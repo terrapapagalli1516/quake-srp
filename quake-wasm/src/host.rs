@@ -90,28 +90,6 @@ impl ShowFps {
     }
 }
 
-/// The finished RGB frame into the presented RGBA framebuffer (`vid.buffer`
-/// for the page's `ImageData`), each channel through its ramp when `ramps` is
-/// given ([`render::cshift_ramps`]: the cshifts, then gamma), alpha 255.
-/// `fb` takes `rgb`'s size (a no-op at a steady resolution, so its pointer
-/// and allocation stay put) and is written in place, four bytes a pixel —
-/// not `clear()` plus four `Vec::push`es, which cost ~5x as much (PERF_PLAN B1:
-/// 2.41 -> 0.46 ms at 1280x800 in wasm).
-fn pack_rgba(fb: &mut Vec<u8>, rgb: &[[u8; 3]], ramps: Option<&[[u8; 256]; 3]>) {
-    fb.resize(rgb.len() * 4, 255);
-    match ramps {
-        None => {
-            for (out, px) in fb.chunks_exact_mut(4).zip(rgb) {
-                out.copy_from_slice(&[px[0], px[1], px[2], 255]);
-            }
-        }
-        Some([r, g, b]) => {
-            for (out, px) in fb.chunks_exact_mut(4).zip(rgb) {
-                out.copy_from_slice(&[r[px[0] as usize], g[px[1] as usize], b[px[2] as usize], 255]);
-            }
-        }
-    }
-}
 
 /// `SCR_SetUpToDrawConsole` + `SCR_DrawConsole`: slide the console (`dt`,
 /// `host_frametime`) and draw it over `img` at its height.
@@ -170,7 +148,7 @@ pub(crate) fn step(dt: f32) -> i32 {
         if real_dt > 0.0 {
             a.show_fps.frame(a.realtime);
         }
-        bench::frame_begin();
+        bench::frame_begin(active_renderer(a));
         // host_time: the menudot spinner (mode-independent, like realtime).
         a.clock += host_frametime;
         // The settings' picture size and the renderer's per-thread settings.
@@ -206,13 +184,20 @@ pub(crate) fn step(dt: f32) -> i32 {
         if a.demoplayback() && !a.cls.timedemo && dt > 0.0 && a.demo.as_ref().is_some_and(|d| d.at_end()) {
             host_end_game(a);
         }
+        // The renderer's threads (`r_threads` against what the host offers),
+        // to whichever game draws: every Walk and DemoPlay the host builds (a
+        // boot, a load, the attract loop's next demo) draws on the setting
+        // from its first frame.
+        let threads = a.settings.cvars.threads.resolve(a.hw_threads);
         if let Some(wk) = a.walk.as_mut() {
             wk.key_move = km;
             wk.viewsize = viewsize;
             wk.crosshair = crosshair;
             wk.stepping = stepping;
+            wk.renderer.set_threads(threads);
         }
         if let Some(d) = a.demo.as_mut() {
+            d.renderer.set_threads(threads);
             d.viewsize = viewsize;
             d.crosshair = crosshair;
             d.stepping = stepping;
@@ -368,15 +353,25 @@ pub(crate) fn step(dt: f32) -> i32 {
         bench::lap(Phase::Blend);
 
         if let Some(img) = img {
-            pack_rgba(&mut a.fb, &img.rgb, ramps.as_ref());
+            render::pack_rgba(&img, ramps.as_ref(), &mut a.fb, threads);
             // Presented: its buffer serves the next frame (render::recycle_image).
             render::recycle_image(img);
         }
         bench::lap(Phase::Pack);
-        bench::frame_end();
+        bench::frame_end(active_renderer(a));
         a.host_framecount += 1;
     });
     ran
+}
+
+/// The renderer of the game that draws this frame: the demo's in mode 1,
+/// else the walk's.
+fn active_renderer(a: &mut crate::app::App) -> Option<&mut render::Renderer> {
+    if a.mode == 1 {
+        a.demo.as_mut().map(|d| &mut d.renderer)
+    } else {
+        a.walk.as_mut().map(|w| &mut w.renderer)
+    }
 }
 
 #[cfg(test)]
@@ -504,7 +499,8 @@ mod tests {
     /// dims it); Classic is none of them.
     #[test]
     fn the_2026_profile_steps_uncapped_scales_2d_and_draws_the_crosshair() {
-        use quake_rs::render::{video_cvars, FovMode};
+        use quake_rs::render::FovMode;
+        let video_cvars = || APP.with(|c| crate::vid::vid(c.borrow().as_ref().unwrap()).video);
         assert_eq!(boot(), 1);
         close_menu();
         step(0.0);

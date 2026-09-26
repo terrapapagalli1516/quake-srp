@@ -22,6 +22,7 @@
 //! too, where the 2026 profile gives them another default: `cl_forwardspeed`
 //! and `cl_backspeed` (Always Run) and `crosshair`.
 
+use crate::render::Threads;
 use crate::screen::{VIEWSIZE_DEFAULT, VIEWSIZE_MAX, VIEWSIZE_MIN, VIEWSIZE_STEP};
 
 /// The port's pixel sizes for [`Cvars::pixel_size`]: 0 is Auto, 1..=4 a
@@ -114,6 +115,10 @@ pub struct Cvars {
     /// `vid_fkey`: `f` toggles fullscreen (the page's; `default.cfg` leaves
     /// `f` unbound).
     pub fkey: bool,
+    /// `r_threads`: how many threads draw the 3-D view (0: Auto, as many as
+    /// the platform offers). The pixels are the same for any count, so it is
+    /// no departure.
+    pub threads: Threads,
 }
 
 impl Default for Cvars {
@@ -153,6 +158,7 @@ impl Cvars {
             freelook: false,
             jumpswim: false,
             fkey: false,
+            threads: Threads::Auto,
         }
     }
 
@@ -361,6 +367,8 @@ pub const CVARS: &[Cvar] = &[
         get: |c| flag(c.jumpswim), set: |c, v| c.jumpswim = on(v) },
     Cvar { name: "vid_fkey", archive: true, departure: true, help: "F toggles fullscreen",
         get: |c| flag(c.fkey), set: |c, v| c.fkey = on(v) },
+    Cvar { name: "r_threads", archive: true, departure: false, help: "3-D view threads, 0 auto",
+        get: |c| c.threads.cvar().to_string(), set: |c, v| c.threads = Threads::from_cvar(atof(v)) },
 ];
 
 /// `Cvar_FindVar`: the cvar called `name` (any case, as the port's console

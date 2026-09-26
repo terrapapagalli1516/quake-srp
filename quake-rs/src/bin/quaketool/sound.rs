@@ -71,7 +71,7 @@ pub fn cmd_sound(pak_path: &str, demo: &str, out_path: &str, rest: &[String]) ->
     mixer.run(&pak, &calls);
     let mut starts = count_starts(&calls);
 
-    let vid = Vid { width: 320, height: 200, display_aspect: 4.0 / 3.0, exact_perspective: false };
+    let vid = Vid { width: 320, height: 200, display_aspect: 4.0 / 3.0, exact_perspective: false, video: render::VideoCvars::CLASSIC, mip: render::MipCvars::DEFAULT };
     let (mut realtime, mut oldrealtime) = (0.0f64, 0.0f64);
     let mut pcm: Vec<i16> = Vec::new();
     let mut trace = String::new();

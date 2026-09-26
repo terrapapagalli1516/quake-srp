@@ -74,7 +74,7 @@ fn main() {
         "render" => need(rest, 2, cmd).and_then(|a| cmd_render(&a[0], &a[1], a.get(2).map(|s| s.as_str()))),
         "render-demo" => need(rest, 1, cmd).and_then(|a| cmd_render_demo(&a[0])),
         "menu" => need(rest, 2, cmd).and_then(|a| cmd_menu(&a[0], &a[1])),
-        "scene" => need(rest, 3, cmd).and_then(|a| cmd_scene(&a[0], &a[1], &a[2])),
+        "scene" => need(rest, 3, cmd).and_then(|a| cmd_scene(&a[0], &a[1], &a[2], &a[3..])),
         "view" => need(rest, 3, cmd).and_then(cmd_view),
         "shot" => need(rest, 3, cmd).and_then(|a| shot::cmd_shot(a).map(Out::Text)),
         "walk" => need(rest, 3, cmd).and_then(|a| {
@@ -151,10 +151,10 @@ fn usage() {
          \tquaketool render-demo <out.ppm>   render the built-in demo room\n\
          \tquaketool menu <pak> <out.ppm>    draw the MAIN menu over the e1m1 POV\n\
          \tquaketool sim <progs.dat> <bsp> [frames]  spawn a map's QuakeC entities + tick physics\n\
-         \tquaketool scene <pak> <map.bsp> <out.ppm>  render a map + its spawned MDL entities\n\
-         \tquaketool view <pak> <map.bsp> <out.ppm> [--res WxH] [--origin x,y,z] [--angles p,y,r] [--time T] [--fov F] [--aspect A] [--exactpersp 0|1] [--vrect x,y,w,h] [--ents FILE] [--particles FILE] [--viewmodel M:F] [--viewent x,y,z,p,y,r] [--bench N]\n\
+         \tquaketool scene <pak> <map.bsp> <out.ppm> [--threads N]  render a map + its spawned MDL entities\n\
+         \tquaketool view <pak> <map.bsp> <out.ppm> [--res WxH] [--origin x,y,z] [--angles p,y,r] [--time T] [--fov F] [--aspect A] [--exactpersp 0|1] [--vrect x,y,w,h] [--ents FILE] [--particles FILE] [--viewmodel M:F] [--viewent x,y,z,p,y,r] [--bench N] [--threads N]\n\
          \t                               render one exact view (Quake camera convention), for the C oracle diff\n\
-         \tquaketool shot <pak> <map.bsp> <out.ppm> [--res WxH] [--zoom N] [--frames N] [--yaw Y] [--pitch P] [--origin x,y,z] [--viewsize V] [--fire N] [--video classic|modern] [--fov-mode classic|horplus] [--hires 0|1] [--display W:H|square] [--scaled2d 0|1]\n\
+         \tquaketool shot <pak> <map.bsp> <out.ppm> [--res WxH] [--zoom N] [--frames N] [--yaw Y] [--pitch P] [--origin x,y,z] [--viewsize V] [--fire N] [--video classic|modern] [--fov-mode classic|horplus] [--hires 0|1] [--display W:H|square] [--scaled2d 0|1] [--threads N]\n\
          \t                               the game screen as a player sees it (view, gun, status bar) at any size and video setting\n\
          \tquaketool walk <pak> <map.bsp> <out-prefix> [steps]  walk forward from spawn; one PPM frame per step\n\
          \tquaketool demo <pak> <demo.dem> <out-prefix> [stride]  replay + render a recorded demo\n\
@@ -163,9 +163,9 @@ fn usage() {
          \tquaketool changelevel <pak> <map.bsp>  drive a player into the map's exit, swap to the next level, prove inventory carries\n\
          \tquaketool census <pak> [map ...]  headless faithfulness playthrough (start, e1m1..e1m8 by default)\n\
          \tquaketool census-edicts <pak> <map> <t1,t2,..>  dump live edicts at server times (oracle_edicts format)\n\
-         \tquaketool play <pak> <walk_MAP|fire_MAP|quad_MAP|demoN> [frames] [--res WxH] [--hash-every N] [--ppm PREFIX]\n\
+         \tquaketool play <pak> <walk_MAP|fire_MAP|quad_MAP|demoN> [frames] [--res WxH] [--hash-every N] [--ppm PREFIX] [video options] [--threads N]\n\
          \t                               run the browser's game client natively (quake_rs::client), frame hashes as web/bench.py\n\
-         \tquaketool timedemo <pak> <demo> [--res WxH[,WxH...]] [--profile 1] [--video classic|modern] [--hires 0|1] [--fov-mode M] [--display W:H] [--scaled2d 0|1]  id's `timedemo`: the demo one message a frame, uncapped; prints CL_FinishTimeDemo's line\n\
+         \tquaketool timedemo <pak> <demo> [--res WxH[,WxH...]] [--profile 1] [--video classic|modern] [--hires 0|1] [--fov-mode M] [--display W:H] [--scaled2d 0|1] [--threads N]  id's `timedemo`: the demo one message a frame, uncapped; prints CL_FinishTimeDemo's line\n\
          \tquaketool sound <pak> <demo> <out.wav> [--rate HZ] [--classic] [--fps F] [--trace FILE]  a demo's sound through the engine's mixer, as a .wav\n\
          \tquaketool sndscript <pak> <script> <out.raw> --rate HZ [--fixes] [--trace FILE]  a sound-oracle script through the port (oracle/sound.py)\n\
          \tquaketool framerate <pak> [--rates 60,144,240,480,jitter] [--only NAMES] [--markdown] [--check]\n\t                               play scripted scenarios at 72 Hz and each rate; how each quantity differs (FRAMERATE.md)\n"
@@ -180,23 +180,21 @@ fn need<'a>(rest: &'a [String], n: usize, cmd: &str) -> Result<&'a [String], Str
     }
 }
 
-/// A `--res WxH` screen size (`x` or `X`), never zero, at most id's largest
-/// mode, `render::MAXWIDTH` x `render::MAXHEIGHT` (1280 x 1024): a larger
-/// one is clamped with a note on stderr, as id's drivers offer no such mode.
-fn parse_res(r: &str) -> Result<(usize, usize), String> {
+/// A `--res WxH` screen size (`x` or `X`), never zero, at most the largest
+/// view `video` allows — in Classic id's largest mode, `render::MAXWIDTH` x
+/// `render::MAXHEIGHT` (1280 x 1024): a larger one is clamped with a note on
+/// stderr, as id's drivers offer no such mode.
+fn parse_res(r: &str, video: render::VideoCvars) -> Result<(usize, usize), String> {
     let (a, b) = r.split_once(['x', 'X']).ok_or_else(|| format!("--res: expected WxH, got {r:?}"))?;
     let w: usize = a.trim().parse().map_err(|_| format!("--res: bad width {a:?}"))?;
     let h: usize = b.trim().parse().map_err(|_| format!("--res: bad height {b:?}"))?;
     if w == 0 || h == 0 {
         return Err("--res: a zero-sized screen".into());
     }
-    let (cw, ch) = render::clamp_to_max(w, h);
+    let (cw, ch) = video.clamp_to_max(w, h);
     if (cw, ch) != (w, h) {
-        eprintln!(
-            "--res {w}x{h}: id's largest mode is {}x{} (MAXWIDTH x MAXHEIGHT); using {cw}x{ch}",
-            render::MAXWIDTH,
-            render::MAXHEIGHT
-        );
+        let (mw, mh) = video.max_view_size();
+        eprintln!("--res {w}x{h}: the largest view is {mw}x{mh}; using {cw}x{ch}");
     }
     Ok((cw, ch))
 }
@@ -1028,10 +1026,22 @@ fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> Result<Out
         // and the animated light-style scales so torches flicker and lights pulse.
         let light_styles = server.lightstyle_scales(server.time());
         let colormap = read("gfx/colormap.lmp").ok();
-        let view = render::render_scene_ext(&bsp_render, &cam, vrect.w, vrect.h, &palette, &inst, &bmodels, &external, viewmodel, server.time(), &parts, &peak_dlights, &light_styles, colormap.as_deref());
+        let scene = render::Scene {
+            colormap: colormap.as_deref(),
+            time: server.time(),
+            light_styles: &light_styles,
+            dlights: &peak_dlights,
+            bmodels: &bmodels,
+            external: &external,
+            models: &inst,
+            particles: &parts,
+            viewmodel,
+            ..render::Scene::new(&bsp_render, cam, vrect.w, vrect.h, &palette)
+        };
+        let view = render::Renderer::new().render(&scene);
         let gfx_wad = read("gfx.wad").ok().and_then(|b| Wad2::parse(b).ok());
         let backtile = gfx_wad.as_ref().and_then(|w| w.qpic("backtile").ok());
-        let mut img = render::compose_view(view, vrect, vid_w, vid_h, backtile.as_ref(), &palette);
+        let mut img = render::compose_view(view, vrect, vid_w, vid_h, backtile.as_ref(), &palette, 1);
 
         // Status bar (HUD) overlay: build a Hud from the player's stats and the
         // game's gfx.wad, then blit it on top of the composed screen. If
@@ -1525,7 +1535,7 @@ fn cmd_render(path: &str, out: &str, palette: Option<&str>) -> Result<Out, Strin
             let pbytes = read(pp)?;
             let pal = render::parse_palette(&pbytes)
                 .ok_or_else(|| format!("bad palette {pp} (need >= 768 bytes)"))?;
-            (render::render_bsp_textured(&b, &cam, 640, 400, &pal), "textured")
+            (render::Renderer::new().render(&render::Scene::new(&b, cam, 640, 400, &pal)), "textured")
         }
         None => (render::render_bsp(&b, &cam, 640, 400), "flat-shaded"),
     };
@@ -1575,7 +1585,7 @@ fn cmd_menu(pak_path: &str, out: &str) -> Result<Out, String> {
     let (mut img, bg) = match read("maps/e1m1.bsp").ok().and_then(|b| Bsp::parse(&b).ok()) {
         Some(b) => {
             let cam = camera_for_bsp(&b);
-            (render::render_bsp_textured(&b, &cam, W, H, &palette), "e1m1 POV")
+            (render::Renderer::new().render(&render::Scene::new(&b, cam, W, H, &palette)), "e1m1 POV")
         }
         None => (render::Image::new(W, H, [0, 0, 0]), "black frame"),
     };
@@ -1676,8 +1686,14 @@ fn color_for_name(name: &str) -> [u8; 3] {
 /// `scene`: parse a map from a PAK, spawn its QuakeC entities, and software-
 /// render the world plus every spawned entity's `.mdl` alias model at its world
 /// position, all sharing one z-buffer so models occlude correctly.
-fn cmd_scene(pak_path: &str, map_name: &str, out: &str) -> Result<Out, String> {
+fn cmd_scene(pak_path: &str, map_name: &str, out: &str, opts: &[String]) -> Result<Out, String> {
     use std::collections::HashMap;
+    // `[--threads N]`: the renderer's threads (the pixels are the same).
+    let threads = match opts {
+        [] => 1,
+        [flag, n] if flag == "--threads" => n.parse().ok().filter(|&n| n > 0).ok_or("--threads: expected a count")?,
+        _ => return Err(format!("scene: unknown options {opts:?}")),
+    };
 
     let pak = Pak::open(pak_path).map_err(|e| e.to_string())?;
 
@@ -1907,6 +1923,16 @@ fn cmd_scene(pak_path: &str, map_name: &str, out: &str) -> Result<Out, String> {
     // so this single-shot render uses id's 64-row colormap-LUT shading (and the lit
     // surface cache) exactly like step_walk does.
     let colormap = pak.read_file("gfx/colormap.lmp").ok().flatten();
+    let scene = render::Scene {
+        colormap: colormap.as_deref(),
+        time: server.time(),
+        light_styles: &light_styles,
+        dlights: &injected_dlights,
+        bmodels: &bmodels,
+        external: &external,
+        models: &instances,
+        ..render::Scene::new(&bsp_for_render, cam, 640, 400, &palette)
+    };
 
     // Optional render benchmark, reusing this command's full scene setup:
     //   QUAKE_BENCH=<iters> [QUAKE_RES=<WxH>] quaketool scene <pak> <map> <out>
@@ -1917,32 +1943,30 @@ fn cmd_scene(pak_path: &str, map_name: &str, out: &str) -> Result<Out, String> {
         let iters: u32 = iters.parse().unwrap_or(60).max(1);
         let (bw, bh) = std::env::var("QUAKE_RES")
             .ok()
-            .and_then(|s| parse_res(&s).ok())
+            .and_then(|s| parse_res(&s, render::VideoCvars::CLASSIC).ok())
             .unwrap_or((640usize, 400usize));
-        let opts = render::RenderOptions::default();
-        let render_once = || {
-            render::render_scene_ext_sprited(
-                &bsp_for_render, &cam, bw, bh, &palette, &instances, &bmodels, &external, None,
-                server.time(), &[], &injected_dlights, &light_styles, colormap.as_deref(), &[], &opts,
-            )
-        };
-        let _ = std::hint::black_box(render_once()); // warm the per-face caches
+        let scene = render::Scene { width: bw, height: bh, ..scene };
+        let mut renderer = render::Renderer::new();
+        renderer.set_threads(threads);
+        let cold = std::time::Instant::now();
+        let _ = std::hint::black_box(renderer.render(&scene)); // warm the per-face caches
+        let cold = cold.elapsed().as_secs_f64() * 1000.0;
         let start = std::time::Instant::now();
         for _ in 0..iters {
-            std::hint::black_box(render_once());
+            std::hint::black_box(renderer.render(&scene));
         }
         let per = start.elapsed().as_secs_f64() * 1000.0 / iters as f64;
 
         // One profiled frame (caches already warm) for the per-phase breakdown.
-        render::render_stats_begin();
-        let _ = std::hint::black_box(render_once());
-        let st = render::render_stats_end();
+        renderer.stats_begin();
+        let _ = std::hint::black_box(renderer.render(&scene));
+        let st = renderer.stats_end();
         let ms = |ns: u64| ns as f64 / 1_000_000.0;
         let mut o = String::new();
         use std::fmt::Write as _;
         let _ = writeln!(
             o,
-            "bench {map_name} {bw}x{bh}: {iters} warm frames -> {per:.2} ms/frame ({:.1} fps)",
+            "bench {map_name} {bw}x{bh} on {threads} thread(s): {iters} warm frames -> {per:.2} ms/frame ({:.1} fps); the first, cold (every surface baked): {cold:.2} ms",
             1000.0 / per
         );
         let _ = writeln!(
@@ -1982,7 +2006,9 @@ fn cmd_scene(pak_path: &str, map_name: &str, out: &str) -> Result<Out, String> {
         return Ok(Out::Text(o));
     }
 
-    let img = render::render_scene_ext_sprited(&bsp_for_render, &cam, 640, 400, &palette, &instances, &bmodels, &external, None, server.time(), &[], &injected_dlights, &light_styles, colormap.as_deref(), &[], &render::RenderOptions::default());
+    let mut renderer = render::Renderer::new();
+    renderer.set_threads(threads);
+    let img = renderer.render(&scene);
     img.write_ppm(out).map_err(|e| format!("cannot write {out}: {e}"))?;
 
     let mut o = String::new();
@@ -2157,9 +2183,7 @@ fn cmd_view(args: &[String]) -> Result<Out, String> {
             "--bench" => bench = Some(val.parse::<u32>().map_err(|_| format!("--bench: bad count {val:?}"))?.max(1)),
             "--d-mipscale" | "--d-mipcap" => {
                 let x: f32 = val.parse().map_err(|_| format!("{flag}: bad number {val:?}"))?;
-                let mut c = render::mip_cvars();
-                if flag == "--d-mipscale" { c.mipscale = x } else { c.mipcap = x }
-                render::set_mip_cvars(c);
+                if flag == "--d-mipscale" { opts.mip.mipscale = x } else { opts.mip.mipcap = x }
             }
             other => return Err(format!("view: unknown option {other:?}")),
         }
@@ -2168,8 +2192,9 @@ fn cmd_view(args: &[String]) -> Result<Out, String> {
     // The video cvars first: hires lifts --res's clamp. (`--display` is not
     // used here: `--aspect` gives vid.aspect itself.)
     video.apply();
+    opts.video = video.cvars;
     if let Some(r) = res {
-        (w, h) = parse_res(r)?;
+        (w, h) = parse_res(r, video.cvars)?;
     }
 
     let pak = Pak::open(pak_path).map_err(|e| e.to_string())?;
@@ -2293,7 +2318,9 @@ fn cmd_view(args: &[String]) -> Result<Out, String> {
     };
 
     let dowarp = quake_rs::world::point_contents(&bsp, cam.pos) <= quake_rs::bsp::CONTENTS_WATER;
-    let render_once = || {
+    let mut renderer = render::Renderer::new();
+    renderer.set_threads(video.threads());
+    let mut render_once = || {
         // cl.viewent as given (the oracle's), else V_CalcRefdef's for a still
         // player in a full-frame view (id at viewsize 120: no fudge, no bob).
         let (origin_ofs, gun_angles) = match viewent {
@@ -2309,23 +2336,35 @@ fn cmd_view(args: &[String]) -> Result<Out, String> {
             origin_ofs,
             angles: gun_angles,
         });
+        let scene = render::Scene {
+            colormap: colormap.as_deref(),
+            time,
+            light_styles: &light_styles,
+            dlights: &dlights,
+            bmodels: &bmodels,
+            external: &externals,
+            models: &instances,
+            sprites: &sprites,
+            particles: &particles,
+            viewmodel,
+            options: opts,
+            ..render::Scene::new(&bsp, cam, view_w, view_h, &palette)
+        };
         // R_SetupFrame's r_dowarp, for the full-frame view (viewsize 120): the
         // warp buffer's view, stretched over the screen by D_WarpScreen. (With
         // --vrect the view is drawn unwarped.)
         if dowarp && vrect.is_none() {
-            let r = quake_rs::screen::warp_vrect(w, h, 120.0, false);
+            let r = quake_rs::screen::warp_vrect(w, h, 120.0, false, video.cvars.hires);
             let mut wopts = opts;
             wopts.screen = Some(render::ScreenPlace { x: r.x, y: r.y, vid_w: w, vid_h: h });
-            let view = render::render_scene_ext_sprited(
-                &bsp, &cam, r.w, r.h, &palette, &instances, &bmodels, &externals, viewmodel, time, &particles, &dlights,
-                &light_styles, colormap.as_deref(), &sprites, &wopts,
-            );
-            return render::apply_warp(view, w, h, time);
+            let scene = render::Scene { width: r.w, height: r.h, options: wopts, ..scene };
+            let view = renderer.render(&scene);
+            let mut screen = render::Image::new(w, h, [0, 0, 0]);
+            let full = render::ViewRect { x: 0, y: 0, w, h };
+            renderer.warp_into(view, &mut screen, full, time, video.cvars.hires);
+            return screen;
         }
-        render::render_scene_ext_sprited(
-            &bsp, &cam, view_w, view_h, &palette, &instances, &bmodels, &externals, viewmodel, time, &particles, &dlights,
-            &light_styles, colormap.as_deref(), &sprites, &opts,
-        )
+        renderer.render(&scene)
     };
     let img = render_once();
     // Warm re-renders of the same view (the first, cold frame above is excluded),
@@ -2438,12 +2477,13 @@ fn cmd_walk(pak_path: &str, map_name: &str, out_prefix: &str, steps: u32) -> Res
     let mut origin = quake_rs::world::walk_move(&bsp, spawn, mins, maxs, [0.0, 0.0, 0.0], dt);
     let start = origin;
     let mut frames = 0u32;
+    let mut renderer = render::Renderer::new();
     for i in 0..steps {
         let wishvel = [forward[0] * speed, forward[1] * speed, 0.0];
         origin = quake_rs::world::walk_move(&bsp, origin, mins, maxs, wishvel, dt);
         let eye = [origin[0], origin[1], origin[2] + 22.0];
         let cam = Camera::looking_at(eye, [eye[0] + forward[0], eye[1] + forward[1], eye[2]], 90.0);
-        let img = render::render_scene(&bsp, &cam, w, h, &palette, &instances);
+        let img = renderer.render(&render::Scene { models: &instances, ..render::Scene::new(&bsp, cam, w, h, &palette) });
         let path = format!("{out_prefix}_{i:03}.ppm");
         img.write_ppm(&path).map_err(|e| format!("cannot write {path}: {e}"))?;
         frames += 1;
@@ -2496,6 +2536,7 @@ fn cmd_demo(pak_path: &str, demo_name: &str, out_prefix: &str, stride_arg: usize
     let mut model_cache: std::collections::HashMap<String, Option<Mdl>> =
         std::collections::HashMap::new();
     let mut written = 0u32;
+    let mut renderer = render::Renderer::new();
     for f in demo.frames.iter().step_by(stride) {
         // Build the alias-model instances visible this frame.
         let mut owned: Vec<(Mdl, [f32; 3], f32, [u8; 3])> = Vec::new();
@@ -2539,7 +2580,7 @@ fn cmd_demo(pak_path: &str, demo_name: &str, out_prefix: &str, stride_arg: usize
             roll: f.view_angles[2],
             fov_deg: 90.0,
         };
-        let img = render::render_scene(&bsp, &cam, w, h, &palette, &instances);
+        let img = renderer.render(&render::Scene { models: &instances, ..render::Scene::new(&bsp, cam, w, h, &palette) });
         let path = format!("{out_prefix}_{written:04}.ppm");
         img.write_ppm(&path).map_err(|e| format!("cannot write {path}: {e}"))?;
         written += 1;
@@ -2578,9 +2619,12 @@ mod tests {
     fn res_is_at_most_id_largest_mode() {
         // r_shared.h's MAXWIDTH x MAXHEIGHT: `view --res 2048x400` panicked in
         // the edge renderer (its 12.20 u wraps from 2048 wide).
-        assert_eq!(parse_res("640x400"), Ok((640, 400)));
-        assert_eq!(parse_res("2048X400"), Ok((1280, 400)));
-        assert_eq!(parse_res("320x2000"), Ok((320, 1024)));
-        assert!(parse_res("0x200").is_err() && parse_res("320").is_err());
+        let classic = |r| parse_res(r, render::VideoCvars::CLASSIC);
+        assert_eq!(classic("640x400"), Ok((640, 400)));
+        assert_eq!(classic("2048X400"), Ok((1280, 400)));
+        assert_eq!(classic("320x2000"), Ok((320, 1024)));
+        assert!(classic("0x200").is_err() && classic("320").is_err());
+        // The hires extra lifts it to 8K.
+        assert_eq!(parse_res("3840x2160", render::VideoCvars::MODERN), Ok((3840, 2160)));
     }
 }

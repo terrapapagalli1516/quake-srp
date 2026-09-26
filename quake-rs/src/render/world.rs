@@ -32,7 +32,7 @@ pub(super) fn face_grads(
 /// reference an inline submodel through their `model` field `"*N"`, where `N`
 /// indexes `bsp.models`. Submodel 0 is the worldspawn; `N >= 1` are the brush
 /// entities, put into the world's edge list at this `origin`
-/// (`R_DrawBEntitiesOnList`, [`super::edge`]). See [`render_scene_ext`](super::render_scene_ext).
+/// (`R_DrawBEntitiesOnList`, `edge.rs`). See [`Scene::bmodels`](super::Scene::bmodels).
 pub struct BModelInstance {
     pub model_index: usize,
     pub origin: Vec3,
@@ -58,8 +58,9 @@ pub struct BModelInstance {
 /// This differs from [`BModelInstance`], which references an *inline* submodel of
 /// the **world** bsp by index. An `ExternalBModel` borrows a *separate*, already
 /// parsed [`Bsp`] (so one cached parse can back many instances without cloning)
-/// and always renders that bsp's model-0 faces. [`render_scene_ext`](super::render_scene_ext)
-/// puts them in the world's edge list like any brush entity, so the box sorts
+/// and always renders that bsp's model-0 faces. The renderer
+/// ([`Scene::external`](super::Scene::external)) puts them in the world's
+/// edge list like any brush entity, so the box sorts
 /// with the world and the other brush models as id's instanced brush models do.
 pub struct ExternalBModel<'a> {
     /// The parsed standalone brush BSP (its MODEL 0 is the visible box).
@@ -71,10 +72,8 @@ pub struct ExternalBModel<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::render::{demo_room, render_scene, render_scene_ext, Camera};
-    use crate::render::alias::ModelInstance;
-    use crate::render::fixtures::tiny_mdl;
-    use crate::render::light::NEUTRAL_LIGHTSTYLE_SCALES;
+    use crate::render::{demo_room, Camera, Scene};
+    use crate::render::fixtures::render_once;
 
     // -- Brush submodels (inline `*N` bmodels: doors / plats / buttons) -----
 
@@ -152,7 +151,7 @@ mod tests {
     }
 
     #[test]
-    fn render_scene_ext_draws_submodel() {
+    fn a_submodel_draws_into_the_scene() {
         // A submodel placed in front of the camera must add non-background
         // pixels relative to an empty bmodel list (the submodel becomes visible).
         let bsp = demo_room_with_submodel();
@@ -161,24 +160,10 @@ mod tests {
         let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
         let bg = [10u8, 10, 14];
 
-        let without = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES, None);
-        let with = render_scene_ext(
-            &bsp,
-            &cam,
-            160,
-            120,
-            &pal,
-            &[],
-            // Place the quad between the camera (-200) and the centre, facing it.
-            &[BModelInstance { model_index: 1, origin: [-120.0, 0.0, 0.0], frame: 0 }],
-            &[],
-            None,
-            0.0,
-            &[],
-            &[],
-            &NEUTRAL_LIGHTSTYLE_SCALES,
-            None,
-        );
+        let without = render_once(&Scene::new(&bsp, cam, 160, 120, &pal));
+        // Place the quad between the camera (-200) and the centre, facing it.
+        let bmodels = [BModelInstance { model_index: 1, origin: [-120.0, 0.0, 0.0], frame: 0 }];
+        let with = render_once(&Scene { bmodels: &bmodels, ..Scene::new(&bsp, cam, 160, 120, &pal) });
 
         let drawn_without = without.rgb.iter().filter(|&&p| p != bg).count();
         let drawn_with = with.rgb.iter().filter(|&&p| p != bg).count();
@@ -206,81 +191,18 @@ mod tests {
     }
 
     #[test]
-    fn render_scene_ext_out_of_range_submodel_is_noop() {
+    fn an_out_of_range_submodel_is_a_noop() {
         // An out-of-range model_index must draw nothing and not panic: the image
         // is byte-identical to passing an empty bmodel list.
         let bsp = demo_room_with_submodel();
         let pal = [[200u8, 200, 200]; 256];
         let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
 
-        let empty = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES, None);
-        let oob = render_scene_ext(
-            &bsp,
-            &cam,
-            160,
-            120,
-            &pal,
-            &[],
-            &[BModelInstance { model_index: 999, origin: [-120.0, 0.0, 0.0], frame: 0 }],
-            &[],
-            None,
-            0.0,
-            &[],
-            &[],
-            &NEUTRAL_LIGHTSTYLE_SCALES,
-            None,
-        );
+        let empty = render_once(&Scene::new(&bsp, cam, 160, 120, &pal));
+        let oob = render_once(&Scene { bmodels: &[BModelInstance { model_index: 999, origin: [-120.0, 0.0, 0.0], frame: 0 }], ..Scene::new(&bsp, cam, 160, 120, &pal) });
         assert_eq!(
             empty.rgb, oob.rgb,
             "out-of-range submodel index must be a no-op"
-        );
-    }
-
-    #[test]
-    fn render_scene_matches_ext_empty_on_demo_room() {
-        // render_scene must equal render_scene_ext(.., &[]) on demo_room: the
-        // wrapper preserves the existing world+alias behaviour exactly.
-        let bsp = demo_room();
-        let pal = [[200u8, 200, 200]; 256];
-        let cam = Camera::looking_at([-200.0, -200.0, 40.0], [0.0, 0.0, 0.0], 90.0);
-
-        // No alias models, no bmodels.
-        let a = render_scene(&bsp, &cam, 160, 120, &pal, &[]);
-        let b = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES, None);
-        assert_eq!(a.rgb, b.rgb, "render_scene must equal render_scene_ext(.., &[])");
-
-        // Also holds with an alias instance present (the model path is shared).
-        let mdl = tiny_mdl();
-        let inst = ModelInstance {
-            mdl: &mdl,
-            origin: [-80.0, 0.0, 0.0],
-            yaw: 0.0,
-            pitch: 0.0,
-            roll: 0.0,
-            frame: 0,
-            color: [255, 32, 32],
-            skinnum: 0,
-        };
-        let a2 = render_scene(&bsp, &cam, 160, 120, &pal, std::slice::from_ref(&inst));
-        let b2 = render_scene_ext(
-            &bsp,
-            &cam,
-            160,
-            120,
-            &pal,
-            std::slice::from_ref(&inst),
-            &[],
-            &[],
-            None,
-            0.0,
-            &[],
-            &[],
-            &NEUTRAL_LIGHTSTYLE_SCALES,
-            None,
-        );
-        assert_eq!(
-            a2.rgb, b2.rgb,
-            "render_scene must equal render_scene_ext with the same alias models and no bmodels"
         );
     }
 
@@ -293,39 +215,9 @@ mod tests {
         let pal = [[200u8, 200, 200]; 256];
         let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
 
-        let centered = render_scene_ext(
-            &bsp,
-            &cam,
-            160,
-            120,
-            &pal,
-            &[],
-            &[BModelInstance { model_index: 1, origin: [-120.0, 0.0, 0.0], frame: 0 }],
-            &[],
-            None,
-            0.0,
-            &[],
-            &[],
-            &NEUTRAL_LIGHTSTYLE_SCALES,
-            None,
-        );
+        let centered = render_once(&Scene { bmodels: &[BModelInstance { model_index: 1, origin: [-120.0, 0.0, 0.0], frame: 0 }], ..Scene::new(&bsp, cam, 160, 120, &pal) });
         // Shift the quad well off to one side (+Y) so it projects elsewhere.
-        let shifted = render_scene_ext(
-            &bsp,
-            &cam,
-            160,
-            120,
-            &pal,
-            &[],
-            &[BModelInstance { model_index: 1, origin: [-120.0, 120.0, 0.0], frame: 0 }],
-            &[],
-            None,
-            0.0,
-            &[],
-            &[],
-            &NEUTRAL_LIGHTSTYLE_SCALES,
-            None,
-        );
+        let shifted = render_once(&Scene { bmodels: &[BModelInstance { model_index: 1, origin: [-120.0, 120.0, 0.0], frame: 0 }], ..Scene::new(&bsp, cam, 160, 120, &pal) });
         let changed = centered
             .rgb
             .iter()
@@ -350,22 +242,7 @@ mod tests {
         let pal = [[200u8, 200, 200]; 256];
         let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
         // Must not panic; the corrupt face is simply skipped.
-        let _img = render_scene_ext(
-            &bsp,
-            &cam,
-            80,
-            60,
-            &pal,
-            &[],
-            &[BModelInstance { model_index: 1, origin: [-120.0, 0.0, 0.0], frame: 0 }],
-            &[],
-            None,
-            0.0,
-            &[],
-            &[],
-            &NEUTRAL_LIGHTSTYLE_SCALES,
-            None,
-        );
+        let _img = render_once(&Scene { bmodels: &[BModelInstance { model_index: 1, origin: [-120.0, 0.0, 0.0], frame: 0 }], ..Scene::new(&bsp, cam, 80, 60, &pal) });
     }
 
     // -- External brush models (standalone b_*.bsp item boxes) -----------------
@@ -444,7 +321,7 @@ mod tests {
     }
 
     #[test]
-    fn render_scene_ext_draws_external_brush_bsp() {
+    fn an_external_brush_bsp_draws_into_the_scene() {
         // An external brush model placed in front of the camera must add /change
         // pixels relative to an empty `external` list — proving its MODEL-0 faces
         // are rasterised at the entity origin and depth-tested against the world.
@@ -455,25 +332,8 @@ mod tests {
         // nearer than the +256 far wall, so it occludes geometry behind it.
         let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
 
-        let without = render_scene_ext(
-            &world, &cam, 160, 120, &pal, &[], &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES, None,
-        );
-        let with = render_scene_ext(
-            &world,
-            &cam,
-            160,
-            120,
-            &pal,
-            &[],
-            &[],
-            &[ExternalBModel { bsp: &box_bsp, origin: [-120.0, 0.0, 0.0] }],
-            None,
-            0.0,
-            &[],
-            &[],
-            &NEUTRAL_LIGHTSTYLE_SCALES,
-            None,
-        );
+        let without = render_once(&Scene::new(&world, cam, 160, 120, &pal));
+        let with = render_once(&Scene { external: &[ExternalBModel { bsp: &box_bsp, origin: [-120.0, 0.0, 0.0] }], ..Scene::new(&world, cam, 160, 120, &pal) });
 
         // The box is nearer than the far wall, so drawing it must CHANGE pixels.
         let changed = without
@@ -494,38 +354,8 @@ mod tests {
         let pal = [[200u8, 200, 200]; 256];
         let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
 
-        let centered = render_scene_ext(
-            &world,
-            &cam,
-            160,
-            120,
-            &pal,
-            &[],
-            &[],
-            &[ExternalBModel { bsp: &box_bsp, origin: [-120.0, 0.0, 0.0] }],
-            None,
-            0.0,
-            &[],
-            &[],
-            &NEUTRAL_LIGHTSTYLE_SCALES,
-            None,
-        );
-        let shifted = render_scene_ext(
-            &world,
-            &cam,
-            160,
-            120,
-            &pal,
-            &[],
-            &[],
-            &[ExternalBModel { bsp: &box_bsp, origin: [-120.0, 120.0, 0.0] }],
-            None,
-            0.0,
-            &[],
-            &[],
-            &NEUTRAL_LIGHTSTYLE_SCALES,
-            None,
-        );
+        let centered = render_once(&Scene { external: &[ExternalBModel { bsp: &box_bsp, origin: [-120.0, 0.0, 0.0] }], ..Scene::new(&world, cam, 160, 120, &pal) });
+        let shifted = render_once(&Scene { external: &[ExternalBModel { bsp: &box_bsp, origin: [-120.0, 120.0, 0.0] }], ..Scene::new(&world, cam, 160, 120, &pal) });
         let changed = centered
             .rgb
             .iter()
@@ -533,20 +363,6 @@ mod tests {
             .filter(|(a, b)| a != b)
             .count();
         assert!(changed > 0, "moving the external box origin should move its pixels");
-    }
-
-    #[test]
-    fn empty_external_slice_matches_no_external() {
-        // Passing an empty `external` slice must be byte-identical to the prior
-        // behaviour (so render_scene and every legacy caller are unchanged).
-        let world = demo_room();
-        let pal = [[200u8, 200, 200]; 256];
-        let cam = Camera::looking_at([-200.0, -200.0, 40.0], [0.0, 0.0, 0.0], 90.0);
-        let a = render_scene(&world, &cam, 160, 120, &pal, &[]);
-        let b = render_scene_ext(
-            &world, &cam, 160, 120, &pal, &[], &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES, None,
-        );
-        assert_eq!(a.rgb, b.rgb, "empty external slice must equal render_scene");
     }
 
     #[test]
@@ -577,25 +393,8 @@ mod tests {
             visibility: Vec::new(),
             lighting: Vec::new(),
         };
-        let baseline = render_scene_ext(
-            &world, &cam, 160, 120, &pal, &[], &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES, None,
-        );
-        let with_empty = render_scene_ext(
-            &world,
-            &cam,
-            160,
-            120,
-            &pal,
-            &[],
-            &[],
-            &[ExternalBModel { bsp: &empty, origin: [-120.0, 0.0, 0.0] }],
-            None,
-            0.0,
-            &[],
-            &[],
-            &NEUTRAL_LIGHTSTYLE_SCALES,
-            None,
-        );
+        let baseline = render_once(&Scene::new(&world, cam, 160, 120, &pal));
+        let with_empty = render_once(&Scene { external: &[ExternalBModel { bsp: &empty, origin: [-120.0, 0.0, 0.0] }], ..Scene::new(&world, cam, 160, 120, &pal) });
         assert_eq!(
             baseline.rgb, with_empty.rgb,
             "an empty/missing external box must draw nothing"
@@ -609,21 +408,6 @@ mod tests {
             f.planenum = 30_000;
             f.texinfo = 30_000;
         }
-        let _ = render_scene_ext(
-            &world,
-            &cam,
-            80,
-            60,
-            &pal,
-            &[],
-            &[],
-            &[ExternalBModel { bsp: &bad, origin: [-120.0, 0.0, 0.0] }],
-            None,
-            0.0,
-            &[],
-            &[],
-            &NEUTRAL_LIGHTSTYLE_SCALES,
-            None,
-        );
+        let _ = render_once(&Scene { external: &[ExternalBModel { bsp: &bad, origin: [-120.0, 0.0, 0.0] }], ..Scene::new(&world, cam, 80, 60, &pal) });
     }
 }

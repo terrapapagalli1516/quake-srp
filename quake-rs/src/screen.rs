@@ -173,13 +173,13 @@ pub const WARP_HEIGHT: usize = 200;
 /// picture, sampled a little coarser across (e.g. 266 columns for 4:3). At
 /// 16:10 and wider the C's aspect is `vid.aspect` itself and nothing differs.
 ///
-/// With the hires extra ([`VideoCvars::hires`](crate::render::VideoCvars))
+/// With the hires extra (`hires`, [`VideoCvars::hires`](crate::render::VideoCvars))
 /// there is no warp buffer: the underwater view is rendered at the screen's
-/// view rectangle, as above water, and [`apply_warp`](crate::render::apply_warp)
+/// view rectangle, as above water, and [`Renderer::warp_into`](crate::render::Renderer::warp_into)
 /// scales the wobble to it — at 4K id's buffer would be blown up twelve times.
-pub fn warp_vrect(vid_w: usize, vid_h: usize, viewsize: f32, intermission: bool) -> ViewRect {
+pub fn warp_vrect(vid_w: usize, vid_h: usize, viewsize: f32, intermission: bool, hires: bool) -> ViewRect {
     let (viewsize, _, lineadj) = status_lines(vid_w, vid_h, viewsize, intermission);
-    if (vid_w <= WARP_WIDTH && vid_h <= WARP_HEIGHT) || crate::render::video_cvars().hires {
+    if (vid_w <= WARP_WIDTH && vid_h <= WARP_HEIGHT) || hires {
         return set_vrect(vid_w as i64, vid_h as i64, viewsize, lineadj, intermission);
     }
     let (mut w, mut h) = (vid_w as f32, vid_h as f32);
@@ -197,17 +197,45 @@ pub fn warp_vrect(vid_w: usize, vid_h: usize, viewsize: f32, intermission: bool)
     set_vrect(w as i64, h as i64, viewsize, lineadj, intermission)
 }
 
-/// Put the rendered 3-D `view` (a `vrect.w x vrect.h` image) into a
-/// `vid_w x vid_h` screen at `vrect`, with everything outside it tile-cleared
-/// ([`draw_tile_clear`] — SCR_UpdateScreen's `Draw_TileClear(0,0,vid.width,
-/// vid.height)` under the view). A view that already IS the whole screen
-/// (viewsize 120, an intermission) comes back untouched, at zero cost. The
+/// A `vid_w x vid_h` screen with everything outside the view rectangle
+/// `vrect` tile-cleared ([`draw_tile_clear`] — SCR_UpdateScreen's
+/// `Draw_TileClear(0,0,vid.width,vid.height)` under the view) and the
+/// rectangle itself left for the view to be drawn into
+/// ([`Renderer::render_into`](crate::render::Renderer::render_into)). The
 /// status bar is drawn over the result afterwards, as in the C.
 ///
-/// Every screen pixel is written exactly once — the tile only goes where the
-/// view does not, the four bands around it — so the screen is a spare frame
-/// buffer left uncleared ([`Image::reused_uncleared`]), and the view's own
-/// buffer goes back to the pool ([`crate::render::recycle_image`]).
+/// The tile only goes where the view does not — the four bands around it —
+/// so, the view drawn, every screen pixel is written exactly once: the
+/// screen is a spare frame buffer left uncleared ([`Image::reused_uncleared`]).
+pub fn screen_with_backtile(
+    vrect: ViewRect,
+    vid_w: usize,
+    vid_h: usize,
+    backtile: Option<&crate::wad::Qpic>,
+    palette: &[[u8; 3]; 256],
+) -> Image {
+    let mut img = Image::reused_uncleared(vid_w, vid_h);
+    // The rectangle the view covers, clipped to the screen: [x0, x1) x [y0, y1).
+    let x0 = vrect.x.min(vid_w);
+    let x1 = x0 + vrect.w.min(vid_w - x0);
+    let y0 = vrect.y.min(vid_h);
+    let y1 = y0 + vrect.h.min(vid_h - y0);
+    // The tile everywhere else: above, below, then either side.
+    draw_tile_clear(&mut img, backtile, 0, 0, vid_w, y0, palette);
+    draw_tile_clear(&mut img, backtile, 0, y1, vid_w, vid_h - y1, palette);
+    draw_tile_clear(&mut img, backtile, 0, y0, x0, y1 - y0, palette);
+    draw_tile_clear(&mut img, backtile, x1, y0, vid_w - x1, y1 - y0, palette);
+    img
+}
+
+/// Put a rendered 3-D `view` (a `vrect.w x vrect.h` image) into a
+/// `vid_w x vid_h` screen at `vrect`, with everything outside it tile-cleared
+/// ([`screen_with_backtile`]). A view that already IS the whole screen
+/// (viewsize 120, an intermission) comes back untouched, at zero cost. The
+/// view is copied in runs of rows on up to `threads` threads (the bytes are
+/// the same for any), and its buffer goes back to the pool
+/// ([`crate::render::recycle_image`]). The client draws its view straight into
+/// the screen instead; this is for a view drawn apart.
 pub fn compose_view(
     view: Image,
     vrect: ViewRect,
@@ -215,26 +243,13 @@ pub fn compose_view(
     vid_h: usize,
     backtile: Option<&crate::wad::Qpic>,
     palette: &[[u8; 3]; 256],
+    threads: usize,
 ) -> Image {
     if vrect.x == 0 && vrect.y == 0 && view.w == vid_w && view.h == vid_h {
         return view;
     }
-    let mut img = Image::reused_uncleared(vid_w, vid_h);
-    // The rectangle the view covers, clipped to the screen: [x0, x1) x [y0, y1).
-    let x0 = vrect.x.min(vid_w);
-    let x1 = x0 + view.w.min(vid_w - x0);
-    let y0 = vrect.y.min(vid_h);
-    let y1 = y0 + view.h.min(vid_h - y0);
-    // The tile everywhere else: above, below, then either side.
-    draw_tile_clear(&mut img, backtile, 0, 0, vid_w, y0, palette);
-    draw_tile_clear(&mut img, backtile, 0, y1, vid_w, vid_h - y1, palette);
-    draw_tile_clear(&mut img, backtile, 0, y0, x0, y1 - y0, palette);
-    draw_tile_clear(&mut img, backtile, x1, y0, vid_w - x1, y1 - y0, palette);
-    let cw = x1 - x0;
-    for (vy, py) in (y0..y1).enumerate() {
-        let dst = py * vid_w + x0;
-        img.rgb[dst..dst + cw].copy_from_slice(&view.rgb[vy * view.w..vy * view.w + cw]);
-    }
+    let mut img = screen_with_backtile(ViewRect { w: view.w, h: view.h, ..vrect }, vid_w, vid_h, backtile, palette);
+    img.blit(&view, vrect.x, vrect.y, threads);
     crate::render::recycle_image(view);
     img
 }
@@ -593,12 +608,12 @@ mod tests {
     fn warp_vrect_is_r_setupframes_warp_buffer_view() {
         // No larger than 320x200: the screen's own view rectangle (1:1 warp).
         for vs in [30.0, 50.0, 100.0, 110.0, 120.0] {
-            assert_eq!(warp_vrect(320, 200, vs, false), calc_refdef(320, 200, vs, false).vrect);
+            assert_eq!(warp_vrect(320, 200, vs, false, false), calc_refdef(320, 200, vs, false).vrect);
         }
         // id's 48-row bar on a 960x600 screen is (int)(48 * 200/600) = 16 rows
         // of the warp buffer.
-        assert_eq!(warp_vrect(960, 600, 100.0, false), vr(0, 0, 320, 184));
-        assert_eq!(warp_vrect(640, 400, 100.0, false), vr(0, 0, 320, 176));
+        assert_eq!(warp_vrect(960, 600, 100.0, false, false), vr(0, 0, 320, 184));
+        assert_eq!(warp_vrect(640, 400, 100.0, false, false), vr(0, 0, 320, 176));
         // The "scaled 2-D" extra's bar is 48 rows of the 320x200 screen.
         let _extra = crate::draw::Scaled2dGuard::set(true);
         // Every 16:10 preset the extra draws at a whole multiple of 320x200
@@ -609,25 +624,24 @@ mod tests {
             for step in 3..=12 {
                 let vs = step as f32 * 10.0;
                 let want = calc_refdef(320, 200, vs, false).vrect;
-                assert_eq!(warp_vrect(w as usize, h as usize, vs, false), want, "{w}x{h} @ {vs}");
+                assert_eq!(warp_vrect(w as usize, h as usize, vs, false, false), want, "{w}x{h} @ {vs}");
             }
-            assert_eq!(warp_vrect(w as usize, h as usize, 50.0, true), vr(0, 0, 320, 200));
+            assert_eq!(warp_vrect(w as usize, h as usize, 50.0, true, false), vr(0, 0, 320, 200));
         }
-        assert_eq!(warp_vrect(960, 600, 50.0, false), vr(80, 26, 160, 100));
+        assert_eq!(warp_vrect(960, 600, 50.0, false, false), vr(80, 26, 160, 100));
         // Wider than 16:10: 320 wide, the height follows the mode (C's too).
-        assert_eq!(warp_vrect(1280, 600, 120.0, false), vr(0, 0, 320, 150));
+        assert_eq!(warp_vrect(1280, 600, 120.0, false, false), vr(0, 0, 320, 150));
         // Taller (4:3): id squeezes 320x200 with its pixel aspect; the square-
         // pixel port keeps the shape instead (266 wide, &~7 -> 264).
-        assert_eq!(warp_vrect(640, 480, 120.0, false), vr(1, 0, 264, 200));
+        assert_eq!(warp_vrect(640, 480, 120.0, false, false), vr(1, 0, 264, 200));
     }
 
     #[test]
     fn hires_renders_underwater_at_the_view_itself() {
         // The hires extra has no warp buffer: the view rectangle, at any size.
-        let _hires = crate::render::VideoGuard::set(crate::render::VideoCvars::MODERN);
         for (w, h) in [(320, 200), (960, 600), (1920, 1080), (3840, 2160)] {
             for vs in [50.0, 100.0, 120.0] {
-                assert_eq!(warp_vrect(w, h, vs, false), calc_refdef(w, h, vs, false).vrect, "{w}x{h} @ {vs}");
+                assert_eq!(warp_vrect(w, h, vs, false, true), calc_refdef(w, h, vs, false).vrect, "{w}x{h} @ {vs}");
             }
         }
     }
@@ -639,7 +653,7 @@ mod tests {
         // viewsize 50 at 320x200: a 160x100 view at (80, 26).
         let r = calc_refdef(320, 200, 50.0, false);
         let view = Image::new(r.vrect.w, r.vrect.h, [250, 1, 2]);
-        let img = compose_view(view, r.vrect, 320, 200, Some(&tile), &pal);
+        let img = compose_view(view, r.vrect, 320, 200, Some(&tile), &pal, 1);
         assert_eq!((img.w, img.h), (320, 200));
         let tile_at = |x: usize, y: usize| pal[tile.data[(y % 64) * 64 + x % 64] as usize];
         for y in 0..200 {
@@ -652,7 +666,7 @@ mod tests {
         // A full-screen view (viewsize 120) passes through untouched.
         let full = calc_refdef(320, 200, 120.0, false);
         let view = Image::new(320, 200, [250, 1, 2]);
-        let out = compose_view(view, full.vrect, 320, 200, Some(&tile), &pal);
+        let out = compose_view(view, full.vrect, 320, 200, Some(&tile), &pal, 1);
         assert!(out.rgb.iter().all(|&p| p == [250, 1, 2]));
     }
 
@@ -698,6 +712,7 @@ mod tests {
                     h,
                     t,
                     &pal,
+                    3,
                 );
                 assert_eq!((got.w, got.h), (w, h));
                 assert!(got.rgb == want, "{w}x{h} {vrect:?} tile {}", t.is_some());

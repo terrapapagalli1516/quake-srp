@@ -105,19 +105,34 @@ pub(crate) fn native(a: &App) -> bool {
 }
 
 /// Once a frame, before the client frame: the framebuffer to the size the
-/// settings ask for, and the settings the engine still keeps per thread
-/// handed over — the renderer's video and mip cvars and the 2-D layer's
-/// scale. (When the renderer takes them per frame, in `Vid`, this is where
-/// they go instead.)
+/// settings ask for, and the 2-D layer's scale (a setting `draw` still keeps
+/// per thread). The renderer's settings go with the frame, in [`vid`].
 pub(crate) fn apply_settings(a: &mut App) {
     let (w, h) = picture_size(&a.settings.cvars, a.window);
     a.set_render_size(w, h);
-    let c = &a.settings.cvars;
-    let fov_mode = if c.fov_adapt { FovMode::HorPlus } else { FovMode::Classic };
-    render::set_video_cvars(VideoCvars { fov_mode, hires: native(a) });
-    render::set_mip_cvars(MipCvars { mipscale: c.d_mipscale, mipcap: c.d_mipcap });
-    quake_rs::draw::set_scaled_2d(c.scaled_2d);
+    quake_rs::draw::set_scaled_2d(a.settings.cvars.scaled_2d);
     a.menu.sync_resolution(w as i32, h as i32);
+}
+
+/// The checks' and the benchmark's shorthand for the picture (the
+/// `set_video` call): `modern` is the 2026 profile's — native resolution at
+/// one device pixel a pixel, Hor+ — whose size then follows the window
+/// (`set_window`); `classic` a video mode in the 4:3 box with id's field of
+/// view. Returns 1 for a known name.
+pub(crate) fn set_video(name: &str) -> i32 {
+    let modern = match name.trim() {
+        "classic" => false,
+        "modern" => true,
+        _ => return 0,
+    };
+    ensure_app(|a| {
+        let c = &mut a.settings.cvars;
+        (c.native, c.fov_adapt) = (modern, modern);
+        if modern {
+            c.pixel_size = 1;
+        }
+    });
+    1
 }
 
 /// The current render width in pixels. Each `Frame` record carries it, and
@@ -162,15 +177,32 @@ pub(crate) const DISPLAY_ASPECT: f64 = 4.0 / 3.0;
 /// size it gives `vid.aspect`), and the exact-perspective setting.
 pub(crate) fn vid(a: &App) -> Vid {
     let (w, h) = (a.render_w, a.render_h);
-    let display_aspect = if native(a) && h > 0 { w as f64 / h as f64 } else { DISPLAY_ASPECT };
-    Vid { width: w, height: h, display_aspect, exact_perspective: a.settings.cvars.exact_persp }
+    let c = &a.settings.cvars;
+    let native = native(a);
+    let display_aspect = if native && h > 0 { w as f64 / h as f64 } else { DISPLAY_ASPECT };
+    let fov_mode = if c.fov_adapt { FovMode::HorPlus } else { FovMode::Classic };
+    Vid {
+        width: w,
+        height: h,
+        display_aspect,
+        exact_perspective: c.exact_persp,
+        video: VideoCvars { fov_mode, hires: native },
+        mip: MipCvars { mipscale: c.d_mipscale, mipcap: c.d_mipcap },
+    }
 }
 
 /// The [`Vid`] of a `w x h` video mode in the 4:3 box, id's spans: what a
 /// Classic frame draws.
 #[cfg(test)]
 pub(crate) fn mode_vid(w: usize, h: usize) -> Vid {
-    Vid { width: w, height: h, display_aspect: DISPLAY_ASPECT, exact_perspective: false }
+    Vid {
+        width: w,
+        height: h,
+        display_aspect: DISPLAY_ASPECT,
+        exact_perspective: false,
+        video: VideoCvars::CLASSIC,
+        mip: MipCvars::DEFAULT,
+    }
 }
 
 /// The `viewsize` cvar (Options "Screen size", `sizeup`/`sizedown`), 30..=120.

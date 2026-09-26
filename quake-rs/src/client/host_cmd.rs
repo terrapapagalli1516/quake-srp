@@ -302,6 +302,7 @@ pub fn try_changelevel(w: &mut Walk, next_map: &str, sound: &mut Vec<SoundCall>)
     // Commit the swap. From here nothing can fail.
     w.server = ns;
     w.bsp = render_bsp;
+    w.renderer.begin_map(&w.bsp);
     w.player = player;
     w.entry_parms = entry_parms;
     w.map_name = map_file;
@@ -396,6 +397,7 @@ pub fn try_restart(w: &mut Walk, sound: &mut Vec<SoundCall>) {
     // Commit the reload (nothing below can fail).
     w.server = ns;
     w.bsp = render_bsp;
+    w.renderer.begin_map(&w.bsp);
     w.player = player;
     w.yaw = yaw;
     w.pitch = pitch;

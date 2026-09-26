@@ -10,7 +10,7 @@ use super::Image;
 /// view leaf is in water/slime/lava (`r_waterwarp`, default on). `view` is the
 /// frame id renders into `r_warpbuffer` (at most 320x200, see
 /// [`warp_vrect`](crate::screen::warp_vrect)); the result is the screen's
-/// `out_w x out_h` view rectangle (`scr_vrect`), each pixel sampling the view
+/// `out.w x out.h` view rectangle (`scr_vrect`), each pixel sampling the view
 /// displaced by a per-row/per-column sine (`AMP2 = 3`, `SPEED = 20`,
 /// `intsintable` from the 128-cycle phase) and stretched by
 /// `wratio = w / scr_vrect.width` (`hratio` likewise), with the slight edge
@@ -18,19 +18,31 @@ use super::Image;
 /// The row displacement is driven by the column's sine and vice versa. The
 /// ratios and row/column tables are the C's `float` arithmetic; `clock` drives
 /// the phase. Applied to the 3-D frame BEFORE the content tint
-/// (V_SetContentsColor), so wobble and tint compose as in software Quake. The
-/// view's buffer goes back to the frame pool.
+/// (V_SetContentsColor), so wobble and tint compose as in software Quake.
+/// `tables` are the renderer's, kept across frames ([`WarpTables`]); the
+/// rows are written in runs on up to `threads` threads (each output row is
+/// its own map of the view: the same bytes for any count).
 ///
-/// With the hires extra ([`VideoCvars::hires`](super::VideoCvars)) the view
-/// is rendered at the screen's own size and the wobble is scaled to it
-/// ([`warp_scale`]): id's sine swings 3 pixels over a 128-pixel cycle in
+/// With the hires extra (`hires`, [`VideoCvars::hires`](super::VideoCvars))
+/// the view is rendered at the screen's own size and the wobble is scaled to
+/// it ([`warp_scale`]): id's sine swings 3 pixels over a 128-pixel cycle in
 /// SCREEN pixels at every resolution, so on a 320x200 screen it bends the view
 /// by a hundredth and ripples twice across, and at 3840x2160 it would be a
 /// fine shimmer over a picture blown up twelve times. Scaled, it is 320x200's
 /// wobble at full resolution; at 320x200 it is id's to the pixel.
-pub fn apply_warp(view: Image, out_w: usize, out_h: usize, clock: f32) -> Image {
-    let scale = if super::video_cvars().hires { warp_scale(out_w, out_h) } else { 1.0 };
-    apply_warp_scaled(view, out_w, out_h, clock, scale)
+pub(super) fn warp_screen(tables: &mut WarpTables, view: &Image, out: WarpTarget, clock: f32, hires: bool, threads: usize) {
+    let scale = if hires { warp_scale(out.w, out.h) } else { 1.0 };
+    warp_scaled(tables, view, out, clock, scale, threads);
+}
+
+/// Where [`warp_screen`] writes: `w x h` pixels at column `x0` of `rows`,
+/// `stride` pixels a row (the screen's view rectangle, or an image of its own).
+pub(super) struct WarpTarget<'a> {
+    pub(super) rows: &'a mut [[u8; 3]],
+    pub(super) stride: usize,
+    pub(super) x0: usize,
+    pub(super) w: usize,
+    pub(super) h: usize,
 }
 
 /// The hires warp's scale for an `out_w x out_h` view: its linear size in
@@ -42,34 +54,39 @@ pub(crate) fn warp_scale(out_w: usize, out_h: usize) -> f64 {
     ((out_w as f64 * out_h as f64) / (320.0 * 200.0)).sqrt().max(1.0)
 }
 
-/// [`apply_warp`] with the sine's amplitude and cycle `scale` times id's
+/// [`warp_screen`] with the sine's amplitude and cycle `scale` times id's
 /// (`AMP2 * scale` pixels over `CYCLE * scale`, the phase advancing `SPEED *
-/// scale` a second): at 1 exactly `D_WarpScreen`.
-pub(crate) fn apply_warp_scaled(view: Image, out_w: usize, out_h: usize, clock: f32, scale: f64) -> Image {
+/// scale` a second): at 1 exactly `D_WarpScreen`. A degenerate view or
+/// target writes black.
+fn warp_scaled(tables: &mut WarpTables, view: &Image, out: WarpTarget, clock: f32, scale: f64, threads: usize) {
     const SPEED: f64 = 20.0;
     let (w, h) = (view.w, view.h);
+    let WarpTarget { rows, stride, x0, w: out_w, h: out_h } = out;
+    if stride == 0 || x0 + out_w > stride || rows.len() < out_h * stride {
+        return;
+    }
+    let rows = &mut rows[..out_h * stride];
     if w == 0 || h == 0 || out_w == 0 || out_h == 0 || view.rgb.len() < w * h {
-        super::recycle_image(view);
-        return Image::new(out_w, out_h, [0, 0, 0]);
+        for row in rows.chunks_mut(stride) {
+            row[x0..x0 + out_w].fill([0, 0, 0]);
+        }
+        return;
     }
     let scale = if scale.is_finite() && scale > 1.0 { scale } else { 1.0 };
     let cycle = (WARP_CYCLE as f64 * scale).round() as i64;
     let phase = ((clock as f64 * SPEED * scale) as i64).rem_euclid(cycle) as usize;
-    let mut out = Image::reused_uncleared(out_w, out_h);
-    WARP_TABLES.with(|t| {
-        let mut t = t.borrow_mut();
-        t.prepare(w, h, out_w, out_h, scale, phase + out_w.max(out_h));
-        let WarpTables { rowptr, column, sin, .. } = &*t;
-        for (v, row) in out.rgb.chunks_exact_mut(out_w).take(out_h).enumerate() {
+    tables.prepare(w, h, out_w, out_h, scale, phase + out_w.max(out_h));
+    let WarpTables { rowptr, column, sin, .. } = &*tables;
+    super::band::for_rows(threads, out_h, rows, stride, |v0, run| {
+        for (k, row) in run.chunks_mut(stride).enumerate() {
+            let v = v0 + k;
             let tv = sin[phase + v] as usize; // 0..2*amp
-            for (u, px) in row.iter_mut().enumerate() {
+            for (u, px) in row[x0..x0 + out_w].iter_mut().enumerate() {
                 let tu = sin[phase + u] as usize; // 0..2*amp
                 *px = view.rgb[rowptr[v + tu] * w + column[tv + u]];
             }
         }
     });
-    super::recycle_image(view);
-    out
 }
 
 /// `AMP2` (d_local.h): the warp's sine swings `0..2*AMP2` pixels.
@@ -77,12 +94,12 @@ const WARP_AMP2: f64 = 3.0;
 /// `CYCLE` (r_local.h): the sine's period in table entries (screen pixels).
 const WARP_CYCLE: usize = 128;
 
-/// [`apply_warp`]'s tables, kept across frames like id's static arrays
+/// [`warp_screen`]'s tables, kept across frames like id's static arrays
 /// (`D_WarpScreen`'s `rowptr`/`column` and R_InitTurb's `intsintable`), so an
 /// underwater frame allocates nothing: `rowptr` and `column` for the last
 /// view and screen sizes and scale, and `intsintable` (at that scale) as far
-/// as any frame has read it.
-struct WarpTables {
+/// as any frame has read it. The [`Renderer`](super::Renderer)'s.
+pub(super) struct WarpTables {
     /// `(view w, view h, screen w, screen h)` the row/column tables are for.
     sizes: (usize, usize, usize, usize),
     /// The scale `sin` is for (1: id's `intsintable`).
@@ -92,10 +109,10 @@ struct WarpTables {
     sin: Vec<i32>,
 }
 
-thread_local! {
-    static WARP_TABLES: std::cell::RefCell<WarpTables> = const {
-        std::cell::RefCell::new(WarpTables { sizes: (0, 0, 0, 0), scale: 1.0, rowptr: Vec::new(), column: Vec::new(), sin: Vec::new() })
-    };
+impl Default for WarpTables {
+    fn default() -> WarpTables {
+        WarpTables { sizes: (0, 0, 0, 0), scale: 1.0, rowptr: Vec::new(), column: Vec::new(), sin: Vec::new() }
+    }
 }
 
 impl WarpTables {
@@ -268,6 +285,20 @@ mod tests {
     use super::*;
     use crate::render::fixtures::synthetic_liquid_pixels;
     use crate::render::raster::{span_at, span_turb, AttrVert, Persp, PolyGrads};
+
+    /// `D_WarpScreen` at `scale` into an `out_w x out_h` image of its own,
+    /// on fresh tables, on `threads` threads.
+    fn warp_at(view: Image, out_w: usize, out_h: usize, clock: f32, scale: f64, threads: usize) -> Image {
+        let mut out = Image::new(out_w, out_h, [7, 7, 7]);
+        let target = WarpTarget { rows: &mut out.rgb, stride: out_w, x0: 0, w: out_w, h: out_h };
+        warp_scaled(&mut WarpTables::default(), &view, target, clock, scale, threads);
+        out
+    }
+
+    /// `D_WarpScreen` with id's scale.
+    fn apply_warp(view: Image, out_w: usize, out_h: usize, clock: f32) -> Image {
+        warp_at(view, out_w, out_h, clock, 1.0, 1)
+    }
 
     /// A `w x h` image whose pixel (x, y) is `[x, y, 0]`, to read back which
     /// source pixel the warp chose.
@@ -476,16 +507,14 @@ mod tests {
         assert_eq!(warp_scale(1280, 800), 4.0);
         assert!((warp_scale(3840, 2160) - 11.384).abs() < 1e-3);
         let id = apply_warp(coord_image(320, 200), 320, 200, 2.7);
-        let hires = {
-            let _g = crate::render::VideoGuard::set(crate::render::VideoCvars::MODERN);
-            apply_warp(coord_image(320, 200), 320, 200, 2.7)
-        };
+        let hires = warp_at(coord_image(320, 200), 320, 200, 2.7, warp_scale(320, 200), 1);
         assert!(id.rgb == hires.rgb);
         // At scale 4 (1280x800) the sine swings 0..24 rows over a 512-column
         // cycle: column u of output row v reads row rowptr[v + t[u]], t the
         // scaled table, and the swing is 4x id's.
         let (w, h) = (1280usize, 800usize);
-        let out = apply_warp_scaled(coord_image(w, h), w, h, 0.0, 4.0);
+        let out = warp_at(coord_image(w, h), w, h, 0.0, 4.0, 1);
+        assert!(warp_at(coord_image(w, h), w, h, 0.0, 4.0, 5).rgb == out.rgb, "any thread count");
         let mut t = Vec::new();
         extend_intsintable(&mut t, w, 4.0);
         assert_eq!((t.iter().min(), t.iter().max()), (Some(&0), Some(&23)));

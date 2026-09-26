@@ -73,6 +73,9 @@ pub struct Walk {
     /// A second copy of the map BSP for rendering (the server owns its own copy
     /// inside the world host).
     pub bsp: Bsp,
+    /// The renderer drawing `bsp` (begun on it: `R_NewMap` whenever `bsp`
+    /// changes), with its caches, z-buffer and video cvars.
+    pub renderer: render::Renderer,
     pub palette: [[u8; 3]; 256],
     /// The parsed `gfx.wad` (sbar + digit pics) for the status-bar HUD overlay,
     /// or `None` if the archive lacked/could not parse it. Parsed once at boot so
@@ -266,6 +269,8 @@ pub struct Walk {
 /// Recorded-demo playback state.
 pub struct DemoPlay {
     pub bsp: Bsp,
+    /// The renderer drawing `bsp` (begun on it), as [`Walk::renderer`].
+    pub renderer: render::Renderer,
     pub palette: [[u8; 3]; 256],
     pub demo: Demo,
     /// The archive, kept open so the recorded `svc_sound` one-shots can load
@@ -391,8 +396,11 @@ impl DemoPlay {
         // CL_ReadFromServer, before the first CL_LerpPoint, so their items
         // are stamped at about host_frametime and never flash.
         let cl_items = demo.frames.first().map_or(0, |f| f.client.items);
+        let mut renderer = render::Renderer::new();
+        renderer.begin_map(&bsp);
         DemoPlay {
             bsp,
+            renderer,
             palette,
             demo,
             pak,
@@ -502,9 +510,12 @@ pub fn assemble_walk(
     // CL_ClearState + the signon's clientdata: what the player spawns with,
     // unflashed (`view::stamp_item_gettime`).
     let cl_items = cl_main::server_items(&server, player);
+    let mut renderer = render::Renderer::new();
+    renderer.begin_map(&bsp);
     Some(Walk {
         server,
         bsp,
+        renderer,
         palette,
         gfx_wad,
         colormap,
@@ -587,6 +598,11 @@ pub struct Vid {
     /// 16-pixel spans (`D_DrawSpans16`): the web port's `wasm_exactpersp`
     /// extra, off in id's Quake.
     pub exact_perspective: bool,
+    /// The port's video cvars (Hor+, views past id's largest mode): Classic
+    /// in id's Quake.
+    pub video: render::VideoCvars,
+    /// id's `d_mipscale` / `d_mipcap` (`MipCvars::DEFAULT`, id's defaults).
+    pub mip: render::MipCvars,
 }
 
 /// How the renderer draws the 3-D view `vrect` of the frame `vid` describes:
@@ -594,12 +610,15 @@ pub struct Vid {
 /// 0.8333 at every 16:10 mode shown at 4:3), which `R_ViewChanged` folds into
 /// the projection so the world is not stretched by the display; where the
 /// view sits on that screen (`D_Sky_uv_To_st` centres the sky on the screen);
-/// and the renderer extra, off unless the platform switched it on.
+/// the video cvars, and id's `d_mipscale`/`d_mipcap`; and the renderer extra,
+/// off unless the platform switched it on.
 pub fn render_options(vrect: &render::ViewRect, vid: &Vid) -> render::RenderOptions {
     render::RenderOptions {
         pixel_aspect: render::vid_aspect(vid.width, vid.height, vid.display_aspect),
         screen: Some(render::ScreenPlace { x: vrect.x, y: vrect.y, vid_w: vid.width, vid_h: vid.height }),
         exact_perspective: vid.exact_perspective,
+        video: vid.video,
+        mip: vid.mip,
     }
 }
 
@@ -738,9 +757,10 @@ thread_local! {
     static VIEW_HOOK: Cell<Option<ViewHook>> = const { Cell::new(None) };
 }
 
-/// A harness's last word on the finished 3-D view of a live frame, before the
-/// 2-D layer is drawn over it (see [`set_view_hook`]).
-pub type ViewHook = fn(render::Image, &[[u8; 3]; 256]) -> render::Image;
+/// A harness's last word on the finished 3-D view of a live frame — the
+/// screen and the view's rectangle on it — before the 2-D layer is drawn over
+/// it (see [`set_view_hook`]).
+pub type ViewHook = fn(&mut render::Image, render::ViewRect, &[[u8; 3]; 256]);
 
 /// Install (or clear) the [`ViewHook`]: the 2-D oracle harness (quake-wasm's
 /// `oracle_screen`) paints the view one flat colour, as the C oracle's
@@ -750,11 +770,11 @@ pub fn set_view_hook(hook: Option<ViewHook>) {
     VIEW_HOOK.with(|c| c.set(hook));
 }
 
-/// The 3-D view through the installed [`ViewHook`] (unchanged without one).
+/// The 3-D view at `vrect` of `screen` through the installed [`ViewHook`]
+/// (unchanged without one).
 #[inline]
-pub fn view_hook(view: render::Image, palette: &[[u8; 3]; 256]) -> render::Image {
-    match VIEW_HOOK.with(Cell::get) {
-        Some(hook) => hook(view, palette),
-        None => view,
+pub fn view_hook(screen: &mut render::Image, vrect: render::ViewRect, palette: &[[u8; 3]; 256]) {
+    if let Some(hook) = VIEW_HOOK.with(Cell::get) {
+        hook(screen, vrect, palette);
     }
 }

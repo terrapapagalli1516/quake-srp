@@ -29,7 +29,7 @@
 //! | `sys`       | sys_win.c `main`                        | the loop: events in, a host frame per tick, frames and sounds out |
 //! | `proto`     | —                                       | the records on stdin and stdout                  |
 //! | `automation`| —                                       | the protocol's calls: the page's buttons, the browser checks' hooks |
-//! | `common`    | common.c `COM_InitFilesystem`           | `-basedir`, the game directory, `pak0.pak`, the game's own files |
+//! | `common`    | common.c `COM_InitFilesystem`           | `-basedir`, the game directory, `pak0.pak`, the game's own files (and `main`'s `-hwthreads`, the threads the host offers) |
 //! | `config`    | host.c `Host_WriteConfiguration`        | `config.cfg`: the settings' changes, written on change, exec'd at startup |
 //! | `app`       | host.c, client.h                        | the `App` (host state around the client's `Walk`/`DemoPlay`: the settings, menu, console, clocks), menu assets, the client's level loads with their sound calls carried out, the boots |
 //! | `host`      | host.c `Host_Frame`                     | `step`: the frame gate (id's 72 fps, or every refresh stepped as 72 Hz runs), the mode's client frame, the menu/console overlays, the fps readout, blend, gamma pack |
@@ -103,11 +103,25 @@ fn basedir() -> PathBuf {
         .map_or_else(|| PathBuf::from("."), PathBuf::from)
 }
 
+/// The threads the host offers: `-hwthreads <n>` (`wasi.js` passes its pool
+/// of thread workers plus one), else what `std` says this machine has (1
+/// where it cannot say, as on `wasm32-wasip1`).
+fn hw_threads() -> usize {
+    let args: Vec<String> = std::env::args().collect();
+    args.iter()
+        .position(|a| a == "-hwthreads")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|n| n.parse().ok())
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, std::num::NonZero::get))
+        .max(1)
+}
+
 fn main() -> ExitCode {
     if let Err(e) = common::init(&basedir()) {
         eprintln!("quake: {e}");
         return ExitCode::FAILURE;
     }
+    app::ensure_app(|a| a.hw_threads = hw_threads());
     // stdout goes through a buffer the size of a turn's small records, so
     // a turn reaches the host in a few writes; a frame's pixels pass
     // straight through it.

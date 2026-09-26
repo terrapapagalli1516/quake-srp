@@ -3,8 +3,7 @@
 use crate::bsp::Bsp;
 use crate::math::Vec3;
 use crate::wad::Qpic;
-use super::demo_room;
-use super::surf::{GEOM_CACHE, LIGHT_CACHE, SURF_CACHE};
+use super::{demo_room, Image, Renderer, Scene};
 
 /// Build a tiny but valid single-skin single-frame MDL whose frame-0
 /// triangle, after the model->world transform, sits in front of the camera.
@@ -169,12 +168,10 @@ pub(crate) fn solid_pic(w: i32, h: i32, idx: u8) -> crate::wad::Qpic {
     }
 }
 
-/// Clear both thread-local caches so a test starts from a known state
-/// (tests share a thread, and a prior test may have populated them).
-pub(super) fn reset_render_caches() {
-    GEOM_CACHE.with(|c| *c.borrow_mut() = None);
-    LIGHT_CACHE.with(|c| *c.borrow_mut() = None);
-    SURF_CACHE.with(|c| *c.borrow_mut() = None);
+/// Draw `scene` on a renderer of its own (every cache cold), as a one-frame
+/// test does.
+pub(crate) fn render_once(scene: &Scene) -> Image {
+    Renderer::new().render(scene)
 }
 
 /// A `demo_room` whose every face is a 2-style lightmapped wall (styles
@@ -203,4 +200,21 @@ pub(super) fn lightmapped_demo_room(block0: u8, block1: u8) -> Bsp {
 pub(crate) fn test_backtile() -> Qpic {
     let data = (0..64 * 64).map(|i| (i % 251) as u8).collect();
     Qpic { width: 64, height: 64, data }
+}
+
+/// A trivial single-frame sprite: `wpx` x `hpx` pixels all `fill`, with a
+/// centred origin so the billboard straddles the projected point.
+pub(super) fn test_sprite(wpx: i32, hpx: i32, fill: u8) -> crate::spr::Sprite {
+    use crate::spr::{Frame, Sprite, SpriteFrame, SpriteHeader};
+    Sprite {
+        header: SpriteHeader {
+            ident: 0, version: 1, type_: 0, boundingradius: 0.0,
+            width: wpx, height: hpx, numframes: 1, beamlength: 0.0, synctype: 0,
+        },
+        frames: vec![Frame::Single(SpriteFrame {
+            origin: [-wpx / 2, hpx / 2], // centred
+            width: wpx, height: hpx,
+            pixels: vec![fill; (wpx * hpx) as usize],
+        })],
+    }
 }

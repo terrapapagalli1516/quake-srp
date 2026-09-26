@@ -72,11 +72,11 @@ const MAX_LIGHT_FACTOR: f32 = 4.0;
 /// multiple lightmap layers (`R_BuildLightMap`).
 pub const LIGHTSTYLES: usize = 64;
 
-/// A no-op light-style scale table: every style at the "normal" `1.0`. Passing
-/// this to [`render_scene_ext`](super::render_scene_ext) leaves lightmaps exactly as the static (style-0)
-/// renderer produced them, which is what [`render_scene`](super::render_scene) does — so all prior
-/// behaviour and tests are unchanged. The animated front-ends instead pass
-/// `server.lightstyle_scales(time)`.
+/// A no-op light-style scale table: every style at the "normal" `1.0`. As a
+/// scene's [`light_styles`](super::Scene::light_styles) (the
+/// [`Scene::new`](super::Scene::new) default) it leaves lightmaps exactly as
+/// the static (style-0) renderer produced them. The animated front-ends
+/// instead pass `server.lightstyle_scales(time)`.
 pub const NEUTRAL_LIGHTSTYLE_SCALES: [f32; LIGHTSTYLES] = [1.0; LIGHTSTYLES];
 
 /// `DFace.styles` slot value meaning "this lightmap layer is unused".
@@ -799,15 +799,6 @@ fn light_point_check_node(
     None
 }
 
-thread_local! {
-    /// Per-thread scratch for the per-face `R_MarkLights` dlight bit masks
-    /// (`surf->dlightbits`). The world/submodel passes `mem::take` it for the
-    /// duration of their face loop (they never nest) and put it back when done,
-    /// so per-frame marking allocates nothing once the buffer has grown to the
-    /// map's face count. See [`mark_dlights`].
-    pub(super) static DLIGHT_BITS_SCRATCH: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
-}
-
 /// Does any dynamic light in `dlights` actually REACH this face? Mirrors the
 /// reach test inside [`add_dynamic_lights`] (`rad = radius - |dist|`, skip if
 /// `rad < minlight`) WITHOUT touching luxels, so the lightmap/surface caches
@@ -1075,10 +1066,9 @@ mod tests {
     use super::*;
     use crate::dlight::DynamicLight;
     use crate::math::sub;
-    use crate::render::{demo_room, render_scene_ext, Camera, Image};
-    use crate::render::fixtures::{
-        one_face_bsp, one_face_bsp_zplane, reset_render_caches, two_style_face_bsp,
-    };
+    use crate::render::{demo_room, Camera, Image, Scene};
+    use crate::render::fixtures::render_once;
+    use crate::render::fixtures::{one_face_bsp, one_face_bsp_zplane, two_style_face_bsp};
 
     // -- Lightmap: surface extents / luxel math ----------------------------
 
@@ -1526,13 +1516,13 @@ mod tests {
         let pal = [[180u8, 180, 180]; 256];
         let cam = Camera::looking_at([-200.0, -200.0, 40.0], [0.0, 0.0, 0.0], 90.0);
 
-        let base = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES, None);
+        let base = render_once(&Scene::new(&bsp, cam, 160, 120, &pal));
         // demo_room has no lighting lump, so faces are fullbright (no lightmap)
         // and dlights cannot attach; the frame must therefore be UNCHANGED even
         // with a light present -- proving dlights never touch non-lightmapped
         // faces and never panic.
         let dl = DynamicLight::new([0.0, 0.0, 0.0], 600.0, 10.0, 0.0, 0.0, 0);
-        let lit = render_scene_ext(&bsp, &cam, 160, 120, &pal, &[], &[], &[], None, 0.0, &[], std::slice::from_ref(&dl), &NEUTRAL_LIGHTSTYLE_SCALES, None);
+        let lit = render_once(&Scene { dlights: std::slice::from_ref(&dl), ..Scene::new(&bsp, cam, 160, 120, &pal) });
         assert_eq!(base.rgb, lit.rgb, "fullbright (lightmap-less) world must ignore dlights");
     }
 
@@ -1780,22 +1770,15 @@ mod tests {
         // coplanar, with wall-adjacent luxels inside the light's lightmap-space
         // reach, i.e. visibly lit by the OLD proximity-only gating — must be
         // byte-identical to the unlit frame.
-        reset_render_caches();
         let bsp = two_rooms_bsp();
         let pal = [[128u8, 128, 128]; 256];
         // Above and behind the origin, looking down across both rooms.
         let cam = Camera::looking_at([0.0, -220.0, 260.0], [0.0, 0.0, 0.0], 90.0);
         let (w, h) = (200usize, 150usize);
 
-        let base = render_scene_ext(
-            &bsp, &cam, w, h, &pal, &[], &[], &[], None, 0.0, &[], &[],
-            &NEUTRAL_LIGHTSTYLE_SCALES, None,
-        );
+        let base = render_once(&Scene::new(&bsp, cam, w, h, &pal));
         let dl = DynamicLight::new([40.0, 0.0, 8.0], 36.0, 10.0, 0.0, 0.0, 0);
-        let lit = render_scene_ext(
-            &bsp, &cam, w, h, &pal, &[], &[], &[], None, 0.0, &[],
-            std::slice::from_ref(&dl), &NEUTRAL_LIGHTSTYLE_SCALES, None,
-        );
+        let lit = render_once(&Scene { dlights: std::slice::from_ref(&dl), ..Scene::new(&bsp, cam, w, h, &pal) });
 
         let px = |img: &Image, p: Vec3| -> [u8; 3] {
             let (x, y) = project_px(&cam, w, h, p);
@@ -1832,7 +1815,6 @@ mod tests {
         // `cl_dlights[lnum].origin` against the face's own plane: a lift
         // lowered 64 units is lit by a light 8 units above where the map put
         // it, and not by one 8 units above where it is now.
-        reset_render_caches();
         let mut bsp = two_rooms_bsp();
         // The world is the far floor (node 2); model 1, the near floor (x 0..256,
         // z 0, its own subtree node 1), is the lift.
@@ -1851,7 +1833,7 @@ mod tests {
         let cam = Camera::looking_at([128.0, -200.0, 200.0], [128.0, 0.0, -64.0], 90.0);
         let (w, h) = (200usize, 150usize);
         let frame = |dl: &[DynamicLight]| {
-            render_scene_ext(&bsp, &cam, w, h, &pal, &[], &lift, &[], None, 0.0, &[], dl, &NEUTRAL_LIGHTSTYLE_SCALES, None)
+            render_once(&Scene { bmodels: &lift, dlights: dl, ..Scene::new(&bsp, cam, w, h, &pal) })
         };
         let (x, y) = project_px(&cam, w, h, [128.0, 0.0, -64.0]);
         let at = |img: &Image| img.rgb[y * w + x];
