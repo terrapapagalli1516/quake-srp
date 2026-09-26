@@ -1937,7 +1937,9 @@ fn cmd_scene(pak_path: &str, map_name: &str, out: &str, opts: &[String]) -> Resu
         let scene = render::Scene { width: bw, height: bh, ..scene };
         let mut renderer = render::Renderer::new();
         renderer.set_threads(threads);
+        let cold = std::time::Instant::now();
         let _ = std::hint::black_box(renderer.render(&scene)); // warm the per-face caches
+        let cold = cold.elapsed().as_secs_f64() * 1000.0;
         let start = std::time::Instant::now();
         for _ in 0..iters {
             std::hint::black_box(renderer.render(&scene));
@@ -1953,7 +1955,7 @@ fn cmd_scene(pak_path: &str, map_name: &str, out: &str, opts: &[String]) -> Resu
         use std::fmt::Write as _;
         let _ = writeln!(
             o,
-            "bench {map_name} {bw}x{bh}: {iters} warm frames -> {per:.2} ms/frame ({:.1} fps)",
+            "bench {map_name} {bw}x{bh} on {threads} thread(s): {iters} warm frames -> {per:.2} ms/frame ({:.1} fps); the first, cold (every surface baked): {cold:.2} ms",
             1000.0 / per
         );
         let _ = writeln!(

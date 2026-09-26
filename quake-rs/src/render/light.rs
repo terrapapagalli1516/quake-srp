@@ -799,15 +799,6 @@ fn light_point_check_node(
     None
 }
 
-thread_local! {
-    /// Per-thread scratch for the per-face `R_MarkLights` dlight bit masks
-    /// (`surf->dlightbits`). The world/submodel passes `mem::take` it for the
-    /// duration of their face loop (they never nest) and put it back when done,
-    /// so per-frame marking allocates nothing once the buffer has grown to the
-    /// map's face count. See [`mark_dlights`].
-    pub(super) static DLIGHT_BITS_SCRATCH: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
-}
-
 /// Does any dynamic light in `dlights` actually REACH this face? Mirrors the
 /// reach test inside [`add_dynamic_lights`] (`rad = radius - |dist|`, skip if
 /// `rad < minlight`) WITHOUT touching luxels, so the lightmap/surface caches
