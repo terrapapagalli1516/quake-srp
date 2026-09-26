@@ -13,9 +13,8 @@
 //! `save.rs` reuses the tokenizer and the epair parsers, as the C's
 //! `Host_Loadgame_f` shares `COM_Parse` / `ED_ParseEdict`.
 
-use super::host::{set_skill_value, skill_value};
 use super::pr_cmds::cvar_value;
-use super::{snapshot_lightstyles, Server, SpawnReport, SETTLE_FRAMETIME};
+use super::{Server, SpawnReport, SETTLE_FRAMETIME};
 use crate::math::Vec3;
 use crate::progs::EType;
 use crate::Result;
@@ -226,8 +225,8 @@ fn bump_classname(counts: &mut Vec<(String, usize)>, classname: &str) {
 impl Server {
     /// `ED_LoadFromFile` (pr_edict.c): tokenize `bsp.entities`, spawn each
     /// entity, set its fields by name, and call its spawn function (named by
-    /// `classname`). Faithful to the C control flow, but a per-entity spawn
-    /// error is caught and counted rather than aborting the whole load.
+    /// `classname`). Faithful to the C control flow: a spawn function's program
+    /// error ends the load (id's `Host_Error`) and is returned.
     pub fn spawn_entities(&mut self) -> Result<SpawnReport> {
         // SV_SpawnServer: current_skill = (int)(skill.value + 0.5), clamped to
         // 0..3, then Cvar_SetValue("skill", current_skill). Re-normalise the live
@@ -235,7 +234,8 @@ impl Server {
         // front-end set (or a portal's cvar_set) is rounded to the integer the
         // spawn filter compares against, and cvar("skill") reads back the
         // canonical value.
-        set_skill_value(skill_value() as f32);
+        let skill = self.skill();
+        self.set_skill(skill as f32);
 
         // The entity text was captured at construction (the host has no accessor
         // and we never downcast). Clone it so the tokenizer borrow does not pin
@@ -273,11 +273,11 @@ impl Server {
             // deathmatch, drop NOT_DEATHMATCH entities; otherwise drop the entity
             // whose NOT_<difficulty> flag matches the current skill (easy=0,
             // medium=1, hard/nightmare>=2). `current_skill` is the live `skill`
-            // cvar (see [`SKILL`]) — a difficulty portal's `cvar_set("skill", N)`
-            // changes which monsters/items this filter keeps.
+            // cvar ([`super::ServerCvars`]) — a difficulty portal's
+            // `cvar_set("skill", N)` changes which monsters/items this filter keeps.
             let spawnflags = self.vm.ent_get_float(ent, "spawnflags") as i32;
-            let deathmatch = cvar_value("deathmatch") != 0.0;
-            let current_skill = skill_value();
+            let deathmatch = cvar_value(&self.cvars(), "deathmatch") != 0.0;
+            let current_skill = self.skill();
             let inhibited = if deathmatch {
                 spawnflags & SPAWNFLAG_NOT_DEATHMATCH != 0
             } else {
@@ -313,30 +313,23 @@ impl Server {
             self.vm.gset_int("other", 0);
             self.vm.gset_float("time", time);
 
-            match self.vm.execute(func) {
-                Ok(()) => report.spawned += 1,
-                Err(_) => {
-                    // C aborted via Host_Error; we keep loading the rest, but
-                    // must reset the interpreter so the faulted call chain does
-                    // not corrupt the next spawn.
-                    report.spawn_errors += 1;
-                    self.vm.reset_execution();
-                }
-            }
+            // A spawn function's error is Host_Error: the load ends there.
+            self.vm.execute(func)?;
+            report.spawned += 1;
         }
 
         // Worldspawn (and any other spawn function) may have called lightstyle();
-        // pull those patterns out of the write transport into the owned table.
-        self.lightstyles = snapshot_lightstyles();
+        // apply those patterns to the owned table.
+        self.apply_lightstyles();
 
         // SV_SpawnServer: "run two frames to allow everything to settle" with
         // host_frametime = 0.1. The first frame fires each entity's spawn-set
         // `nextthink` (e.g. monsters droptofloor / set their first animation
         // frame, items settle onto the floor) so the world is in its resting
-        // initial state before play begins. A per-entity think fault is isolated
-        // by run_frame (it never aborts the load).
-        let _ = self.run_frame_f64(SETTLE_FRAMETIME);
-        let _ = self.run_frame_f64(SETTLE_FRAMETIME);
+        // initial state before play begins. A program error there ends the load,
+        // as it ended id's.
+        self.run_frame_f64(SETTLE_FRAMETIME)?;
+        self.run_frame_f64(SETTLE_FRAMETIME)?;
 
         // classnames sorted by count desc, then name asc for determinism.
         classname_counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));

@@ -46,18 +46,18 @@ fn ser_func(f: &Function) -> Vec<u8> {
     v
 }
 
-pub(super) struct Builder {
+pub(crate) struct Builder {
     strings: Vec<u8>,
     statements: Vec<Statement>,
     globaldefs: Vec<Def>,
     fielddefs: Vec<Def>,
     functions: Vec<Function>,
     nglobals: usize,
-    pub(super) entityfields: i32,
+    pub(crate) entityfields: i32,
 }
 
 impl Builder {
-    pub(super) fn new() -> Builder {
+    pub(crate) fn new() -> Builder {
         Builder {
             strings: vec![0u8],
             statements: Vec::new(),
@@ -77,14 +77,14 @@ impl Builder {
             entityfields: 0,
         }
     }
-    pub(super) fn intern(&mut self, s: &str) -> i32 {
+    pub(crate) fn intern(&mut self, s: &str) -> i32 {
         let ofs = self.strings.len() as i32;
         self.strings.extend_from_slice(s.as_bytes());
         self.strings.push(0);
         ofs
     }
     /// Add a global def of `type_` at `ofs` named `name`.
-    pub(super) fn add_global(&mut self, name: &str, type_: u16, ofs: u16) {
+    pub(crate) fn add_global(&mut self, name: &str, type_: u16, ofs: u16) {
         let s = self.intern(name);
         self.globaldefs.push(Def {
             type_,
@@ -93,7 +93,7 @@ impl Builder {
         });
     }
     /// Add a field def of `type_` at `ofs` named `name`.
-    pub(super) fn add_field(&mut self, name: &str, type_: u16, ofs: u16) {
+    pub(crate) fn add_field(&mut self, name: &str, type_: u16, ofs: u16) {
         let s = self.intern(name);
         self.fielddefs.push(Def {
             type_,
@@ -102,7 +102,7 @@ impl Builder {
         });
     }
     /// Add a bytecode function `name` with `stmts`; returns its index.
-    pub(super) fn add_function(&mut self, name: &str, stmts: Vec<Statement>) -> usize {
+    pub(crate) fn add_function(&mut self, name: &str, stmts: Vec<Statement>) -> usize {
         let first = self.statements.len() as i32;
         let s_name = self.intern(name);
         self.statements.extend(stmts);
@@ -121,7 +121,7 @@ impl Builder {
     /// Add a builtin function record (`first_statement = -builtin_num`) named
     /// `name`, so QuakeC can `CALL` into the engine builtin table; returns its
     /// function index.
-    pub(super) fn add_builtin(&mut self, name: &str, builtin_num: i32) -> usize {
+    pub(crate) fn add_builtin(&mut self, name: &str, builtin_num: i32) -> usize {
         let s_name = self.intern(name);
         self.functions.push(Function {
             first_statement: -builtin_num,
@@ -135,7 +135,7 @@ impl Builder {
         });
         self.functions.len() - 1
     }
-    pub(super) fn build(&self) -> Vec<u8> {
+    pub(crate) fn build(&self) -> Vec<u8> {
         let globals: Vec<u32> = vec![0u32; self.nglobals];
         let mut body = Vec::new();
         let ofs_statements = HEADER_SIZE + body.len();
@@ -187,7 +187,7 @@ impl Builder {
 }
 
 /// An empty BSP (no geometry); world queries are total and report SOLID.
-pub(super) fn empty_bsp() -> Bsp {
+pub(crate) fn empty_bsp() -> Bsp {
     Bsp {
         version: crate::bsp::BSPVERSION,
         entities: String::new(),
@@ -209,26 +209,26 @@ pub(super) fn empty_bsp() -> Bsp {
 }
 
 /// A BSP carrying a specific entity text blob.
-pub(super) fn bsp_with_entities(text: &str) -> Bsp {
+pub(crate) fn bsp_with_entities(text: &str) -> Bsp {
     let mut b = empty_bsp();
     b.entities = text.to_string();
     b
 }
 
 // ev_* type codes (etype_t ordinals; see progs::EType).
-pub(super) const EV_STRING: u16 = 1;
-pub(super) const EV_FLOAT: u16 = 2;
-pub(super) const EV_FUNCTION: u16 = 6;
+pub(crate) const EV_STRING: u16 = 1;
+pub(crate) const EV_FLOAT: u16 = 2;
+pub(crate) const EV_FUNCTION: u16 = 6;
 
-pub(super) const EV_VECTOR: u16 = 3;
-pub(super) const EV_ENTITY: u16 = 4;
+pub(crate) const EV_VECTOR: u16 = 3;
+pub(crate) const EV_ENTITY: u16 = 4;
 
 /// A BSP whose world model is a single empty leaf, so a world box-trace runs
 /// clear (fraction 1) instead of the empty-BSP "everything solid". Hull 0's
 /// headnode (0) names node 0, whose children are the empty leaf -> CONTENTS
 /// EMPTY. This lets the entity-clip tests see entity collisions instead of a
 /// world block at fraction 0.
-pub(super) fn world_open_bsp() -> Bsp {
+pub(crate) fn world_open_bsp() -> Bsp {
     use crate::bsp::{DClipNode, DLeaf, DModel, DNode, DPlane, CONTENTS_EMPTY, CONTENTS_SOLID};
     let mut b = empty_bsp();
     // One axial plane at x = -100000 (far away), so every test point is on
@@ -289,7 +289,7 @@ pub(super) fn world_open_bsp() -> Bsp {
 /// Build a progs whose "marker" classname spawn function sets a global float
 /// `spawned_flag` to 1.0, so we can prove the spawner executed it. Also adds
 /// a "classname" string field and "spawnflags"/"think"/"nextthink" fields.
-pub(super) fn marker_progs() -> (Vec<u8>, usize, usize) {
+pub(crate) fn marker_progs() -> (Vec<u8>, usize, usize) {
     let mut b = Builder::new();
     b.entityfields = 8;
 
@@ -340,7 +340,7 @@ pub(super) fn marker_progs() -> (Vec<u8>, usize, usize) {
 /// shared by the sv_move and touch_triggers tests so a synthetic Server can
 /// place SOLID_BBOX / SOLID_TRIGGER edicts and run them. Returns
 /// `(image, touch_fn_index, g_one_offset, g_flag_offset)`.
-pub(super) fn touch_progs() -> (Vec<u8>, usize, usize, usize) {
+pub(crate) fn touch_progs() -> (Vec<u8>, usize, usize, usize) {
     let mut b = Builder::new();
     b.entityfields = 32;
 
@@ -399,7 +399,7 @@ pub(super) fn touch_progs() -> (Vec<u8>, usize, usize, usize) {
 /// (`CONTENTS_EMPTY`) and `z < 0` is solid (`CONTENTS_SOLID`), in every hull.
 /// A player box dropped onto it lands on `z = 0` and cannot tunnel through.
 /// The split plane is the axial +Z plane at `dist = 0` (`ptype = 2`).
-pub(super) fn floor_bsp() -> Bsp {
+pub(crate) fn floor_bsp() -> Bsp {
     use crate::bsp::{DClipNode, DLeaf, DModel, DNode, DPlane, CONTENTS_EMPTY, CONTENTS_SOLID};
     let mut b = empty_bsp();
     // plane 0: +Z at z = 0 (the point hull, hull 0). plane 1: +Z at z = 24,
@@ -470,13 +470,13 @@ pub(super) fn floor_bsp() -> Bsp {
 ///
 /// Returns `(image, g_const100_ofs, g_origin_vec_ofs)` so the test can place
 /// the `100.0` float and the `(0,0,40)` vector the spawn function stores.
-pub(super) fn player_progs() -> (Vec<u8>, usize, usize) {
+pub(crate) fn player_progs() -> (Vec<u8>, usize, usize) {
     player_progs_with_prethink(vec![Statement { op: Op::Done as u16, a: 0, b: 0, c: 0 }])
 }
 
 /// [`player_progs`] with `prethink` as the body of `PlayerPreThink` (the global
 /// `prethink_time` at offset 56 is free for it to record into).
-pub(super) fn player_progs_with_prethink(prethink: Vec<Statement>) -> (Vec<u8>, usize, usize) {
+pub(crate) fn player_progs_with_prethink(prethink: Vec<Statement>) -> (Vec<u8>, usize, usize) {
     let mut b = Builder::new();
     b.add_global("prethink_time", EV_FLOAT, 56);
     b.entityfields = 48;
@@ -598,7 +598,7 @@ pub(super) fn player_progs_with_prethink(prethink: Vec<Statement>) -> (Vec<u8>, 
 /// Set up the field-number constants a freshly-loaded player progs needs for
 /// its `PutClientInServer` ADDRESS ops, plus the value constants. Mirrors the
 /// offsets chosen in [`player_progs`].
-pub(super) fn prime_player_globals(server: &mut Server, g_const100: usize, g_origin: usize) {
+pub(crate) fn prime_player_globals(server: &mut Server, g_const100: usize, g_origin: usize) {
     // Field numbers for ADDRESS (health field ofs 33, origin field ofs 2).
     server.vm.set_gi(50, 33);
     server.vm.set_gi(51, 2);
@@ -609,7 +609,7 @@ pub(super) fn prime_player_globals(server: &mut Server, g_const100: usize, g_ori
 
 /// Field/global offsets the attack progs uses (kept in one place so the test
 /// can fill the constants after load).
-pub(super) mod attack_ofs {
+pub(crate) mod attack_ofs {
     // Globals.
     pub const SELF: u16 = 31;
     pub const G_FIRED: u16 = 40; // float flag PostThink sets when attacking
@@ -630,7 +630,7 @@ pub(super) mod attack_ofs {
 /// SAMPLE, VOL, ATTEN)` through the engine `PF_sound` builtin (#8). When
 /// `button0` is clear it does nothing. Returns `(image, sound_fn_index)`; the
 /// caller fills the constant globals via [`prime_attack_globals`].
-pub(super) fn attack_progs() -> (Vec<u8>, usize) {
+pub(crate) fn attack_progs() -> (Vec<u8>, usize) {
     use attack_ofs::*;
     let mut b = Builder::new();
     b.entityfields = 56;
@@ -778,7 +778,7 @@ pub(super) fn attack_progs() -> (Vec<u8>, usize) {
 
 /// Fill the constant globals the attack progs reads (after the Server is
 /// built so the sample string is interned into the live VM heap).
-pub(super) fn prime_attack_globals(server: &mut Server, sound_fn: usize, sample: &str) -> i32 {
+pub(crate) fn prime_attack_globals(server: &mut Server, sound_fn: usize, sample: &str) -> i32 {
     use attack_ofs::*;
     server.vm.set_gi(G_FBUTTON0 as usize, F_BUTTON0 as i32);
     server.vm.set_gf(G_ONE as usize, 1.0);
@@ -805,7 +805,7 @@ pub(super) fn prime_attack_globals(server: &mut Server, sound_fn: usize, sample:
 ///
 /// Returns `(image, g_const_ofs, g_decoded_ofs)` so the test can place the
 /// value `SetChangeParms` stores and read what `PutClientInServer` decoded.
-pub(super) fn changelevel_progs() -> (Vec<u8>, usize, usize) {
+pub(crate) fn changelevel_progs() -> (Vec<u8>, usize, usize) {
     let mut b = Builder::new();
     b.entityfields = 8;
 

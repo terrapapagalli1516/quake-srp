@@ -44,12 +44,14 @@
 //!   `PR_UglyValueString` writes them raw inside quotes and `COM_Parse`
 //!   truncates at the quote — same lossy behaviour as WinQuake).
 
+use std::rc::Rc;
+
 use crate::bsp::Bsp;
 use crate::error::{QError, Result};
 use crate::progs::{EType, Progs};
+use crate::qrand::QRand;
 use crate::server::{
-    capture_transports, ed_new_string, link_edict, parse_float, parse_int, parse_vector,
-    push_lightstyle, restore_transports, snapshot_lightstyles, Server, Tokenizer,
+    ed_new_string, link_edict, parse_float, parse_int, parse_vector, Server, Tokenizer,
     MAX_LIGHTSTYLES, NUM_SPAWN_PARMS,
 };
 use crate::vm::{Vm, MAX_EDICTS};
@@ -528,11 +530,14 @@ impl Server {
     /// is re-identified by its `classname "player"` (set by
     /// `PutClientInServer` before the save). A save without one is rejected.
     /// Any error leaves the caller's current game untouched (this builds a
-    /// whole new `Server`).
+    /// whole new `Server`). The new server draws from the host session's
+    /// `rand` streams, as every server the session runs does
+    /// ([`Server::set_rand`]).
     pub fn load_savegame(
         bsp: Bsp,
         progs: Progs,
         pak: Option<crate::pak::Pak>,
+        rand: &Rc<QRand>,
         text: &str,
     ) -> Result<Server> {
         let sg = parse_savegame(text)?;
@@ -543,54 +548,29 @@ impl Server {
             )));
         }
 
-        // The build below resets/repopulates the per-thread transports the
-        // CALLER's still-running server also syncs from (the lightstyle table
-        // its next `run_frame` snapshots, the skill cell `cvar("skill")`
-        // reads). Capture them now and hand them back on ANY failure past
-        // this point: "the running game is left intact" (the module-doc
-        // deviation) must cover the shared transports, not just the caller's
-        // `Server` struct — without this, a rejected save's lightstyles and
-        // skill would bleed into the game that survived it.
-        let snapshot = capture_transports();
-        match Self::load_savegame_body(bsp, progs, pak, text, &sg) {
-            Ok(server) => Ok(server),
-            Err(e) => {
-                restore_transports(snapshot);
-                Err(e)
-            }
-        }
+        // Everything below builds a new server, with its own cvars, light
+        // styles and outbox: a failure drops it and leaves the caller's game
+        // as it was.
+        let mut server = Server::with_pak(bsp, progs, pak)?;
+        server.set_rand(Rc::clone(rand));
+        Self::load_savegame_body(server, text, &sg)
     }
 
-    /// The fallible body of [`Server::load_savegame`] (the C sequence, steps
-    /// 2–5, plus the player re-identification), split out so every error path
-    /// restores the caller's per-thread transports in exactly one place.
-    fn load_savegame_body(
-        bsp: Bsp,
-        progs: Progs,
-        pak: Option<crate::pak::Pak>,
-        text: &str,
-        sg: &SaveGame,
-    ) -> Result<Server> {
+    /// The rest of [`Server::load_savegame`] on the fresh `server`: the C
+    /// sequence, steps 2–5, plus the player re-identification.
+    fn load_savegame_body(mut server: Server, text: &str, sg: &SaveGame) -> Result<Server> {
         // SV_SpawnServer (see the module doc: the map spawn functions DO run;
         // the save text then overwrites the world state they produced).
-        let mut server = Server::with_pak(bsp, progs, pak)?;
         // Cvar_SetValue ("skill", (float)current_skill) — before the spawn,
         // so the skill-flag entity filter matches the save's world exactly.
         server.set_skill(sg.skill as f32);
         server.set_map_name(&sg.map_name);
-        // Discard static-sound registrations a previously FAILED build left in
-        // the per-thread registry, so the host's post-load drain is exactly
-        // this level's (same discipline as the front-end's other build paths).
-        let _ = server.drain_static_sounds();
         server.spawn_entities()?;
 
         // load the light styles (all 64 lines overwrite sv.lightstyles).
-        // Written to the thread-local transport too, so the per-frame
-        // `snapshot_lightstyles` sync cannot revert them to the spawn's set.
-        for (i, s) in sg.lightstyles.iter().enumerate() {
-            push_lightstyle(i, s.clone());
+        for (slot, s) in server.lightstyles.iter_mut().zip(&sg.lightstyles) {
+            slot.clone_from(s);
         }
-        server.lightstyles = snapshot_lightstyles();
 
         // load the edicts out of the savegame file: entnum -1 is the globals.
         let mut tok = Tokenizer::new(&text[sg.blocks_ofs..]);
@@ -995,7 +975,7 @@ mod tests {
         // The freed slot is an empty block: "{\n}\n".
         assert!(text.contains("{\n}\n"), "free edict round-trips as {{}}");
 
-        let s2 = Server::load_savegame(empty_bsp(), rich_progs(), None, &text)
+        let s2 = Server::load_savegame(empty_bsp(), rich_progs(), None, &Rc::default(), &text)
             .expect("load_savegame");
         assert_eq!(s2.vm.num_edicts(), 4, "world + 3 slots, like the save");
         assert_eq!(s2.vm.ent_get_string(e1, "classname"), "monster_army");
@@ -1030,9 +1010,8 @@ mod tests {
         s.set_sv_time(33.5);
         s.client_spawn_parms[0] = 1.0;
         s.client_spawn_parms[3] = 25.0;
-        push_lightstyle(0, "m".into());
-        push_lightstyle(5, "jklmnopqrst".into());
-        s.lightstyles = snapshot_lightstyles();
+        s.lightstyles[0] = "m".into();
+        s.lightstyles[5] = "jklmnopqrst".into();
         // A player so the loader accepts the save.
         let p = s.vm.spawn();
         s.vm.ent_set_string(p, "classname", "player");
@@ -1049,7 +1028,7 @@ mod tests {
         assert_eq!(sg.lightstyles[5], "jklmnopqrst");
         assert_eq!(sg.lightstyles[1], "m", "unset style writes the C's \"m\"");
 
-        let s2 = Server::load_savegame(empty_bsp(), rich_progs(), None, &text)
+        let s2 = Server::load_savegame(empty_bsp(), rich_progs(), None, &Rc::default(), &text)
             .expect("loads");
         assert_eq!(s2.skill(), 2);
         assert_eq!(s2.time(), 33.5);
@@ -1061,10 +1040,10 @@ mod tests {
     #[test]
     fn hostile_input_errors_cleanly_never_panics() {
         // Truncated header.
-        assert!(Server::load_savegame(empty_bsp(), rich_progs(), None, "5\n").is_err());
+        assert!(Server::load_savegame(empty_bsp(), rich_progs(), None, &Rc::default(), "5\n").is_err());
         // Wrong version: the C's message. (`.err()` not `.unwrap_err()`:
         // Server has no Debug impl.)
-        let err = Server::load_savegame(empty_bsp(), rich_progs(), None, &"4\n".repeat(90))
+        let err = Server::load_savegame(empty_bsp(), rich_progs(), None, &Rc::default(), &"4\n".repeat(90))
             .err()
             .expect("wrong version is rejected");
         assert!(err.to_string().contains("Savegame is version 4, not 5"), "{err}");
@@ -1076,13 +1055,13 @@ mod tests {
         let good = s.write_savegame();
         let sg = parse_savegame(&good).unwrap();
         let garbage = format!("{}not-a-brace", &good[..sg.blocks_ofs]);
-        let err = Server::load_savegame(empty_bsp(), rich_progs(), None, &garbage)
+        let err = Server::load_savegame(empty_bsp(), rich_progs(), None, &Rc::default(), &garbage)
             .err()
             .expect("garbage blocks rejected");
         assert!(err.to_string().contains("First token isn't a brace"), "{err}");
         // A block cut off mid-pair: EOF without closing brace.
         let truncated = format!("{}{{\n\"classname\" ", &good[..sg.blocks_ofs]);
-        let err = Server::load_savegame(empty_bsp(), rich_progs(), None, &truncated)
+        let err = Server::load_savegame(empty_bsp(), rich_progs(), None, &Rc::default(), &truncated)
             .err()
             .expect("truncated block rejected");
         assert!(err.to_string().contains("EOF without closing brace"), "{err}");
@@ -1090,31 +1069,27 @@ mod tests {
         let mut s2 = server_with(rich_progs());
         s2.set_map_name("e1m1");
         let no_player = s2.write_savegame();
-        let err = Server::load_savegame(empty_bsp(), rich_progs(), None, &no_player)
+        let err = Server::load_savegame(empty_bsp(), rich_progs(), None, &Rc::default(), &no_player)
             .err()
             .expect("player-less save rejected");
         assert!(err.to_string().contains("no player edict"), "{err}");
         // Empty text.
-        assert!(Server::load_savegame(empty_bsp(), rich_progs(), None, "").is_err());
+        assert!(Server::load_savegame(empty_bsp(), rich_progs(), None, &Rc::default(), "").is_err());
     }
 
-    /// A REJECTED load must leave the caller's per-thread transports alone:
-    /// `load_savegame` resets/overwrites the shared lightstyle table and skill
-    /// cell (via `with_pak` + the header styles) before the blocks can fail to
-    /// parse, and the surviving game's next `run_frame` re-syncs its
-    /// `lightstyles` from that table while `skill()` reads that cell — so
-    /// without the restore, a hostile save's styles/skill would bleed into
-    /// the game it failed to replace (review finding).
+    /// A REJECTED load must leave the caller's game alone: `load_savegame`
+    /// sets the header's skill and styles on the server it builds before the
+    /// blocks can fail to parse, and none of it may reach the surviving game
+    /// (a review finding when the two shared thread-locals).
     #[test]
-    fn failed_load_restores_the_callers_thread_state() {
+    fn failed_load_leaves_the_running_game_alone() {
         // A save whose header carries DIFFERENT styles (style 0 "zzz") and a
         // DIFFERENT skill (0) than the running game below, but whose blocks
         // are garbage so the load fails after the header is applied.
         let mut donor = server_with(rich_progs());
         donor.set_map_name("e1m2");
         donor.set_skill(0.0);
-        push_lightstyle(0, "zzz".into());
-        donor.lightstyles = snapshot_lightstyles();
+        donor.lightstyles[0] = "zzz".into();
         let dp = donor.vm.spawn();
         donor.vm.ent_set_string(dp, "classname", "player");
         let donor_text = donor.write_savegame();
@@ -1125,20 +1100,16 @@ mod tests {
         let mut running = server_with(rich_progs());
         running.set_map_name("e1m1");
         running.set_skill(2.0);
-        push_lightstyle(0, "abcdefg".into());
-        running.lightstyles = snapshot_lightstyles();
+        running.lightstyles[0] = "abcdefg".into();
 
-        let err = Server::load_savegame(empty_bsp(), rich_progs(), None, &hostile)
+        let err = Server::load_savegame(empty_bsp(), rich_progs(), None, &Rc::default(), &hostile)
             .err()
             .expect("garbage blocks rejected");
         assert!(err.to_string().contains("First token isn't a brace"), "{err}");
 
-        // The shared transports still hold the RUNNING game's state…
-        assert_eq!(snapshot_lightstyles()[0], "abcdefg");
+        // The running game keeps its own state, through its next frame.
         assert_eq!(running.skill(), 2);
-        // …so the per-frame sync cannot revert its owned table to the failed
-        // load's set (this assignment is what run_frame does each tick).
-        running.lightstyles = snapshot_lightstyles();
+        running.run_frame(0.1).expect("frame");
         assert_eq!(running.lightstyle(0), "abcdefg");
     }
 
@@ -1159,7 +1130,7 @@ mod tests {
             1,
         );
         let doctored = format!("{}{}", &good[..sg.blocks_ofs], blocks);
-        let s2 = Server::load_savegame(empty_bsp(), rich_progs(), None, &doctored)
+        let s2 = Server::load_savegame(empty_bsp(), rich_progs(), None, &Rc::default(), &doctored)
             .expect("unknown names degrade, not abort");
         assert!(s2.vm.output.contains("'bogus_global' is not a global"));
         assert!(s2.vm.output.contains("'bogus_field' is not a field"));
@@ -1176,7 +1147,7 @@ mod tests {
         s.vm.ent_set_int(p, "think", think);
         let good = s.write_savegame();
         let doctored = good.replace("monster_think", "no_such_function");
-        let s2 = Server::load_savegame(empty_bsp(), rich_progs(), None, &doctored)
+        let s2 = Server::load_savegame(empty_bsp(), rich_progs(), None, &Rc::default(), &doctored)
             .expect("missing function degrades (C Host_Errors)");
         assert!(s2.vm.output.contains("Can't find function no_such_function"));
         assert_eq!(s2.vm.ent_get_int(p, "think"), 0, "pair skipped, field stays 0");
@@ -1205,7 +1176,7 @@ mod tests {
         assert_eq!(lines[20], "1234.567890", "sv.time is %f of the double");
         // Host_Loadgame_f reads it with fscanf("%f") into `float time`, and
         // `sv.time = time`: the clock restarts from that float.
-        let s2 = Server::load_savegame(empty_bsp(), rich_progs(), None, &text).expect("loads");
+        let s2 = Server::load_savegame(empty_bsp(), rich_progs(), None, &Rc::default(), &text).expect("loads");
         assert_eq!(s2.sv_time(), f64::from(saved as f32));
         assert_eq!(s2.vm.gget_float("time"), saved as f32, "the QC global is its float");
         // 64 lightstyles then the globals block opener.

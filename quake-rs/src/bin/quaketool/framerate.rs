@@ -18,7 +18,7 @@
 //!
 //! Rates: `60`, `72`, `144`, `240`, `480` (Hz, steady) and `jitter` (a 144 Hz
 //! display whose refresh intervals wander ±40% and drop one in 50). Each run
-//! restarts the random sequences (`server::reset_random`), so the rates
+//! starts from a fresh session's random streams (`QRand::new`), so the rates
 //! differ only by their frame times. With `--check` the command fails when
 //! an uncapped value is further from the 72 Hz reference than the scenario's
 //! stated tolerance.
@@ -39,7 +39,7 @@ use quake_rs::vm::Vm;
 use quake_rs::world;
 
 /// The screen the scenarios draw (small: they measure the game, not pixels).
-const VID: Vid = Vid { width: 320, height: 200, display_aspect: 4.0 / 3.0, exact_perspective: false };
+const VID: Vid = Vid { width: 320, height: 200, display_aspect: 4.0 / 3.0, exact_perspective: false, video: render::VideoCvars::CLASSIC };
 
 // QuakeC constants (defs.qc).
 const FL_GODMODE: i32 = 64;
@@ -155,12 +155,12 @@ struct Sim {
 }
 
 impl Sim {
-    /// A fresh level: `maps/<map>.bsp` loaded as `map` does, the random
-    /// sequences restarted, the player in god mode and unseen by monsters.
+    /// A fresh level: `maps/<map>.bsp` loaded as `map` does, with a fresh
+    /// session's random streams, the player in god mode and unseen by monsters.
     fn new(pak: &Pak, map: &str, rate: Rate, stepping: Stepping) -> Sim {
-        quake_rs::server::reset_random();
         let path = format!("maps/{map}.bsp");
-        let mut w = host_cmd::build_walk_map(pak.clone(), &path, &mut Vec::new())
+        let rand = std::rc::Rc::new(quake_rs::qrand::QRand::new());
+        let mut w = host_cmd::build_walk_map(pak.clone(), &path, &rand, &mut Vec::new())
             .unwrap_or_else(|| panic!("{path} would not load"));
         w.stepping = stepping;
         let mut s = Sim { w, clock: FrameClock::new(rate, stepping), t: 0.0, dt: 0.0, sounds: Vec::new() };
@@ -1167,7 +1167,6 @@ fn clocks(c: &Ctx) -> Vec<Measure> {
 }
 
 fn demo(c: &Ctx) -> Vec<Measure> {
-    quake_rs::server::reset_random();
     let mut d: DemoPlay = cl_demo::build_demo_n(c.pak.clone(), 0, &mut Vec::new()).expect("demo1");
     d.stepping = c.stepping;
     let mut clock = FrameClock::new(c.rate, c.stepping);
@@ -1498,7 +1497,7 @@ pub fn cmd_framerate(pak_path: &str, rest: &[String]) -> Result<String, String> 
     let bytes = std::fs::read(pak_path).map_err(|e| format!("cannot read {pak_path}: {e}"))?;
     let pak = Pak::from_bytes("pak0.pak".into(), bytes).map_err(|e| e.to_string())?;
     if budget {
-        let sizes = res.split(',').map(super::parse_res).collect::<Result<Vec<_>, _>>()?;
+        let sizes = res.split(',').map(|r| super::parse_res(r, render::VideoCvars::CLASSIC)).collect::<Result<Vec<_>, _>>()?;
         return Ok(frame_budget(&pak, &sizes));
     }
     if lerpmove {

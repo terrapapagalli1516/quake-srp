@@ -18,17 +18,17 @@
 //!   underwater warp ([`super::warp`], rendered at full resolution). At 320x200
 //!   both are id's to the pixel.
 //!
-//! These are cvars in id's sense — per-thread settings the platform sets and
-//! the renderer reads each frame, like `d_mipscale` ([`super::set_mip_cvars`])
-//! — so the client frame, which only knows id's `Vid`, needs no new fields.
-//! A renderer split across threads must read them on the calling thread and
-//! hand the value to its workers (the render entry takes one snapshot).
+//! These are cvars in id's sense — settings the platform sets and the
+//! renderer reads each frame, like `d_mipscale` ([`super::MipCvars`]): the
+//! scene hands them in with every frame
+//! ([`RenderOptions::video`](super::RenderOptions::video)), and the client's
+//! [`Vid`](crate::client::Vid) carries them from the platform.
 
 /// id's widest and tallest view (`r_shared.h`: `MAXWIDTH` 1280, `MAXHEIGHT`
 /// 1024): `vid_win.c` and `vid_ext.c` offer no larger mode, and the renderer
 /// sizes its tables by them (`newedges[MAXHEIGHT]`, `d_scantable`, the warp's
 /// `column[MAXWIDTH+AMP2*2]`). Classic renders at most this size
-/// ([`clamp_to_max`]); the port's tables are sized at run time and its edge
+/// ([`VideoCvars::clamp_to_max`]); the port's tables are sized at run time and its edge
 /// renderer's `u` is wider than id's 12.20 int (which wraps from 2048 wide),
 /// so with [`VideoCvars::hires`] only [`HIRES_MAXWIDTH`] limits it.
 pub const MAXWIDTH: usize = 1280;
@@ -119,59 +119,26 @@ impl VideoCvars {
     pub const MODERN: VideoCvars = VideoCvars { fov_mode: FovMode::HorPlus, hires: true };
 }
 
-thread_local! {
-    static VIDEO_CVARS: std::cell::Cell<VideoCvars> = const { std::cell::Cell::new(VideoCvars::CLASSIC) };
-}
-
-/// Set the video cvars for the frames this thread renders from now on.
-pub fn set_video_cvars(v: VideoCvars) {
-    VIDEO_CVARS.with(|c| c.set(v));
-}
-
-/// The current video cvars ([`set_video_cvars`]; Classic until set).
-#[must_use]
-pub fn video_cvars() -> VideoCvars {
-    VIDEO_CVARS.with(|c| c.get())
-}
-
-/// Tests: the video cvars set for as long as the guard lives, then back to
-/// Classic (so a failing test cannot leak them into the next on its thread).
-#[cfg(test)]
-pub(crate) struct VideoGuard;
-
-#[cfg(test)]
-impl VideoGuard {
-    pub(crate) fn set(v: VideoCvars) -> VideoGuard {
-        set_video_cvars(v);
-        VideoGuard
+impl VideoCvars {
+    /// The largest view these cvars allow: id's [`MAXWIDTH`] x [`MAXHEIGHT`],
+    /// or [`HIRES_MAXWIDTH`] x [`HIRES_MAXHEIGHT`] with [`VideoCvars::hires`].
+    /// The platform clamps the mode it asks for to this.
+    #[must_use]
+    pub fn max_view_size(self) -> (usize, usize) {
+        if self.hires {
+            (HIRES_MAXWIDTH, HIRES_MAXHEIGHT)
+        } else {
+            (MAXWIDTH, MAXHEIGHT)
+        }
     }
-}
 
-#[cfg(test)]
-impl Drop for VideoGuard {
-    fn drop(&mut self) {
-        set_video_cvars(VideoCvars::CLASSIC);
+    /// `(w, h)` limited to [`VideoCvars::max_view_size`]: in Classic id's
+    /// largest view, as its video drivers never set a larger mode.
+    #[must_use]
+    pub fn clamp_to_max(self, w: usize, h: usize) -> (usize, usize) {
+        let (mw, mh) = self.max_view_size();
+        (w.min(mw), h.min(mh))
     }
-}
-
-/// The largest view the current cvars allow: id's [`MAXWIDTH`] x
-/// [`MAXHEIGHT`], or [`HIRES_MAXWIDTH`] x [`HIRES_MAXHEIGHT`] with
-/// [`VideoCvars::hires`]. The platform clamps the mode it asks for to this.
-#[must_use]
-pub fn max_view_size() -> (usize, usize) {
-    if video_cvars().hires {
-        (HIRES_MAXWIDTH, HIRES_MAXHEIGHT)
-    } else {
-        (MAXWIDTH, MAXHEIGHT)
-    }
-}
-
-/// `(w, h)` limited to [`max_view_size`]: in Classic id's largest view, as
-/// its video drivers never set a larger mode.
-#[must_use]
-pub fn clamp_to_max(w: usize, h: usize) -> (usize, usize) {
-    let (mw, mh) = max_view_size();
-    (w.min(mw), h.min(mh))
 }
 
 #[cfg(test)]
@@ -217,12 +184,11 @@ mod tests {
 
     #[test]
     fn hires_lifts_id_mode_limit() {
-        assert_eq!(clamp_to_max(3840, 2160), (1280, 1024));
-        let _g = VideoGuard::set(VideoCvars { hires: true, ..VideoCvars::CLASSIC });
-        assert_eq!(clamp_to_max(3840, 2160), (3840, 2160));
-        assert_eq!(clamp_to_max(10_000, 10_000), (HIRES_MAXWIDTH, HIRES_MAXHEIGHT));
-        drop(_g);
-        assert_eq!(max_view_size(), (MAXWIDTH, MAXHEIGHT));
+        assert_eq!(VideoCvars::CLASSIC.clamp_to_max(3840, 2160), (1280, 1024));
+        assert_eq!(VideoCvars::CLASSIC.max_view_size(), (MAXWIDTH, MAXHEIGHT));
+        let hires = VideoCvars { hires: true, ..VideoCvars::CLASSIC };
+        assert_eq!(hires.clamp_to_max(3840, 2160), (3840, 2160));
+        assert_eq!(hires.clamp_to_max(10_000, 10_000), (HIRES_MAXWIDTH, HIRES_MAXHEIGHT));
     }
 
     #[test]
@@ -231,23 +197,18 @@ mod tests {
         // the wide view's middle 144 columns are the 4:3 picture (the same
         // xscale, the centre 24 columns over), but for a few pixels on edges
         // the two clip differently.
-        use crate::render::{demo_room, render_scene_ext_sprited, Camera, RenderOptions, NEUTRAL_LIGHTSTYLE_SCALES};
+        use crate::render::fixtures::render_once;
+        use crate::render::{demo_room, Camera, RenderOptions, Scene};
         let bsp = demo_room();
         let pal = crate::render::fixtures::ramp_palette();
         let cam = Camera::looking_at([-200.0, -150.0, 40.0], [0.0, 0.0, 0.0], 90.0);
-        let draw = |w: usize, h: usize| {
-            render_scene_ext_sprited(
-                &bsp, &cam, w, h, &pal, &[], &[], &[], None, 0.0, &[], &[], &NEUTRAL_LIGHTSTYLE_SCALES, None, &[],
-                &RenderOptions::default(),
-            )
+        let draw = |w: usize, h: usize, video: VideoCvars| {
+            let options = RenderOptions { video, ..RenderOptions::default() };
+            render_once(&Scene { options, ..Scene::new(&bsp, cam, w, h, &pal) })
         };
-        let narrow = draw(144, 108);
-        let (wide, classic_wide) = {
-            let _g = VideoGuard::set(VideoCvars { fov_mode: FovMode::HorPlus, hires: false });
-            let wide = draw(192, 108);
-            set_video_cvars(VideoCvars::CLASSIC);
-            (wide, draw(192, 108))
-        };
+        let narrow = draw(144, 108, VideoCvars::CLASSIC);
+        let wide = draw(192, 108, VideoCvars { fov_mode: FovMode::HorPlus, hires: false });
+        let classic_wide = draw(192, 108, VideoCvars::CLASSIC);
         let same = |img: &crate::render::Image| {
             (0..108 * 144).filter(|&i| img.rgb[(i / 144) * 192 + 24 + i % 144] == narrow.rgb[i]).count()
         };

@@ -7,7 +7,7 @@
 //! * `WinQuake/r_light.c` — `R_AnimateLight` (pattern letter →
 //!   `d_lightstylevalue`), shared by the live server and demo playback.
 
-use super::Server;
+use super::{Outbox, Server};
 use crate::vm::Vm;
 use crate::Result;
 
@@ -23,73 +23,40 @@ use crate::Result;
 // This is *persistent map state* — the renderer reads it every frame to animate
 // lightmaps — so unlike the per-frame sound/particle/temp-entity queues it is
 // OWNED by the [`Server`] (the `lightstyles` field), not drained-and-discarded.
-// The thread-local below is only the *write transport*: builtins are
-// `fn(&mut Vm)` and cannot see the `Server`, and `vm.rs` (the `Host` trait) is
-// off-limits, so the builtin has no other place to write. The Server syncs the
-// transport into its owned table after each QuakeC execution window
-// (`spawn_entities` / `run_frame`) and the getter reads the owned table. The
-// transport is reset in [`Server::new`] so a changelevel re-populates cleanly.
+// The builtin cannot reach the `Server`, only its outbox, so it sends the
+// write there (the `svc_lightstyle` the C broadcast), and the server applies
+// the writes to its table after each QuakeC execution window
+// (`spawn_entities` / `run_frame`); the getters read the owned table.
 // ---------------------------------------------------------------------------
 
 /// `MAX_LIGHTSTYLES` (quakedef.h): the size of `sv.lightstyles[]`.
 pub const MAX_LIGHTSTYLES: usize = 64;
 
-thread_local! {
-    /// Write transport for [`bi_lightstyle`]: the latest pattern string per style
-    /// index. The [`Server`] owns the authoritative copy and syncs from here; this
-    /// is reset in [`Server::new`] so a fresh level starts empty. See the module
-    /// note above for why a thread-local transport (not a field) is unavoidable
-    /// for an engine builtin.
-    pub(super) static LIGHTSTYLES: std::cell::RefCell<[String; MAX_LIGHTSTYLES]> =
-        std::cell::RefCell::new(std::array::from_fn(|_| String::new()));
-}
-
-/// Store `val` at style index `style` in the thread-local transport. An
-/// out-of-range index is ignored (no panic), matching the C's silent clamp
-/// (`if (style >= MAX_LIGHTSTYLES) ...`). `pub(crate)` so the savegame loader
-/// can restore the saved styles into the transport (a later frame's
-/// `snapshot_lightstyles` sync must not revert them to the fresh-spawn set).
-pub(crate) fn push_lightstyle(style: usize, val: String) {
-    if style >= MAX_LIGHTSTYLES {
-        return;
-    }
-    LIGHTSTYLES.with(|t| {
-        if let Some(slot) = t.borrow_mut().get_mut(style) {
-            *slot = val;
-        }
-    });
-}
-
-/// Snapshot the current transport table (the latest pattern per style).
-pub(crate) fn snapshot_lightstyles() -> [String; MAX_LIGHTSTYLES] {
-    LIGHTSTYLES.with(|t| t.borrow().clone())
-}
-
-/// Clear the transport table (called from [`Server::new`] so a stale level's
-/// styles cannot leak into a fresh server before its worldspawn repopulates).
-pub(super) fn reset_lightstyles() {
-    LIGHTSTYLES.with(|t| {
-        *t.borrow_mut() = std::array::from_fn(|_| String::new());
-    });
-}
-
 /// `PF_lightstyle` (#35): `void(float style, string value) lightstyle`. The C
 /// `PF_lightstyle` stored `value` into `sv.lightstyles[style]` and, for live
 /// clients, broadcast an `svc_lightstyle` update. This headless server has no
 /// netcode, so we only store the pattern (PARM0 = style index, PARM1 = the
-/// pattern string). An out-of-range style index is ignored without panicking.
+/// pattern string). An out-of-range style index is ignored without panicking,
+/// matching the C's silent clamp.
 pub(super) fn bi_lightstyle(vm: &mut Vm) -> Result<()> {
     let style = vm.arg_float(0);
     let val = vm.arg_string(1);
-    // The C truncates the float to an int index; negatives / NaN clamp out of
-    // range and are dropped by `push_lightstyle`.
-    let idx = if style.is_finite() && style >= 0.0 {
-        style as usize
-    } else {
-        usize::MAX
-    };
-    push_lightstyle(idx, val);
+    // The C truncates the float to an int index; negatives / NaN are out of
+    // range and dropped.
+    if style.is_finite() && style >= 0.0 && (style as usize) < MAX_LIGHTSTYLES {
+        vm.with_host(|_, h| h.outbox().lightstyles.push((style as usize, val)));
+    }
     Ok(())
+}
+
+impl Server {
+    /// Apply the `lightstyle()` writes the QuakeC sent since the last call to
+    /// the server's `sv.lightstyles` table (see the note above).
+    pub(super) fn apply_lightstyles(&mut self) {
+        for (style, val) in self.take_outbox(|o: &mut Outbox| &mut o.lightstyles) {
+            self.lightstyles[style] = val;
+        }
+    }
 }
 
 /// `R_AnimateLight` letter scale: map a pattern character to its
@@ -159,7 +126,7 @@ impl Server {
 
     /// `R_AnimateLight` (r_light.c): the per-style brightness scale at game `time`,
     /// one entry per `MAX_LIGHTSTYLES` style index, ready to pass to
-    /// [`crate::render::render_scene_ext`].
+    /// [`crate::render::Scene::light_styles`].
     ///
     /// For style `j` with pattern string of length `L`:
     /// * `L == 0` (unset) → scale `1.0` (the C `d_lightstylevalue = 256`, i.e.
@@ -191,8 +158,8 @@ mod tests {
     // ------------------------------------------------ animated light styles (#35)
 
     /// Drive `bi_lightstyle(style, val)` directly: PARM0 = style float, PARM1 =
-    /// the interned pattern string. Returns nothing; the write lands in the
-    /// thread-local transport (`snapshot_lightstyles` / a frame sync reads it).
+    /// the interned pattern string. Returns nothing; the write waits in the
+    /// server's outbox until a frame applies it.
     fn call_lightstyle(server: &mut Server, style: f32, val: &str) {
         let s = server.vm.intern(val);
         server.vm.set_gf(OFS_PARM0, style);
@@ -214,7 +181,7 @@ mod tests {
         // Store a steady style 0 and a torch flicker at slot 3.
         call_lightstyle(&mut server, 0.0, "m");
         call_lightstyle(&mut server, 3.0, "mmnmmommommnonmmonqnmmo");
-        // A frame syncs the transport into the owned table (the production path).
+        // A frame applies the writes to the owned table (the production path).
         server.run_frame(0.1).expect("frame");
 
         assert_eq!(server.lightstyle(0), "m");
@@ -293,13 +260,13 @@ mod tests {
 
     #[test]
     fn fresh_server_clears_stale_lightstyles() {
-        // A pattern left in the transport must not leak into a freshly built
-        // server (Server::new calls reset_lightstyles).
+        // A pattern one server has not applied yet must not reach a freshly
+        // built server.
         let (img, _gc, _gd) = changelevel_progs();
         let progs = Progs::parse(&img).expect("parse");
         let mut s1 = Server::new(empty_bsp(), progs).expect("server");
-        call_lightstyle(&mut s1, 1.0, "z"); // leaves "z" in the transport
-        // A new server resets the transport; its first frame syncs an empty table.
+        call_lightstyle(&mut s1, 1.0, "z"); // waits in s1's outbox
+        // A new server has its own outbox; its first frame applies nothing.
         let progs2 = Progs::parse(&img).expect("parse");
         let mut s2 = Server::new(empty_bsp(), progs2).expect("server");
         s2.run_frame(0.1).expect("frame");

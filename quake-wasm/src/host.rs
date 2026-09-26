@@ -1,5 +1,5 @@
-//! The frame — host.c's `Host_Frame` as the `step` export the page calls
-//! once per display refresh: `Host_FilterTime`'s 72 fps gate, then the
+//! The frame — host.c's `Host_Frame` as `step`, which the program's loop
+//! runs once per display refresh (`sys`): `Host_FilterTime`'s 72 fps gate, then the
 //! active mode's client frame, then the rest of `SCR_UpdateScreen` (the menu
 //! and console overlays) and `V_UpdatePalette`: the cshifts and gamma as
 //! per-channel ramps the finished frame is packed through into the presented
@@ -11,7 +11,7 @@ use quake_rs::client::host::{host_filter_time, host_filter_time_uncapped};
 
 use crate::app::ensure_app;
 use crate::bench::{self, Phase};
-use crate::cl_demo::{host_end_game, step_demo, step_timedemo};
+use crate::cl_demo::{finish_host_error, host_end_game, step_demo, step_timedemo};
 use crate::cl_walk::step_walk;
 
 /// [`host_filter_time`], or the same frame without the 72 fps cap — every
@@ -63,37 +63,15 @@ impl ShowFps {
     }
 }
 
-/// The finished RGB frame into the presented RGBA framebuffer (`vid.buffer`
-/// for the page's `ImageData`), each channel through its ramp when `ramps` is
-/// given ([`render::cshift_ramps`]: the cshifts, then gamma), alpha 255.
-/// `fb` takes `rgb`'s size (a no-op at a steady resolution, so its pointer
-/// and allocation stay put) and is written in place, four bytes a pixel —
-/// not `clear()` plus four `Vec::push`es, which cost ~5x as much (PERF_PLAN B1:
-/// 2.41 -> 0.46 ms at 1280x800 in wasm).
-fn pack_rgba(fb: &mut Vec<u8>, rgb: &[[u8; 3]], ramps: Option<&[[u8; 256]; 3]>) {
-    fb.resize(rgb.len() * 4, 255);
-    match ramps {
-        None => {
-            for (out, px) in fb.chunks_exact_mut(4).zip(rgb) {
-                out.copy_from_slice(&[px[0], px[1], px[2], 255]);
-            }
-        }
-        Some([r, g, b]) => {
-            for (out, px) in fb.chunks_exact_mut(4).zip(rgb) {
-                out.copy_from_slice(&[r[px[0] as usize], g[px[1] as usize], b[px[2] as usize], 255]);
-            }
-        }
-    }
-}
 
 /// `SCR_SetUpToDrawConsole` + `SCR_DrawConsole`: slide the console (`dt`,
 /// `host_frametime`) and draw it over `img` at its height.
 fn console_layer(a: &mut crate::app::App, img: Option<&mut render::Image>, dt: f32) {
     a.console.slide(dt, a.render_w, a.render_h);
-    if a.console.current() > 0.0 {
-        if let (Some(img), Some(palette)) = (img, a.active_palette()) {
-            render::draw_console(img, &a.console, a.conback.as_ref(), a.conchars.as_ref(), palette, a.realtime);
-        }
+    if a.console.current() > 0.0
+        && let (Some(img), Some(palette)) = (img, a.active_palette())
+    {
+        render::draw_console(img, &a.console, a.conback.as_ref(), a.conchars.as_ref(), palette, a.realtime);
     }
 }
 
@@ -110,12 +88,11 @@ fn console_layer(a: &mut crate::app::App, img: Option<&mut render::Image>, dt: f
 /// moves.
 ///
 /// While a `timedemo` runs every call is a host frame playing the next
-/// recorded message; the page then calls `step` back to back, each call's
-/// `dt` the previous call's own duration (see `web/index.html`), so
-/// `realtime` — the clock `CL_FinishTimeDemo` measures on — adds up the time
-/// the frames took and not the page's pauses between batches of them.
-#[no_mangle]
-pub extern "C" fn step(dt: f32) -> i32 {
+/// recorded message; the program's loop then runs `step` back to back
+/// without waiting for the display, each call's `dt` the time since the last
+/// one started (`sys`), so `realtime` — the clock `CL_FinishTimeDemo`
+/// measures on — adds up the time the frames took.
+pub(crate) fn step(dt: f32) -> i32 {
     // Guard a non-finite / negative dt so both clocks only move forward.
     let real_dt = if dt.is_finite() && dt > 0.0 { dt } else { 0.0 };
     let mut ran = 0;
@@ -143,7 +120,7 @@ pub extern "C" fn step(dt: f32) -> i32 {
         if real_dt > 0.0 {
             a.show_fps.frame(a.realtime);
         }
-        bench::frame_begin();
+        bench::frame_begin(active_renderer(a));
         // host_time: the menudot spinner (mode-independent, like realtime).
         a.clock += dt;
         let (w, h) = (a.render_w, a.render_h);
@@ -177,14 +154,20 @@ pub extern "C" fn step(dt: f32) -> i32 {
         }
         // The renderer's options are built inside the client frame, under this
         // borrow: hand it the menu's Web extras (wasm_exactpersp) first.
-        crate::extras::set_frame_extras(a.menu.extras());
+        crate::extras::set_frame_extras(a.menu.extras(), a.video);
         // The scaled-2-D extra is draw.rs state; the menu's value is the truth.
         quake_rs::draw::set_scaled_2d(a.menu.extras().scaled_2d);
+        // The renderer's threads, to whichever game draws: every Walk and
+        // DemoPlay the host builds (a boot, a load, the attract loop's next
+        // demo) draws on the setting from its first frame.
+        let threads = a.render_threads.resolve(a.hw_threads);
         if let Some(wk) = a.walk.as_mut() {
             wk.key_move = km;
             wk.viewsize = viewsize;
+            wk.renderer.set_threads(threads);
         }
         if let Some(d) = a.demo.as_mut() {
+            d.renderer.set_threads(threads);
             d.viewsize = viewsize;
             // +showscores only reaches the game while it owns the keyboard.
             d.show_scores = km.showscores && !gate_gameplay;
@@ -246,6 +229,8 @@ pub extern "C" fn step(dt: f32) -> i32 {
         if a.walk.as_mut().is_some_and(|wk| std::mem::take(&mut wk.pending_sellscreen)) {
             a.m_menu_help();
         }
+        // A QuakeC error ended the game this frame: Host_Error's disconnect.
+        finish_host_error(a);
 
         // The wasm_showfps extra (off by default): QuakeWorld draws it with the
         // rest of the play-screen 2-D (SCR_DrawFPS, before Sbar_Draw, the
@@ -287,33 +272,33 @@ pub extern "C" fn step(dt: f32) -> i32 {
             // resolution (the framebuffer is the source of truth), so a boot /
             // New Game / `map` that changed the render size can't leave it stale.
             a.menu.sync_resolution(a.render_w as i32, a.render_h as i32);
-            if let Some(img) = img.as_mut() {
-                if let Some(palette) = a.active_palette() {
-                    // M_Draw: over the console background while the console
-                    // is out (scr_con_current: forced up, disconnected),
-                    // else over the faded screen.
-                    if a.console.current() > 0.0 {
-                        render::draw_menu_over_console(
-                            img,
-                            &a.menu,
-                            &a.menu_pics,
-                            a.conchars.as_ref(),
-                            a.conback.as_ref(),
-                            a.clock,
-                            a.realtime,
-                            palette,
-                        );
-                    } else {
-                        render::draw_menu(
-                            img,
-                            &a.menu,
-                            &a.menu_pics,
-                            a.conchars.as_ref(),
-                            a.clock,
-                            a.realtime,
-                            palette,
-                        );
-                    }
+            if let Some(img) = img.as_mut()
+                && let Some(palette) = a.active_palette()
+            {
+                // M_Draw: over the console background while the console
+                // is out (scr_con_current: forced up, disconnected),
+                // else over the faded screen.
+                if a.console.current() > 0.0 {
+                    render::draw_menu_over_console(
+                        img,
+                        &a.menu,
+                        &a.menu_pics,
+                        a.conchars.as_ref(),
+                        a.conback.as_ref(),
+                        a.clock,
+                        a.realtime,
+                        palette,
+                    );
+                } else {
+                    render::draw_menu(
+                        img,
+                        &a.menu,
+                        &a.menu_pics,
+                        a.conchars.as_ref(),
+                        a.clock,
+                        a.realtime,
+                        palette,
+                    );
                 }
             }
         }
@@ -351,15 +336,25 @@ pub extern "C" fn step(dt: f32) -> i32 {
         bench::lap(Phase::Blend);
 
         if let Some(img) = img {
-            pack_rgba(&mut a.fb, &img.rgb, ramps.as_ref());
+            render::pack_rgba(&img, ramps.as_ref(), &mut a.fb, threads);
             // Presented: its buffer serves the next frame (render::recycle_image).
             render::recycle_image(img);
         }
         bench::lap(Phase::Pack);
-        bench::frame_end();
+        bench::frame_end(active_renderer(a));
         a.host_framecount += 1;
     });
     ran
+}
+
+/// The renderer of the game that draws this frame: the demo's in mode 1,
+/// else the walk's.
+fn active_renderer(a: &mut crate::app::App) -> Option<&mut render::Renderer> {
+    if a.mode == 1 {
+        a.demo.as_mut().map(|d| &mut d.renderer)
+    } else {
+        a.walk.as_mut().map(|w| &mut w.renderer)
+    }
 }
 
 #[cfg(test)]

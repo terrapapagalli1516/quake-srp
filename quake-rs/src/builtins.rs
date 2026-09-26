@@ -21,9 +21,8 @@
 //! `ftos == #26`, `vtos == #27`, `rint == #36`, `fabs == #43`,
 //! `nextent == #47`, `vectoangles == #51`.
 
-use crate::error::Result;
+use crate::error::{ProgramError, Result};
 use crate::vm::{Builtin, Vm};
-use std::sync::atomic::{AtomicU32, Ordering};
 
 /// `PF_Fixme`: an unimplemented builtin. The C version calls `PR_RunError`
 /// (which `longjmp`s out of the interpreter); we return the equivalent `Err`.
@@ -52,33 +51,6 @@ fn pf_debug_noop(_vm: &mut Vm) -> Result<()> {
     Ok(())
 }
 
-thread_local! {
-    /// The `svc_stufftext` text `stuffcmd` sent, as `(client entity, text)`,
-    /// until the front-end takes it — the client's reliable message the C
-    /// writes (`Host_ClientCommands`). Thread-local like the server's other
-    /// event queues (single-threaded VM).
-    static STUFFTEXT: std::cell::RefCell<Vec<(i32, String)>> =
-        const { std::cell::RefCell::new(Vec::new()) };
-}
-
-/// `PF_stuffcmd` (#21): `stuffcmd(client, text)` sends `svc_stufftext` to that
-/// client, whose command buffer runs it (`Cbuf_AddText`). Queued as
-/// `(entity, text)`; the front-end playing that client takes it with
-/// [`take_stufftext`]. The C's "Parm 0 not a client" `PR_RunError` for an
-/// entity outside `1..=maxclients` is left to the front-end, which only
-/// executes text sent to its own player. (id1 stuffs only `"bf\n"`, the
-/// bonus flash, from 16 sites: every item pickup and CheckPowerups.)
-pub fn pf_stuffcmd(vm: &mut Vm) -> Result<()> {
-    let ent = vm.arg_entity(0);
-    let text = vm.arg_string(1);
-    STUFFTEXT.with(|q| q.borrow_mut().push((ent, text)));
-    Ok(())
-}
-
-/// Take and clear the queued `stuffcmd` text (see [`pf_stuffcmd`]).
-pub fn take_stufftext() -> Vec<(i32, String)> {
-    STUFFTEXT.with(|q| std::mem::take(&mut *q.borrow_mut()))
-}
 
 /// `PF_VarString(first)`: concatenate the string arguments from `first` to
 /// `pr_argc`. The C version uses a fixed 256-byte buffer; we build a `String`.
@@ -125,50 +97,11 @@ fn pf_makevectors(vm: &mut Vm) -> Result<()> {
 
 // -------------------------------------------------------------------- #7 random
 
-/// Seed for the deterministic LCG backing [`pf_random`].
-///
-/// The C `PF_random` uses libc `rand()`, which is process-global, seeded once
-/// and unspecified across platforms. The [`Vm`] struct has a fixed field set we
-/// must not extend, so we keep the PRNG state in a process-global `AtomicU32`
-/// instead. This makes `random()` reproducible (it always starts from the same
-/// seed in a fresh process) without touching `Vm`.
-static RNG_STATE: AtomicU32 = AtomicU32::new(RNG_SEED);
-
-/// [`RNG_STATE`]'s value in a fresh process.
-const RNG_SEED: u32 = 0x1337_BEEF;
-
-/// Restart [`pf_random`]'s sequence from a fresh process's seed, so two
-/// runs in one process draw the same numbers (a harness comparing them:
-/// `quaketool framerate`).
-pub fn reset_random() {
-    RNG_STATE.store(RNG_SEED, Ordering::Relaxed);
-}
-
-/// Numerically-Recipes-style 32-bit LCG step (`x = x*1664525 + 1013904223`).
-fn lcg_next() -> u32 {
-    // fetch_update with wrapping arithmetic; never panics, lock-free.
-    let mut prev = RNG_STATE.load(Ordering::Relaxed);
-    loop {
-        let next = prev
-            .wrapping_mul(1_664_525)
-            .wrapping_add(1_013_904_223);
-        match RNG_STATE.compare_exchange_weak(prev, next, Ordering::Relaxed, Ordering::Relaxed) {
-            Ok(_) => return next,
-            Err(actual) => prev = actual,
-        }
-    }
-}
-
-/// `PF_random` (#7): `float() random`, a value in `[0, 1]`.
-///
-/// The C computes `(rand() & 0x7fff) / (float)0x7fff`, so the range is CLOSED
-/// `[0, 1]` — it returns exactly `1.0` when the masked bits are `0x7fff`. We match
-/// id exactly (divide by `0x7fff`, not `0x8000`) so endpoint-sensitive QuakeC
-/// behaves identically. Backed by the deterministic [`RNG_STATE`] LCG (in place of
-/// process-global `rand()`) so tests reproduce.
+/// `PF_random` (#7): `float() random`, a value in the closed `[0, 1]`
+/// (`(rand() & 0x7fff) / (float)0x7fff`), drawn from the host session's
+/// streams ([`crate::qrand::QRand::random`]) in place of libc's `rand()`.
 fn pf_random(vm: &mut Vm) -> Result<()> {
-    let bits = lcg_next() & 0x7fff;
-    let num = (bits as f32) / 32767.0; // 0x7fff -> closed [0,1], matching PF_random
+    let num = vm.rand().random();
     vm.ret_float(num);
     Ok(())
 }
@@ -192,21 +125,34 @@ fn pf_normalize(vm: &mut Vm) -> Result<()> {
 
 // ------------------------------------------------------------ #10/#11 error/objerror
 
-/// `PF_error` (#10): a TERMINAL program error. The C dumps `self` and calls
-/// `Host_Error`; we append the message to `output` and fault via `run_error`.
+/// `PF_error` (#10): `void(string s, ...) error`. id prints
+/// `======SERVER ERROR in <function>:` and the text, dumps `self`
+/// (`ED_Print`), and calls `Host_Error ("Program error")` — directly, not
+/// through `PR_RunError`, so with no statement or stack trace. The program
+/// error returned halts the VM like any other ([`Vm::execute`]).
 fn pf_error(vm: &mut Vm) -> Result<()> {
-    let s = var_string(vm, 0);
-    vm.output.push_str(&format!("======SERVER ERROR======\n{s}\n"));
-    Err(vm.run_error(format!("program error: {s}")))
+    Err(error_report(vm, "SERVER ERROR").into())
 }
 
-/// `PF_objerror` (#11): dumps `self`, frees it, then errors. The C frees the
-/// `self` edict before `Host_Error`; with no `self` plumbing required for the
-/// self-contained subset, we record the message and fault.
+/// `PF_objerror` (#11): as [`pf_error`], under `======OBJECT ERROR`, and
+/// `self` is freed (`ED_Free`) after its dump, before `Host_Error`.
 fn pf_objerror(vm: &mut Vm) -> Result<()> {
-    let s = var_string(vm, 0);
-    vm.output.push_str(&format!("======OBJECT ERROR======\n{s}\n"));
-    Err(vm.run_error(format!("object error: {s}")))
+    let report = error_report(vm, "OBJECT ERROR");
+    let ent = vm.glob_int(vm.go.self_);
+    vm.free_edict(ent);
+    Err(report.into())
+}
+
+/// What `PF_error`/`PF_objerror` print on the way to `Host_Error`:
+/// `======<kind> in <function>:`, the message, and `ED_Print (self)`. The
+/// text also goes to the dev log (`vm.output`), like `dprint`'s.
+fn error_report(vm: &mut Vm, kind: &str) -> ProgramError {
+    let message = var_string(vm, 0);
+    let function = vm.running_function().to_string();
+    let dump = vm.ed_print(vm.glob_int(vm.go.self_));
+    let console = format!("======{kind} in {function}:\n{message}\n{dump}");
+    vm.output.push_str(&console);
+    ProgramError { function, message, console }
 }
 
 // ------------------------------------------------------------------- #12 vlen
@@ -497,7 +443,7 @@ pub fn default_builtins() -> Vec<Builtin> {
         pf_find,        // 18  find
         pf_fixme,       // 19  precache_sound
         pf_fixme,       // 20  precache_model
-        pf_stuffcmd,    // 21  stuffcmd
+        pf_fixme,       // 21  stuffcmd      (network)
         pf_fixme,       // 22  findradius    (server world)
         pf_bprint,      // 23  bprint
         pf_sprint,      // 24  sprint
@@ -893,23 +839,26 @@ mod tests {
     }
 
     #[test]
-    fn random_is_in_unit_interval_and_deterministic() {
-        let mut vm = bare_vm();
-        // Many draws all land in the CLOSED [0,1] (PF_random divides by 0x7fff, so
-        // 1.0 is attainable); the sequence is reproducible within a run because the
-        // LCG is process-global and stepped deterministically.
-        let mut seen_distinct = false;
-        let mut last = -1.0f32;
-        for _ in 0..1000 {
-            pf_random(&mut vm).expect("random");
-            let r = vm.gf(OFS_RETURN);
-            assert!((0.0..=1.0).contains(&r), "random() = {r} out of [0,1]");
-            if r != last && last >= 0.0 {
-                seen_distinct = true;
-            }
-            last = r;
+    fn random_is_in_unit_interval_and_draws_from_the_vms_streams() {
+        fn draw(vm: &mut Vm) -> f32 {
+            pf_random(vm).expect("random");
+            vm.gf(OFS_RETURN)
         }
-        assert!(seen_distinct, "random() should produce varied values");
+        // Many draws all land in the CLOSED [0,1] (PF_random divides by 0x7fff,
+        // so 1.0 is attainable), and they vary.
+        let (mut a, mut b) = (bare_vm(), bare_vm());
+        let seq: Vec<f32> = (0..1000).map(|_| draw(&mut a)).collect();
+        assert!(seq.iter().all(|r| (0.0..=1.0).contains(r)), "random() out of [0,1]");
+        assert!(seq.windows(2).any(|w| w[0] != w[1]), "random() should produce varied values");
+        // Each VM has fresh streams of its own: another draws the same numbers,
+        // whatever ran before it.
+        let again: Vec<f32> = (0..1000).map(|_| draw(&mut b)).collect();
+        assert_eq!(seq, again, "a fresh VM repeats the sequence");
+        // Handed one session's streams, two VMs continue one sequence.
+        let session = std::rc::Rc::new(crate::qrand::QRand::new());
+        a.set_rand(std::rc::Rc::clone(&session));
+        b.set_rand(session);
+        assert_eq!([draw(&mut a), draw(&mut b)], [seq[0], seq[1]], "one shared sequence");
     }
 
     #[test]
@@ -1006,15 +955,18 @@ mod tests {
         vm.argc = 1;
         let s = vm.intern("boom");
         vm.set_gi(OFS_PARM0, s);
-        assert!(pf_error(&mut vm).is_err(), "error() must fault");
-        assert!(vm.output.contains("boom"));
+        // PF_error's banner and ED_Print (self): here the world, all zeros.
+        let banner = "======SERVER ERROR in :\nboom\n\nEDICT 0:\n";
+        let Err(crate::QError::Program(e)) = pf_error(&mut vm) else { panic!("error() must fault") };
+        assert_eq!((e.message.as_str(), e.console.as_str()), ("boom", banner));
+        assert!(vm.output.contains(banner));
 
         let mut vm = bare_vm();
         vm.argc = 1;
         let s = vm.intern("kaboom");
         vm.set_gi(OFS_PARM0, s);
-        assert!(pf_objerror(&mut vm).is_err(), "objerror() must fault");
-        assert!(vm.output.contains("kaboom"));
+        let Err(crate::QError::Program(e)) = pf_objerror(&mut vm) else { panic!("objerror() must fault") };
+        assert!(e.console.starts_with("======OBJECT ERROR in :\nkaboom\n"), "{e:?}");
     }
 
     #[test]

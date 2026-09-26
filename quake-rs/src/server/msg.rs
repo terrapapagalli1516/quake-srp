@@ -1,5 +1,6 @@
-//! The server→client message side, with no network: the event queues and the
-//! `Write*` recognisers a front-end drains every frame.
+//! The server→client message side, with no network: the [`Outbox`] the
+//! builtins write into and the `Write*` recognisers a front-end drains every
+//! frame.
 //!
 //! Ported from Quake (GPLv2). Copyright (C) 1996-1997 Id Software, Inc.
 //! Sources:
@@ -13,31 +14,85 @@
 //!
 //! In the C each of these became bytes in a client datagram, the signon or the
 //! reliable buffer. This single-process server has no netcode, so each lands
-//! in a per-thread queue instead — [`SoundEvent`], [`StaticSound`],
+//! in the server's [`Outbox`] instead — [`SoundEvent`], [`StaticSound`],
 //! [`ParticleBurst`], [`GameMessage`], [`TempEntityEvent`], [`SvcEvent`] —
-//! which the `Server::drain_*` methods below hand to the front-end. Builtins
-//! are `fn(&mut Vm)` and cannot see the `Server`, hence `thread_local!`s; each
-//! section restates why.
+//! which the `Server::drain_*` methods below hand to the front-end.
 
 use super::Server;
 use crate::vm::Vm;
 use crate::Result;
 
 // ---------------------------------------------------------------------------
-// Sound-event queue (PF_sound / PF_ambientsound).
+// The outbox.
+// ---------------------------------------------------------------------------
+
+/// Everything a server's QuakeC sent out of the server since the host last
+/// looked: what id's C wrote into the client's buffers (`sv.datagram`,
+/// `sv.reliable_datagram`, `sv.signon`, the client's `message`), and the
+/// console text it queued for the host.
+///
+/// One per server, on its [`super::WorldModel`]: the builtins are
+/// `fn(&mut Vm)` and reach it through [`Vm::with_host`] ([`Host::outbox`]);
+/// the server's physics writes it the same way, and the `Server::drain_*`
+/// methods empty it for the front-end. A new server starts with an empty one,
+/// so nothing one level queued can reach the next.
+#[derive(Debug, Default)]
+pub struct Outbox {
+    /// `svc_sound`s ([`Server::drain_sounds`]).
+    sounds: Vec<SoundEvent>,
+    /// The signon's `svc_spawnstaticsound`s ([`Server::drain_static_sounds`]).
+    static_sounds: Vec<StaticSound>,
+    /// `svc_particle`s ([`Server::drain_particles`]).
+    particles: Vec<ParticleBurst>,
+    /// `svc_print`s and `svc_centerprint`s ([`Server::drain_messages`]).
+    messages: Vec<GameMessage>,
+    /// Where the client's parse of each buffer the `Write*` builtins feed is
+    /// (one per [`MsgBuf`]); reset at the top of every server frame.
+    parsers: [MsgParse; 2],
+    /// Temp entities those buffers completed ([`Server::drain_temp_entities`]).
+    temp_entities: Vec<TempEntityEvent>,
+    /// `svc_*` commands those buffers completed ([`Server::drain_svc_events`]).
+    svc_events: Vec<SvcEvent>,
+    /// `svc_stufftext`s, as `(client entity, text)` ([`Server::drain_stufftext`]).
+    stufftext: Vec<(i32, String)>,
+    /// A `changelevel <map>` the QuakeC queued for the host's command buffer
+    /// (`PF_changelevel`, `localcmd`; [`Server::take_pending_changelevel`]).
+    pub(super) changelevel: Option<String>,
+    /// A `restart` the QuakeC queued for the host's command buffer
+    /// (`localcmd("restart\n")`; [`Server::take_pending_restart`]).
+    pub(super) restart: bool,
+    /// `svc_lightstyle`s, `(style, pattern)`, not yet applied to the server's
+    /// table (`Server::apply_lightstyles`).
+    pub(super) lightstyles: Vec<(usize, String)>,
+}
+
+impl Server {
+    /// This server's [`Outbox`]. Its world model always has one; `None` only
+    /// if the VM's host were taken away.
+    pub(super) fn outbox(&mut self) -> Option<&mut Outbox> {
+        self.vm.host.as_deref_mut().map(|h| h.outbox())
+    }
+
+    /// Take one of the outbox's queues, leaving it empty.
+    pub(super) fn take_outbox<T: Default>(&mut self, queue: impl FnOnce(&mut Outbox) -> &mut T) -> T {
+        self.outbox().map(|o| std::mem::take(queue(o))).unwrap_or_default()
+    }
+}
+
+/// Put one more thing in the outbox of the server `vm` runs for, through its
+/// host (a bare VM, with no server, has nowhere to send it).
+fn send(vm: &mut Vm, put: impl FnOnce(&mut Outbox)) {
+    vm.with_host(|_, h| put(h.outbox()));
+}
+
+// ---------------------------------------------------------------------------
+// Sound events (PF_sound / SV_StartSound).
 //
 // The C `PF_sound` -> `SV_StartSound` wrote an `svc_sound` message into the
 // per-client datagram for the network layer to flush. This headless server has
-// no netcode, so instead each fired sound is captured as a [`SoundEvent`] in a
-// process-wide queue that [`Server::drain_sounds`] hands to whatever audio
-// front-end (or test) wants it.
-//
-// Builtins are `fn(&mut Vm)` and cannot see the `Server`, and the `Vm` type
-// lives in `vm.rs` (which this task may not edit), so the queue cannot hang off
-// either. A `thread_local!` `RefCell<Vec<SoundEvent>>` reached from `bi_sound`
-// is the cleanest spot that keeps the builtin signature intact. Server methods
-// run on the same thread as the builtins they invoke, so the events a frame's
-// QuakeC fires are visible to `drain_sounds` immediately afterward.
+// no netcode, so instead each fired sound is captured as a [`SoundEvent`] in
+// the outbox, which [`Server::drain_sounds`] hands to whatever audio front-end
+// (or test) wants it.
 // ---------------------------------------------------------------------------
 
 /// One queued sound emission — the engine `SV_StartSound` payload, captured for
@@ -66,23 +121,6 @@ pub struct SoundEvent {
     pub attenuation: f32,
 }
 
-thread_local! {
-    /// Process-wide (per-thread) queue the sound builtins push to and
-    /// [`Server::drain_sounds`] takes. See the module note above.
-    static SOUND_EVENTS: std::cell::RefCell<Vec<SoundEvent>> =
-        const { std::cell::RefCell::new(Vec::new()) };
-}
-
-/// Push a fired sound onto the thread-local queue.
-fn push_sound_event(ev: SoundEvent) {
-    SOUND_EVENTS.with(|q| q.borrow_mut().push(ev));
-}
-
-/// Take and clear every queued sound event.
-pub(super) fn take_sound_events() -> Vec<SoundEvent> {
-    SOUND_EVENTS.with(|q| std::mem::take(&mut *q.borrow_mut()))
-}
-
 // ---------------------------------------------------------------------------
 // Static (looping ambient) sound registry (PF_ambientsound).
 //
@@ -91,10 +129,10 @@ pub(super) fn take_sound_events() -> Vec<SoundEvent> {
 // (snd_dma.c) then allocated a PERSISTENT looping channel re-spatialized every
 // frame. These are the torch crackles / wind / hums placed by the QuakeC at
 // level spawn. Like the one-shot queue above, this headless server has no
-// netcode, so each `ambientsound()` is recorded as a [`StaticSound`] in a
-// process-wide thread-local list that [`Server::drain_static_sounds`] hands to
-// the front-end ONCE (the front-end keeps the loops alive itself, mirroring how
-// the signon packet was sent once at connect).
+// netcode, so each `ambientsound()` is recorded as a [`StaticSound`] in the
+// outbox, which [`Server::drain_static_sounds`] hands to the front-end ONCE
+// (the front-end keeps the loops alive itself, mirroring how the signon packet
+// was sent once at connect).
 // ---------------------------------------------------------------------------
 
 /// One placed looping ambient sound — the `svc_spawnstaticsound` payload the C
@@ -121,24 +159,6 @@ pub struct StaticSound {
     pub attenuation: f32,
 }
 
-thread_local! {
-    /// Process-wide (per-thread) registry [`bi_ambientsound`] pushes to and
-    /// [`Server::drain_static_sounds`] takes. See the module note above; the
-    /// thread-local reasoning mirrors [`SOUND_EVENTS`] exactly.
-    static STATIC_SOUNDS: std::cell::RefCell<Vec<StaticSound>> =
-        const { std::cell::RefCell::new(Vec::new()) };
-}
-
-/// Push a placed static sound onto the thread-local registry.
-fn push_static_sound(ev: StaticSound) {
-    STATIC_SOUNDS.with(|q| q.borrow_mut().push(ev));
-}
-
-/// Take and clear every registered static sound.
-pub(super) fn take_static_sounds() -> Vec<StaticSound> {
-    STATIC_SOUNDS.with(|q| std::mem::take(&mut *q.borrow_mut()))
-}
-
 /// Box centre of an entity: `origin + 0.5*(mins + maxs)`, the point
 /// `SV_StartSound`/`PF_ambientsound` wrote for the emission coordinate.
 fn entity_sound_origin(vm: &Vm, e: i32) -> [f32; 3] {
@@ -159,14 +179,10 @@ fn entity_sound_origin(vm: &Vm, e: i32) -> [f32; 3] {
 // into the per-client datagram; the client's `R_RunParticleEffect` then spawned
 // the actual particles into its `d_*` software renderer. This headless server
 // has no client, so — exactly like the sound queue above — each fired
-// `particle()` is captured as a [`ParticleBurst`] in a process-wide thread-local
-// queue that [`Server::drain_particles`] hands to a front-end. The front-end
+// `particle()` is captured as a [`ParticleBurst`] in the outbox, which
+// [`Server::drain_particles`] hands to a front-end. The front-end
 // (wasm/quaketool) owns the live [`crate::particles::ParticleSystem`] that turns
 // a drained burst into spawned points, ages them, and draws them into the scene.
-//
-// The reasoning for a `thread_local!` (rather than a field on `Server` or `Vm`)
-// is identical to the sound queue's: builtins are `fn(&mut Vm)` and cannot see
-// the `Server`, and `vm.rs` is off-limits, so the queue cannot hang off either.
 // ---------------------------------------------------------------------------
 
 /// One queued `particle()` burst — the engine `SV_StartParticle` payload,
@@ -189,28 +205,11 @@ pub struct ParticleBurst {
     pub count: i32,
 }
 
-thread_local! {
-    /// Process-wide (per-thread) queue [`bi_particle`] pushes to and
-    /// [`Server::drain_particles`] takes. See the module note above; mirrors the
-    /// [`SOUND_EVENTS`] queue exactly.
-    static PARTICLE_BURSTS: std::cell::RefCell<Vec<ParticleBurst>> =
-        const { std::cell::RefCell::new(Vec::new()) };
-}
-
-/// Push a fired particle burst onto the thread-local queue.
-fn push_particle_burst(ev: ParticleBurst) {
-    PARTICLE_BURSTS.with(|q| q.borrow_mut().push(ev));
-}
-
-/// Take and clear every queued particle burst.
-pub(super) fn take_particle_bursts() -> Vec<ParticleBurst> {
-    PARTICLE_BURSTS.with(|q| std::mem::take(&mut *q.borrow_mut()))
-}
-
 /// A text message QuakeC asked to show the player: a `centerprint` (drawn
 /// centered for a couple of seconds — level intros, "you need the silver key")
 /// or a `bprint`/`sprint` notify line (item pickups, etc.). Drained each frame by
 /// the front-end, which renders + times them out.
+#[derive(Debug, Clone, PartialEq)]
 pub struct GameMessage {
     /// True for `centerprint` (centered, transient); false for a notify line.
     pub center: bool,
@@ -218,22 +217,14 @@ pub struct GameMessage {
     pub text: String,
 }
 
-thread_local! {
-    // QuakeC print routing the front-end displays. Same single-threaded-VM
-    // rationale as the sound/particle/temp-entity queues above.
-    static MESSAGES: std::cell::RefCell<Vec<GameMessage>> =
-        const { std::cell::RefCell::new(Vec::new()) };
-}
-
-fn push_message(center: bool, text: String) {
-    if text.is_empty() {
-        return;
+impl Outbox {
+    /// Queue a print for the player (`svc_centerprint`, or `svc_print`'s notify
+    /// line); an empty one shows nothing, so it is dropped.
+    fn print(&mut self, center: bool, text: String) {
+        if !text.is_empty() {
+            self.messages.push(GameMessage { center, text });
+        }
     }
-    MESSAGES.with(|q| q.borrow_mut().push(GameMessage { center, text }));
-}
-
-pub(super) fn take_messages() -> Vec<GameMessage> {
-    MESSAGES.with(|q| std::mem::take(&mut *q.borrow_mut()))
 }
 
 /// `PF_centerprint` (#73): show the (var-arg concatenated) message centered on
@@ -242,7 +233,7 @@ pub(super) fn take_messages() -> Vec<GameMessage> {
 pub(super) fn bi_centerprint(vm: &mut Vm) -> Result<()> {
     let s = crate::builtins::var_string(vm, 1);
     vm.output.push_str(&s);
-    push_message(true, s);
+    send(vm, |o| o.print(true, s));
     Ok(())
 }
 
@@ -250,7 +241,7 @@ pub(super) fn bi_centerprint(vm: &mut Vm) -> Result<()> {
 pub(super) fn bi_bprint(vm: &mut Vm) -> Result<()> {
     let s = crate::builtins::var_string(vm, 0);
     vm.output.push_str(&s);
-    push_message(false, s);
+    send(vm, |o| o.print(false, s));
     Ok(())
 }
 
@@ -259,7 +250,21 @@ pub(super) fn bi_bprint(vm: &mut Vm) -> Result<()> {
 pub(super) fn bi_sprint(vm: &mut Vm) -> Result<()> {
     let s = crate::builtins::var_string(vm, 1);
     vm.output.push_str(&s);
-    push_message(false, s);
+    send(vm, |o| o.print(false, s));
+    Ok(())
+}
+
+/// `PF_stuffcmd` (#21): `stuffcmd(client, text)` sends `svc_stufftext` to that
+/// client, whose command buffer runs it (`Cbuf_AddText`). Queued as
+/// `(entity, text)`; the front-end playing that client takes it with
+/// [`Server::drain_stufftext`]. The C's "Parm 0 not a client" `PR_RunError`
+/// for an entity outside `1..=maxclients` is left to the front-end, which
+/// only executes text sent to its own player. (id1 stuffs only `"bf\n"`, the
+/// bonus flash, from 16 sites: every item pickup and CheckPowerups.)
+pub(super) fn bi_stuffcmd(vm: &mut Vm) -> Result<()> {
+    let ent = vm.arg_entity(0);
+    let text = vm.arg_string(1);
+    send(vm, |o| o.stufftext.push((ent, text)));
     Ok(())
 }
 
@@ -290,12 +295,8 @@ pub(super) fn bi_particle(vm: &mut Vm) -> Result<()> {
     let sent = (vm.arg_float(3) as i32 & 0xFF) as u8;
     let count = if sent == 255 { 1024 } else { sent as i32 };
 
-    push_particle_burst(ParticleBurst {
-        org,
-        dir,
-        color,
-        count,
-    });
+    let burst = ParticleBurst { org, dir, color, count };
+    send(vm, |o| o.particles.push(burst));
     Ok(())
 }
 
@@ -324,12 +325,8 @@ pub(super) fn bi_particle(vm: &mut Vm) -> Result<()> {
 // never swallow a write aimed at the other. The parsers are deliberately
 // total: an unknown command or TE type, or a write of the wrong kind, drops
 // the message in progress and goes back to reading command bytes rather than
-// guessing a length or panicking.
-//
-// A `thread_local!` for the same reason as the queues above: builtins are
-// `fn(&mut Vm)` and cannot see the `Server`. Server methods run on the same
-// thread as the builtins, so a frame's events are visible to the drains right
-// after it.
+// guessing a length or panicking. The parsers and what they complete live in
+// the outbox, like the queues above.
 // ---------------------------------------------------------------------------
 
 /// `MSG_BROADCAST` (pr_cmds.c `WriteDest`): `sv.datagram`, the unreliable
@@ -644,89 +641,54 @@ pub enum SvcEvent {
     SellScreen,
 }
 
-thread_local! {
-    /// One parser per [`MsgBuf`] (per-thread). Reset at the top of every
-    /// server frame and for a fresh server ([`reset_message_parsers`]).
-    static MSG_PARSE: std::cell::RefCell<[MsgParse; 2]> =
-        const { std::cell::RefCell::new([MsgParse::Command, MsgParse::Command]) };
-    /// Completed temp entities awaiting a [`Server::drain_temp_entities`].
-    /// Mirrors the [`SOUND_EVENTS`]/[`PARTICLE_BURSTS`] queues exactly.
-    static TEMP_ENTITIES: std::cell::RefCell<Vec<TempEntityEvent>> =
-        const { std::cell::RefCell::new(Vec::new()) };
-    /// Completed commands awaiting a [`Server::drain_svc_events`].
-    static SVC_EVENTS: std::cell::RefCell<Vec<SvcEvent>> =
-        const { std::cell::RefCell::new(Vec::new()) };
-}
-
-/// Push a completed temp-entity event onto the thread-local queue.
-fn push_temp_entity(ev: TempEntityEvent) {
-    TEMP_ENTITIES.with(|q| q.borrow_mut().push(ev));
-}
-
-/// Take and clear every queued temp-entity event.
-pub(super) fn take_temp_entities() -> Vec<TempEntityEvent> {
-    TEMP_ENTITIES.with(|q| std::mem::take(&mut *q.borrow_mut()))
-}
-
-/// Push a completed server command onto the thread-local queue.
-fn push_svc_event(ev: SvcEvent) {
-    SVC_EVENTS.with(|q| q.borrow_mut().push(ev));
-}
-
-/// Take and clear every queued server command.
-pub(super) fn take_svc_events() -> Vec<SvcEvent> {
-    SVC_EVENTS.with(|q| std::mem::take(&mut *q.borrow_mut()))
-}
-
-/// Put every buffer's parser back between commands, dropping any half-read
-/// message. Called at the start of each server frame (the C cleared its
-/// buffers once they were sent) so a partial message left by an errored think
-/// never bleeds into the next frame, and for a fresh server.
-pub(super) fn reset_message_parsers() {
-    MSG_PARSE.with(|s| *s.borrow_mut() = [MsgParse::Command, MsgParse::Command]);
-}
-
-/// A command byte read between commands: start its payload, or act on it.
-/// Unknown commands are skipped — the id1 progs only write the ones here.
-fn parse_command(value: f32) -> MsgParse {
-    let b = value as i32;
-    match if (0..=255).contains(&b) { b as u8 } else { 0 } {
-        SVC_TEMP_ENTITY => MsgParse::TempEntity(TeMsg::default()),
-        SVC_INTERMISSION => {
-            push_svc_event(SvcEvent::Intermission);
-            MsgParse::Command
-        }
-        SVC_FINALE => MsgParse::AwaitString { cutscene: false },
-        SVC_CUTSCENE => MsgParse::AwaitString { cutscene: true },
-        SVC_CDTRACK => MsgParse::SkipBytes(2),
-        SVC_SELLSCREEN => {
-            push_svc_event(SvcEvent::SellScreen);
-            MsgParse::Command
-        }
-        // Stat ticks: the front-end reads killed_monsters / found_secrets from
-        // the QuakeC globals (like the Tab scoreboard), so these single-byte
-        // commands need no event.
-        SVC_KILLEDMONSTER | SVC_FOUNDSECRET => MsgParse::Command,
-        _ => MsgParse::Command,
+impl Outbox {
+    /// Put every buffer's parser back between commands, dropping any half-read
+    /// message. Called at the start of each server frame (the C cleared its
+    /// buffers once they were sent) so a partial message left by an errored
+    /// think never bleeds into the next frame.
+    pub(super) fn reset_parsers(&mut self) {
+        self.parsers = Default::default();
     }
-}
 
-/// `MSG_Write*(WriteDest(), value)`: hand one write to the parser of the buffer
-/// `dest` names (a no-op for an unmodelled destination).
-fn msg_write(dest: i32, w: MsgWrite) {
-    let Some(buf) = write_dest(dest) else { return };
-    MSG_PARSE.with(|cell| {
-        let mut parsers = cell.borrow_mut();
-        let st = &mut parsers[buf as usize];
-        *st = match std::mem::take(st) {
+    /// A command byte read between commands: start its payload, or act on it.
+    /// Unknown commands are skipped — the id1 progs only write the ones here.
+    fn parse_command(&mut self, value: f32) -> MsgParse {
+        let b = value as i32;
+        match if (0..=255).contains(&b) { b as u8 } else { 0 } {
+            SVC_TEMP_ENTITY => MsgParse::TempEntity(TeMsg::default()),
+            SVC_INTERMISSION => {
+                self.svc_events.push(SvcEvent::Intermission);
+                MsgParse::Command
+            }
+            SVC_FINALE => MsgParse::AwaitString { cutscene: false },
+            SVC_CUTSCENE => MsgParse::AwaitString { cutscene: true },
+            SVC_CDTRACK => MsgParse::SkipBytes(2),
+            SVC_SELLSCREEN => {
+                self.svc_events.push(SvcEvent::SellScreen);
+                MsgParse::Command
+            }
+            // Stat ticks: the front-end reads killed_monsters / found_secrets from
+            // the QuakeC globals (like the Tab scoreboard), so these single-byte
+            // commands need no event.
+            SVC_KILLEDMONSTER | SVC_FOUNDSECRET => MsgParse::Command,
+            _ => MsgParse::Command,
+        }
+    }
+
+    /// `MSG_Write*(WriteDest(), value)`: hand one write to the parser of the
+    /// buffer `dest` names (a no-op for an unmodelled destination).
+    fn write(&mut self, dest: i32, w: MsgWrite) {
+        let Some(buf) = write_dest(dest) else { return };
+        let st = std::mem::take(&mut self.parsers[buf as usize]);
+        self.parsers[buf as usize] = match st {
             MsgParse::Command => match w {
-                MsgWrite::Byte(v) => parse_command(v),
+                MsgWrite::Byte(v) => self.parse_command(v),
                 _ => MsgParse::Command,
             },
             MsgParse::TempEntity(mut te) => match te.feed(&w) {
                 TeStep::More => MsgParse::TempEntity(te),
                 TeStep::Done(ev) => {
-                    push_temp_entity(ev);
+                    self.temp_entities.push(ev);
                     MsgParse::Command
                 }
                 TeStep::Drop => MsgParse::Command,
@@ -734,7 +696,7 @@ fn msg_write(dest: i32, w: MsgWrite) {
             MsgParse::AwaitString { cutscene } => {
                 // Anything but the string is out of step: drop the command.
                 if let MsgWrite::Str(text) = w {
-                    push_svc_event(if cutscene { SvcEvent::Cutscene(text) } else { SvcEvent::Finale(text) });
+                    self.svc_events.push(if cutscene { SvcEvent::Cutscene(text) } else { SvcEvent::Finale(text) });
                 }
                 MsgParse::Command
             }
@@ -743,45 +705,50 @@ fn msg_write(dest: i32, w: MsgWrite) {
                 _ => MsgParse::Command,
             },
         };
-    });
+    }
+}
+
+/// `MSG_Write*(WriteDest(), value)` from a builtin, into its server's outbox.
+fn msg_write(vm: &mut Vm, dest: i32, w: MsgWrite) {
+    send(vm, |o| o.write(dest, w));
 }
 
 /// `PF_WriteByte` (#52): `void(float to, float value)` —
 /// `MSG_WriteByte(WriteDest(), G_FLOAT(OFS_PARM1))`.
 pub(super) fn bi_writebyte(vm: &mut Vm) -> Result<()> {
-    msg_write(vm.arg_float(0) as i32, MsgWrite::Byte(vm.arg_float(1)));
+    msg_write(vm, vm.arg_float(0) as i32, MsgWrite::Byte(vm.arg_float(1)));
     Ok(())
 }
 
 /// `PF_WriteChar` (#53): one byte, like [`bi_writebyte`].
 pub(super) fn bi_writechar(vm: &mut Vm) -> Result<()> {
-    msg_write(vm.arg_float(0) as i32, MsgWrite::Byte(vm.arg_float(1)));
+    msg_write(vm, vm.arg_float(0) as i32, MsgWrite::Byte(vm.arg_float(1)));
     Ok(())
 }
 
 /// `PF_WriteShort` (#54): a 16-bit integer field.
 pub(super) fn bi_writeshort(vm: &mut Vm) -> Result<()> {
-    msg_write(vm.arg_float(0) as i32, MsgWrite::Short(vm.arg_float(1)));
+    msg_write(vm, vm.arg_float(0) as i32, MsgWrite::Short(vm.arg_float(1)));
     Ok(())
 }
 
 /// `PF_WriteLong` (#55): a 32-bit integer field (no message the progs write
 /// carries one; read like a short so the parser stays in step if one appears).
 pub(super) fn bi_writelong(vm: &mut Vm) -> Result<()> {
-    msg_write(vm.arg_float(0) as i32, MsgWrite::Short(vm.arg_float(1)));
+    msg_write(vm, vm.arg_float(0) as i32, MsgWrite::Short(vm.arg_float(1)));
     Ok(())
 }
 
 /// `PF_WriteCoord` (#56): a world coordinate.
 pub(super) fn bi_writecoord(vm: &mut Vm) -> Result<()> {
-    msg_write(vm.arg_float(0) as i32, MsgWrite::Coord(vm.arg_float(1)));
+    msg_write(vm, vm.arg_float(0) as i32, MsgWrite::Coord(vm.arg_float(1)));
     Ok(())
 }
 
 /// `PF_WriteAngle` (#57): `MSG_WriteAngle` writes one byte, so the parser
 /// reads it as one (no message the progs write carries an angle).
 pub(super) fn bi_writeangle(vm: &mut Vm) -> Result<()> {
-    msg_write(vm.arg_float(0) as i32, MsgWrite::Byte(vm.arg_float(1)));
+    msg_write(vm, vm.arg_float(0) as i32, MsgWrite::Byte(vm.arg_float(1)));
     Ok(())
 }
 
@@ -791,7 +758,8 @@ pub(super) fn bi_writeangle(vm: &mut Vm) -> Result<()> {
 pub(super) fn bi_writestring(vm: &mut Vm) -> Result<()> {
     let dest = vm.arg_float(0) as i32;
     if write_dest(dest).is_some() {
-        msg_write(dest, MsgWrite::Str(vm.arg_string(1)));
+        let text = vm.arg_string(1);
+        msg_write(vm, dest, MsgWrite::Str(text));
     }
     Ok(())
 }
@@ -803,7 +771,7 @@ pub(super) fn bi_writestring(vm: &mut Vm) -> Result<()> {
 /// the edict index (~0.0 for every real entity), collapsing all beams onto one
 /// slot.
 pub(super) fn bi_writeentity(vm: &mut Vm) -> Result<()> {
-    msg_write(vm.arg_float(0) as i32, MsgWrite::Short(vm.arg_entity(1) as f32));
+    msg_write(vm, vm.arg_float(0) as i32, MsgWrite::Short(vm.arg_entity(1) as f32));
     Ok(())
 }
 
@@ -831,15 +799,8 @@ pub(super) fn bi_sound(vm: &mut Vm) -> Result<()> {
     // when absent.
     let sound_index = lookup_sound_index(vm, &sample);
 
-    push_sound_event(SoundEvent {
-        entity,
-        channel,
-        sound_index,
-        sample,
-        origin,
-        volume,
-        attenuation,
-    });
+    let ev = SoundEvent { entity, channel, sound_index, sample, origin, volume, attenuation };
+    send(vm, |o| o.sounds.push(ev));
     Ok(())
 }
 
@@ -878,13 +839,14 @@ pub(super) fn bi_ambientsound(vm: &mut Vm) -> Result<()> {
 
     let vol_byte = (volume * 255.0).clamp(0.0, 255.0) as u8;
     let atten_byte = (attenuation * 64.0).clamp(0.0, 255.0) as u8;
-    push_static_sound(StaticSound {
+    let ev = StaticSound {
         origin: pos,
         sound_index,
         sample,
         volume: vol_byte as f32 / 255.0,
         attenuation: atten_byte as f32 / 64.0,
-    });
+    };
+    send(vm, |o| o.static_sounds.push(ev));
     Ok(())
 }
 
@@ -915,16 +877,17 @@ impl Server {
         self.paused = !self.paused;
         let name = if self.player > 0 { self.vm.ent_get_string(self.player, "netname") } else { String::new() };
         let what = if self.paused { "paused" } else { "unpaused" };
-        push_message(false, format!("{name} {what} the game\n"));
+        if let Some(o) = self.outbox() {
+            o.print(false, format!("{name} {what} the game\n"));
+        }
     }
 
     /// Take and clear the queued sound events fired by the QuakeC since the last
     /// drain (`PF_sound`/`PF_ambientsound` pushes; see [`SoundEvent`]). A
     /// front-end calls this once per frame to play them; tests use it to assert
-    /// a weapon actually fired. The queue is process-/thread-local, so call this
-    /// on the same thread that drove the frame.
+    /// a weapon actually fired.
     pub fn drain_sounds(&mut self) -> Vec<SoundEvent> {
-        take_sound_events()
+        self.take_outbox(|o| &mut o.sounds)
     }
 
     /// Take and clear the placed looping ambient sounds the QuakeC registered
@@ -932,28 +895,25 @@ impl Server {
     /// level's worldspawn registers them all during `spawn_entities`, so a
     /// front-end drains ONCE after the level builds and keeps the loops alive
     /// itself — mirroring how the C wrote them once into the signon packet and
-    /// `S_StaticSound` kept a persistent channel. Thread-local like
-    /// [`Server::drain_sounds`]: call on the thread that spawned the level.
+    /// `S_StaticSound` kept a persistent channel.
     pub fn drain_static_sounds(&mut self) -> Vec<StaticSound> {
-        take_static_sounds()
+        self.take_outbox(|o| &mut o.static_sounds)
     }
 
     /// Take and clear the queued on-screen messages (`centerprint`/`sprint`/
     /// `bprint`) the QuakeC emitted since the last drain. The front-end shows
     /// centered ones transiently and notify lines fading at the top.
     pub fn drain_messages(&mut self) -> Vec<GameMessage> {
-        take_messages()
+        self.take_outbox(|o| &mut o.messages)
     }
 
     /// Take and clear the queued particle bursts fired by the QuakeC since the
     /// last drain (`PF_particle` pushes; see [`ParticleBurst`]). A front-end
     /// calls this once per frame and replays each burst into its
     /// [`crate::particles::ParticleSystem`]; tests use it to assert an
-    /// explosion/spawn actually emitted particles. The queue is
-    /// process-/thread-local, so call this on the same thread that drove the
-    /// frame (mirrors [`Server::drain_sounds`]).
+    /// explosion/spawn actually emitted particles.
     pub fn drain_particles(&mut self) -> Vec<ParticleBurst> {
-        take_particle_bursts()
+        self.take_outbox(|o| &mut o.particles)
     }
 
     /// Take and clear the queued temp-entity events decoded from the QuakeC's
@@ -962,11 +922,9 @@ impl Server {
     /// MSG_ALL (Chthon's lightning), in the order they were written. A front-end
     /// calls this once per frame and maps each [`TempEntityEvent`] to the
     /// matching [`crate::particles::ParticleSystem`] effect or beam; tests
-    /// use it to assert a temp entity actually fired. The queue is
-    /// process-/thread-local, so call this on the same thread that drove the frame
-    /// (mirrors [`Server::drain_sounds`]/[`Server::drain_particles`]).
+    /// use it to assert a temp entity actually fired.
     pub fn drain_temp_entities(&mut self) -> Vec<TempEntityEvent> {
-        take_temp_entities()
+        self.take_outbox(|o| &mut o.temp_entities)
     }
 
     /// Take and clear the queued MSG_ALL server commands recognised from the
@@ -974,10 +932,17 @@ impl Server {
     /// (`svc_intermission` / `svc_finale` / `svc_cutscene` / `svc_sellscreen`).
     /// A front-end calls this once per frame and plays the client role of
     /// `CL_ParseServerMessage` (cl_parse.c): enter intermission mode, latch the
-    /// completed time, start the finale text reveal. Thread-local like
-    /// [`Server::drain_temp_entities`] — call it on the thread that drove the frame.
+    /// completed time, start the finale text reveal.
     pub fn drain_svc_events(&mut self) -> Vec<SvcEvent> {
-        take_svc_events()
+        self.take_outbox(|o| &mut o.svc_events)
+    }
+
+    /// Take and clear the `stuffcmd` text the QuakeC sent since the last
+    /// drain, as `(client entity, text)`: the reliable `svc_stufftext`
+    /// messages whose text the client's command buffer runs (see
+    /// [`bi_stuffcmd`]).
+    pub fn drain_stufftext(&mut self) -> Vec<(i32, String)> {
+        self.take_outbox(|o| &mut o.stufftext)
     }
 
     /// `SV_StartSound` (sv_phys.c helper, via `world.c`): queue a sound emitted by
@@ -989,15 +954,11 @@ impl Server {
     pub(super) fn start_sound(&mut self, ent: i32, channel: i32, sample: &str, volume_byte: i32, attenuation: f32) {
         let origin = entity_sound_origin(&self.vm, ent);
         let sound_index = lookup_sound_index(&mut self.vm, sample);
-        push_sound_event(SoundEvent {
-            entity: ent,
-            channel,
-            sound_index,
-            sample: sample.to_string(),
-            origin,
-            volume: (volume_byte as f32) / 255.0,
-            attenuation,
-        });
+        let volume = (volume_byte as f32) / 255.0;
+        let ev = SoundEvent { entity: ent, channel, sound_index, sample: sample.to_string(), origin, volume, attenuation };
+        if let Some(o) = self.outbox() {
+            o.sounds.push(ev);
+        }
     }
 }
 
@@ -1239,15 +1200,11 @@ mod tests {
         server.vm.set_gf(OFS_PARM0 + 3, value);
         bi_writeshort(&mut server.vm).expect("bi_writeshort");
     }
-    /// A fresh server plus a cleared decoder/queue (the thread-locals persist
-    /// across tests on the same thread, so reset before each scenario).
+    /// A fresh server (with a fresh outbox) for a message scenario.
     fn te_server() -> Server {
         let (img, _sound_fn) = attack_progs();
         let progs = Progs::parse(&img).expect("parse");
-        let server = Server::new(floor_bsp(), progs).expect("server");
-        reset_message_parsers();
-        let _ = take_temp_entities(); // clear any residue from a prior test
-        server
+        Server::new(floor_bsp(), progs).expect("server")
     }
 
     #[test]
@@ -1281,13 +1238,9 @@ mod tests {
         server.vm.set_gi(OFS_PARM0 + 3, ofs);
         bi_writestring(&mut server.vm).expect("bi_writestring");
     }
-    /// A fresh server plus a cleared MSG_ALL recognizer/queue (thread-locals
-    /// persist across tests on one thread, so reset before each scenario).
+    /// A fresh server for a MSG_ALL scenario.
     fn svc_server() -> Server {
-        let server = te_server();
-        reset_message_parsers();
-        let _ = take_svc_events();
-        server
+        te_server()
     }
 
     #[test]
@@ -1365,7 +1318,6 @@ mod tests {
         // parses exactly like the datagram. Only MSG_BROADCAST temp entities
         // were decoded, so the bolt never reached the client.
         let mut server = svc_server();
-        let _ = take_temp_entities();
         write_chthon_bolt(&mut server, [-128.0, 64.0, -40.0], [960.0, 64.0, -40.0]);
         let evs = server.drain_temp_entities();
         assert_eq!(evs.len(), 1, "one temp entity from the reliable buffer");
@@ -1385,7 +1337,6 @@ mod tests {
         // arrive: neither message swallows the other's writes (the C's
         // sv.datagram and sv.reliable_datagram are separate buffers).
         let mut server = svc_server();
-        let _ = take_temp_entities();
         write_byte(&mut server, MSG_BROADCAST, SVC_TEMP_ENTITY as f32);
         write_byte(&mut server, MSG_BROADCAST, TE_EXPLOSION as f32);
         write_coord(&mut server, MSG_BROADCAST, 1.0);
@@ -1406,7 +1357,6 @@ mod tests {
         // svc_intermission/svc_sellscreen; and a bare svc_intermission on the
         // datagram is one (the client parses both buffers alike).
         let mut server = svc_server();
-        let _ = take_temp_entities();
         write_byte(&mut server, MSG_ALL, SVC_TEMP_ENTITY as f32);
         write_byte(&mut server, MSG_ALL, TE_EXPLOSION2 as f32);
         for v in [1.0, 2.0, 3.0] {
@@ -1444,15 +1394,12 @@ mod tests {
             server.drain_svc_events().is_empty(),
             "desynced finale dropped, stray string ignored"
         );
-        // A queued event from the OLD level must not leak across a new server
-        // (with_pak clears state + queue, mirroring reset_changelevel).
+        // A queued event from the OLD level cannot reach a new server: each
+        // has its own outbox.
         write_byte(&mut server, MSG_ALL, SVC_INTERMISSION as f32);
-        let fresh = svc_server();
-        drop(fresh);
-        assert!(
-            take_svc_events().is_empty(),
-            "a fresh server cleared the queued events"
-        );
+        let mut fresh = svc_server();
+        assert!(fresh.drain_svc_events().is_empty(), "a fresh server has no queued events");
+        assert_eq!(server.drain_svc_events(), vec![SvcEvent::Intermission]);
     }
 
     #[test]
@@ -1592,7 +1539,7 @@ mod tests {
         write_byte(&mut server, 0, SVC_TEMP_ENTITY as f32);
         write_byte(&mut server, 0, TE_EXPLOSION as f32);
         write_coord(&mut server, 0, 1.0); // only one of three coords
-        reset_message_parsers(); // frame boundary
+        server.outbox().expect("outbox").reset_parsers(); // frame boundary
         // Continuing the old coords now must NOT complete a stale message.
         write_coord(&mut server, 0, 2.0);
         write_coord(&mut server, 0, 3.0);

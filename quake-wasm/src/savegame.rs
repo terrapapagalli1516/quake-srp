@@ -1,162 +1,24 @@
-//! Save/load — `Host_Savegame_f` / `Host_Loadgame_f` (host_cmd.c) over the
-//! page's localStorage: the console halves with the C's guards and messages,
-//! the rebuild of a [`Walk`] from a `.sav` text (the client's,
-//! [`quake_rs::client::host_cmd::build_walk_savegame`]), and the scratch-buffer
-//! exports the page moves the text through (plus the menu slot comments).
-
-use std::cell::RefCell;
+//! Save/load — `Host_Savegame_f` / `Host_Loadgame_f` (host_cmd.c) and the
+//! Load/Save menus' `M_ScanSaves` (menu.c), over `std::fs` as the C wrote
+//! them: the saves are `.sav` text files in the game directory
+//! ([`crate::common`]), which the browser keeps in the page's storage. The
+//! rebuild of a [`Walk`] from a save is the client's
+//! ([`quake_rs::client::host_cmd::build_walk_savegame`]).
 
 use quake_rs::client::host_cmd;
+use quake_rs::menu::MAX_SAVEGAMES;
 
-use crate::app::{ensure_app, pak, Walk};
+use crate::app::{ensure_app, Walk};
+use crate::common::{self, pak};
 use crate::snd_dma;
 
-// ---------------------------------------------------------------------------
-// Savegame persistence bridge (page-owned localStorage)
-//
-// The C's Host_Savegame_f/Host_Loadgame_f read and write .sav FILES; in the
-// browser the page owns persistence (localStorage), so the engine speaks text
-// through the same shared-scratch-buffer style the sound path uses:
-//
-//  * `save <name>` (console) runs the C's guards, builds the .sav text via
-//    Server::write_savegame, and queues (filename, text); the page polls
-//    `poll_save()` each frame, reads the name/text out of linear memory, and
-//    persists them under a per-name localStorage key. A storage failure
-//    reports back through `save_store_failed()` (the async stand-in for the
-//    C's synchronous "ERROR: couldn't open.").
-//  * `load <name>` (console) prints the C's "Loading game from ..." line and
-//    queues a request; the page polls `poll_load_request()`, fetches the
-//    stored text, writes it into the wasm scratch via `sav_alloc()` +
-//    linear-memory copy, then calls `load_game()`. `load_failed()` reports
-//    the C's "ERROR: couldn't open." when the key does not exist OR when
-//    `sav_alloc` rejects an oversized value (NULL: the page must not copy).
-//  * `extract_save_comment()` parses a stored .sav from the same scratch and
-//    returns its comment (underscores back to spaces, M_ScanSaves) for the
-//    Load/Save menu slot listings.
-// ---------------------------------------------------------------------------
-
-thread_local! {
-    /// Completed saves awaiting page pickup: `(filename, .sav text)` pairs.
-    static SAVE_QUEUE: RefCell<Vec<(String, String)>> = const { RefCell::new(Vec::new()) };
-    /// The save `poll_save()` popped, pinned for the ptr/len exports.
-    static SAVE_CUR: RefCell<(String, String)> =
-        const { RefCell::new((String::new(), String::new())) };
-    /// A pending load: the filename the page should fetch from localStorage.
-    static LOAD_REQUEST: RefCell<Option<String>> = const { RefCell::new(None) };
-    /// The request `poll_load_request()` popped, pinned for the ptr export.
-    static LOAD_REQ_CUR: RefCell<String> = const { RefCell::new(String::new()) };
-    /// Page->wasm scratch: stored .sav text handed back for `load_game()` /
-    /// `extract_save_comment()` (the inbound twin of the sound scratch).
-    static SAV_BUF: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
-    /// The comment `extract_save_comment()` produced, pinned for its ptr export.
-    static SAVE_COMMENT: RefCell<String> = const { RefCell::new(String::new()) };
-}
-
-/// Pop the next completed save into the pinned slot and return its TEXT byte
-/// length (0 = queue empty). The page then reads `save_name_*` + `save_text_ptr`.
-#[no_mangle]
-pub extern "C" fn poll_save() -> i32 {
-    SAVE_QUEUE.with(|q| {
-        let Some(item) = q.borrow_mut().pop() else {
-            return 0;
-        };
-        let len = item.1.len() as i32;
-        SAVE_CUR.with(|c| *c.borrow_mut() = item);
-        len
-    })
-}
-
-/// Byte length of the popped save's filename.
-#[no_mangle]
-pub extern "C" fn save_name_len() -> i32 {
-    SAVE_CUR.with(|c| c.borrow().0.len() as i32)
-}
-
-/// Pointer to the popped save's filename bytes.
-#[no_mangle]
-pub extern "C" fn save_name_ptr() -> *const u8 {
-    SAVE_CUR.with(|c| c.borrow().0.as_ptr())
-}
-
-/// Pointer to the popped save's .sav text bytes (length = `poll_save()`'s return).
-#[no_mangle]
-pub extern "C" fn save_text_ptr() -> *const u8 {
-    SAVE_CUR.with(|c| c.borrow().1.as_ptr())
-}
-
-/// The page failed to persist the popped save (localStorage threw — quota or
-/// privacy mode). The C fails synchronously with "ERROR: couldn't open."
-/// before writing; persistence here is asynchronous, so the error arrives a
-/// frame after the optimistic "done." (documented deviation).
-#[no_mangle]
-pub extern "C" fn save_store_failed() {
-    ensure_app(|a| {
-        a.console
-            .println("ERROR: couldn't store savegame (localStorage full?)");
-    });
-}
-
-/// Pop a pending load request and return the filename's byte length (0 = none).
-#[no_mangle]
-pub extern "C" fn poll_load_request() -> i32 {
-    LOAD_REQUEST.with(|r| {
-        let Some(name) = r.borrow_mut().take() else {
-            return 0;
-        };
-        let len = name.len() as i32;
-        LOAD_REQ_CUR.with(|c| *c.borrow_mut() = name);
-        len
-    })
-}
-
-/// Pointer to the popped load request's filename bytes.
-#[no_mangle]
-pub extern "C" fn load_request_ptr() -> *const u8 {
-    LOAD_REQ_CUR.with(|c| c.borrow().as_ptr())
-}
-
-/// The page found no stored save under the requested name: the C's fopen
-/// failure path, `Con_Printf("ERROR: couldn't open.\n")`.
-#[no_mangle]
-pub extern "C" fn load_failed() {
-    ensure_app(|a| a.console.println("ERROR: couldn't open."));
-}
-
-/// Hard cap on the inbound .sav scratch (a real save is ~100-400 KB; 8 MB is
-/// far past any legitimate file) so a hostile length can't balloon memory.
-const SAV_BUF_MAX: i32 = 8 * 1024 * 1024;
-
-/// Resize the inbound .sav scratch to `len` bytes and return its pointer; the
-/// page copies the stored text in, then calls `load_game()` /
-/// `extract_save_comment()`. An out-of-range `len` (negative, or past the
-/// 8 MB cap) FAILS CLOSED: the scratch is emptied and NULL comes back, and
-/// the page must honour the rejection (skip the copy, report `load_failed`).
-/// Returning any real pointer for a length we did not allocate would invite
-/// the caller to write `len` bytes through it — the exact wild write into
-/// linear memory the cap exists to prevent.
-#[no_mangle]
-pub extern "C" fn sav_alloc(len: i32) -> *mut u8 {
-    SAV_BUF.with(|b| {
-        let mut b = b.borrow_mut();
-        b.clear();
-        if !(0..=SAV_BUF_MAX).contains(&len) {
-            return std::ptr::null_mut();
-        }
-        b.resize(len as usize, 0);
-        b.as_mut_ptr()
-    })
-}
-
-/// Load the game whose .sav text the page placed in the scratch buffer
-/// (`Host_Loadgame_f`'s post-fopen half). On success the new walk replaces
-/// the current mode (1); on any parse/load failure the RUNNING GAME IS LEFT
-/// INTACT and the error prints to the console (0) — the C `Sys_Error`ed on a
-/// malformed save; we degrade (documented deviation).
-#[no_mangle]
-pub extern "C" fn load_game() -> i32 {
-    let bytes = SAV_BUF.with(|b| std::mem::take(&mut *b.borrow_mut()));
-    let text = String::from_utf8_lossy(&bytes).into_owned();
-    match build_walk_savegame(&text) {
+/// Load the game in the `.sav` `text` (`Host_Loadgame_f` after its fopen).
+/// On success the new walk replaces the current mode (true); on any
+/// parse/load failure the RUNNING GAME IS LEFT INTACT and the error prints to
+/// the console (false) — the C `Sys_Error`ed on a malformed save; we degrade
+/// (documented deviation).
+pub(crate) fn load_game_text(text: &str) -> bool {
+    match build_walk_savegame(text) {
         Ok(nw) => {
             ensure_app(|a| {
                 a.start_game(nw);
@@ -173,57 +35,39 @@ pub extern "C" fn load_game() -> i32 {
                 a.menu.reset_nav();
                 a.menu.sync_resolution(a.render_w as i32, a.render_h as i32);
             });
-            1
+            true
         }
         Err(msg) => {
             ensure_app(|a| a.console.println(msg));
-            0
+            false
         }
     }
 }
 
-/// Parse the .sav text in the scratch buffer and pin its comment (underscores
-/// converted back to spaces, like the C menu's `M_ScanSaves`) for the slot
-/// listings; returns the comment's byte length, or 0 for an unparseable text.
-#[no_mangle]
-pub extern "C" fn extract_save_comment() -> i32 {
-    let bytes = SAV_BUF.with(|b| std::mem::take(&mut *b.borrow_mut()));
-    let text = String::from_utf8_lossy(&bytes);
-    let Ok(sg) = quake_rs::save::parse_savegame(&text) else {
-        return 0;
-    };
-    let comment = quake_rs::save::comment_for_display(&sg.comment);
-    let len = comment.len() as i32;
-    SAVE_COMMENT.with(|c| *c.borrow_mut() = comment);
-    len
+/// The Load/Save listing for one save's text (`M_ScanSaves`: the comment,
+/// underscores back to spaces), or `None` for a text that does not parse.
+pub(crate) fn save_comment(text: &str) -> Option<String> {
+    let sg = quake_rs::save::parse_savegame(text).ok()?;
+    Some(quake_rs::save::comment_for_display(&sg.comment))
 }
 
-/// Pointer to the comment bytes `extract_save_comment()` produced.
-#[no_mangle]
-pub extern "C" fn save_comment_ptr() -> *const u8 {
-    SAVE_COMMENT.with(|c| c.borrow().as_ptr())
-}
-
-/// MERGE SEAM (Load/Save menu <- localStorage): assign menu slot `slot`'s
-/// comment from the savegame text the page just placed in the scratch via
-/// [`sav_alloc`] (one stored `.sav` per call). An empty/absent/unparseable
-/// buffer marks the slot unused (`"--- UNUSED SLOT ---"` in M_Load_Draw).
-/// The page refreshes all 12 slots at boot and after every persisted save,
-/// so the menu's listings always mirror what localStorage actually holds.
-#[no_mangle]
-pub extern "C" fn menu_set_save_comment(slot: i32) {
-    let Ok(slot) = usize::try_from(slot) else { return };
-    let bytes = SAV_BUF.with(|b| std::mem::take(&mut *b.borrow_mut()));
-    let comment = if bytes.is_empty() {
-        String::new()
-    } else {
-        let text = String::from_utf8_lossy(&bytes);
-        match quake_rs::save::parse_savegame(&text) {
-            Ok(sg) => quake_rs::save::comment_for_display(&sg.comment),
-            Err(_) => String::new(),
+/// `M_ScanSaves` (menu.c): each of the 12 slots' listing from `s<i>.sav` in
+/// the game directory — its comment, or an unused slot where the file is
+/// missing or does not parse. The C runs it whenever the Load or Save menu
+/// opens (`M_Menu_Load_f`, `M_Menu_Save_f`); the program's loop does the
+/// same (`sys`), and once at startup.
+pub(crate) fn scan_saves() {
+    let comments: [String; MAX_SAVEGAMES] = std::array::from_fn(|i| {
+        common::read_file(&format!("s{i}.sav"))
+            .ok()
+            .and_then(|bytes| save_comment(&String::from_utf8_lossy(&bytes)))
+            .unwrap_or_default()
+    });
+    ensure_app(|a| {
+        for (slot, comment) in comments.into_iter().enumerate() {
+            a.menu.set_save_comment(slot, comment);
         }
-    };
-    ensure_app(|a| a.menu.set_save_comment(slot, comment.clone()));
+    });
 }
 
 /// `COM_DefaultExtension` (common.c): append `ext` unless the last path
@@ -237,12 +81,12 @@ fn default_extension(path: &str, ext: &str) -> String {
     }
 }
 
-/// `Host_Savegame_f` (host_cmd.c), console half: run the C's guard sequence
-/// (exact messages, same order — minus `cmd_source`/multiplayer, which don't
-/// exist in this single-player shell), then queue the .sav text for the page.
+/// `Host_Savegame_f` (host_cmd.c): the C's guard sequence (exact messages,
+/// same order — minus `cmd_source`/multiplayer, which don't exist in this
+/// single-player shell), then the .sav text written to `<gamedir>/<name>.sav`.
 /// `name` is `argv[1]` (`None` reproduces the C's `Cmd_Argc() != 2` usage
-/// message at its position in the sequence). Also the host-side entry the
-/// Save menu's `MenuAction::SaveSlot(i)` will call with `"s<i>"`.
+/// message at its position in the sequence). The Save menu's
+/// `MenuAction::SaveSlot(i)` calls it with `"s<i>"`.
 pub(crate) fn do_save_command(name: Option<&str>) {
     ensure_app(|a| {
         // if (!sv.active) — no live single-player world (demo/attract mode).
@@ -273,18 +117,20 @@ pub(crate) fn do_save_command(name: Option<&str>) {
         let fname = default_extension(name, ".sav");
         a.console.println(format!("Saving game to {fname}..."));
         let text = w.server.write_savegame();
-        SAVE_QUEUE.with(|q| q.borrow_mut().push((fname, text)));
-        // The C prints "done." after its synchronous fwrite; the page's
-        // localStorage write happens next frame and reports a failure via
-        // save_store_failed() (documented deviation).
-        a.console.println("done.");
+        // fopen failing: "ERROR: couldn't open." (the page's storage keeping
+        // the file is asynchronous, and reports its own failure on the
+        // console: web/index.html).
+        match common::write_file(&fname, text.as_bytes()) {
+            Ok(()) => a.console.println("done."),
+            Err(_) => a.console.println("ERROR: couldn't open."),
+        }
     });
 }
 
-/// `Host_Loadgame_f` (host_cmd.c), console half: print the C's status line and
-/// queue the request; the page fetches the stored text and calls back into
-/// `load_game()` (or `load_failed()`). Also the host-side entry the Load
-/// menu's `MenuAction::LoadSlot(i)` will call with `"s<i>"`.
+/// `Host_Loadgame_f` (host_cmd.c): print the C's status line, read
+/// `<gamedir>/<name>.sav` ("ERROR: couldn't open." when it is not there) and
+/// load it ([`load_game_text`]). The Load menu's `MenuAction::LoadSlot(i)`
+/// calls it with `"s<i>"`.
 pub(crate) fn do_load_command(name: Option<&str>) {
     let Some(name) = name.filter(|s| !s.is_empty()) else {
         ensure_app(|a| a.console.println("load <savename> : load a game"));
@@ -294,7 +140,12 @@ pub(crate) fn do_load_command(name: Option<&str>) {
     // equivalent: the attract demo keeps idling until the swap commits.)
     let fname = default_extension(name, ".sav");
     ensure_app(|a| a.console.println(format!("Loading game from {fname}...")));
-    LOAD_REQUEST.with(|r| *r.borrow_mut() = Some(fname));
+    match common::read_file(&fname) {
+        Ok(bytes) => {
+            load_game_text(&String::from_utf8_lossy(&bytes));
+        }
+        Err(_) => ensure_app(|a| a.console.println("ERROR: couldn't open.")),
+    }
 }
 
 /// `Host_Loadgame_f`'s post-fopen half on the embedded pak
@@ -303,7 +154,7 @@ pub(crate) fn do_load_command(name: Option<&str>) {
 fn build_walk_savegame(text: &str) -> Result<Walk, String> {
     let pak = pak().ok_or_else(|| "Couldn't load map".to_string())?;
     let mut sound = Vec::new();
-    let walk = host_cmd::build_walk_savegame(pak.clone(), text, &mut sound);
+    let walk = host_cmd::build_walk_savegame(pak.clone(), text, &crate::app::session_rand(), &mut sound);
     snd_dma::play(&pak, sound);
     walk
 }
@@ -320,6 +171,11 @@ mod tests {
     use quake_rs::render;
 
     // ------------------------------------------------------------ save/load
+
+    /// A save file as the game directory holds it.
+    fn stored(name: &str) -> String {
+        String::from_utf8(common::read_file(name).expect("the save was written")).unwrap()
+    }
 
     /// The whole console scrollback as one string (oldest line first).
     fn console_text() -> String {
@@ -445,23 +301,17 @@ mod tests {
         run_console_line("load");
         assert!(console_text().contains("load <savename> : load a game"));
 
-        // load of a slot the page can't find -> the page calls load_failed().
+        // load of a slot that is not there: fopen fails.
         run_console_line("load missing_slot");
         assert!(console_text().contains("Loading game from missing_slot.sav..."));
-        assert!(poll_load_request() > 0, "the request reaches the page");
-        let name = LOAD_REQ_CUR.with(|c| c.borrow().clone());
-        assert_eq!(name, "missing_slot.sav");
-        load_failed();
         assert!(console_text().contains("ERROR: couldn't open."));
 
-        // And a healthy save passes the guards and queues for the page.
+        // And a healthy save passes the guards and writes its file.
         run_console_line("save ok_slot");
         let text = console_text();
         assert!(text.contains("Saving game to ok_slot.sav..."), "{text}");
         assert!(text.contains("done."), "{text}");
-        assert!(poll_save() > 0, "the .sav text is queued for the page");
-        let (fname, sav) = SAVE_CUR.with(|c| c.borrow().clone());
-        assert_eq!(fname, "ok_slot.sav");
+        let sav = stored("ok_slot.sav");
         assert!(sav.starts_with("5\n"), "SAVEGAME_VERSION header");
     }
 
@@ -514,14 +364,10 @@ mod tests {
 
         let digest_saved = world_digest();
 
-        // Save through the REAL console path; grab what the page would store.
+        // Save through the REAL console path, into the game directory.
         console_toggle();
         run_console_line("save sl_round");
-        let len = poll_save();
-        assert!(len > 0, "a completed save is queued");
-        let (fname, text) = SAVE_CUR.with(|c| c.borrow().clone());
-        assert_eq!(fname, "sl_round.sav");
-        assert_eq!(len as usize, text.len());
+        let text = stored("sl_round.sav");
         console_toggle();
 
         // Keep playing: the world diverges from the saved instant.
@@ -530,12 +376,10 @@ mod tests {
         }
         assert_ne!(world_digest(), digest_saved, "play diverged after saving");
 
-        // Load: the console requests, the page feeds the text back.
+        // Load it back through the console.
         console_toggle();
         run_console_line("load sl_round");
-        assert!(poll_load_request() > 0);
-        SAV_BUF.with(|b| *b.borrow_mut() = text.clone().into_bytes());
-        assert_eq!(load_game(), 1, "the stored save loads");
+        assert!(!console_text().contains("ERROR"), "{}", console_text());
 
         // ROUND-TRIP FIDELITY: the reloaded world equals the saved instant.
         assert_eq!(world_digest(), digest_saved, "load restored the saved world");
@@ -567,8 +411,7 @@ mod tests {
         let digest_saved = world_digest();
         console_toggle();
         run_console_line("save sl_reload");
-        assert!(poll_save() > 0);
-        let (_, text) = SAVE_CUR.with(|c| c.borrow().clone());
+        let text = stored("sl_reload.sav");
 
         // "Page reload": drop the entire App and boot a fresh session.
         APP.with(|c| *c.borrow_mut() = None);
@@ -576,8 +419,7 @@ mod tests {
         set_resolution(320, 200);
         APP.with(|c| c.borrow_mut().as_mut().unwrap().menu.visible = false);
 
-        SAV_BUF.with(|b| *b.borrow_mut() = text.into_bytes());
-        assert_eq!(load_game(), 1, "the save loads in the fresh session");
+        assert!(load_game_text(&text), "the save loads in the fresh session");
         assert_eq!(
             world_digest(),
             digest_saved,
@@ -628,12 +470,8 @@ mod tests {
         console_toggle();
         run_console_line("viewsize 60");
         run_console_line("save t");
-        assert!(poll_save() > 0);
-        let (_, text) = SAVE_CUR.with(|c| c.borrow().clone());
         run_console_line("load t");
-        assert!(poll_load_request() > 0);
-        SAV_BUF.with(|b| *b.borrow_mut() = text.into_bytes());
-        assert_eq!(load_game(), 1);
+        assert!(!console_text().contains("ERROR"), "{}", console_text());
         APP.with(|c| {
             let b = c.borrow();
             let a = b.as_ref().unwrap();
@@ -670,22 +508,20 @@ mod tests {
         let digest = world_digest();
 
         // Total garbage (including non-UTF8 bytes).
-        SAV_BUF.with(|b| *b.borrow_mut() = b"complete {{{ garbage \x01\xff".to_vec());
-        assert_eq!(load_game(), 0, "garbage is rejected");
+        let garbage = String::from_utf8_lossy(b"complete {{{ garbage \x01\xff").into_owned();
+        assert!(!load_game_text(&garbage), "garbage is rejected");
         assert_eq!(world_digest(), digest, "the running game is untouched");
 
         // A real save to corrupt.
         console_toggle();
         run_console_line("save sl_hostile");
-        assert!(poll_save() > 0);
-        let (_, text) = SAVE_CUR.with(|c| c.borrow().clone());
+        let text = stored("sl_hostile.sav");
         console_toggle();
 
         // Wrong version: the C's exact message.
         let mut wrong = text.clone();
         wrong.replace_range(0..1, "9");
-        SAV_BUF.with(|b| *b.borrow_mut() = wrong.into_bytes());
-        assert_eq!(load_game(), 0);
+        assert!(!load_game_text(&wrong));
         assert!(
             console_text().contains("Savegame is version 9, not 5"),
             "{}",
@@ -695,8 +531,7 @@ mod tests {
 
         // Truncated mid-block (cut inside the last "classname" key).
         let cut = text.rfind("\"classname\"").expect("save has classnames") + 5;
-        SAV_BUF.with(|b| *b.borrow_mut() = text.as_bytes()[..cut].to_vec());
-        assert_eq!(load_game(), 0, "a truncated save is rejected");
+        assert!(!load_game_text(&text[..cut]), "a truncated save is rejected");
         assert_eq!(world_digest(), digest, "still untouched");
 
         // A rejected save must not leak its HEADER into the shared per-thread
@@ -712,8 +547,7 @@ mod tests {
         lines[21] = "hostilepattern".into(); // hostile lightstyle 0
         let doctored = lines.join("\n");
         let cut = doctored.rfind("\"classname\"").expect("blocks survive doctoring") + 5;
-        SAV_BUF.with(|b| *b.borrow_mut() = doctored.as_bytes()[..cut].to_vec());
-        assert_eq!(load_game(), 0, "the doctored save is still rejected");
+        assert!(!load_game_text(&doctored[..cut]), "the doctored save is still rejected");
         assert_eq!(world_digest(), digest, "world (incl. skill) untouched");
         step(0.05); // run_frame re-syncs lightstyles from the shared transport
         assert_eq!(
@@ -730,54 +564,28 @@ mod tests {
         assert!(player_field("health") > 0.0);
     }
 
-    /// `sav_alloc` fails CLOSED on a hostile length: NULL back (the page then
-    /// skips the copy and reports `load_failed`) — never a pointer that
-    /// invites a `len`-byte write the engine did not allocate (review
-    /// finding: the old clamp-to-empty returned a dangling pointer the page
-    /// would copy a >8 MB localStorage value through, smashing linear memory).
+    /// `M_ScanSaves`: each slot's listing is the comment of `s<i>.sav` in
+    /// the game directory (the display form: underscores back to spaces), and
+    /// a slot whose file is missing or does not parse is unused.
     #[test]
-    fn sav_alloc_rejects_hostile_lengths_with_null() {
-        assert!(sav_alloc(SAV_BUF_MAX + 1).is_null());
-        assert!(sav_alloc(i32::MAX).is_null());
-        assert!(sav_alloc(-1).is_null());
-        assert!(sav_alloc(i32::MIN).is_null());
-        // A rejection also empties the scratch, so a page that ignored the
-        // NULL and called load_game anyway would parse "" (clean error),
-        // never a stale prior text.
-        SAV_BUF.with(|b| assert!(b.borrow().is_empty()));
-        // In-range lengths (the cap itself included) still allocate.
-        assert!(!sav_alloc(16).is_null());
-        SAV_BUF.with(|b| assert_eq!(b.borrow().len(), 16));
-        assert!(!sav_alloc(SAV_BUF_MAX).is_null());
-        SAV_BUF.with(|b| assert_eq!(b.borrow().len(), SAV_BUF_MAX as usize));
-    }
-
-    /// The slot-listing primitive for the (sibling-branch) Load/Save menus:
-    /// `extract_save_comment` parses a stored .sav from the scratch buffer and
-    /// returns the M_ScanSaves-style display comment (underscores -> spaces).
-    #[test]
-    fn comment_extraction_for_slot_listings() {
+    fn scan_saves_lists_the_slots_from_the_game_directory() {
         assert_eq!(boot(), 1);
         set_resolution(320, 200);
         APP.with(|c| c.borrow_mut().as_mut().unwrap().menu.visible = false);
         step(0.05);
         console_toggle();
-        run_console_line("save sl_comment");
-        assert!(poll_save() > 0);
-        let (_, text) = SAVE_CUR.with(|c| c.borrow().clone());
-
-        SAV_BUF.with(|b| *b.borrow_mut() = text.into_bytes());
-        let len = extract_save_comment();
-        assert_eq!(len as usize, 39, "SAVEGAME_COMMENT_LENGTH");
-        let comment = SAVE_COMMENT.with(|c| c.borrow().clone());
+        run_console_line("save s2");
+        common::write_file("s5.sav", b"not a save").unwrap();
+        scan_saves();
+        let comment = |i| APP.with(|c| c.borrow().as_ref().unwrap().menu.save_comment(i).to_string());
+        let c2 = comment(2);
+        assert_eq!(c2.len(), 39, "SAVEGAME_COMMENT_LENGTH");
         // e1m1's worldspawn message is "the Slipgate Complex"; kills at col 22.
-        assert!(comment.contains("Slipgate"), "{comment:?}");
-        assert!(comment.contains("kills:"), "{comment:?}");
-        assert!(!comment.contains('_'), "display form uses spaces: {comment:?}");
-
-        // Garbage in the scratch -> 0, no panic.
-        SAV_BUF.with(|b| *b.borrow_mut() = b"not a save".to_vec());
-        assert_eq!(extract_save_comment(), 0);
+        assert!(c2.contains("Slipgate") && c2.contains("kills:"), "{c2:?}");
+        assert!(!c2.contains('_'), "display form uses spaces: {c2:?}");
+        assert_eq!(comment(5), "", "garbage is an unused slot");
+        assert_eq!(comment(0), "", "a missing file is an unused slot");
+        assert_eq!(save_comment("not a save"), None);
     }
 
     /// Second review: saves the port wrote before it named the player

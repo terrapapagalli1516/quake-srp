@@ -368,7 +368,8 @@ fn census_client_think_runs_before_player_prethink() {
 /// resumes ("player unpaused the game").
 #[test]
 fn census_pause_stops_the_game_and_shows_the_plaque() {
-    use crate::app::{boot, pak, APP};
+    use crate::app::{boot, APP};
+    use crate::common::pak;
     use crate::console::console_toggle;
     use crate::host::step as host_step;
     use crate::input::{key_down, key_up};

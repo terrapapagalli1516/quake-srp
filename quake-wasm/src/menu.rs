@@ -1,7 +1,7 @@
 //! Menu glue — what menu.c's `M_Keydown` asks of the host: the actions the
 //! engine's `Menu` returns (New Game, Video mode, Save/Load slot, Go to
 //! console, leaving the main menu) carried out against the App, and the menu
-//! key exports, each one key press through keys.c's `Key_Event`
+//! keys the automation calls press, each through keys.c's `Key_Event`
 //! ([`crate::input::key_event`]).
 
 use quake_rs::keys::{
@@ -85,33 +85,30 @@ pub(crate) fn run_menu_deferred(d: MenuDeferred) {
 }
 
 /// One key press (down + up) for the menu, when it is up: a no-op otherwise,
-/// so the page's legacy menu exports never reach the game's bindings.
+/// so the automation's menu calls never reach the game's bindings.
 fn menu_press(key: u8) {
     if APP.with(|c| c.borrow().as_ref().is_some_and(|a| a.menu.visible)) {
         press(key);
     }
 }
 
-// --- the menu's keys as exports (automation, tests: the page sends every key
-// through `key_event`) -------------------------------------------------------
+// --- the menu's keys for the automation's calls and the tests (the page sends
+// every key through `key_event`) ----------------------------------------------
 
 /// `K_UPARROW` in the menu (`M_*_Key`). No-op when the menu is hidden.
-#[no_mangle]
-pub extern "C" fn menu_up() {
+pub(crate) fn menu_up() {
     menu_press(K_UPARROW);
 }
 
 /// `K_DOWNARROW` in the menu. No-op when the menu is hidden.
-#[no_mangle]
-pub extern "C" fn menu_down() {
+pub(crate) fn menu_down() {
     menu_press(K_DOWNARROW);
 }
 
 /// `K_ENTER` in the menu: activate the highlighted item (New Game starts the
 /// start hub and closes the menu; Load/Save slots, Video modes, Go to console
 /// and the rest as `M_*_Key` does them). No-op when the menu is hidden.
-#[no_mangle]
-pub extern "C" fn menu_select() {
+pub(crate) fn menu_select() {
     menu_press(K_ENTER);
 }
 
@@ -143,23 +140,20 @@ fn new_game() {
 /// Escape (`K_ESCAPE` through `Key_Event`): within the menu, back out a
 /// screen (Main closes it and resumes the demo loop); outside it,
 /// `M_ToggleMenu_f` — the main menu opens (or the console goes up).
-#[no_mangle]
-pub extern "C" fn menu_cancel() {
+pub(crate) fn menu_cancel() {
     press(K_ESCAPE);
 }
 
 /// Answer the Quit prompt "Yes" (the `y` key, `M_Quit_Key`): close the menu.
 /// Also answers New Game's "Are you sure?" (SCR_ModalMessage's `y`), which
 /// starts the new game. A no-op with the menu hidden.
-#[no_mangle]
-pub extern "C" fn menu_quit_yes() {
+pub(crate) fn menu_quit_yes() {
     menu_press(b'y');
 }
 
 /// Answer the Quit prompt "No" (the `n` key, `M_Quit_Key`): back to the
 /// screen it rose from. A no-op with the menu hidden.
-#[no_mangle]
-pub extern "C" fn menu_quit_no() {
+pub(crate) fn menu_quit_no() {
     menu_press(b'n');
 }
 
@@ -168,30 +162,26 @@ pub extern "C" fn menu_quit_no() {
 /// the menu is hidden. The Screen size row is `viewsize`, which the next
 /// `step` frames the view with — it never touches the framebuffer size (that
 /// is Enter on Video Options).
-#[no_mangle]
-pub extern "C" fn menu_left() {
+pub(crate) fn menu_left() {
     menu_press(K_LEFTARROW);
 }
 
 /// `K_RIGHTARROW` in the menu. See [`menu_left`].
-#[no_mangle]
-pub extern "C" fn menu_right() {
+pub(crate) fn menu_right() {
     menu_press(K_RIGHTARROW);
 }
 
 /// Backspace while the menu is up: on the Customize-controls screen this
 /// unbinds the highlighted command (`M_Keys_Key` K_BACKSPACE/K_DEL); on every
 /// other screen it does nothing.
-#[no_mangle]
-pub extern "C" fn menu_backspace() {
+pub(crate) fn menu_backspace() {
     menu_press(K_BACKSPACE);
 }
 
 /// 1 while the Keys screen is waiting for the next key to bind (`bind_grab`,
-/// menu.c). The page reads this to route the NEXT raw keypress to
-/// [`menu_bind_key`] instead of menu navigation.
-#[no_mangle]
-pub extern "C" fn menu_bind_grabbing() -> i32 {
+/// menu.c). The page hears it in the `State` record: a mouse click is then
+/// the key to bind (K_MOUSE1..3), even with the pointer free.
+pub(crate) fn menu_bind_grabbing() -> i32 {
     APP.with(|c| {
         c.borrow()
             .as_ref()
@@ -205,21 +195,19 @@ pub extern "C" fn menu_bind_grabbing() -> i32 {
 /// any key. Escape cancels, backtick is refused, any other key binds to the
 /// highlighted command; the grab ends either way. A no-op when nothing is
 /// grabbing.
-#[no_mangle]
-pub extern "C" fn menu_bind_key(keynum: i32) {
+pub(crate) fn menu_bind_key(keynum: i32) {
     if !(0..256).contains(&keynum) || menu_bind_grabbing() == 0 {
         return;
     }
     press(keynum as u8);
 }
 
-/// The menu screen currently showing, as a stable id — a read-only
-/// verification/debug export (the browser checks the screen transitions:
+/// The menu screen currently showing, as a stable id — the page's `State`
+/// record carries it, and the browser checks read it (the screen transitions:
 /// Multiplayer opens, Save gates, Video applies). 0 Main, 1 SinglePlayer,
 /// 2 Load, 3 Save, 4 Multiplayer, 5 Options, 6 Keys, 7 Video, 8 Help, 9 Quit,
 /// 10 the port's Web extras, 11 Multiplayer > Setup.
-#[no_mangle]
-pub extern "C" fn menu_screen_id() -> i32 {
+pub(crate) fn menu_screen_id() -> i32 {
     APP.with(|c| {
         c.borrow()
             .as_ref()
@@ -245,23 +233,20 @@ pub extern "C" fn menu_screen_id() -> i32 {
 
 /// The Web extras as bits — 1 `wasm_uncapped`, 2 `wasm_showfps`,
 /// 4 `wasm_exactpersp` ([`render::Extras::bits`]); 0 (all off, id's Quake)
-/// by default. The page stores this in localStorage whenever it changes.
-#[no_mangle]
-pub extern "C" fn extras() -> i32 {
+/// by default. `config.cfg` keeps them across sessions ([`crate::config`]).
+pub(crate) fn extras() -> i32 {
     APP.with(|c| c.borrow().as_ref().map(|a| a.menu.extras().bits() as i32).unwrap_or(0))
 }
 
-/// Set the Web extras from [`extras`]' bits: the page restoring the saved
-/// choice after boot. Unknown bits are ignored.
-#[no_mangle]
-pub extern "C" fn set_extras(bits: i32) {
+/// Set the Web extras from [`extras`]' bits (automation). Unknown bits are
+/// ignored.
+pub(crate) fn set_extras(bits: i32) {
     ensure_app(|a| a.menu.set_extras(render::Extras::from_bits(bits as u32)));
 }
 
 /// 1 when the menu is currently visible (capturing input), else 0. The page
-/// reads this to route Arrow/Enter keys to the menu vs. the game.
-#[no_mangle]
-pub extern "C" fn menu_visible() -> i32 {
+/// hears it in the `State` record, for what its own keys and clicks do.
+pub(crate) fn menu_visible() -> i32 {
     APP.with(|c| {
         c.borrow()
             .as_ref()

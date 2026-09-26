@@ -1,8 +1,35 @@
 //! host.c's frame gate — `Host_FilterTime`: whether a host frame runs, and
-//! how far it advances the game.
+//! how far it advances the game — and `Host_Error`, which ends it.
 //!
 //! Ported from Quake (GPLv2). Copyright (C) 1996-1997 Id Software, Inc.
 //! Source: `WinQuake/host.c`.
+
+use super::{SoundCall, Walk};
+use crate::QError;
+
+/// `Host_Error` (host.c) for an error in the local game — a QuakeC runtime
+/// error, `Host_Error ("Program error")`: print what `PR_RunError` (or
+/// `error`/`objerror`) printed and `Host_Error: Program error` to the console,
+/// shut the server down, and disconnect, which stops every sound
+/// (`CL_Disconnect`'s `S_StopAllSounds`). The walk keeps the message
+/// ([`Walk::host_error`]) for the host, which finishes the job: it drops the
+/// walk and stops the demo loop (`cls.demonum = -1`), and its console comes
+/// down over the disconnected screen. Every profile does this; it is id's.
+///
+/// An error that is not a program error (the port's servers raise none
+/// mid-game) is reported the same way, with its text as the message.
+pub fn host_error(w: &mut Walk, e: &QError, sound: &mut Vec<SoundCall>) {
+    let message = match e {
+        QError::Program(pe) => {
+            w.notify.print(&pe.console, w.host_time);
+            "Program error".to_string()
+        }
+        other => other.to_string(),
+    };
+    w.notify.print(&format!("Host_Error: {message}\n"), w.host_time);
+    w.host_error = Some(message);
+    sound.push(SoundCall::StopAll);
+}
 
 /// `Host_FilterTime` (host.c): the most a single frame may advance the game —
 /// a longer real frame (a hitch, a backgrounded tab) is clamped to 0.1 s of
@@ -74,6 +101,71 @@ pub fn host_filter_time_display(realtime: f64, oldrealtime: &mut f64) -> Option<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- Host_Error ---------------------------------------------------------
+
+    /// A pak holding only what [`super::super::assemble_walk`] needs: the palette.
+    fn palette_pak() -> crate::pak::Pak {
+        let files: [(&str, Vec<u8>); 1] = [("gfx/palette.lmp", vec![0u8; 768])];
+        let mut img = b"PACK".to_vec();
+        let body: usize = files.iter().map(|f| f.1.len()).sum();
+        img.extend_from_slice(&(12 + body as i32).to_le_bytes());
+        img.extend_from_slice(&(64 * files.len() as i32).to_le_bytes());
+        let mut dir = Vec::new();
+        for (name, bytes) in &files {
+            let mut n = [0u8; 56];
+            n[..name.len()].copy_from_slice(name.as_bytes());
+            dir.extend_from_slice(&n);
+            dir.extend_from_slice(&(img.len() as i32).to_le_bytes());
+            dir.extend_from_slice(&(bytes.len() as i32).to_le_bytes());
+            img.extend_from_slice(bytes);
+        }
+        img.extend_from_slice(&dir);
+        crate::pak::Pak::from_bytes("t".into(), img).expect("pak")
+    }
+
+    /// cl_main.rs:300 used to drop the server frame's `Result`, so a QuakeC
+    /// error vanished and the game went on. id's `PR_RunError` prints its
+    /// report and calls `Host_Error ("Program error")`, which ends the game:
+    /// here the report and `Host_Error: Program error` reach the console
+    /// text, every sound stops, the walk records the error for the host, and
+    /// it runs nothing more.
+    #[test]
+    fn a_quakec_error_in_the_frame_is_host_error() {
+        use crate::progs::{Op, Progs, Statement};
+        use crate::server::testutil::{floor_bsp, player_progs_with_prethink, prime_player_globals};
+        use crate::server::Server;
+        // PlayerPreThink calls the function in global 57, which holds 0.
+        let call_null = Statement { op: Op::Call0 as u16, a: 57, b: 0, c: 0 };
+        let (img, g_const100, g_origin) = player_progs_with_prethink(vec![call_null]);
+        let mut server = Server::new(floor_bsp(), Progs::parse(&img).expect("parse")).expect("server");
+        prime_player_globals(&mut server, g_const100, g_origin);
+        let player = server.connect_client().expect("connect");
+        let mut w = super::super::assemble_walk(palette_pak(), "maps/t.bsp".into(), server, player, [0.0; 16], floor_bsp(), 0.0, 0.0)
+            .expect("walk");
+        let vid = super::super::Vid {
+            width: 64,
+            height: 40,
+            display_aspect: 4.0 / 3.0,
+            exact_perspective: false,
+            video: crate::render::VideoCvars::CLASSIC,
+        };
+
+        let frame = super::super::cl_main::walk_frame(&mut w, 0.1, false, &vid);
+        assert_eq!(w.host_error.as_deref(), Some("Program error"));
+        let printed = w.notify.take_printed();
+        assert!(printed.starts_with("CALL0      57(???)"), "PR_PrintStatement first: {printed:?}");
+        assert!(printed.contains("             : PlayerPreThink\n"), "the stack trace: {printed:?}");
+        assert!(printed.ends_with("\nNULL function\nHost_Error: Program error\n"), "{printed:?}");
+        assert!(matches!(frame.sound[..], [SoundCall::StopAll]), "CL_Disconnect stops every sound");
+        assert!(frame.image.rgb.iter().all(|&p| p == [0, 0, 0]), "the disconnected screen");
+
+        // The game is over: nothing more runs.
+        let t = w.server.sv_time();
+        let next = super::super::cl_main::walk_frame(&mut w, 0.1, false, &vid);
+        assert_eq!(w.server.sv_time(), t);
+        assert!(next.sound.is_empty() && w.notify.take_printed().is_empty());
+    }
 
     // -- Host_FilterTime: realtime vs host_time ---------------------------------
 

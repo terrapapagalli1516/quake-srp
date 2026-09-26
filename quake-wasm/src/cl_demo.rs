@@ -50,7 +50,7 @@ pub(crate) fn step_timedemo(
 fn stop_all_sounds() {
     crate::snd_dma::SND_QUEUE.with(|q| q.borrow_mut().clear());
     crate::snd_dma::STOP_SND_QUEUE.with(|q| q.borrow_mut().clear());
-    if let Some(pak) = crate::app::pak() {
+    if let Some(pak) = crate::common::pak() {
         crate::snd_dma::play(&pak, vec![SoundCall::StopAll]);
     }
 }
@@ -81,9 +81,27 @@ pub(crate) fn cl_disconnect(a: &mut App) {
     cl_stop_playback(a);
     a.cls.timedemo = false;
     a.demo = None;
-    a.walk = None;
+    if let Some(w) = a.walk.take() {
+        a.sv_gravity = w.server.sv_gravity();
+    }
     a.mode = 1;
     a.disconnected = true;
+}
+
+/// The page's half of `Host_Error` (host.c), once the game has ended in one
+/// — a QuakeC runtime error ([`Walk::host_error`](quake_rs::client::Walk),
+/// set by the engine's `client::host::host_error`, which printed the report
+/// and stopped the sounds): the report into the console if the frame's text
+/// has not been taken yet, `CL_Disconnect`, and `cls.demonum = -1` so no demo
+/// loop starts; disconnected, the console covers the screen.
+pub(crate) fn finish_host_error(a: &mut App) {
+    let Some(w) = a.walk.as_mut().filter(|w| w.host_error.is_some()) else { return };
+    let printed = w.notify.take_printed();
+    if !printed.is_empty() {
+        a.console.print_notified(&printed);
+    }
+    cl_disconnect(a);
+    a.cls.demonum = -1;
 }
 
 /// `CL_PlayDemo_f` after its argument check: disconnect, print
@@ -101,6 +119,7 @@ pub(crate) fn cl_play_demo(a: &mut App, arg: &str, timedemo: bool) -> bool {
         return false;
     };
     d.viewsize = a.menu.viewsize();
+    d.sv_gravity = a.sv_gravity;
     a.demo = Some(d);
     a.mode = 1;
     a.disconnected = false;
@@ -162,8 +181,7 @@ pub(crate) fn host_end_game(a: &mut App) {
 /// `1` while a `timedemo` runs (`cls.timedemo`): the page then runs host
 /// frames back to back, a time slice's worth per animation frame, instead of
 /// one per refresh.
-#[no_mangle]
-pub extern "C" fn timedemo_running() -> i32 {
+pub(crate) fn timedemo_running() -> i32 {
     APP.with(|c| c.borrow().as_ref().map(|a| a.cls.timedemo as i32).unwrap_or(0))
 }
 
@@ -178,7 +196,8 @@ mod tests {
     use quake_rs::particles::Lcg;
     use quake_rs::server::{SoundEvent, TempEntityEvent};
 
-    use crate::app::{build_demo, pak};
+    use crate::app::build_demo;
+    use crate::common::pak;
     use crate::snd_dma::{
         poll_sound, set_audio_ready, sound_channel, sound_entity, sound_is_view_entity,
         sound_volume, SND_QUEUE,
@@ -1031,12 +1050,13 @@ mod tests {
     /// client's own cvar in playback too (it was a constant 800 here): at the
     /// default a recorded svc_particle puff (pt_slowgrav, dir 0) leaves its
     /// first 0.05 s frame at vz -2; after e1m8 (worldspawn sets 100, and the
-    /// cvar outlives the map) at -0.25.
+    /// cvar outlives the map) at -0.25. The page keeps the cvar across the
+    /// disconnect that starts a demo (`App::sv_gravity`).
     #[test]
     fn demo_particles_fall_by_the_sv_gravity_cvar() {
         use quake_rs::demo::{Demo, DemoFrame};
         use quake_rs::server::ParticleBurst;
-        let vz = || {
+        let vz = |sv_gravity: f32| {
             let plain = |t: f32| DemoFrame { time: t, ..Default::default() };
             let puff = DemoFrame {
                 time: 0.05,
@@ -1052,17 +1072,27 @@ mod tests {
                 frames: vec![plain(0.0), puff, plain(0.10), plain(0.15)],
             };
             let mut d = DemoPlay::new(build_test_pak(&[]), render::demo_room(), [[0u8; 3]; 256], demo);
+            d.sv_gravity = sv_gravity;
             let _ = step_demo(&mut d, 0.05, false, 64, 40);
             assert_eq!(d.idx, 1);
             let v: Vec<f32> = d.particles.particles().iter().map(|p| p.velocity[2]).collect();
             assert!(!v.is_empty() && v.iter().all(|&z| z == v[0]), "{v:?}");
             v[0]
         };
-        let _ = crate::app::build_walk_map("maps/e1m1.bsp").expect("e1m1"); // sv_gravity 800
-        assert_eq!(vz(), -800.0 * 0.05 * 0.05);
-        let _ = crate::app::build_walk_map("maps/e1m8.bsp").expect("e1m8"); // sv_gravity 100
-        assert_eq!(vz(), -100.0 * 0.05 * 0.05);
-        let _ = crate::app::build_walk_map("maps/e1m1.bsp");
+        // What the page hands the demo: the last game's cvar, kept by CL_Disconnect.
+        let page_gravity_after = |map: &str| {
+            let w = crate::app::build_walk_map(map).expect("map boots");
+            let mut g = 0.0;
+            crate::app::ensure_app(|a| {
+                a.start_game(w);
+                cl_disconnect(a);
+                g = a.sv_gravity;
+            });
+            g
+        };
+        assert_eq!(vz(page_gravity_after("maps/e1m1.bsp")), -800.0 * 0.05 * 0.05);
+        assert_eq!(vz(page_gravity_after("maps/e1m8.bsp")), -100.0 * 0.05 * 0.05);
+        assert_eq!(page_gravity_after("maps/e1m1.bsp"), 800.0);
     }
 
     /// CENSUS F18 on the recorded stream: C's demo playback parses the signon

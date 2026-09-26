@@ -7,7 +7,7 @@
 
 use crate::math::Vec3;
 use crate::sbar::{IT_INVISIBILITY, IT_INVULNERABILITY, IT_QUAD, IT_SUIT};
-use super::Camera;
+use super::{Camera, Image};
 
 /// Quake's `V_CalcBob` (view.c): the sinusoidal head-bob amount (world units) to
 /// add to the eye height while moving, so the view rocks up and down with each
@@ -107,6 +107,29 @@ pub fn cshift_ramps(shifts: &[([u8; 3], f32)], gamma: &[u8; 256]) -> [[u8; 256];
         }
     }
     ramps
+}
+
+/// `VID_ShiftPalette` at the port's boundary: the finished screen `image`
+/// into `out` as RGBA (alpha 255) through the palette-shift ramps
+/// ([`cshift_ramps`]; `None`: a plain copy), row runs on up to `threads`
+/// threads. Each pixel is its own map, so the bytes are the same for any
+/// thread count.
+pub fn pack_rgba(image: &Image, ramps: Option<&[[u8; 256]; 3]>, out: &mut Vec<u8>, threads: usize) {
+    let (w, h) = (image.w, image.h);
+    let n = w.saturating_mul(h).min(image.rgb.len());
+    out.resize(n * 4, 255);
+    super::band::map_rows(threads, h, out, w * 4, &image.rgb[..n], w, |out, rgb| match ramps {
+        None => {
+            for (o, px) in out.chunks_exact_mut(4).zip(rgb) {
+                o.copy_from_slice(&[px[0], px[1], px[2], 255]);
+            }
+        }
+        Some([r, g, b]) => {
+            for (o, px) in out.chunks_exact_mut(4).zip(rgb) {
+                o.copy_from_slice(&[r[px[0] as usize], g[px[1] as usize], b[px[2] as usize], 255]);
+            }
+        }
+    });
 }
 
 /// CalcGunAngle's `cl.viewent.angles` (view.c) for a camera built from the

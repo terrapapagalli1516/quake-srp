@@ -44,6 +44,7 @@ pub mod mdl;
 pub mod spr;
 
 pub mod progs;
+pub mod qrand;
 pub mod vm;
 pub mod builtins;
 
@@ -67,5 +68,5 @@ pub mod stepping;
 
 pub mod client;
 
-pub use error::{QError, Result};
+pub use error::{ProgramError, QError, Result};
 pub use math::Vec3;

@@ -21,6 +21,7 @@ use super::cl_input::{
     clamp_pitch, KeyMove, CL_ANGLESPEEDKEY, CL_PITCHSPEED, CL_YAWSPEED, SPEED, V_CENTERSPEED,
 };
 use super::cl_tent::{rocket_trail_type, spawn_temp_entity};
+use super::host::host_error;
 use super::host_cmd::{try_changelevel, try_restart, FL_ONGROUND, IT_INVISIBILITY};
 use super::lerpmove::{LerpMove, MOVETYPE_STEP};
 use super::view::{
@@ -172,10 +173,23 @@ pub fn offset_box(origin: [f32; 3], mins: [f32; 3], maxs: [f32; 3]) -> ([f32; 3]
     )
 }
 
+/// The frame of a game `Host_Error` has ended: nothing — the client is
+/// disconnected, and id's console covers the screen (`con_forcedup`) — and
+/// what it said to the sound layer.
+fn disconnected_frame(vid: &Vid, sound: Vec<SoundCall>) -> ClientFrame {
+    ClientFrame { image: render::Image::new(vid.width, vid.height, [0, 0, 0]), cshifts: Vec::new(), sound }
+}
+
 /// One live client frame (see the module doc) of `host_frametime` seconds —
 /// `Host_FilterTime`'s double, which the server's `sv.time` advances by
 /// exactly (`client_frame_f64`); the client's own timing takes it as an `f32`.
+/// A QuakeC error in the server's frame (or in a level change it makes) is
+/// `Host_Error`: [`host_error`] ends the game, and this frame and every later
+/// one is the disconnected screen, until the host drops the walk.
 pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -> ClientFrame {
+    if w.host_error.is_some() {
+        return disconnected_frame(vid, Vec::new());
+    }
     let dt = host_frametime as f32;
     let (render_w, render_h) = (vid.width, vid.height);
     let mut sound = Vec::new();
@@ -300,14 +314,19 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
         // edict behind the menu, and it runs when the server does.
         w.next_impulse = 0;
         let before = w.server.vm.ent_get_vector(w.player, "origin");
-        let _ = w.server.client_frame_stepped(&cmd, host_frametime, w.stepping);
+        if let Err(e) = w.server.client_frame_stepped(&cmd, host_frametime, w.stepping) {
+            // Host_Error longjmps out of the host frame: none of this frame's
+            // messages reach the client.
+            host_error(w, &e, &mut sound);
+            return disconnected_frame(vid, sound);
+        }
         // CL_LerpPoint on a local server: cl.time = the message time, sv.time
         // after this frame's physics.
         w.clock = w.server.time();
         apply_fixangle(w);
         parse_client_damage(w, before);
         // svc_stufftext to this client (PF_stuffcmd): the bonus flash.
-        for (ent, text) in crate::builtins::take_stufftext() {
+        for (ent, text) in w.server.drain_stufftext() {
             if ent == w.player && stufftext_bonus_flash(&text) {
                 w.bonus_blend = BONUS_PERCENT;
             }
@@ -367,6 +386,9 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
         // pressed a button). Reload the current level with the entry inventory.
         // `else if` so a changelevel this frame takes precedence over a restart.
         try_restart(w, &mut sound);
+    }
+    if w.host_error.is_some() {
+        return disconnected_frame(vid, sound); // the new level's QuakeC failed
     }
 
     // CL_ParseClientdata's item get-times (the new-weapon icon flash), on the
@@ -974,12 +996,36 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
     let eye_contents = crate::world::point_contents(&w.bsp, eye);
     let dowarp = eye_contents <= crate::bsp::CONTENTS_WATER;
     let rvrect = if dowarp {
-        crate::screen::warp_vrect(render_w, render_h, w.viewsize, intermission)
+        crate::screen::warp_vrect(render_w, render_h, w.viewsize, intermission, vid.video.hires)
     } else {
         vrect
     };
-    let view =
-        render::render_scene_ext_sprited(&w.bsp, &cam, rvrect.w, rvrect.h, &w.palette, &instances, &bmodels, &external, viewmodel, w.clock, &parts, &active_dlights, &light_styles, w.colormap.as_deref(), &sprites, &render_options(&rvrect, vid));
+    let scene = render::Scene {
+        colormap: w.colormap.as_deref(),
+        time: w.clock,
+        light_styles: &light_styles,
+        dlights: &active_dlights,
+        bmodels: &bmodels,
+        external: &external,
+        models: &instances,
+        sprites: &sprites,
+        particles: &parts,
+        viewmodel,
+        options: render_options(&rvrect, vid),
+        ..render::Scene::new(&w.bsp, cam, rvrect.w, rvrect.h, &w.palette)
+    };
+    // The screen: backtile around the view rectangle (SCR_UpdateScreen's
+    // Draw_TileClear) and the view drawn straight into it, or, underwater,
+    // into the warp buffer for D_WarpScreen below. The status bar is drawn
+    // over it later.
+    let backtile = backtile_for(&vrect, render_w, render_h, w.gfx_wad.as_ref());
+    let mut img = render::screen_with_backtile(vrect, render_w, render_h, backtile.as_ref(), &w.palette);
+    let warp_view = if dowarp {
+        Some(w.renderer.render(&scene))
+    } else {
+        w.renderer.render_into(&scene, &mut img);
+        None
+    };
     lap(Phase::Render3d);
     // Host_Frame runs CL_DecayLights after SCR_UpdateScreen: `radius -=
     // (cl.time - cl.oldtime)*decay` — 0 while paused, nothing fades or dies.
@@ -998,15 +1044,12 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
     // Underwater sine wobble (D_WarpScreen): the warp buffer's view, stretched
     // over the screen's view rectangle while it wobbles, BEFORE the content
     // tint so the screen ripples, not just darkens.
-    let view = if dowarp { render::apply_warp(view, vrect.w, vrect.h, w.clock) } else { view };
+    if let Some(view) = warp_view {
+        w.renderer.warp_into(view, &mut img, vrect, w.clock, vid.video.hires);
+    }
     // The 2-D oracle harness paints the view one flat colour (the C oracle's
     // `oracle_blank`), so a shot measures the 2-D layer alone (`set_view_hook`).
-    let view = view_hook(view, &w.palette);
-    // The screen: the view at its rectangle, backtile around it
-    // (SCR_UpdateScreen's Draw_TileClear), the status bar drawn over below.
-    let backtile = backtile_for(&vrect, render_w, render_h, w.gfx_wad.as_ref());
-    let mut img =
-        render::compose_view(view, vrect, render_w, render_h, backtile.as_ref(), &w.palette);
+    view_hook(&mut img, vrect, &w.palette);
     // cl.cshifts order: CONTENTS (bottom) -> DAMAGE -> BONUS -> POWERUP (top).
     let mut shifts: Vec<([u8; 3], f32)> = Vec::new();
     if let Some(cs) = render::content_cshift(eye_contents) {

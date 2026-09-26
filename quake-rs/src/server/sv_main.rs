@@ -17,9 +17,6 @@
 //! sv_main.c's message senders (`SV_StartSound`, `SV_StartParticle`) live with
 //! the rest of the message side in `msg.rs`.
 
-use super::host::{reset_changelevel, reset_restart, reset_skill};
-use super::lightstyle::reset_lightstyles;
-use super::msg::{reset_message_parsers, take_svc_events};
 use super::pr_cmds::install_engine_builtins;
 use super::sv_world::link_edict;
 use super::{
@@ -90,34 +87,11 @@ impl Server {
         install_engine_builtins(&mut vm);
         vm.set_host(Box::new(WorldModel::with_pak(bsp, pak)));
 
-        // A deferred changelevel() request is per-thread and outlives a server;
-        // clear it so a request issued against a prior level can never leak into
-        // this fresh one (mirrors `svs.changelevel_issued = false` in
-        // SV_SpawnServer).
-        reset_changelevel();
-        // Likewise a pending localcmd("restart") respawn must not survive into a
-        // freshly spawned server.
-        reset_restart();
-        // And a half-parsed message / queued MSG_ALL command (an intermission fired
-        // on the OLD level must never start one on this fresh server).
-        reset_message_parsers();
-        let _ = take_svc_events();
-        // The light-style transport is also per-thread and outlives a server;
-        // clear it so a prior level's patterns cannot leak before this level's
-        // worldspawn calls `lightstyle()` (mirrors `SV_SpawnServer` memset of
-        // sv.lightstyles).
-        reset_lightstyles();
-        // The `skill` cvar is process-global (we have no cvar registry); reset it
-        // to the single-player default (1, medium) for each fresh server so the
-        // spawn filter is deterministic and a prior level's `cvar_set("skill", …)`
-        // cannot leak in unexpectedly. A front-end that persists the player's
-        // chosen difficulty across a changelevel re-applies it with
+        // The world model starts with the cvars' defaults (skill 1, sv_gravity
+        // 800, `ServerCvars`). A front-end that persists the player's chosen
+        // difficulty across a changelevel re-applies it with
         // [`Server::set_skill`] after construction (the same way it carries
-        // `serverflags`).
-        reset_skill();
-        // `sv_gravity` is NOT reset: the C cvar outlives the map
-        // (SV_SpawnServer never touches it), and id1's worldspawn sets it on
-        // every map (100 on e1m8, 800 elsewhere).
+        // `serverflags`); id1's worldspawn sets sv_gravity on every map.
 
         // Init globals available in this program. The C `SV_SpawnServer` set
         // sv.time = 1.0 before loading entities.

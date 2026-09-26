@@ -2215,6 +2215,43 @@ AudioWorklet wiring).
 - `quaketool sound <pak> <demo> <out.wav> [--classic] [--rate HZ]` renders a
   demo's sound through the mixer natively.
 
+## The browser as a WASI program (2026-09-26, branch `q26/platform`)
+
+The browser build became a plain program (`fn main`, stdin/stdout, `std::fs`)
+in a Web Worker under `web/wasi.js`; `web/PLATFORM.md` has the design and
+the measurements. What that moved that id's game has an opinion on:
+
+- ✅ **Saves are files, as `Host_Savegame_f` writes them.** `save` writes
+  `id1/<name>.sav` and prints "done." after the write, or the C's "ERROR:
+  couldn't open." when it fails (the page's asynchronous "couldn't store"
+  message is gone; a storage failure after the fact is `echo`ed by the page).
+  `load` reads the file (`Host_Loadgame_f`). The Load and Save menus list the
+  slots from `s0.sav`..`s11.sav` when they open (`M_ScanSaves` in
+  `M_Menu_Load_f`/`M_Menu_Save_f`), in the program now. Tests in
+  `savegame.rs`; `web/verify_save.py`.
+- ✅ **`config.cfg`** (`Host_WriteConfiguration`, quake.rc's `exec
+  config.cfg`). It archives what the page kept before: the video mode (the
+  port's `_vid_resolution WxH`, where id archives a mode number), `viewsize`
+  and the Web extras. Written when a value changes (a page is never told it
+  quits), exec'd at startup before the attract loop, values unquoted (this
+  console has no `COM_Parse`). Key bindings and the other Options cvars are
+  not archived yet, as the page never kept them. Tests in `config.rs`.
+- ✅ **`play`** (`S_Play`): each named sample (`.wav` added without an
+  extension) as a local sound; the page's sound button runs `play
+  items/r_item1.wav`. Test `play_queues_each_named_sample_as_a_local_sound`.
+- ✅ **`S_StopAllSounds` stops what the frame started before it, and only
+  that.** A level change's stop now drops the one-shots and stops queued
+  earlier in the same frame, and the page hears it before the new level's
+  sounds, which play. The old page drained one-shots first and stopped every
+  source at the generation change after them, so a sound the new level
+  started in its first frame was cut. Test
+  `stop_all_drops_the_sounds_queued_before_it_and_keeps_those_after`.
+- ✅ **A level's placed loops are that level's.** With audio unlocked after
+  the walk had booted, the old page started the attract demo's 66 loops over
+  e1m1 (`verify_ambient.py`: "e1m1 static loops started 66"; e1m1 has 14);
+  the new page keeps each level's loop records and starts those, once each
+  (Firefox found them started twice).
+
 ## LOW (27)
 
 Tracked but deferred (cosmetic/edge). A few already landed in wave 1: SV_SetIdealPitch, SV_CheckStuck, groundentity-on-landed-entity, perspective-correct z-buffer (1/z), continuous 1/z particle size, debug builtins inert, light-style default, frame-index reset-to-0. Remaining low items (~~SV_TryUnstick/WallFriction~~ (✅ Round 2), ~~force_retouch~~ (✅ CENSUS F8, `quake/fix-server`), sky case-sensitivity, ~~affine span subdivision~~ (✅ `quake/w2b`, 16-pixel spans), TE color-ramp edge cases, audio cull threshold, etc.) are low-value and unscheduled. The current list is "Open, as of 2026-09-25" at the top.
@@ -2350,3 +2387,38 @@ demo hashes and timedemo are unchanged by it. Measured in `FRAMERATE.md`
 ("Monsters between their steps"): at 240 Hz a walking grunt is drawn moving
 in 99.8% of frames (Classic 4.2%), its largest move in a frame 0.17 units
 (4.1), half a step behind the server on average.
+
+## QuakeC errors end the game (2026-09-26, branch `q26/server`)
+
+The client dropped the server frame's `Result` (`client/cl_main.rs:300`), and the server
+isolated a failing think, touch, `blocked` or spawn function and carried on: a QuakeC
+runtime error vanished and the game went on. id's `PR_RunError` (pr_exec.c) prints the
+failing statement (`PR_PrintStatement`), a stack trace (`PR_StackTrace`) and the message,
+then `Host_Error ("Program error")` (host.c) shuts the server down, disconnects, stops the
+demo loop and drops to the console. Every profile now does that; it is id's, not an extra.
+
+- ✅ **The report, to the column.** `vm/print.rs` ports `PR_PrintStatement` (id's
+  `pr_opnames`, where the disassembler says `DIV_F`/`LOAD_F` id says `DIV`/`INDIRECT`),
+  `PR_GlobalString`, `PR_ValueString`, `PR_StackTrace` and `ED_Print`, padding included;
+  `a_program_error_is_pr_run_errors_report_and_halts_the_vm` pins the text.
+- ✅ **The longjmp.** The first error halts the VM: the QuakeC running, and whatever
+  called it through a builtin (a touch a `walkmove` fired), stops; the server frame or
+  level load returns the error; the server runs no more QuakeC. The census, a harness,
+  resumes the VM (`reset_execution`) and carries on, as before.
+- ✅ **Host_Error in the client.** `client::host::host_error` prints the report and
+  `Host_Error: Program error` to the console text and stops every sound
+  (`CL_Disconnect`'s `S_StopAllSounds`); `walk_frame` shows the disconnected screen from
+  then on and sets `Walk::host_error` for the host, which drops the walk, sets
+  `cls.demonum = -1` and brings the console down (the shell's side: not wired yet, see the
+  branch report). A changelevel, restart or `kill` whose QuakeC fails ends the game the
+  same way; a missing or corrupt map still leaves the level running (the port's degrade).
+- ✅ **`error` and `objerror` (CENSUS L16).** id prints `======SERVER ERROR in <function>:`
+  (or `OBJECT ERROR`) and the text, dumps `self` (`ED_Print`), and calls `Host_Error`
+  directly (no statement or trace); `objerror` frees `self` first. Both were `PR_RunError`s
+  with a banner of the port's own that left `self` alive. The census's forced touch of
+  start.bsp's unreachable teleporter now frees it: that map's census has 1 fault where it
+  had 3 (two fewer touches, frames, teleport sounds and splashes); every other map's
+  census is unchanged when run alone.
+- **Not id's:** a QuakeC error while `build_walk_map` / `build_walk_savegame` bring up a
+  NEW game returns `None` / the error text without id's report (the host prints "map not
+  found" or the text); no shareware map raises one (census: 0 spawn errors).

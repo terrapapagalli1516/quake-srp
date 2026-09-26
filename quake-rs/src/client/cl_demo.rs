@@ -762,7 +762,7 @@ fn render_demo_frame(
     // client's own sv_gravity cvar in playback too — 800, or what the last map
     // played set it to (e1m8's worldspawn: 100), not the recording's.
     if cl_frametime.is_finite() && cl_frametime > 0.0 {
-        d.particles.integrate(cl_frametime, v.time, crate::server::Server::sv_gravity_cvar() * 0.05);
+        d.particles.integrate(cl_frametime, v.time, d.sv_gravity * 0.05);
     }
     // The RECORDED svc_lightstyle table drives the world lighting through the
     // same R_AnimateLight 10 Hz logic the live walk uses (lightstyle_scales_at)
@@ -815,19 +815,37 @@ fn render_demo_frame(
     let eye_contents = crate::world::point_contents(&d.bsp, cam.pos);
     let dowarp = eye_contents <= crate::bsp::CONTENTS_WATER;
     let rvrect = if dowarp {
-        crate::screen::warp_vrect(render_w, render_h, d.viewsize, f.intermission != 0)
+        crate::screen::warp_vrect(render_w, render_h, d.viewsize, f.intermission != 0, vid.video.hires)
     } else {
         vrect
     };
-    let view = render::render_scene_ext_sprited(&d.bsp, &cam, rvrect.w, rvrect.h, &d.palette, &owned, &bmodels, &[], viewmodel, v.time, &parts, &[], &demo_styles, d.colormap.as_deref(), &sprite_insts, &render_options(&rvrect, vid));
-    lap(Phase::Render3d);
-    // D_WarpScreen: stretched over the screen's view rectangle while it
-    // wobbles — the warp applies to the 3-D view FIRST; the content tint joins
-    // the deferred whole-screen blend below (V_UpdatePalette order).
-    let view = if dowarp { render::apply_warp(view, vrect.w, vrect.h, v.time) } else { view };
+    let scene = render::Scene {
+        colormap: d.colormap.as_deref(),
+        time: v.time,
+        light_styles: &demo_styles,
+        bmodels: &bmodels,
+        models: &owned,
+        sprites: &sprite_insts,
+        particles: &parts,
+        viewmodel,
+        options: render_options(&rvrect, vid),
+        ..render::Scene::new(&d.bsp, cam, rvrect.w, rvrect.h, &d.palette)
+    };
+    // The screen, backtile around the view rectangle, and the view drawn
+    // straight into it — or, submerged, into the warp buffer and then
+    // D_WarpScreen'd over the rectangle while it wobbles: the warp applies to
+    // the 3-D view FIRST; the content tint joins the deferred whole-screen
+    // blend below (V_UpdatePalette order).
     let backtile = backtile_for(&vrect, render_w, render_h, d.gfx_wad.as_ref());
-    let mut img =
-        render::compose_view(view, vrect, render_w, render_h, backtile.as_ref(), &d.palette);
+    let mut img = render::screen_with_backtile(vrect, render_w, render_h, backtile.as_ref(), &d.palette);
+    if dowarp {
+        let view = d.renderer.render(&scene);
+        lap(Phase::Render3d);
+        d.renderer.warp_into(view, &mut img, vrect, v.time, vid.video.hires);
+    } else {
+        d.renderer.render_into(&scene, &mut img);
+        lap(Phase::Render3d);
+    }
     lap(Phase::Post3d);
     // A recorded intermission/finale frame draws its overlay exactly like the
     // live walk (SCR_UpdateScreen's cl.intermission branches), gated on the game
@@ -1034,7 +1052,7 @@ mod tests {
         DemoPlay::new(pak, render::demo_room(), [[0u8; 3]; 256], demo)
     }
 
-    const VID: Vid = Vid { width: 64, height: 40, display_aspect: 4.0 / 3.0, exact_perspective: false };
+    const VID: Vid = Vid { width: 64, height: 40, display_aspect: 4.0 / 3.0, exact_perspective: false, video: render::VideoCvars::CLASSIC };
 
     /// Entity `num` moved from `from` to `to` (x) this message.
     fn moved(num: i32, from: f32, to: f32) -> EntSnapshot {
@@ -1231,7 +1249,7 @@ mod tests {
         })
         .unwrap();
         let mut d = DemoPlay::new(pak, render::demo_room(), [[0u8; 3]; 256], demo);
-        let vid = Vid { width: 64, height: 40, display_aspect: 4.0 / 3.0, exact_perspective: false };
+        let vid = Vid { width: 64, height: 40, display_aspect: 4.0 / 3.0, exact_perspective: false, video: render::VideoCvars::CLASSIC };
         // The first frame (CL_TimeDemo_f's) reads through the second message;
         // the time between messages is not what moves playback on.
         let mut shown = Vec::new();

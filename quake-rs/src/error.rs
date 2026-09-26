@@ -24,6 +24,31 @@ pub enum QError {
     },
     /// A structurally invalid value (bad count, version, offset, …).
     Invalid(String),
+    /// A QuakeC runtime error: id's `Host_Error ("Program error")`, which
+    /// ends the game.
+    Program(Box<ProgramError>),
+}
+
+/// A QuakeC runtime error — `PR_RunError` (a VM fault, a bad builtin call),
+/// or the `error`/`objerror` builtins — which id's host answers with
+/// `Host_Error ("Program error")`: the server shuts down, the client
+/// disconnects, and the console comes down with what was printed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProgramError {
+    /// The QuakeC function that was running (`pr_xfunction`).
+    pub function: String,
+    /// The error: `PR_RunError`'s message, or the text `error()` was given.
+    pub message: String,
+    /// Everything id printed to the console on the way to `Host_Error`: for
+    /// `PR_RunError` the failing statement, the stack trace and the message;
+    /// for `error`/`objerror` their banner and `ED_Print (self)`.
+    pub console: String,
+}
+
+impl From<ProgramError> for QError {
+    fn from(e: ProgramError) -> Self {
+        QError::Program(Box::new(e))
+    }
 }
 
 /// Crate-wide result alias.
@@ -57,6 +82,7 @@ impl fmt::Display for QError {
                 "bad magic in {context}: found {found:02x?}, expected {expected:?}"
             ),
             QError::Invalid(msg) => write!(f, "invalid data: {msg}"),
+            QError::Program(e) => write!(f, "program error in {}(): {}", e.function, e.message),
         }
     }
 }

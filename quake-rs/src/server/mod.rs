@@ -47,8 +47,10 @@
 //! * The tokenizer ([`Tokenizer`]) is a faithful transcription of `COM_Parse`
 //!   working over `&str` byte positions, so a malformed entity blob yields fewer
 //!   tokens rather than reading out of bounds.
-//! * Spawning catches a per-entity spawn-function error and continues, exactly
-//!   as the spec requires (the C aborted the host on the first `Host_Error`).
+//! * A QuakeC runtime error is id's `PR_RunError` → `Host_Error`: the first one
+//!   halts the VM ([`Vm::execute`]) and ends whatever the server was doing — a
+//!   frame, a level load — with that [`crate::QError::Program`] error, for the
+//!   front-end to end the game on.
 //! * The borrow discipline from `vm.rs` is respected: the host is only held out
 //!   of the VM for the duration of a single trace / contents query, never across
 //!   an [`Vm::execute`] call (which itself reaches the host via `with_host`).
@@ -59,7 +61,7 @@ use crate::bsp::Bsp;
 use crate::math::Vec3;
 use crate::stepping::Stepping;
 use crate::vm::{Host, HostTrace, Vm};
-use crate::{QError, Result};
+use crate::Result;
 
 mod host;
 mod lightstyle;
@@ -74,7 +76,7 @@ mod sv_world;
 
 pub use lightstyle::{lightstyle_scales_at, MAX_LIGHTSTYLES};
 pub use msg::{
-    te_consts, GameMessage, ParticleBurst, SoundEvent, StaticSound, SvcEvent, TempEntityEvent,
+    te_consts, GameMessage, Outbox, ParticleBurst, SoundEvent, StaticSound, SvcEvent, TempEntityEvent,
 };
 pub use pr_cmds::install_engine_builtins;
 pub use sv_main::{EntityDlight, EF_BRIGHTLIGHT, EF_DIMLIGHT, EF_MUZZLEFLASH};
@@ -84,22 +86,13 @@ pub use sv_move::{
 pub use sv_user::v_calc_roll;
 pub use sv_world::{probe_point_contents, sv_impact, sv_move, touch_triggers, MoveTrace};
 
-/// Restart the process-global random sequences — id's one `rand()`, here
-/// QuakeC's `random()` and the monsters' chase-direction draws — from a
-/// fresh process's seeds, so two runs in one process see the same numbers
-/// (`quaketool framerate` compares one scenario at several frame rates).
-pub fn reset_random() {
-    crate::builtins::reset_random();
-    sv_move::reset_ai_rand();
-}
 
-pub(crate) use host::{capture_transports, restore_transports};
-pub(crate) use lightstyle::{push_lightstyle, snapshot_lightstyles};
+pub use host::ServerCvars;
 pub(crate) use pr_edict::{ed_new_string, parse_float, parse_int, parse_vector, Tokenizer};
 pub(crate) use sv_world::link_edict;
 
 #[cfg(test)]
-mod testutil;
+pub(crate) mod testutil;
 
 // ---------------------------------------------------------------------------
 // Quake constants used by the server (server.h / sv_phys.c / pr_cmds.c).
@@ -203,6 +196,12 @@ pub struct WorldModel {
     /// `"maps/b_explob.bsp"` -> `(0,0,0)..(32,32,64)`. Filled by
     /// [`precache_model`] so `setmodel` finds them.
     model_bounds: std::collections::HashMap<String, (Vec3, Vec3)>,
+    /// What this server's QuakeC sent out, until the server drains it (see
+    /// [`Outbox`]). It lives here, on the [`Host`], because that is what a
+    /// builtin can reach ([`Vm::with_host`]).
+    outbox: Outbox,
+    /// The `skill` and `sv_gravity` cvars (see [`ServerCvars`]).
+    cvars: ServerCvars,
 }
 
 /// `mod->mins`/`maxs` of the model file `name` in `pak`, as `Mod_LoadModel`
@@ -252,6 +251,8 @@ impl WorldModel {
             precache_sounds: vec![String::new()],
             pak,
             model_bounds: std::collections::HashMap::new(),
+            outbox: Outbox::default(),
+            cvars: ServerCvars::default(),
         };
         // Slot 1 is the world brush model. id used the map name; "*0" is the
         // submodel-0 (worldspawn) reference and is what setmodel resolves.
@@ -347,6 +348,18 @@ impl Host for WorldModel {
     fn bsp(&self) -> &Bsp {
         &self.bsp
     }
+
+    fn outbox(&mut self) -> &mut Outbox {
+        &mut self.outbox
+    }
+
+    fn cvars(&self) -> &ServerCvars {
+        &self.cvars
+    }
+
+    fn cvars_mut(&mut self) -> &mut ServerCvars {
+        &mut self.cvars
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -374,11 +387,11 @@ pub struct Server {
     /// (`pub(crate)`: the savegame loader re-identifies the player edict.)
     pub(crate) player: i32,
     /// The map's animated light-style patterns (`sv.lightstyles[64]`), owned by
-    /// the server. The `lightstyle()` builtin writes a thread-local transport;
-    /// the server syncs that into this field after each QuakeC execution window
+    /// the server. The `lightstyle()` builtin sends its writes to the outbox;
+    /// the server applies them to this field after each QuakeC execution window
     /// (`spawn_entities` / `run_frame`). `lightstyle_scales` reads it to produce
-    /// the per-style brightness scales the renderer applies each frame. Cleared in
-    /// [`Server::new`] so a changelevel re-populates it from the new worldspawn.
+    /// the per-style brightness scales the renderer applies each frame. Empty in
+    /// a new server, so a changelevel re-populates it from the new worldspawn.
     /// (`pub(crate)`: `Host_Loadgame_f` overwrites all 64 from the savegame.)
     pub(crate) lightstyles: [String; MAX_LIGHTSTYLES],
     /// `sv.name` (server.h): the bare map name (`"e1m1"`), recorded by
@@ -425,8 +438,6 @@ pub struct SpawnReport {
     pub inhibited: usize,
     /// Entities with a classname but no matching spawn function.
     pub no_spawn_function: usize,
-    /// Entities whose spawn function returned an error (caught, not fatal).
-    pub spawn_errors: usize,
     /// `(classname, count)` pairs, sorted by count descending then name.
     pub classnames: Vec<(String, usize)>,
 }
@@ -436,10 +447,6 @@ pub struct SpawnReport {
 pub struct FrameReport {
     /// Number of think functions that fired this frame.
     pub thinks_fired: usize,
-    /// Thinks that faulted (e.g. hit an unimplemented engine builtin). The
-    /// offending entity is isolated and the frame continues, mirroring the
-    /// per-entity robustness of the spawn loop.
-    pub think_errors: usize,
     /// The `time` global after the frame.
     pub time: f32,
 }
@@ -546,21 +553,23 @@ impl Server {
     }
 
     /// Execute a system QuakeC function with `self = self_e`, `other = other_e`.
-    /// Returns `Ok(true)` if it existed and ran, `Ok(false)` if absent. A program
-    /// fault is caught (`reset_execution`) and surfaced as `Err`, never panicked.
+    /// Returns `Ok(true)` if it existed and ran, `Ok(false)` if absent, and the
+    /// program error if it failed (the VM has halted: see [`Vm::execute`]).
     fn run_sys(&mut self, name: &str, self_e: i32, other_e: i32) -> Result<bool> {
         let Some(f) = self.sys_function(name) else {
             return Ok(false);
         };
         self.vm.gset_int("self", self_e);
         self.vm.gset_int("other", other_e);
-        if let Err(e) = self.vm.execute(f) {
-            self.vm.reset_execution();
-            return Err(crate::QError::invalid(format!(
-                "QuakeC error in {name}(): {e}"
-            )));
-        }
+        self.vm.execute(f)?;
         Ok(true)
+    }
+
+    /// The program error the VM halted on, as an `Err`, if it has: QuakeC
+    /// the physics ran outside a think (a touch, a pusher's `blocked`) failed,
+    /// and id's longjmp would have left the frame there.
+    fn check_halted(&self) -> Result<()> {
+        self.vm.halted().map_or(Ok(()), |e| Err(e.clone().into()))
     }
 
     /// The player's attack-relevant state for verification: `(button0, weapon,
@@ -586,12 +595,6 @@ impl Server {
     }
 }
 
-/// Build a [`QError`] for an unexpected server condition. (Currently unused on
-/// the happy path; kept so callers can surface a structured error if needed.)
-#[allow(dead_code)]
-fn server_error(msg: impl Into<String>) -> QError {
-    QError::invalid(msg.into())
-}
 
 // ---------------------------------------------------------------------------
 // Tests
