@@ -80,7 +80,8 @@ a digest-pinned `i386/debian` container and runs directly on the x86_64 host.
 
 **Port side.** `quaketool view <pak> <map> <out.ppm> [--res] [--origin] [--angles]
 [--time] [--fov] [--aspect] [--exactpersp] [--ents FILE] [--particles FILE] [--viewmodel M:F] [--bench N]` renders one exactly
-specified view through the same `render_scene_ext_sprited` the game uses. It is a
+specified view through the same renderer the game uses (`render::Renderer` drawing a
+`render::Scene`; `quaketool --help` lists the rest of its options). It is a
 new subcommand; no existing output changed (goldens `fb14bd65`/`a6f98d8a`/`0211e6d4`
 when it was added; the renderer fixes since moved them to `4807aaa1`/`9ae2b478`/`c65b7046`
 at `3ba835f`).
@@ -378,10 +379,10 @@ after the map loads:
   sliders read 0 without) and draws the video menu's title, so Options shows its
   "Video Options" row as the DOS and Windows drivers do.
 - **The port's side** is the live `App` (the browser's own code, compiled
-  natively) driven through the page's exports by an ignored test,
-  `quake-wasm/src/oracle_screen.rs` (`QUAKE_SCREEN_SCRIPT=script cargo test
-  --release --lib oracle_screen -- --ignored`; the script commands are in its
-  header). A test-only hook in `cl_walk.rs` paints the view the same flat colour,
+  natively) driven through the host's own functions, as the page's calls reach them,
+  by an ignored test, `quake-wasm/src/oracle_screen.rs` (`QUAKE_SCREEN_SCRIPT=script
+  cargo test --release --bin quake oracle_screen -- --ignored`; the script commands are in its
+  header). The client's view hook (`quake_rs::client::set_view_hook`) paints the view the same flat colour,
   and each shot is handed the C frame's clocks (`realtime` for the flashing
   cursors, `host_time` for the menu's spinning dot, the finale's reveal time).
 - The port runs its Classic profile (every departure off, id's
@@ -538,7 +539,7 @@ the play position overtook (`S_Update_`'s "overshot" reset), on both sides.
 ## Classic (`classic_check.py`)
 
 ```sh
-uv run oracle/classic_check.py                        # ~40 s once built; exit 0 = Classic is id's
+uv run oracle/classic_check.py                        # about a minute once built; exit 0 = Classic is id's
 uv run oracle/classic_check.py --only goldens,play    # some of it
 uv run oracle/classic_check.py --record --note "..."  # re-record, saying why
 ```
@@ -565,21 +566,28 @@ recording (first on `a50d8d7`, the settings branch's base). A change that
 moves an identity value on purpose is re-recorded with `--record --note`,
 and says so where the fidelity change is recorded (AUDIT.md).
 
-**Last run** (branch `q26/settings` after merging `quake/2026` at `207eee1`
-and `q26/lerp`, 2026-09-26; the tools' outputs were kept beside the report):
+**Last run** (branch `q26/docs` on `244bcd5`, the end of the 2026 push,
+2026-09-26; about a minute with everything built):
 
 ```
 PASS  goldens      0.1 s  3 values match
-PASS  play        14.4 s  42 values match
-PASS  timedemo     4.3 s  3 values match
-PASS  census       1.3 s  1 values match
-PASS  edicts       1.9 s  9 values match
-PASS  oracle       0.6 s  8 values match
-PASS  screen2d     3.2 s  146 values match
-PASS  demolerp    19.8 s  0 values match
-PASS  sound        2.3 s  0 values match
+PASS  play        12.5 s  42 values match
+PASS  timedemo     3.9 s  3 values match
+PASS  census       1.2 s  1 values match
+PASS  edicts       2.1 s  9 values match
+PASS  oracle       0.9 s  8 values match
+PASS  screen2d    10.4 s  146 values match
+PASS  demolerp    20.0 s  0 values match
+PASS  sound        3.3 s  0 values match
 ALL PASS
 ```
+
+"Values match" counts the values compared with `classic_expected.txt`. The
+`demolerp` and `sound` rows record nothing: they compare the port with id's C
+live, in the same run (every demo MATCH, every case sample-identical), so their
+count is 0 and their PASS is the live comparison's. The `oracle` and `screen2d`
+rows do both: the live comparison with id's C, checked against the recorded match
+of each row.
 
 ## Demo playback (`demo_lerp.py`)
 

@@ -1,5 +1,5 @@
 //! The 2-D oracle harness: drives the live [`App`](crate::app::App) from a
-//! script, the way the page does (the same exports, the same `step`), and
+//! script, the way the page does (the same host functions, the same `step`), and
 //! writes the presented framebuffer. `oracle/screen2d.py` writes the script,
 //! runs the same scenario through id's WinQuake (the C oracle) and diffs the
 //! two screens pixel for pixel; see `oracle/README.md`.
@@ -7,7 +7,7 @@
 //! It is an ignored test, so it costs the shipped wasm nothing:
 //!
 //! ```sh
-//! QUAKE_SCREEN_SCRIPT=script.txt cargo test --release --lib oracle_screen -- --ignored
+//! QUAKE_SCREEN_SCRIPT=script.txt cargo test --release --bin quake oracle_screen -- --ignored
 //! ```
 //!
 //! One command per line (`#` starts a comment):
