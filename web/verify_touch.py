@@ -145,6 +145,12 @@ def main():
               pg.evaluate("document.documentElement.classList.contains('touch') && !!document.getElementById('touch')"))
         check("no keyboard-and-mouse note", pg.evaluate("!document.getElementById('touchNote')"))
         check("the start prompt says tap", pg.evaluate("document.getElementById('play').textContent") == "tap to start")
+        # The first frame sizes the canvas; `ready` can come a moment before it.
+        try:
+            pg.wait_for_function("(() => { const r = document.getElementById('c').getBoundingClientRect();"
+                                 " return Math.abs(r.width - 844) <= 1 && Math.abs(r.height - 390) <= 1; })()", timeout=5000)
+        except Exception:
+            pass
         box = pg.evaluate("(() => { const r = document.getElementById('c').getBoundingClientRect(); return [r.width, r.height]; })()")
         check("the picture fills the screen", abs(box[0] - 844) <= 1 and abs(box[1] - 390) <= 1, str(box))
         manifest = pg.evaluate("fetch('manifest.webmanifest').then(r => r.json())")

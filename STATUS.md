@@ -57,9 +57,7 @@ here, and the older history, kept as evidence, with superseded items marked.
   - **Clippy:** 0 warnings in both crates.
   - **Browser checks:** the 15 `web/verify_*.py` checks pass in headless Chromium
     (today's run). The 14 page checks ran on both builds' deploy dirs;
-    `verify_threads` builds its own program. One check fails on the threads build
-    only: `verify_touch`'s "the picture fills the screen" reads the canvas before the
-    first frame has sized it (37/38; "What is left"). The branches also ran most checks
+    `verify_threads` builds its own program. The branches also ran most checks
     in headless Firefox.
   - **Frame rate:** `quaketool framerate --check` passes: 22 scenarios, uncapped at
     60–480 Hz against 72.
@@ -93,9 +91,7 @@ here, and the older history, kept as evidence, with superseded items marked.
      resolution off; the menu's fade dither is a fine screen-door under a 4–6x menu;
   7. no `version` command, and `disconnect` does not end the game.
 
-  Also: `verify_touch.py` checks the canvas size at `ready`, before the first frame
-  sized it, so it fails on the threads build. The canvas is right 0.5 s later on both
-  builds; the check should wait for it. The structural work is `CODE_PLAN.md`'s menu:
+  The structural work is `CODE_PLAN.md`'s menu:
   W0a/W0b, R1, R6, R8, R9, R11, and the engine-owned `Host` session (§7).
 
 ---
