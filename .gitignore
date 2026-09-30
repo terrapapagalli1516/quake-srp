@@ -24,3 +24,6 @@ quake-c/
 # Local links (or copies) of the Quake data and of id's WinQuake source, never committed
 /quake-data
 /quake-c
+
+# Screenshots the browser checks (web/verify_*.py) and web/shoot.py write
+web/*.png

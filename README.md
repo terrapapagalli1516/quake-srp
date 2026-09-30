@@ -234,7 +234,7 @@ display.
 | `web/` | the page, the WASI host (`wasi.js`), touch controls, the service worker, the browser checks |
 | `oracle/` | id's WinQuake built headless from the C, and the scripts that compare it with the port |
 | `census/` | helpers for the gameplay census ([CENSUS.md](CENSUS.md)) |
-| `screenshots/` | renders, old and new |
+| `screenshots/` | the two renders at the top of this README |
 
 Further reading:
 
