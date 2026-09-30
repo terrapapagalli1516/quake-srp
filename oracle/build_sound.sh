@@ -11,7 +11,7 @@
 # one edit (quakedef.h's id386 switch, as build.sh makes it) is made on the copy.
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
-SRC=${QUAKE_C_SRC:-quake-c/WinQuake}
+SRC=${QUAKE_C_SRC:-$HERE/../quake-c/WinQuake}
 OUT=$HERE/build
 IMAGE=quake-oracle-cc:bookworm
 FPMATH=${ORACLE_FPMATH:-x87}

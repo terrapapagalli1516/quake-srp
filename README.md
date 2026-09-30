@@ -46,7 +46,7 @@ Both are stills from `quaketool shot`, so the 2026 crosshair isn't drawn.
 
 ## Play it
 
-The commands are for a POSIX shell (`sh`, `bash`, `zsh`), run from the repository root.
+The commands are for a POSIX shell (`sh`, `bash`, `zsh`), run from the repository's root.
 You need:
 - Rust 1.85 or later, with the `wasm32-wasip1-threads` target;
 - `uv`;
@@ -189,9 +189,10 @@ recorded from a tree known to be right. Five run id's C next to the port:
 | `sound` | the mixer, sample by sample | id's C |
 
 The id's-C checks need id's WinQuake source ([id-Software/Quake](https://github.com/id-Software/Quake))
-and docker to build the oracle once. Point `QUAKE_C_SRC` at the source's `WinQuake`
-directory. [oracle/README.md](oracle/README.md) has every result and explains each
-remaining difference.
+and docker to build the oracle once. Put the source at `quake-c/` (so that
+`quake-c/WinQuake` exists), or point `QUAKE_C_SRC` at its `WinQuake` directory.
+[oracle/README.md](oracle/README.md) has every result and explains each remaining
+difference.
 
 Beyond Classic:
 - `cargo test` passes in both crates, and clippy shows zero warnings.

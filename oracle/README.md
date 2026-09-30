@@ -16,8 +16,8 @@ uv run oracle/classic_check.py  # all of Classic's proof in one run: see "Classi
 
 Needs docker (for the build only), uv, cargo, and the shareware pak at
 `quake-data/ID1/PAK0.PAK` (or `--pak`). The id source is read from
-`quake-c/WinQuake`
-(`QUAKE_C_SRC` overrides). `compare.py --help` lists every option. The ones you will use most:
+`quake-c/WinQuake` at the repository's root (`QUAKE_C_SRC` overrides).
+`compare.py --help` lists every option. The ones you will use most:
 
 | option | what it does |
 |---|---|
