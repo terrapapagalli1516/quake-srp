@@ -27,3 +27,6 @@ quake-c/
 
 # Screenshots the browser checks (web/verify_*.py) and web/shoot.py write
 web/*.png
+
+# Python
+__pycache__/

@@ -54,6 +54,9 @@ def main():
         else:
             lines.append(c)
     lines.append("oracle_quit")
+    if not ORACLE.exists():
+        print("building the C oracle (oracle/build.sh) ...", file=sys.stderr)
+        subprocess.run([str(PROJECT / "oracle" / "build.sh")], check=True)
     with tempfile.TemporaryDirectory(prefix="oracle-base-") as tmp:
         base = Path(tmp)
         (base / "id1").mkdir()
