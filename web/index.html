@@ -965,7 +965,8 @@ const cd = {
   el: null, gain: null, analyser: null,   // the drive, made on the first AudioContext
   serial: -1,        // the start the element is playing
   track: 0,          // the track whose file the element holds
-  url: null,         // its object URL
+  url: null,         // its object URL (a player's own kept track only)
+  hasFile: false,    // the element has something to play: a kept track, or a server one by URL
   loading: false,
   error: '',
 };
@@ -994,15 +995,21 @@ function cdGraph() {
   cd.gain.connect(cd.analyser);
   return true;
 }
-// Put the player's file for `track` in the drive.
+// Put the file for `track` in the drive: the player's own kept one if
+// there is one, else the server's (its URL straight into the element, so
+// it is streamed from there — fetched, and cached, exactly as any other
+// file the page plays or shows; nothing is read into memory here).
 async function cdLoad(track) {
   cd.loading = true;
   try {
     const blob = await storage.musicGet(track);
-    if (cd.url) URL.revokeObjectURL(cd.url);
-    cd.url = blob ? URL.createObjectURL(blob) : null;
+    if (cd.url) { URL.revokeObjectURL(cd.url); cd.url = null; }
     cd.track = track;
-    if (cd.url) cd.el.src = cd.url; else cd.el.removeAttribute('src');
+    const serverUrl = serverTracks.get(track);
+    cd.hasFile = !!(blob || serverUrl);
+    if (blob) { cd.url = URL.createObjectURL(blob); cd.el.src = cd.url; }
+    else if (serverUrl) cd.el.src = serverUrl;
+    else cd.el.removeAttribute('src');
   } finally {
     cd.loading = false;
   }
@@ -1021,7 +1028,7 @@ function cdSync() {
     cd.serial = w.serial;
     cd.el.currentTime = 0;
   }
-  const play = w.mode === CD_MODE.PLAYING && w.serial === cd.serial && !document.hidden && !!cd.url;
+  const play = w.mode === CD_MODE.PLAYING && w.serial === cd.serial && !document.hidden && cd.hasFile;
   if (play && cd.el.paused) cd.el.play().catch(e => { cd.error = String(e); });
   else if (!play && !cd.el.paused) cd.el.pause();
 }
@@ -1421,12 +1428,17 @@ const PAK0_COUNT = 339, PAK0_CRC = 32981, MAX_FILES_IN_PACK = 2048;
 const CONTENT_KEY = 'quake-rs.content';   // localStorage: { pending: [paths], note, ok }
 const MUSIC_TYPES = { ogg: 'audio/ogg', oga: 'audio/ogg', opus: 'audio/ogg; codecs=opus', mp3: 'audio/mpeg',
                       flac: 'audio/flac', wav: 'audio/wav', m4a: 'audio/mp4', aac: 'audio/aac', webm: 'audio/webm' };
-const content = { paks: [], tracks: [], registered: null };
+// paks/tracks are everything in effect; serverPaks/serverTracks are the
+// subset of those that came from the server's own files.json and were not
+// overridden by one of the player's own (below, "A server's own files").
+const content = { paks: [], tracks: [], registered: null, serverPaks: [], serverTracks: [] };
 const contentLine = document.getElementById('contentLine');
 const contentMsg = document.getElementById('contentMsg');
 const fileInput = document.getElementById('fileInput');
 const dropHint = document.getElementById('dropHint');
 const isPakPath = (p) => /^id1\/pak\d+\.pak$/.test(p);
+// track number -> the server's URL for it, set once at boot (planServerFiles).
+let serverTracks = new Map();
 
 function contentNote() {
   try { return JSON.parse(localStorage.getItem(CONTENT_KEY) || 'null'); } catch (e) { return null; }
@@ -1523,6 +1535,58 @@ async function planContent(items) {
   return plan;
 }
 
+// ===========================================================================
+// A server's own files (web/PLATFORM.md, "A server's own files")
+// ===========================================================================
+// A deploy can offer id1/pak1.pak and the CD's tracks itself — so its own
+// player (or anyone on its private network) doesn't have to drop them in every
+// session — by an optional manifest, files.json, beside index.html:
+// { "files": [ { "path": "id1/pak1.pak", "size": 41894404 }, ... ] }.
+// Fetched once, quietly: absent (no such deploy, or offline) just means
+// pak0 only, with no further requests for pak1 or any track — the point of
+// asking a manifest instead of guessing (a GET for pak1.pak, then ten for
+// tracks 2..11) is exactly to make a plain pak0 deploy's page load with no
+// failing requests. A size is used only where a response's Content-Length
+// can't be (download()'s comment): it is not otherwise trusted.
+//
+// What it finds is classified exactly as a dropped file is (isPakPath,
+// musicTrack): one path into the program either way. The paks come down
+// with quake.wasm and pak0, in the same download() and its one progress
+// bar; a track is never fetched here at all — the CD plays its URL
+// directly ("CD music"), streamed by the browser, so offering ten tracks
+// costs nothing until one is actually played.
+async function fetchManifest() {
+  try {
+    const r = await fetch('files.json', { cache: 'no-cache' });
+    if (!r.ok) return null;                        // no manifest: pak0 only
+    const j = await r.json();
+    return Array.isArray(j && j.files) ? j.files : null;
+  } catch (e) { return null; }                      // offline, or not deployed
+}
+const musicProbe = new Audio();
+function canPlayMusic(ext) {
+  return !!MUSIC_TYPES[ext] && !!musicProbe.canPlayType(MUSIC_TYPES[ext]);
+}
+// The manifest's entries, sorted into extra paks to download (pak0 is
+// always the deploy's own, never the manifest's) and tracks (by name, never
+// downloaded here) — { paks: [{path, size}], tracks: Map<track, path> }.
+function planServerFiles(list) {
+  const paks = [], tracks = new Map();
+  for (const f of list || []) {
+    const path = typeof f === 'string' ? f : f && f.path;
+    if (typeof path !== 'string') continue;
+    const size = (f && typeof f === 'object' && Number.isFinite(f.size) && f.size > 0) ? f.size : 0;
+    const base = path.toLowerCase().split('/').pop();
+    if (/^pak\d+\.pak$/.test(base)) {
+      if (base !== 'pak0.pak') paks.push({ path, size });
+      continue;
+    }
+    const track = musicTrack(base);
+    if (track >= 2 && canPlayMusic(base.split('.').pop())) tracks.set(track, path);
+  }
+  return { paks, tracks };
+}
+
 // Keep what the plan says and restart the game with it.
 async function addContent(items) {
   if (storage.fallback || !storage.db) { contentShow('your files need IndexedDB, which this browser does not offer here', false); return; }
@@ -1542,11 +1606,15 @@ async function addContent(items) {
   location.reload();
 }
 
-// Remove every file the player added, and restart.
+// Remove every file the player added, and restart. (This deploy's own
+// files.json content, if any, is not the player's to remove this way —
+// contentStarted() only offers the button when there is something else to
+// take out, and this skips those paths rather than failing to remove them.)
 async function removeContent() {
-  for (const path of content.paks) await storage.remove(path);
+  for (const path of content.paks) if (!content.serverPaks.includes(path)) await storage.remove(path);
   await storage.musicClear();
-  setContentNote({ pending: [], note: 'removed your files: the shareware episode again', ok: true });
+  const back = content.serverPaks.length || content.serverTracks.length ? "this server's Quake again" : 'the shareware episode again';
+  setContentNote({ pending: [], note: `removed your files: ${back}`, ok: true });
   location.reload();
 }
 
@@ -1561,10 +1629,16 @@ async function contentStarted() {
   if (have) {
     const what = content.registered ? 'registered Quake, episodes 1–4' : 'shareware Quake, episode 1';
     const music = content.tracks.length ? `CD music: track${content.tracks.length === 1 ? '' : 's'} ${spans(content.tracks)}` : 'no CD music';
-    contentLine.innerHTML = `Your Quake: ${what} · ${music}. Drop more files to add them, or `
-      + '<button id="addBtn" class="link">choose files</button> · <button id="removeBtn" class="link">remove them</button>';
+    const fromServer = content.serverPaks.length || content.serverTracks.length;
+    // Removable: something of the player's own, over and above whatever
+    // this server offers — the button goes away once it would do nothing.
+    const removable = content.paks.some(p => !content.serverPaks.includes(p)) || content.tracks.some(t => !content.serverTracks.includes(t));
+    const whose = fromServer ? (removable ? "This server's Quake, and yours:" : "This server's Quake:") : 'Your Quake:';
+    contentLine.innerHTML = `${whose} ${what} · ${music}. Drop more files to add or override them, or `
+      + '<button id="addBtn" class="link">choose files</button>'
+      + (removable ? ' · <button id="removeBtn" class="link">remove yours</button>' : '');
     document.getElementById('addBtn').addEventListener('click', () => fileInput.click());
-    document.getElementById('removeBtn').addEventListener('click', removeContent);
+    if (removable) document.getElementById('removeBtn').addEventListener('click', removeContent);
   }
   if (note && note.note) contentShow(note.note, note.ok !== false && !note.error);
 }
@@ -1593,7 +1667,12 @@ async function contentRefused(e) {
     location.reload();
     return true;
   }
-  if (content.paks.length && bootMsg) {
+  // "remove them" can only take out what came from the player's own
+  // storage; a server pak that fails this way needs its deploy fixed (a
+  // files.json pak1 that is well-formed but not actually id's registered
+  // data, say) — the button would do nothing, so it is left off, and the
+  // error on the boot bar below names it.
+  if (content.paks.some(p => !content.serverPaks.includes(p)) && bootMsg) {
     const btn = document.createElement('button');
     btn.className = 'link';
     btn.textContent = 'remove your Quake files and start again';
@@ -1665,16 +1744,21 @@ function setProgress(received, total) {
   }
 }
 // Fetch several files with one progress bar; resolves to their bytes.
-async function download(urls) {
+// `hints[i]`, when given, is urls[i]'s size from elsewhere (a server's
+// files.json: "A server's own files"), used only where the response's own
+// Content-Length can't be.
+async function download(urls, hints = []) {
   const resps = await Promise.all(urls.map(u => fetch(u)));
   resps.forEach((r, i) => { if (!r.ok) throw new Error('HTTP ' + r.status + ' fetching ' + urls[i]); });
   // A compressed body's Content-Length is the compressed size, but the stream
-  // yields decompressed bytes: no usable total, so show the MB counter only.
+  // yields decompressed bytes: no usable total from it, so a hint if there is
+  // one, else the MB counter alone (indeterminate bar).
   let total = 0;
-  for (const r of resps) {
-    const n = r.headers.get('Content-Encoding') ? 0 : parseInt(r.headers.get('Content-Length') || '0', 10);
+  resps.forEach((r, i) => {
+    const n = r.headers.get('Content-Encoding') ? (hints[i] || 0)
+            : parseInt(r.headers.get('Content-Length') || '0', 10) || hints[i] || 0;
     total = n > 0 && total >= 0 ? total + n : -1;
-  }
+  });
   total = Math.max(total, 0);
   let received = 0;
   return Promise.all(resps.map(async r => {
@@ -1708,8 +1792,8 @@ async function main() {
       + '"Cross-Origin-Opener-Policy: same-origin" and "Cross-Origin-Embedder-Policy: require-corp"');
   }
   quake.startedAt = performance.now();
-  const [[wasm, pak], files] = await Promise.all([
-    download(['quake.wasm', 'id1/pak0.pak']),
+  const [manifestFiles, files] = await Promise.all([
+    fetchManifest(),
     (async () => {
       await storage.open();
       const have = new Map(await storage.all().catch(() => []));
@@ -1717,9 +1801,29 @@ async function main() {
       return have;
     })(),
   ]);
-  const tracks = await storage.musicTracks();
-  content.tracks = tracks;
-  content.paks = [...files.keys()].filter(isPakPath);
+  const server = planServerFiles(manifestFiles);
+  serverTracks = server.tracks;
+  const urls = ['quake.wasm', 'id1/pak0.pak', ...server.paks.map(p => p.path)];
+  const hints = [0, 0, ...server.paks.map(p => p.size)];
+  const [wasm, pak, ...serverPakBytes] = await download(urls, hints);
+
+  const playerTracks = await storage.musicTracks();
+  content.tracks = [...new Set([...server.tracks.keys(), ...playerTracks])].sort((a, b) => a - b);
+  content.serverTracks = [...server.tracks.keys()].filter(t => !playerTracks.includes(t));
+
+  // A server pak must look like a pak before it reaches the engine: the
+  // same check readPak() gives a dropped one, so a deploy mistake (a
+  // truncated upload, the wrong file at that path) stays pak0-only rather
+  // than refusing the whole boot (web/PLATFORM.md, "A server's own files").
+  const serverFiles = [];
+  for (let i = 0; i < server.paks.length; i++) {
+    const { path } = server.paks[i];
+    const bytes = serverPakBytes[i];
+    const bad = (await readPak(new File([bytes], path.split('/').pop()))).error;
+    if (bad) console.warn(`[quake] the server's ${path}: ${bad}`);
+    else serverFiles.push([path, bytes]);
+  }
+
   quake.downloadedAt = performance.now();
   bootFill.classList.remove('indet');
   bootFill.style.width = '100%';
@@ -1739,12 +1843,21 @@ async function main() {
   worker = new Worker('wasi.js');
   worker.onmessage = onWorkerMessage;
   worker.onerror = (e) => { setStatus('error: ' + e.message); };
-  // The player's paks come after the server's pak0: one of their own by
-  // the same name takes its place. Theirs are handed over, not copied.
-  const fileList = [['id1/pak0.pak', pak], ...files];
-  const handed = [wasm.buffer, pak.buffer, ...[...files].filter(([p]) => isPakPath(p)).map(([, d]) => d.buffer)];
-  worker.postMessage({ t: 'init', wasm: wasm.buffer, shared, audio: audioShared, files: fileList, args: commandLine(tracks) },
+  // The server's files (pak0 always, pak1 if files.json offered and valid
+  // one) are the base; the player's own kept ones come after, so one of
+  // theirs by the same name takes its place — the same rule a dropped
+  // pak0 already got, now uniform for pak1 too. Everyone's are handed
+  // over, not copied.
+  const fileList = [['id1/pak0.pak', pak], ...serverFiles, ...files];
+  const handed = [wasm.buffer, pak.buffer, ...serverFiles.map(([, d]) => d.buffer),
+                  ...[...files].filter(([p]) => isPakPath(p)).map(([, d]) => d.buffer)];
+  worker.postMessage({ t: 'init', wasm: wasm.buffer, shared, audio: audioShared, files: fileList, args: commandLine(content.tracks) },
                      handed);
+  // paks in effect beyond the baseline pak0 (never counted itself, unless
+  // the player's own storage overrides it — "Your Quake" already did this;
+  // serverFiles never offers a pak0, so it only ever adds pak1 here).
+  content.paks = [...new Set([...files.keys(), ...serverFiles.map(([p]) => p)])].filter(isPakPath);
+  content.serverPaks = serverFiles.map(([p]) => p).filter(p => !files.has(p));
   sendWindow();
 
   // Up when the program's startup (quake.rc: config.cfg, the attract demos)

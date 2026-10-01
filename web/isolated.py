@@ -15,6 +15,7 @@ $QUAKE_BROWSER.
 """
 import functools
 import http.server
+import json
 import os
 import shutil
 import socketserver
@@ -60,6 +61,27 @@ def copy_page(dest):
     for f in PAGE_FILES:
         os.makedirs(os.path.dirname(os.path.join(dest, f)), exist_ok=True)
         shutil.copy(os.path.join(here, f), os.path.join(dest, f))
+
+
+def write_manifest(dest):
+    """Write `dest`/files.json, the manifest a deploy uses to offer its own
+    id1/pak1.pak and CD tracks (web/PLATFORM.md, "A server's own files"):
+    one entry per file actually found at dest/id1/pak1.pak and
+    dest/id1/music/*, each with its size. Call this after those files are in
+    place; skip it (or leave it unwritten) for a pak0-only deploy — its
+    absence is exactly what tells the page to ask for nothing else."""
+    files = []
+    pak1 = os.path.join(dest, "id1", "pak1.pak")
+    if os.path.isfile(pak1):
+        files.append({"path": "id1/pak1.pak", "size": os.path.getsize(pak1)})
+    music_dir = os.path.join(dest, "id1", "music")
+    if os.path.isdir(music_dir):
+        for name in sorted(os.listdir(music_dir)):
+            path = os.path.join(music_dir, name)
+            if os.path.isfile(path):
+                files.append({"path": f"id1/music/{name}", "size": os.path.getsize(path)})
+    with open(os.path.join(dest, "files.json"), "w") as f:
+        json.dump({"files": files}, f)
 
 
 def webdir():
