@@ -28,7 +28,7 @@ the volumes, the mouse).
 | departure | setting (settings page row) | 2026 | why |
 |---|---|---|---|
 | No 72 fps cap: a host frame on every display refresh, with the game stepped as id's 72 Hz frames step it (`Stepping::Uncapped`) | `wasm_uncapped` (Uncapped framerate) | on | The game must play the same from 60 to 480 Hz. id's gate caps the game at 72 fps, so a 120 Hz display runs at 60. The stepping keeps jumps, flashes, trails and clocks on id's 72 Hz values (`FRAMERATE.md`). |
-| The picture fills the window at the window's aspect, at its device pixels divided by a whole pixel size, with square pixels; the renderer's `hires` (views past 1280x1024, particles and the underwater warp in proportion) | `vid_native` (Native resolution), `vid_pixelsize` (Pixel size) | on, Auto | id's modes stop at 1280x1024 and are shown in a 4:3 box. Whole pixels keep the chunky software look. Auto picks the smallest size that keeps a frame within 1920x1080 pixels times the whole square root of the render threads. ("High resolutions and Hor+") |
+| The picture fills the window at the window's aspect, at its device pixels divided by a whole pixel size, with square pixels; the renderer's `hires` (views past 1280x1024, particles and the underwater warp in proportion). Video Options (2026 only) lists Native — Auto, then 1x..4x pixel size — above `RESOLUTION_PRESETS`, honestly marking whichever is actually live (printing its real size) and letting Enter switch back to it after a fixed mode; off (Classic, or the host never says `modern`), the screen is `VID_MenuDraw`'s alone | `vid_native` (Native resolution), `vid_pixelsize` (Pixel size) | on, Auto | id's modes stop at 1280x1024 and are shown in a 4:3 box. Whole pixels keep the chunky software look. Auto picks the smallest size that keeps a frame within 1920x1080 pixels times the whole square root of the render threads. ("High resolutions and Hor+") |
 | Hor+: `fov` spans a 4:3 screen, and a wider screen sees more at the sides | `fov_adapt` (Widescreen FOV) | on | id spreads `fov` over any width, so a wide screen loses the top and bottom. |
 | The 2-D layer (status bar, menus, console) at the largest whole multiple of 320x200 that fits | `wasm_scaled2d` (Scaled 2-D layer) | on | id draws it 1:1, so at 1440p the status bar is a 24-pixel strip. |
 | Monsters glide between their 0.1 s steps (QuakeSpasm's `r_lerpmove`) | `r_lerpmove` (Smooth monsters) | on | At high refresh rates a stepping monster visibly jumps ten times a second. ("Demo playback between messages") |
@@ -266,10 +266,6 @@ marked *(2026-06)* were not re-checked since. Struck items were closed on 2026-0
   over a second), QuakeC timers a frame rounds up (lava burns 4% faster at 480 Hz, a
   fall-damage threshold 4.5 units lower), pusher think transitions; air control is not
   measured (`FRAMERATE.md`, "What is left").
-- In 2026, Video Options shows 960x600 as the current mode, and picking a mode silently
-  turns Native resolution off (review).
-- The menu's fade dither is one screen pixel under a 4–6x menu, so it reads as a fine
-  screen-door (review).
 - On a phone the JUMP and FIRE buttons overlap the status bar's ammo count (review).
 
 **Menus**
@@ -2841,3 +2837,65 @@ player's track files (`web/PLATFORM.md`, "Your files" and "CD music").
   `MCI_NOTIFY_FAILURE`/eject door; `CDAudio_Play`'s "Bad track number" (a
   developer print). A track the player has no file for, within the disc's
   range, is to the game a data track ("CDAudio: track N is not audio").
+
+## Video Options honesty, and the menu fade dither at a big 2-D scale (branch `fleet/video`)
+
+Two "look" problems the closing review found playing the 2026 default in a browser
+(the "Open" list above, 2026-09-26): Video Options lying about the picture, and a
+"screen-door" fade dither.
+
+- ✅ **Video Options is honest about native resolution** (quake-rs `menu.rs`). The
+  bug: in 2026, native resolution's actual size rarely matches any of
+  `RESOLUTION_PRESETS` exactly, so `Menu::sync_resolution`'s `(w, h) ==
+  preset` match never fired and the list kept showing whatever preset it
+  last matched — in practice the boot default, 960x600 — as "current" even
+  though the screen was something else entirely; and Enter on any mode
+  silently set `vid_native 0` with no way back short of leaving the screen
+  for Options > Classic / 2026. Fixed, in the 2026 profile only (`Menu::
+  native_rows_shown`, the host's `modern = profile == Modern`; off in
+  Classic, or if `Menu::sync_resolution` is never told `modern` at all —
+  `VID_MenuDraw`'s plain grid, untouched): `NATIVE_ROWS` (Auto, then pixel
+  sizes 1..=4) are **appended after** `RESOLUTION_PRESETS`, not prepended —
+  every existing preset keeps its row index, so this is purely additive.
+  While the picture genuinely is native (`Menu::actual_native`, the host's
+  `vid::native` — a window must be known too, not just `vid_native`'s cvar),
+  no preset is marked current; the matching native row is, and it prints
+  the actual render size (`Menu::actual_size`) instead of a guess. Enter on
+  a preset still turns native off exactly as id's `VID_SetMode` always did
+  (visibly now: the screen was already showing no preset as current, so one
+  lighting up is the visible change); Enter on a native row turns it back on
+  at that pixel size. Same list, same Up/Down/Enter — the way back is never
+  more than an arrow away. `MenuAction::ResolutionChanged` now branches on
+  `cvars.native` (quake-wasm `menu.rs`/`vid.rs`): a native pick recomputes
+  the picture from the window and pixel size (`vid::apply_settings`) instead
+  of reallocating to a stored mode that doesn't exist for it.
+  Tests: `quake-rs/src/menu.rs` — `video_rows_are_the_presets_alone_until_
+  2026_native_rows_sync`, `video_options_opens_honest_when_the_picture_is_
+  native`, `picking_a_fixed_mode_is_reversible_back_to_native`,
+  `a_native_row_sets_its_own_pixel_size`, `classic_video_options_ignores_
+  native_rows_even_if_native_is_on`, `video_options_marks_the_live_native_
+  row_white_with_its_real_size`. `web/verify_settings.py` opens Video
+  Options in 2026, checks the native row is current and prints the real
+  size, picks a fixed mode, and picks native back. Classic: `screen2d`'s
+  `menu_options.video` shot is unchanged (native rows never draw there;
+  `oracle/classic_expected.txt`'s 95.49/98.80 — the port's own mode list vs
+  id's grid, a pre-existing, documented difference — holds exactly).
+- **The fade dither at a big "scaled 2-D" scale: already fixed, not a
+  regression.** Checked directly (not just read): `fade_screen` (`draw.rs`)
+  already dithers on `screen_2d`'s own scale, not the framebuffer's raw
+  pixels — it has since `bf35315` (2026-09-25, "the scaled layout becomes an
+  opt-in extra"), a day before the review that still listed this. A probe
+  at 1920x1080 (scale 5, squarely in the review's "4-6x") confirmed whole
+  5x5 blocks, no 1-pixel screen-door; a new test pins it down exactly:
+  `fade_screen_is_whole_blocks_not_a_screen_door_at_a_native_4_to_6x_scale`
+  asserts every dither cell is one whole `scale x scale` block at that
+  scene (alongside the existing `fade_screen_matches_the_per_pixel_dither_
+  at_any_scale`, which already covered the general formula across sizes
+  `bf35315` never exercised at exactly review-sized windows). Likeliest
+  explanation: the review played a deployed build that predated that day's
+  later merges. No production code changed for this half of the brief.
+
+Screenshots (this branch's scratch dir, named in its report): Video Options
+in 2026 and Classic, before (native 1108c3e) and after this branch; a menu
+over the game at a 4-6x 2-D scale, before and after (unchanged, proving the
+dither was never touched).

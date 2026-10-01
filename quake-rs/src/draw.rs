@@ -514,6 +514,37 @@ mod tests {
     }
 
     #[test]
+    fn fade_screen_is_whole_blocks_not_a_screen_door_at_a_native_4_to_6x_scale() {
+        // Review: "the menu fade dither is 1 px under a 4-6x menu, so it
+        // reads as a fine screen-door". 1920x1080 is the "scaled 2-D" extra's
+        // scale 5 (floor(min(1920/320, 1080/200)) = floor(min(6, 5.4)) = 5) —
+        // squarely in that range. Every dither cell must be a whole 5x5
+        // block of ONE colour, never a single pixel changing on its own.
+        let _extra = Scaled2dGuard::set(true);
+        let (w, h) = (1920usize, 1080usize);
+        let sc = screen_2d(w, h);
+        assert_eq!(sc.scale, 5.0, "the scenario this is checking");
+        let keep = 200u8;
+        let mut img = Image::new(w, h, keep);
+        fade_screen(&mut img);
+        for by in 0..(h / 5) {
+            for bx in 0..(w / 5) {
+                let mut block = (0..5).flat_map(|dy| (0..5).map(move |dx| (dx, dy)));
+                let first = img.pixels[(by * 5) * w + bx * 5];
+                assert!(
+                    block.all(|(dx, dy)| img.pixels[(by * 5 + dy) * w + bx * 5 + dx] == first),
+                    "block ({bx},{by}) is not one colour: not a {0}x{0} block",
+                    5
+                );
+            }
+        }
+        // And it is still id's pattern, just at that block size: a quarter
+        // of the screen kept, none of it a lone pixel.
+        let kept = img.pixels.iter().filter(|&&p| p == keep).count();
+        assert_eq!(kept, (w / 5) * (h / 5) * 25 / 4, "a quarter of the screen, in whole 5x5 blocks");
+    }
+
+    #[test]
     fn draw_string_writes_glyph_pixels() {
         // A 128x128 conchars where every texel is the lit index 3 EXCEPT the
         // space cell (byte 32 -> cell (0,2)) which stays at the transparent 0.

@@ -38,14 +38,21 @@ pub(crate) fn apply_menu_action(a: &mut App, action: MenuAction) -> Option<MenuD
         MenuAction::SaveSlot(i) => return Some(MenuDeferred::Save(i)),
         MenuAction::LoadSlot(i) => return Some(MenuDeferred::Load(i)),
         MenuAction::ResolutionChanged => {
-            // Enter on a Video Options mode line (VID_MenuKey K_ENTER ->
-            // VID_SetMode): the menu set `_vid_resolution` (and native
-            // resolution off); the framebuffer takes the new (clamped) size at
-            // once, and the page notices the new frame size and re-fits the
-            // canvas.
-            let (rw, rh) = a.settings.cvars.vid_resolution;
-            let (w, h) = clamp_resolution(i32::from(rw), i32::from(rh));
-            a.set_render_size(w, h);
+            // Enter on a Video Options row: a fixed mode (VID_MenuKey
+            // K_ENTER -> VID_SetMode) set `_vid_resolution` and native
+            // resolution off — the framebuffer takes the new (clamped) size
+            // at once. One of the port's own native-resolution rows (2026)
+            // turned native back on instead, with no stored mode to
+            // reallocate to: recompute the picture from the window and pixel
+            // size, same as any other frame (`apply_settings`). Either way
+            // the page notices the new frame size and re-fits the canvas.
+            if a.settings.cvars.native {
+                crate::vid::apply_settings(a);
+            } else {
+                let (rw, rh) = a.settings.cvars.vid_resolution;
+                let (w, h) = clamp_resolution(i32::from(rw), i32::from(rh));
+                a.set_render_size(w, h);
+            }
         }
         MenuAction::OpenConsole => {
             // Options "Go to console": select() already closed the menu
@@ -58,7 +65,7 @@ pub(crate) fn apply_menu_action(a: &mut App, action: MenuAction) -> Option<MenuD
             // Options "Reset to defaults": select() ran the profile's
             // default.cfg on the settings (read live each frame); the video
             // mode is not a default.cfg cvar and stays.
-            a.menu.sync_resolution(a.render_w as i32, a.render_h as i32);
+            crate::vid::sync_menu_resolution(a);
         }
         MenuAction::Resume => {
             // M_Main_Key K_ESCAPE: the demo loop back (`cls.demonum =
@@ -141,7 +148,7 @@ fn new_game() {
                 // framebuffer) and point the menu's current video mode at it,
                 // instead of snapping back to DEFAULT — starting a game no longer
                 // throws away a menu-picked resolution.
-                a.menu.sync_resolution(a.render_w as i32, a.render_h as i32);
+                crate::vid::sync_menu_resolution(a);
             });
         }
     }
@@ -278,6 +285,15 @@ pub(crate) fn menu_screen_id() -> i32 {
             })
             .unwrap_or(0)
     })
+}
+
+/// The highlighted row on the showing screen ([`quake_rs::menu::Menu::cursor`]):
+/// the browser checks' way to see what Video Options (or any list) actually
+/// marks current without having to read conchars pixels — e.g. in 2026, the
+/// native-resolution rows follow `RESOLUTION_PRESETS`, so a native row's
+/// index is `RESOLUTION_PRESETS.len() + pixel_size.min(4)`.
+pub(crate) fn menu_cursor() -> i32 {
+    APP.with(|c| c.borrow().as_ref().map(|a| a.menu.cursor() as i32).unwrap_or(0))
 }
 
 // --- the four first departures as bits (the checks' shorthand) --------------

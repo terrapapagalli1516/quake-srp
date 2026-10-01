@@ -33,7 +33,7 @@ pub(crate) fn load_game_text(text: &str) -> bool {
                 a.console.open = false;
                 a.console.set_current(0.0);
                 a.menu.reset_nav();
-                a.menu.sync_resolution(a.render_w as i32, a.render_h as i32);
+                crate::vid::sync_menu_resolution(a);
             });
             true
         }
