@@ -51,7 +51,7 @@ def serve(directory, port):
 
 # The page's own files, as a deploy dir holds them beside quake.wasm and
 # id1/pak0.pak (PLATFORM.md, "Build, serve, deploy").
-PAGE_FILES = ["index.html", "wasi.js", "touch.js", "sw.js", "manifest.webmanifest",
+PAGE_FILES = ["index.html", "wasi.js", "touch.js", "endscreen.js", "sw.js", "manifest.webmanifest",
               "icons/icon-192.png", "icons/icon-512.png", "icons/apple-touch-icon.png"]
 
 

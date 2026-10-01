@@ -601,7 +601,10 @@ impl Console {
 }
 
 /// `VERSION` (quakedef.h) as `Draw_ConsoleBackground` prints it, `"%4.2f"`.
-const CON_VERSION: &str = "1.09";
+/// `pub`: `sys::end_screen` (quake-wasm, `Sys_Quit`'s end screen) stamps the
+/// same string into row 0, as the DOS build's `sprintf(ver, " v%4.2f",
+/// VERSION)` did.
+pub const CON_VERSION: &str = "1.09";
 
 /// `Draw_ConsoleBackground` (draw.c): the bottom `lines` rows of `conback`
 /// stretched over the top `lines` rows of the 2-D screen `sc` (row `y` shows

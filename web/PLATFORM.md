@@ -629,6 +629,53 @@ they happen and it applies them at once, the pad is read as late as the
 tick, and the frame is presented in the refresh that ticked. What would cut
 more is the browser's (`?lowlatency`, below) or the frame's own time.
 
+## Quit
+
+`Host_Quit_f` (Menu > Quit > Y, or the console's `quit`) sends one more
+record, `Quit` (`quake-wasm/src/sys.rs`'s `maybe_quit`), and the program
+ends right after: `_start` returns, `wasi.js` marks it exited (`RUN` 2) and
+posts `{t: 'exit', run: 2}`, which `gameExited` already treats as quiet —
+as id's `Sys_Quit` called `exit(0)`. Typing `quit` where the console is the
+keyboard's destination skips the confirmation and quits at once, exactly as
+`Host_Quit_f` does; raised any other way (Menu > Quit, or a key bound to
+`quit` while playing) it asks first, the same Quit prompt the menu always
+had (`screen2d`'s, unchanged).
+
+A page cannot exit, so the host does the next best thing:
+
+- **Leaves fullscreen and releases the pointer and keyboard locks**
+  (`document.exitFullscreen()`, `document.exitPointerLock()`,
+  `navigator.keyboard.unlock()` where "Esc in fullscreen" held one) — the
+  one thing the brief requires; everything past this is the "wanted" part.
+- **Shows id's end screen**, if the pak has one: DOS Quake's `Sys_Quit`
+  (`sys_dos.c`) copied `end2.bin` (registered) or `end1.bin` (shareware)
+  onto the text screen — 80x25 of (character, attribute) VGA text-mode
+  bytes, the DOS build's version stamped into row 0
+  (`quake_rs::console::CON_VERSION`, the same string the console background
+  carries). The `Quit` record's `registered` byte says which file the
+  program read, and its 4000 bytes are that lump exactly
+  (`quake-wasm/src/sys::end_screen`), so the page need not fetch or guess
+  anything. `web/endscreen.js` draws them: CP437 mapped to Unicode (an
+  inline 256-entry table — no font file), the 16-colour VGA palette for
+  each byte's foreground/background nibble, and the attribute's top bit as
+  a one-second blink. Without a screen (a modified pak missing both files,
+  or none loaded at all) it shows a plain message instead; leaving
+  fullscreen happens either way.
+- **Restarts on any key, click or tap** — `location.reload()`. The
+  simplest robust choice: the worker's `main` has already returned, so
+  there is no live game left to hand input to, and a reload costs the
+  player nothing — `config.cfg` and the saves are already files kept in
+  IndexedDB ("Files", above), and the pak is re-served from the cache.
+
+Phones get the same screen, scaled to fit a landscape width; a tap anywhere
+dismisses it, same as a click.
+
+`quake-wasm/src/sys.rs`'s tests cover both quit paths (immediate from the
+console, confirmed from the menu) and the record's exact bytes, including
+the version patch; `web/verify_quit.py` drives the browser side: fullscreen
+and the pointer lock, both released; the end screen on screen; a dismiss
+that reloads into a running game again.
+
 ## Sound
 
 The program mixes, as WinQuake did: id's `snd_dma.c`, `snd_mix.c` and
@@ -1098,6 +1145,7 @@ and the pak:
 deploy/index.html          web/index.html
 deploy/wasi.js             web/wasi.js
 deploy/touch.js            web/touch.js           (touch screens only)
+deploy/endscreen.js        web/endscreen.js       (id's end screen, "Quit")
 deploy/sw.js               web/sw.js              (offline, isolation anywhere)
 deploy/manifest.webmanifest  web/manifest.webmanifest
 deploy/icons/*.png         web/icons/icon-192.png, icon-512.png, apple-touch-icon.png
@@ -1110,7 +1158,7 @@ deploy/files.json          isolated.write_manifest(dir) — only if either optio
 
 ```sh
 mkdir -p deploy/id1 deploy/icons
-cp web/index.html web/wasi.js web/touch.js web/sw.js web/manifest.webmanifest deploy/
+cp web/index.html web/wasi.js web/touch.js web/endscreen.js web/sw.js web/manifest.webmanifest deploy/
 cp web/icons/icon-192.png web/icons/icon-512.png web/icons/apple-touch-icon.png deploy/icons/
 cp quake-wasm/target/wasm32-wasip1/release/quake.wasm deploy/
 cp quake-data/ID1/PAK0.PAK deploy/id1/pak0.pak

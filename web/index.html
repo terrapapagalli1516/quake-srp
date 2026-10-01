@@ -22,6 +22,9 @@
 <!-- The service worker (offline, and cross-origin isolation where the
      server sends no headers) registers itself; main() waits for it. -->
 <script src="sw.js"></script>
+<!-- id's end screen, shown once the game quits (web/PLATFORM.md, "Quit"):
+     loaded unconditionally, unlike touch.js, since any session can quit. -->
+<script src="endscreen.js"></script>
 <style>
   /* Palette: Quake's bronze/rust on near-black — restrained, no kitsch. */
   :root {
@@ -306,7 +309,7 @@ const IN = { TICK: 1, KEY: 2, MOUSE: 3, CLEAR_KEYS: 4, POINTER_UNLOCKED: 5, AUDI
              PRESENT: 12, GAMEPAD: 20 };
 // Frame formats (the FRAME record's, and what PRESENT asks for).
 const FORMAT = { RGBA8: 0, INDEXED8: 1 };
-const OUT = { FRAME: 1, SYNC: 2, STATE: 3, REPLY: 12, BENCH: 13, AUDIO: 15, CD: 16, RUMBLE: 20 };
+const OUT = { FRAME: 1, SYNC: 2, STATE: 3, REPLY: 12, BENCH: 13, AUDIO: 15, CD: 16, RUMBLE: 20, QUIT: 18 };
 // State flags (the STATE record).
 const ST = { MENU: 1, CONSOLE: 2, WALK: 4, BIND_GRAB: 8, TIMEDEMO: 16, NATIVE: 32, FKEY: 64,
              TOUCH: 128, ASK: 256, PAUSED: 512 };
@@ -439,6 +442,7 @@ function handleOutput(b) {
         break;
       }
       case OUT.RUMBLE: onRumble(f32(p), f32(p + 4), u32(p + 8), len >= 16 && u32(p + 12) !== 0); break;
+      case OUT.QUIT: onQuit(dv, p, len); break;
     }
     i = p + len;
   }
@@ -450,6 +454,29 @@ function gameExited(m) {
     setStatus('the game stopped: ' + m.why);
     console.error('[quake]', m.why);
   }
+}
+// Host_Quit_f / M_Quit_Key decided to quit (the `Quit` record, written
+// once — quake-wasm/src/sys.rs's `maybe_quit`, "Sys_Quit"'s moment). A page
+// can't exit, so this is as close as the browser gets: give the desktop
+// back, same as id's Sys_Quit did on a real machine. `registered` says
+// which end screen the game would show; `screen` is that file's 4000 raw
+// bytes (endscreen.js draws it), or null if the pak had neither file. The
+// worker has already returned from its `main` (or is about to): no more
+// frames come, and endscreen.js's dismiss reloads the page to play again
+// (`web/PLATFORM.md`, "Quit" — saves and config.cfg already live in
+// IndexedDB, so nothing is lost).
+function onQuit(dv, p, len) {
+  const registered = dv.getUint8(p) !== 0;
+  const screen = len > 4 ? new Uint8Array(dv.buffer, dv.byteOffset + p + 4, len - 4) : null;
+  // Leaving fullscreen also drops any pointer lock, but the player may be
+  // unlocked-fullscreen or locked-without-fullscreen, so both are released
+  // independently; `pageWillDropLock` keeps the lock-loss handler above from
+  // reading this as the player's own Esc and opening a menu nobody will see.
+  pageWillDropLock();
+  try { if (document.pointerLockElement) document.exitPointerLock(); } catch (e) { /* unsupported */ }
+  unlockEscape();
+  if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+  window.QuakeEndScreen?.show(registered, screen);
 }
 
 // ===========================================================================

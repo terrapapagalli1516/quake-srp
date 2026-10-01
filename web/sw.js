@@ -9,13 +9,14 @@
 //     deployed (the shareware pak, a server's own pak1 and CD tracks,
 //     web/PLATFORM.md's "A server's own files"); bump DATA_CACHE to fetch
 //     it afresh.
-//   - everything else (the page, wasi.js, touch.js, quake.wasm, the app
-//     manifest and icons, and a server's own files.json): from the network,
-//     kept for later, and from what was kept when the network fails. So
-//     online the page is always the one deployed (an update takes effect at
-//     the next load, with nothing to bump), and offline it is the one last
-//     played — files.json included, so a deploy that later adds pak1 and
-//     tracks is only offered once a player has been online since.
+//   - everything else (the page, wasi.js, touch.js, endscreen.js,
+//     quake.wasm, the app manifest and icons, and a server's own
+//     files.json): from the network, kept for later, and from what was kept
+//     when the network fails. So online the page is always the one deployed
+//     (an update takes effect at the next load, with nothing to bump), and
+//     offline it is the one last played — files.json included, so a deploy
+//     that later adds pak1 and tracks is only offered once a player has been
+//     online since.
 //   - every answer carries the two cross-origin isolation headers, which the
 //     page's SharedArrayBuffers need. A server that sends them loses
 //     nothing; one that cannot (a plain static host) gets them from here,
@@ -42,7 +43,7 @@ if (typeof window === 'undefined') {
   // The page's own small files, kept at install so the first visit can be
   // replayed offline (its navigation came before this worker). quake.wasm
   // and the pak are kept as the page fetches them through the worker.
-  const PRECACHE = ['index.html', 'sw.js', 'wasi.js', 'touch.js', 'manifest.webmanifest',
+  const PRECACHE = ['index.html', 'sw.js', 'wasi.js', 'touch.js', 'endscreen.js', 'manifest.webmanifest',
                     'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png'];
 
   self.addEventListener('install', (e) => {
