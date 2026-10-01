@@ -70,6 +70,10 @@ const CSS = `
   line-height: 1.22;
 }
 #quakeEndScreen .qesRow { white-space: pre; }
+/* An inline background covers only the glyphs' height, leaving a dark seam
+   between rows; an inline-block one fills the whole line box, as a text-mode
+   cell does. */
+#quakeEndScreen .qesRow span { display: inline-block; vertical-align: top; }
 #quakeEndScreen .qesBlink { animation: qesBlink 1s steps(1) infinite; }
 @keyframes qesBlink { 50%, 100% { opacity: 0; } }
 #quakeEndScreen .qesFallback {
@@ -87,6 +91,18 @@ function ensureStyle() {
 // 80x25 of (character, attribute) pairs into one row's worth of <span>s, run
 // length encoded by (fg, bg, blink) so a mostly-one-colour row (most of this
 // screen) costs one element, not eighty.
+// CP437's block elements, drawn as backgrounds rather than glyphs: a font's
+// half block covers half its em box, not the taller line box, so a glyph
+// leaves a strip of the cell's background showing (end1.bin's bottom edge,
+// row 23, is 80 lower halves). Text mode filled exact half cells.
+const BLOCKS = {
+  0xdb: (fg) => fg,                                                         // █
+  0xdc: (fg, bg) => `linear-gradient(to bottom, ${bg} 50%, ${fg} 50%)`,     // ▄
+  0xdf: (fg, bg) => `linear-gradient(to bottom, ${fg} 50%, ${bg} 50%)`,     // ▀
+  0xdd: (fg, bg) => `linear-gradient(to right, ${fg} 50%, ${bg} 50%) 0 0 / 1ch 100% repeat-x`, // ▌
+  0xde: (fg, bg) => `linear-gradient(to right, ${bg} 50%, ${fg} 50%) 0 0 / 1ch 100% repeat-x`, // ▐
+};
+
 function buildRow(bytes, row) {
   const line = document.createElement('div');
   line.className = 'qesRow';
@@ -96,18 +112,19 @@ function buildRow(bytes, row) {
     const o = (row * COLS + col) * 2;
     const ch = bytes[o], attr = bytes[o + 1];
     const fg = VGA16[attr & 0x0f], bg = VGA16[(attr >> 4) & 0x07], blink = (attr & 0x80) !== 0;
-    const text = String.fromCodePoint(CP437[ch] ?? 0x20);
-    if (run && run.fg === fg && run.bg === bg && run.blink === blink) {
+    const block = BLOCKS[ch] ? ch : 0;
+    const text = block ? ' ' : String.fromCodePoint(CP437[ch] ?? 0x20);
+    if (run && run.fg === fg && run.bg === bg && run.blink === blink && run.block === block) {
       run.text += text;
       run.el.textContent = run.text;
     } else {
       flush();
       const el = document.createElement('span');
       el.style.color = fg;
-      el.style.background = bg;
+      el.style.background = block ? BLOCKS[block](fg, bg) : bg;
       if (blink) el.className = 'qesBlink';
       el.textContent = text;
-      run = { fg, bg, blink, text, el };
+      run = { fg, bg, blink, block, text, el };
     }
   }
   flush();
