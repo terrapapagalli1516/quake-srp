@@ -106,7 +106,7 @@ round-trip tests; `wasi.js` and `index.html` carry the same constants.
 | 6 | AUDIO_READY | `ready u8`, `0 ×3`, `rate u32` (the AudioContext's sample rate; 0 none yet) |
 | 7 | CALL | `id u32`, then the UTF-8 line |
 | 8 | END | — (written by the host, not the page: "nothing more queued") |
-| 9 | WINDOW | `w u32`, `h u32`: the page's box for the picture in device pixels (its CSS size x `devicePixelRatio`; the whole screen in fullscreen), sent at start and on every resize |
+| 9 | WINDOW | `w u32`, `h u32`: the page's box for the picture in device pixels (its CSS size x `devicePixelRatio`; the whole screen in fullscreen), sent at start and on every resize; `dpr f32`: that `devicePixelRatio` (an older page sends none: read as 1) |
 | 10 | AUDIO_CLOCK | `pos u32`: the sound ring's play position, in sample pairs (wrapping); sent before every TICK |
 | 11 | AUDIO_WAKE | `pos u32`: the same, written by the host between ticks while the worklet plays: "mix now" |
 | 12 | PRESENT | `format u8`: how the page shows frames from now on (0 RGBA8, 1 INDEXED8; RGBA8 until it says). The page sends it before the first tick |
@@ -519,10 +519,13 @@ bindings, and the port's departures, which the profiles **Classic** and
 `STATE` record:
 
 - **Native resolution** (`vid_native`, 2026). The page sends its box for the
-  picture in device pixels (`WINDOW`); the program renders the box divided by
-  a whole pixel size (`vid_pixelsize`: 1..4, or Auto, the smallest that
-  keeps the frame within a 1080p frame's pixels) and says the size in
-  `pixel_size`; the page makes the canvas exactly `W x pixel_size` device
+  picture in device pixels and its `devicePixelRatio` (`WINDOW`); the
+  program renders the box divided by a whole pixel size (`vid_pixelsize`:
+  1..4, or Auto, the smallest that keeps the frame within a 1080p frame's
+  pixels per whole square root of the renderer's threads, from 2 on a
+  phone: a ratio of 2 or more in a box whose shorter side is at most 540 CSS
+  pixels, since a phone's cores are several times slower than a desktop's
+  and slow further as it warms) and says the size in `pixel_size`; the page makes the canvas exactly `W x pixel_size` device
   pixels wide and `H x pixel_size` tall (`fitCanvas`), `image-rendering:
   pixelated`, so every picture pixel is a whole square of screen pixels at
   the box's own aspect (the view is Hor+: `fov_adapt`). Off (Classic), the

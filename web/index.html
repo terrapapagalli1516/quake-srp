@@ -1980,9 +1980,11 @@ function pictureBox() {
 let windowSent = '';
 function sendWindow() {
   const dpr = window.devicePixelRatio || 1, b = pictureBox();
-  const w = Math.floor(b.w * dpr), h = Math.floor(b.h * dpr);
-  if (w + 'x' + h === windowSent) return;
-  if (sendRecord(IN.WINDOW, fields(8, d => { d.setUint32(0, w, true); d.setUint32(4, h, true); }))) windowSent = w + 'x' + h;
+  const w = Math.floor(b.w * dpr), h = Math.floor(b.h * dpr), key = w + 'x' + h + '@' + dpr;
+  if (key === windowSent) return;
+  // The ratio too: Auto's pixel size starts a phone's small, dense screen at
+  // 2x2 (quake-wasm's vid::phone_sized).
+  if (sendRecord(IN.WINDOW, fields(12, d => { d.setUint32(0, w, true); d.setUint32(4, h, true); d.setFloat32(8, dpr, true); }))) windowSent = key;
 }
 // `?classic` / `?2026` in the address: the profile to switch to, as the
 // command line's `+profile` (run after config.cfg, like the menu's switch,

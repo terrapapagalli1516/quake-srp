@@ -66,6 +66,10 @@ pub(crate) struct App {
     /// its CSS size times `devicePixelRatio`), which `vid_native` renders
     /// into. `None` until the page says (natively, in the tests).
     pub(crate) window: Option<(u32, u32)>,
+    /// The page's `devicePixelRatio` (the `Window` record; 1 until it says):
+    /// how many device pixels make a CSS pixel, which tells a phone's small,
+    /// dense screen from a desktop's ([`crate::vid::phone_sized`]).
+    pub(crate) dpr: f32,
     /// The main-menu engine. Lives at the App level (mode-independent) so it can
     /// overlay WHATEVER is playing — the walk OR the attract demo (any key
     /// during demo playback brings it up, as in Quake); while `menu.visible`,
@@ -537,6 +541,7 @@ pub(crate) fn ensure_app(f: impl FnOnce(&mut App)) {
                 mode: 0,
                 settings: Settings::new(START_PROFILE),
                 window: None,
+                dpr: 1.0,
                 menu: Menu::new(),
                 menu_pics: MenuPics::default(),
                 conchars: None,

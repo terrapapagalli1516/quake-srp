@@ -113,8 +113,9 @@ pub(crate) fn call(line: &str) -> Answer {
         "width" => width().into(),
         "height" => height().into(),
         "set_resolution" => done(|| set_resolution(int(0), int(1))),
-        // The page's box in device pixels (what its `Window` record says).
-        "set_window" => done(|| set_window(f(0) as u32, f(1) as u32)),
+        // The page's box in device pixels and its devicePixelRatio (what its
+        // `Window` record says; the ratio is optional, 1 when left out).
+        "set_window" => done(|| set_window(f(0) as u32, f(1) as u32, f(2) as f32)),
         "set_video" => crate::vid::set_video(rest).into(),
         "render_threads" => render_threads().into(),
         "viewsize" => viewsize().into(),

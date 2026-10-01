@@ -170,7 +170,7 @@ impl<W: Write> Sys<W> {
                     self.write_sound(0.0)?;
                     self.out.flush()?;
                 }
-                Event::Window { w, h } => crate::vid::set_window(w, h),
+                Event::Window { w, h, dpr } => crate::vid::set_window(w, h, dpr),
                 Event::Present(format) => crate::app::ensure_app(|a| a.present.set_format(format)),
                 Event::Gamepad(pad) => gamepad(pad),
                 Event::Call { id, line } => {
@@ -312,7 +312,7 @@ fn ui_state() -> UiState {
         c.borrow().as_ref().map_or((false, false, 0), |a| {
             let native = crate::vid::native(a);
             let threads = crate::vid::render_threads(a);
-            let pixel = a.window.filter(|_| native).map_or(0, |w| crate::vid::pixel_size(&a.settings.cvars, w, threads));
+            let pixel = a.window.filter(|_| native).map_or(0, |w| crate::vid::pixel_size(&a.settings.cvars, w, a.dpr, threads));
             (native, a.settings.cvars.fkey, pixel)
         })
     });

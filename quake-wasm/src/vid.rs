@@ -54,6 +54,24 @@ pub(crate) fn auto_pixel_budget(threads: usize) -> usize {
     AUTO_PIXEL_BUDGET * threads.max(1).isqrt()
 }
 
+/// The shorter side, in CSS pixels, of a box [`phone_sized`] takes for a
+/// phone's: a phone held either way is 320-480 wide in CSS pixels; a tablet
+/// or a laptop is 700 or more.
+const PHONE_CSS_SIDE: f32 = 540.0;
+
+/// A phone's screen: dense pixels (`devicePixelRatio` 2 or more) in a small
+/// box (its shorter side at most [`PHONE_CSS_SIDE`] CSS pixels). Auto starts
+/// such a screen at 2x2 ([`pixel_size`]): a phone's cores are several times
+/// slower than a desktop's and slow down further as the phone warms, which
+/// the thread count behind [`auto_pixel_budget`] cannot see (an Android
+/// phone at 1x1, 2640x1080 on 8 threads, took 13 ms a frame dry and 19 ms
+/// underwater against 60 Hz's 16.7, throttled at 40 C; at 2x2, 8 and 9 ms).
+/// At 2x2 a game pixel is still under a CSS pixel there, finer than the eye
+/// resolves at arm's length.
+pub(crate) fn phone_sized((win_w, win_h): (u32, u32), dpr: f32) -> bool {
+    dpr >= 2.0 && win_w.min(win_h) as f32 / dpr <= PHONE_CSS_SIDE
+}
+
 /// Clamp a requested `(w, h)` render resolution into the supported envelope:
 /// width `MIN_W..=MAX_W`, height `MIN_H..=MAX_H`, and the total pixel count capped
 /// at [`MAX_PIXELS`] (shrinking the height first if `w*h` would exceed it). Always
@@ -78,12 +96,13 @@ pub(crate) fn clamp_resolution(w: i32, h: i32) -> (usize, usize) {
 /// How many device pixels make one of the picture's in native mode: the
 /// setting's 1..=4, or for Auto (0) the smallest that keeps a `win_w x win_h`
 /// box's frame within [`auto_pixel_budget`] for the renderer's `threads` (4
-/// at most).
-pub(crate) fn pixel_size(cvars: &Cvars, (win_w, win_h): (u32, u32), threads: usize) -> u32 {
+/// at most), from 2 on a [`phone_sized`] screen.
+pub(crate) fn pixel_size(cvars: &Cvars, (win_w, win_h): (u32, u32), dpr: f32, threads: usize) -> u32 {
     let max = u32::from(quake_rs::cvar::PIXEL_SIZE_MAX);
     let budget = auto_pixel_budget(threads);
+    let first = if phone_sized((win_w, win_h), dpr) { 2 } else { 1 };
     match u32::from(cvars.pixel_size) {
-        0 => (1..=max).find(|p| (win_w / p) as usize * (win_h / p) as usize <= budget).unwrap_or(max),
+        0 => (first..=max).find(|p| (win_w / p) as usize * (win_h / p) as usize <= budget).unwrap_or(max),
         n => n.min(max),
     }
 }
@@ -91,10 +110,10 @@ pub(crate) fn pixel_size(cvars: &Cvars, (win_w, win_h): (u32, u32), threads: usi
 /// The picture's size for these settings: native, the page's box divided by
 /// the pixel size (at least 320x200, at most the renderer's hires limit);
 /// otherwise the video mode, clamped.
-pub(crate) fn picture_size(cvars: &Cvars, window: Option<(u32, u32)>, threads: usize) -> (usize, usize) {
+pub(crate) fn picture_size(cvars: &Cvars, window: Option<(u32, u32)>, dpr: f32, threads: usize) -> (usize, usize) {
     match window.filter(|_| cvars.native) {
         Some(win) => {
-            let p = pixel_size(cvars, win, threads);
+            let p = pixel_size(cvars, win, dpr, threads);
             let (w, h) = ((win.0 / p) as usize, (win.1 / p) as usize);
             let (mw, mh) = (render::HIRES_MAXWIDTH, render::HIRES_MAXHEIGHT);
             (w.clamp(MIN_W as usize, mw), h.clamp(MIN_H as usize, mh))
@@ -136,7 +155,7 @@ pub(crate) fn sync_menu_resolution(a: &mut App) {
 /// settings ask for, and the 2-D layer's scale (a setting `draw` still keeps
 /// per thread). The renderer's settings go with the frame, in [`vid`].
 pub(crate) fn apply_settings(a: &mut App) {
-    let (w, h) = picture_size(&a.settings.cvars, a.window, render_threads(a));
+    let (w, h) = picture_size(&a.settings.cvars, a.window, a.dpr, render_threads(a));
     a.set_render_size(w, h);
     quake_rs::draw::set_scaled_2d(a.settings.cvars.scaled_2d);
     sync_menu_resolution(a);
@@ -190,8 +209,13 @@ pub(crate) fn set_resolution(w: i32, h: i32) {
 
 /// The page's box for the picture, in device pixels (the `Window` record);
 /// native mode renders into it from the next frame.
-pub(crate) fn set_window(w: u32, h: u32) {
-    ensure_app(|a| a.window = (w > 0 && h > 0).then_some((w, h)));
+/// The `Window` record: the page's box in device pixels and its
+/// `devicePixelRatio` (an older page sends none, read as 0: taken as 1).
+pub(crate) fn set_window(w: u32, h: u32, dpr: f32) {
+    ensure_app(|a| {
+        a.window = (w > 0 && h > 0).then_some((w, h));
+        a.dpr = if dpr.is_finite() && dpr >= 1.0 { dpr } else { 1.0 };
+    });
 }
 
 /// The width:height ratio the page shows a video mode at, whatever its
@@ -275,7 +299,7 @@ mod tests {
     #[test]
     fn native_pictures_are_whole_fractions_of_the_window() {
         let mut c = quake_rs::cvar::Cvars::modern();
-        let size = |c: &Cvars, win, threads| (picture_size(c, Some(win), threads), pixel_size(c, win, threads));
+        let size = |c: &Cvars, win, threads| (picture_size(c, Some(win), 1.0, threads), pixel_size(c, win, 1.0, threads));
         assert_eq!(size(&c, (1920, 1080), 1), ((1920, 1080), 1));
         assert_eq!(size(&c, (2560, 1440), 1), ((1280, 720), 2), "1440p on one thread: 2x2");
         assert_eq!(size(&c, (2560, 1440), 8), ((2560, 1440), 1), "and 1x1 on eight");
@@ -286,8 +310,33 @@ mod tests {
         c.pixel_size = 3;
         assert_eq!(size(&c, (1920, 1080), 1), ((640, 360), 3));
         c.native = false;
-        assert_eq!(picture_size(&c, Some((1920, 1080)), 1), (960, 600), "the mode");
+        assert_eq!(picture_size(&c, Some((1920, 1080)), 1.0, 1), (960, 600), "the mode");
         assert_eq!((auto_pixel_budget(0), auto_pixel_budget(3), auto_pixel_budget(4)), (AUTO_PIXEL_BUDGET, AUTO_PIXEL_BUDGET, 2 * AUTO_PIXEL_BUDGET));
+    }
+
+    /// A phone's small, dense screen starts Auto at 2x2 whatever its threads;
+    /// a tablet, a laptop's dense screen and a desktop keep the budget's
+    /// answer; a fixed pixel size is what it says everywhere.
+    #[test]
+    fn auto_starts_a_phone_at_two_pixels() {
+        let mut c = quake_rs::cvar::Cvars::modern();
+        // A phone-sized landscape viewport: 880x360 CSS at 3x, 8 threads.
+        assert!(phone_sized((2640, 1080), 3.0));
+        assert_eq!(pixel_size(&c, (2640, 1080), 3.0, 8), 2);
+        assert_eq!(picture_size(&c, Some((2640, 1080)), 3.0, 8), (1320, 540));
+        assert!(phone_sized((1080, 2160), 3.0), "and held upright");
+        // Not phones: an iPad (1024x768 CSS at 2x), a MacBook (1440x900 at 2x),
+        // a desktop at 1x, and a phone-sized box at 1x (a small desktop window).
+        assert!(!phone_sized((2048, 1536), 2.0));
+        assert!(!phone_sized((2880, 1800), 2.0));
+        assert!(!phone_sized((1920, 1080), 1.0));
+        assert!(!phone_sized((880, 360), 1.0));
+        assert_eq!(pixel_size(&c, (1920, 1080), 1.0, 8), 1);
+        c.pixel_size = 1;
+        assert_eq!(pixel_size(&c, (2640, 1080), 3.0, 8), 1, "1x1 when asked");
+        // An older page sends no ratio (0): a desktop's 1.
+        set_window(2640, 1080, 0.0);
+        assert_eq!(APP.with(|a| a.borrow().as_ref().map(|a| a.dpr)), Some(1.0));
     }
 
     // -- dynamic render resolution (set_resolution + clamp + reallocation) ----

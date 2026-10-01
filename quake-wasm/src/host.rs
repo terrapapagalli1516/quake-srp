@@ -512,7 +512,7 @@ mod tests {
         assert_eq!(stepping(), Stepping::Classic);
         assert_eq!((video_cvars().fov_mode, video_cvars().hires, quake_rs::draw::scaled_2d()), (FovMode::Classic, false, false));
         use_2026();
-        crate::vid::set_window(1600, 1000);
+        crate::vid::set_window(1600, 1000, 1.0);
         step(0.0);
         assert_eq!(stepping(), Stepping::Uncapped);
         assert_eq!((video_cvars().fov_mode, video_cvars().hires, quake_rs::draw::scaled_2d()), (FovMode::HorPlus, true, true));
