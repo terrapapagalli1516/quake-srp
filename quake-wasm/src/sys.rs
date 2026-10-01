@@ -166,8 +166,10 @@ impl<W: Write> Sys<W> {
                 Event::AudioClock(pos) => self.audio.clock(pos),
                 Event::AudioWake(pos) => {
                     // S_ExtraUpdate: top the device's ring up between frames.
+                    // No host frame ran, so this is not a sample for the
+                    // 2026 mixer's adaptive lead ([`Audio::mix`]).
                     self.audio.clock(pos);
-                    self.write_sound(0.0)?;
+                    self.write_sound(0.0, None)?;
                     self.out.flush()?;
                 }
                 Event::Window { w, h, dpr } => crate::vid::set_window(w, h, dpr),
@@ -198,13 +200,24 @@ impl<W: Write> Sys<W> {
     fn frame(&mut self, dt: f64) -> io::Result<()> {
         self.scan_saves_on_entry();
         crate::bench::before_frame();
-        self.last_frame = Instant::now();
+        let t0 = Instant::now();
+        self.last_frame = t0;
+        // A verify script's way to hold this frame late on purpose
+        // (`crate::bench::maybe_stall`): zero code without `--features
+        // bench`. Before `step`, so the sleep counts in `host_elapsed`
+        // below, exactly as a slow render would.
+        crate::bench::maybe_stall();
         // The page's refresh time as the old `step(dt: f32)` export took it.
         let ran = step(dt as f32) != 0;
+        // How long this host frame actually took: while it ran, the worker
+        // could not mix, nor answer the page's AudioWake between ticks
+        // either. The 2026 mixer's lead adapts to it ([`Audio::mix`]);
+        // Classic's `_snd_mixahead` ignores it.
+        let host_elapsed = t0.elapsed().as_secs_f64();
         // S_Update_ every tick, even one Host_FilterTime's 72 fps cap skipped
         // (id's S_ExtraUpdate mixed between frames too): the device's ring
         // stays fed. The samples go first, ahead of the frame's pixels.
-        self.write_sound(dt)?;
+        self.write_sound(dt, Some(host_elapsed))?;
         if !ran {
             // Nothing new to show.
             return Ok(());
@@ -238,9 +251,11 @@ impl<W: Write> Sys<W> {
     }
 
     /// The tick's sound ([`Audio::frame`]): its samples for the page's ring
-    /// (`Pcm`), and the device's counts (`Audio`).
-    fn write_sound(&mut self, dt: f64) -> io::Result<()> {
-        let Some(pcm) = self.audio.frame(dt) else { return Ok(()) };
+    /// (`Pcm`), and the device's counts (`Audio`). `host_elapsed` is the
+    /// wall-clock time the host frame just took to compute (`None` between
+    /// ticks, an `AudioWake` that ran no frame).
+    fn write_sound(&mut self, dt: f64, host_elapsed: Option<f64>) -> io::Result<()> {
+        let Some(pcm) = self.audio.frame(dt, host_elapsed) else { return Ok(()) };
         self.pcm_bytes.clear();
         self.pcm_bytes.extend(pcm.samples.iter().flat_map(|v| v.to_le_bytes()));
         let (start, rate) = (pcm.start, pcm.rate);

@@ -182,15 +182,16 @@ Three `SharedArrayBuffer`s:
   a frame's memory is written, or handed back, only while no one reads it.
   No frame slots, and no copy in the worker. A grown memory reaches the page
   as a fresh `memory.buffer`.
-- **The sound ring** (64 bytes + 16384 stereo pairs of 16 bits, made by the
-  page, handed to the worker and to the AudioWorklet). Its control block is
-  an `Int32Array`: `POS` (the pair the device plays next — the clock the
+- **The sound ring** (64 bytes + 32768 stereo pairs of 16 bits — 682 ms at
+  48 kHz, enough for 2026's adaptive lead, "Sound" below — made by the page,
+  handed to the worker and to the AudioWorklet). Its control block is an
+  `Int32Array`: `POS` (the pair the device plays next — the clock the
   program mixes ahead of), `WRITE` (where the program's samples reach),
   `RATE` (their rate), `UNDER` (quanta the worklet played short once the
   program had written anything), `PLAYED`, `CLEARS`, `PEAK` (the loudest
   sample played since the page last reset it), `QUANTA`. Samples go in at
-  `start & 16383`; the worklet plays pair `POS` when `0 < WRITE - POS <=
-  16384`, silence otherwise. The same table is at the top of `wasi.js` and
+  `start & 32767`; the worklet plays pair `POS` when `0 < WRITE - POS <=
+  32768`, silence otherwise. The same table is at the top of `wasi.js` and
   in the page's sound section.
 
 ## Presentation
@@ -751,6 +752,91 @@ larger bites), nor in `verify_loops.py`'s 40 s. The checks read the ring
 (`quake.audio.ring()`: its position, lead, underruns, loudest sample) and
 the mixer (`snd_stats`, `snd_channels`: every channel's sample, volumes,
 position and key).
+
+**A late host frame.** `wasi.js` runs the program and mixes it on the same
+worker: while a host frame is busy — a slow render pass, a GC pause, a core
+another process is using — the worker cannot mix, and cannot answer the
+page's `AudioWake` between ticks either (that only fires while the program
+blocks waiting for the next tick, which a busy frame is not doing). A 2026
+lead of `MODERN_MIXAHEAD` (50 ms) only outlasts a frame about that long; a
+slower one runs the ring dry mid-frame, and the `PCM` that finally ends the
+stall is itself painted from the device's position at the *top* of the frame
+(like id's own `S_Update_`), so by the time it lands that same stretch of
+real time has already passed again — what's left over from it is what the
+*next* frame like it draws on, which is why surviving a *run* of slow frames
+needs a lead at a little over twice one of them, not once (`quake-wasm/src
+/snd_dma.rs`'s `adapt_modern_ahead`, below).
+
+This is 2026-only host plumbing, not a departure to weigh against Classic:
+id's mixer (`Mixer::samples_ahead`) is untouched, and Classic's
+`_snd_mixahead` stays id's fixed 0.1 s always, whatever a frame takes — the
+same way the ring itself, or `wasi.js`'s turn-taking, are plumbing rather
+than settings. What changes is only the value 2026 hands that same,
+unmodified mixer call:
+
+- **The ring is twice the size** (`RING_PAIRS`: 32768, was 16384 — 682 ms at
+  48 kHz, 743 ms at 44.1 kHz) so a grown lead has somewhere to live; a
+  `samples_ahead` call not shortened by the ring's own cap was the point, not
+  a latency change by itself (the cap was never reached before this, and
+  `MODERN_MIXAHEAD` did not move).
+- **The 2026 lead is adaptive**, `quake-wasm/src/snd_dma.rs`'s
+  `Audio::modern_ahead`, fed by how long each host frame actually took to
+  compute (an `Instant` around `step` in `Sys::frame`, `quake-wasm/src/
+  sys.rs`): a frame that ran long jumps the lead at once to 2.5x it (one to
+  cover the stall just measured, one more left over for a repeat of it, plus
+  a margin against the next one running a little longer still) — clamped to
+  550 ms, comfortably short of the ring's new cap — and holds there, not
+  easing down the moment it catches up (a *sustained* run at the same length
+  must not reopen the gap it just closed, the bug an earlier, stricter
+  version of this had: `snd_dma.rs`'s tests name it). Short frames ease the
+  lead back towards `MODERN_MIXAHEAD` over a few seconds, so a fast desktop
+  keeps today's latency. The first frame of a new stall still glitches once —
+  nothing can see it coming — and a *sustained* stretch past about
+  220 ms/frame (under 4.5 fps) still underruns sometimes, bounded by how far
+  past it the frame runs: there is only so much a bounded ring can buy.
+  `snd_stats`'s `mixahead_ms` shows the lead live.
+
+**Proof (headless Chromium, phone viewport, a built-in test hook).**
+Chromium's own CPU throttle (`Emulation.setCPUThrottlingRate`) does not
+reach a Worker — measured: the page's `wait` for the program's frame is
+unchanged by it, throttled or not. `quake-wasm/src/bench.rs`'s `maybe_stall`
+(`--features bench`; zero code otherwise) holds a host frame late on
+purpose instead, set with the `stall_ms` automation call
+(`web/verify_audio_resilience.py`). Timings here are noisy, and at the time
+of this round another job was pinning a core at 900%+ CPU
+continuously for hours — a live instance of the very thing above ("a core
+another process is using") — so every number below was taken under that
+load, both sides of the comparison, back to back, same machine, same
+minute, e1m1, the 2026 profile (a `stall_ms` sweep, the same measurement
+`web/verify_audio_resilience.py` makes at one level, each level held 6 s,
+against a build with `adapt_modern_ahead`'s call sited to always return
+`MODERN_MIXAHEAD` unmoved — "before" otherwise meaning the code before this
+round):
+
+| `stall_ms` | before: underruns/min (`mixahead_ms`) | after: underruns/min (`mixahead_ms`) |
+|---:|---:|---:|
+| 0 (unthrottled) | 280 (50) | **0** (50-70) |
+| 80 | 9,660 (50) | 208 (266) |
+| 100 | 13,005 (50) | 218 (243) |
+| 120 | 14,698 (50) | 170 (343) |
+| 150 | 14,455 (50) | 548 (410) |
+| 180 | 14,675 (50) | 1,174 (548) |
+
+Before this fix, `mixahead_ms` never leaves the 50 ms floor (it cannot: the
+cvar was never touched) and every stall level underruns at essentially the
+device's full rate — the ring never catches up. After it, every level is
+cut by 12-85x, the lead visibly grows with the stall, and the unthrottled
+row is the sharpest line: even with no deliberate stall, a contended
+machine alone cost the unfixed build 280 underruns/min, and the fix cut
+that to zero — the adaptive lead defends against real, unplanned
+contention, not only a synthetic one. 180 ms/frame, held forever, is past
+`adapt_modern_ahead`'s derived limit (~220 ms/frame) even before this
+load's own contribution, so it alone is not driven to zero — the ring (even
+doubled) cannot buy an unbounded lead; a `stall_ms` run on a quiet machine,
+or any level at or under 150 ms here, clears that bar. After the stall
+ends, the lead eases back under 90 ms within 5 quick seconds, underruns
+rare while it does. `web/verify_audio_resilience.py`'s bars are set
+generously enough to pass under this same contention.
 
 ## Threads
 

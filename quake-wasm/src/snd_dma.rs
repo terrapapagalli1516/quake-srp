@@ -49,14 +49,14 @@ use quake_rs::cd_audio::{CdAudio, CdState, Disc};
 use quake_rs::client::{Listener, SoundCall};
 use quake_rs::pak::Pak;
 use quake_rs::server::StaticSound;
-use quake_rs::snd::{Mixer, SoundMode};
+use quake_rs::snd::{Mixer, SoundMode, MODERN_MIXAHEAD};
 
 use crate::app::{ensure_app, APP};
 use crate::common::pak;
 
 /// The shared ring's size in sample pairs (`web/PLATFORM.md`, "Sound"): the
 /// most the mixer paints ahead of the device.
-pub(crate) const RING_PAIRS: usize = 16384;
+pub(crate) const RING_PAIRS: usize = 32768;
 
 /// A call into the sound layer, as the game made it.
 #[derive(Debug, Clone)]
@@ -189,6 +189,11 @@ pub(crate) struct Audio {
     statics: Vec<StaticSound>,
     /// `cl.viewentity`, for a new mixer.
     view_entity: i32,
+    /// [`SoundMode::Modern`]'s lead now: [`MODERN_MIXAHEAD`] normally, grown
+    /// by [`adapt_modern_ahead`] when a host frame ran long and eased back
+    /// when frames are quick again. Classic's lead is id's fixed 0.1 s,
+    /// never touched.
+    modern_ahead: f32,
     pub(crate) stats: AudioStats,
     /// The last tick's samples: where they start, whether they clear the
     /// ring first, the pairs.
@@ -221,6 +226,7 @@ impl Audio {
             frac: 0.0,
             statics: Vec::new(),
             view_entity: 0,
+            modern_ahead: MODERN_MIXAHEAD,
             stats: AudioStats::default(),
             start: 0,
             cleared: false,
@@ -285,13 +291,17 @@ impl Audio {
     /// One tick: the calls since the last, the menu's clicks, and `S_Update_`
     /// — the samples from where the mixer left off to the device's position
     /// plus `_snd_mixahead` (`dt` moves the position on when the page sent
-    /// none). `None` without a pak.
-    pub(crate) fn frame(&mut self, dt: f64) -> Option<Pcm<'_>> {
+    /// none). `host_elapsed` is the wall-clock time the host frame just took
+    /// to compute (`None` for a wake between ticks, which ran no frame): a
+    /// tick that took long feeds [`adapt_modern_ahead`], in [`SoundMode::
+    /// Modern`] only — Classic's `_snd_mixahead` is id's fixed 0.1 s.
+    /// `None` without a pak.
+    pub(crate) fn frame(&mut self, dt: f64, host_elapsed: Option<f64>) -> Option<Pcm<'_>> {
         if self.pak.is_none() {
             self.pak = pak();
         }
         let pak = self.pak.take()?;
-        let pcm = self.mix(&pak, dt);
+        let pcm = self.mix(&pak, dt, host_elapsed);
         self.pak = Some(pak);
         pcm.then(|| {
             let mixer = self.mixer.as_ref().expect("mixed");
@@ -300,7 +310,7 @@ impl Audio {
     }
 
     /// [`Audio::frame`]'s work: true when it painted.
-    fn mix(&mut self, pak: &Pak, dt: f64) -> bool {
+    fn mix(&mut self, pak: &Pak, dt: f64, host_elapsed: Option<f64>) -> bool {
         self.mixer(pak);
         let requests = PENDING.with(|p| std::mem::take(&mut *p.borrow_mut()));
         for r in requests {
@@ -314,6 +324,21 @@ impl Audio {
             self.stats.local = self.stats.local.wrapping_add(1);
         }
         mixer.cvars.volume = volume();
+
+        // 2026 only: id's own `_snd_mixahead` (Classic, [`SoundMode::
+        // mixahead`]) is never touched. A host frame that took
+        // `host_elapsed` left the worker unable to mix for that long (it is
+        // one thread: busy rendering, it cannot answer the page's AudioWake
+        // between ticks either), which can run the ring dry; this grows the
+        // lead at once to cover a repeat, then eases it back towards
+        // `MODERN_MIXAHEAD` as frames come in quick (`web/PLATFORM.md`,
+        // "Sound").
+        if self.made_for.0 == SoundMode::Modern {
+            if let Some(elapsed) = host_elapsed {
+                self.modern_ahead = adapt_modern_ahead(self.modern_ahead, elapsed as f32, dt as f32);
+            }
+            mixer.cvars.mixahead = self.modern_ahead;
+        }
 
         if !self.clocked {
             // No page clock this tick: the device ran for `dt`.
@@ -387,7 +412,7 @@ impl Audio {
                 let _ = write!(
                     t,
                     "rate={} mode={} running={} device_rate={} clock={} painted_time={} starts={} local={} \
-                     stops={} clears={} painted={} statics={} sounding={}",
+                     stops={} clears={} painted={} statics={} sounding={} mixahead_ms={:.1}",
                     mixer.map_or(0, Mixer::rate),
                     self.made_for.0.name(),
                     u8::from(self.running),
@@ -401,6 +426,7 @@ impl Audio {
                     s.painted,
                     mixer.map_or(0, |m| m.total_channels() - quake_rs::snd::MAX_DYNAMIC_CHANNELS - 4),
                     mixer.map_or(0, |m| m.channels().filter(|c| c.leftvol > 0 || c.rightvol > 0).count()),
+                    f64::from(mixer.map_or(0.0, |m| m.cvars.mixahead)) * 1000.0,
                 );
                 Some((0.0, t))
             }
@@ -461,6 +487,74 @@ fn print_lines(lines: Vec<String>) {
     }
 }
 
+/// 2026's `_snd_mixahead`, adapted: host plumbing around id's mixer, not a
+/// change to it ([`Mixer::samples_ahead`] is untouched; this only picks the
+/// value [`Audio::mix`] hands it for [`SoundMode::Modern`] — Classic's lead
+/// is id's fixed 0.1 s, always, [`SoundMode::mixahead`]).
+///
+/// The worker that runs the program is the same one that mixes: a host
+/// frame busy rendering cannot answer the page's `AudioWake` either, so a
+/// frame that takes `host_elapsed_s` leaves the ring unfed for that whole
+/// stretch, and the newly mixed PCM that finally ends the stall is itself
+/// painted from a clock reading taken *before* it (the device's position at
+/// the top of the frame, like id's own `S_Update_`) — so by the time it
+/// lands, that same `host_elapsed_s` has already passed again in real time.
+/// A lead of [`MODERN_MIXAHEAD`] (50 ms) only outlasts frames up to about
+/// that long; a slower one (a phone's slow pass underwater, a GC pause, a
+/// tab stealing the core) runs it dry and the worklet plays silence —
+/// `web/PLATFORM.md`, "Sound", measured it holding "at 30 fps and above".
+///
+/// Surviving a *run* of frames that long (not just one) needs the lead at
+/// a little over twice the frame, not once: one to cover the stall just
+/// measured, a second to leave over for the next one just like it (nothing
+/// mixes again until this frame's samples are already delivered late), plus
+/// a margin for the next one running a little longer than this one did —
+/// without it, the lead would land exactly on the line and a sustained,
+/// slightly uneven stall (never perfectly the same length twice) would keep
+/// catching it there. `current` jumps up at once to `SAFETY` the frame just
+/// seen (2.5x: 2x plus that margin) — at or above `current`, holding steady
+/// rather than easing down the moment it catches up is what keeps a
+/// *sustained* run from reopening the gap it just closed — clamped to
+/// [`CEILING`] (comfortably short of the ring's cap — `RING_PAIRS` holds
+/// 682 ms at 48 kHz, 743 ms at 44.1 kHz — so `samples_ahead` is never
+/// clamped by it instead, which would quietly undersize the lead this
+/// function asked for). Short of that, it eases back towards
+/// `MODERN_MIXAHEAD` a fixed fraction of the gap a second (`dt_s` the
+/// elapsed real time, so the rate is the same at 60 Hz or 480), so a fast
+/// desktop's latency recovers within a few seconds of the game running well
+/// again — reactive, not predictive: the first frame of a new stall still
+/// glitches once, as nothing can see it coming, and a *sustained* stall
+/// longer than `CEILING / SAFETY` (220 ms/frame — under 4.5 fps, worse
+/// than anything measured so far) still underruns periodically, bounded by
+/// how far past it the frame runs — there is only so much a bounded ring
+/// can buy.
+fn adapt_modern_ahead(current: f32, host_elapsed_s: f32, dt_s: f32) -> f32 {
+    /// However long the slow frame just measured was, mix this many times
+    /// that far ahead: one to cover it, one more so a repeat of it lands
+    /// inside the buffer this bought rather than draining it to nothing
+    /// again (see the function's docs for the derivation).
+    const SAFETY: f32 = 2.5;
+    /// Never past this: comfortably under the ring's cap (`RING_PAIRS` /
+    /// the device rate — 682 ms at 48 kHz, 743 ms at 44.1 kHz).
+    const CEILING: f32 = 0.55;
+    /// Fraction of the gap above `MODERN_MIXAHEAD` shed per second of quick
+    /// frames (continuous decay, so splitting a second into more or fewer
+    /// frames gives the same result): a 350 ms lead is back under 75 ms
+    /// within a second, under 15 ms within three.
+    const DECAY_PER_SECOND: f32 = 0.07;
+
+    let wanted = (host_elapsed_s * SAFETY).clamp(MODERN_MIXAHEAD, CEILING);
+    if wanted >= current {
+        // At or above: jump up, or (`==`) hold — a *sustained* run of
+        // frames this long must not ease down the moment it has just
+        // caught up, or the next one like it reopens the gap this bought.
+        wanted
+    } else {
+        let decay = DECAY_PER_SECOND.powf(dt_s.clamp(0.0, 1.0));
+        MODERN_MIXAHEAD + (current - MODERN_MIXAHEAD) * decay
+    }
+}
+
 /// (Tests.) The `S_StartSound` events waiting for the next frame, with the
 /// view entity of their call.
 #[cfg(test)]
@@ -502,7 +596,6 @@ mod tests {
     use quake_rs::bsp::Bsp;
     use quake_rs::progs::Progs;
     use quake_rs::server::Server;
-    use quake_rs::snd::MODERN_MIXAHEAD;
 
     use crate::app::{boot, boot_attract, boot_demo};
     use crate::host::step;
@@ -528,7 +621,21 @@ mod tests {
         let mut out = Vec::new();
         for _ in 0..frames {
             step(dt as f32);
-            if let Some(pcm) = audio.frame(dt) {
+            if let Some(pcm) = audio.frame(dt, None) {
+                out.extend_from_slice(pcm.samples);
+            }
+        }
+        out
+    }
+
+    /// Frames of `dt`, each measured as having taken `host_elapsed` of real
+    /// time to compute — [`adapt_modern_ahead`]'s input, as `Sys::frame`
+    /// feeds it from an `Instant` around `step`.
+    fn run_frames_timed(audio: &mut Audio, frames: usize, dt: f64, host_elapsed: f64) -> Vec<i16> {
+        let mut out = Vec::new();
+        for _ in 0..frames {
+            step(dt as f32);
+            if let Some(pcm) = audio.frame(dt, Some(host_elapsed)) {
                 out.extend_from_slice(pcm.samples);
             }
         }
@@ -561,13 +668,13 @@ mod tests {
         modern();
         let mut audio = Audio::new();
         audio.clock(1000);
-        let first = audio.frame(0.0).map(|p| (p.start, p.samples.len() / 2)).unwrap();
+        let first = audio.frame(0.0, None).map(|p| (p.start, p.samples.len() / 2)).unwrap();
         assert_eq!(first, (1000, 2400), "from the page's position, 50 ms ahead of it");
         audio.clock(1000 + 800);
-        let next = audio.frame(0.0).map(|p| (p.start, p.samples.len() / 2)).unwrap();
+        let next = audio.frame(0.0, None).map(|p| (p.start, p.samples.len() / 2)).unwrap();
         assert_eq!(next, (3400, 800), "the device played 800 pairs: 800 more");
         audio.clock(1000 + 800 + 10_000);
-        let late = audio.frame(0.0).map(|p| (p.start, p.samples.len() / 2)).unwrap();
+        let late = audio.frame(0.0, None).map(|p| (p.start, p.samples.len() / 2)).unwrap();
         assert_eq!(late, (11_800, 2400), "overtaken: skip to the device, then 50 ms again");
     }
 
@@ -576,11 +683,11 @@ mod tests {
         assert_eq!(boot(), 1);
         close_menu();
         let mut audio = Audio::new();
-        let first = audio.frame(1.0 / 72.0).map(|p| p.clear).unwrap();
+        let first = audio.frame(1.0 / 72.0, None).map(|p| p.clear).unwrap();
         assert!(first, "a new mixer: S_Init's S_StopAllSounds (true)");
-        assert!(!audio.frame(1.0 / 72.0).unwrap().clear);
+        assert!(!audio.frame(1.0 / 72.0, None).unwrap().clear);
         assert_eq!(boot_demo(), 1);
-        let pcm = audio.frame(1.0 / 72.0).unwrap();
+        let pcm = audio.frame(1.0 / 72.0, None).unwrap();
         assert!(pcm.clear, "the demo's S_StopAllSounds clears what was mixed ahead");
         assert_eq!(stats(&audio)["clears"], "2");
         assert!(sound_generation() >= 2, "the automation's generation counts them");
@@ -598,7 +705,7 @@ mod tests {
         assert_eq!((s["rate"].as_str(), s["mode"].as_str()), ("44100", "2026"), "the device's rate");
         let statics = s["statics"].clone();
         crate::host_cmd::execute_console_command("snd_modern 0");
-        let pcm = audio.frame(1.0 / 72.0).map(|p| (p.rate, p.clear)).unwrap();
+        let pcm = audio.frame(1.0 / 72.0, None).map(|p| (p.rate, p.clear)).unwrap();
         assert_eq!(pcm, (11025, true), "id's rate; the ring cleared for the new mixer");
         assert_eq!(sound_mode(), SoundMode::Classic, "snd_modern 0 is the Classic mixer");
         let s = stats(&audio);
@@ -628,7 +735,7 @@ mod tests {
         let before: u32 = stats(&audio)["local"].parse().unwrap();
         menu_down();
         s_play(&["items/r_item1"]);
-        audio.frame(1.0 / 72.0);
+        audio.frame(1.0 / 72.0, None);
         let s = stats(&audio);
         assert_eq!(s["local"], (before + 1).to_string(), "menu1.wav for the cursor");
         let (_, channels) = audio.call("snd_channels").unwrap();
@@ -777,5 +884,141 @@ mod tests {
             .count();
         assert!(water > 0, "some e1m1 leafs hear water ambience");
         assert!(sky > 0, "some e1m1 leafs hear sky/wind ambience");
+    }
+
+    // --- adapt_modern_ahead: the late-frame fix ---------------------------
+
+    #[test]
+    fn a_slow_frame_grows_the_lead_at_once_and_a_quick_one_does_not() {
+        // A 150 ms frame (a phone's slow underwater pass) jumps the lead to
+        // 2.5x it, clamped to the floor and the ceiling.
+        let grown = adapt_modern_ahead(MODERN_MIXAHEAD, 0.150, 1.0 / 72.0);
+        assert!((grown - 0.375).abs() < 1e-5, "{grown}");
+        // A frame well inside the current lead does not grow it.
+        assert!(adapt_modern_ahead(grown, 0.010, 1.0 / 72.0) <= grown);
+        // However long the stall, the lead never passes the ring's cap
+        // (`RING_PAIRS` / 48 kHz = 682 ms; 44.1 kHz = 743 ms).
+        assert_eq!(adapt_modern_ahead(MODERN_MIXAHEAD, 10.0, 1.0 / 72.0), 0.55);
+        // However short the frame, the lead never drops below the baseline.
+        assert_eq!(adapt_modern_ahead(MODERN_MIXAHEAD, 0.0, 1.0 / 72.0), MODERN_MIXAHEAD);
+    }
+
+    #[test]
+    fn a_sustained_stall_at_the_same_level_holds_steady_instead_of_oscillating() {
+        // The bug this guards: `wanted > current` (strict) eased the lead
+        // back down the instant it caught up to a sustained stall, so the
+        // very next frame just like it found it under-grown again — forever
+        // (caught by `a_sustained_stall_at_the_derived_safe_limit_never_
+        // gaps_once_converged` actually running the ring dry in headless
+        // Chromium before this fix, not by this pure-function test alone).
+        // Once the lead matches `SAFETY * s`, a run of more frames taking
+        // exactly `s` must hold it there, not ease it down and jump back up
+        // every other frame.
+        let s = 0.15;
+        let mut ahead = adapt_modern_ahead(MODERN_MIXAHEAD, s, s);
+        let target = ahead;
+        for _ in 0..20 {
+            ahead = adapt_modern_ahead(ahead, s, s);
+            assert_eq!(ahead, target, "holds steady, not oscillating, at a sustained {s}s/frame");
+        }
+    }
+
+    #[test]
+    fn the_grown_lead_eases_back_to_the_floor_over_quick_seconds() {
+        let mut ahead = adapt_modern_ahead(MODERN_MIXAHEAD, 0.150, 0.0);
+        assert!((ahead - 0.375).abs() < 1e-5, "the jump: {ahead}");
+        let jump = ahead;
+        for _ in 0..72 {
+            ahead = adapt_modern_ahead(ahead, 0.0, 1.0 / 72.0);
+        }
+        assert!((ahead - (MODERN_MIXAHEAD + (jump - MODERN_MIXAHEAD) * 0.07)).abs() < 1e-5,
+            "one second of quick frames sheds 93% of the gap: {ahead}");
+        for _ in 0..72 * 4 {
+            ahead = adapt_modern_ahead(ahead, 0.0, 1.0 / 72.0);
+        }
+        assert!(ahead - MODERN_MIXAHEAD < 0.0005, "back near the floor within a few seconds: {ahead}");
+    }
+
+    /// `samples_ahead`'s own bookkeeping (`quake-rs/src/snd/dma.rs`), without
+    /// a live `Mixer`: each cycle paints up to `clock + ahead`, but
+    /// `painted_time` only ever grows (`Mixer::paint` advances it by
+    /// `samples_ahead`'s return, which is 0 — not negative — once a lower
+    /// target falls under the high-water mark a bigger lead already bought).
+    /// Simulates a host frame that always takes exactly `s`, forever, and
+    /// checks the real condition for no underrun: the buffer already built
+    /// *before* a cycle starts must reach past that cycle's *own* clock plus
+    /// its own `s` — it is the only buffer there is for the ring to draw on
+    /// while that cycle's stall runs, since nothing mixes again until it
+    /// ends. This is why `adapt_modern_ahead`'s docs derive a lead of a
+    /// little over *twice* the frame, not once. Returns how many cycles from
+    /// `warmup` on failed that.
+    fn simulate_sustained_stall_gaps(s: f32, cycles: u32, warmup: u32) -> u32 {
+        let (mut ahead, mut clock, mut painted, mut gaps) = (MODERN_MIXAHEAD, 0.0_f32, 0.0_f32, 0);
+        for cycle in 0..cycles {
+            let underran_this_cycle = painted < clock + s;
+            ahead = adapt_modern_ahead(ahead, s, s);
+            painted = painted.max(clock + ahead);
+            clock += s;
+            if cycle >= warmup && underran_this_cycle {
+                gaps += 1;
+            }
+        }
+        gaps
+    }
+
+    #[test]
+    fn a_sustained_stall_at_the_derived_safe_limit_never_gaps_once_converged() {
+        // Comfortably under CEILING / SAFETY (0.55 / 2.5 = 0.22 s): the lead
+        // converges to a stable `SAFETY * s` and every later cycle's
+        // already-built buffer reaches past that cycle's own stall.
+        assert_eq!(simulate_sustained_stall_gaps(0.15, 200, 5), 0, "150 ms/frame, forever: no gap once converged");
+        assert_eq!(simulate_sustained_stall_gaps(0.18, 200, 5), 0, "180 ms/frame: still comfortably covered");
+        assert_eq!(simulate_sustained_stall_gaps(0.05, 200, 5), 0, "50 ms/frame: comfortably covered");
+    }
+
+    #[test]
+    fn a_sustained_stall_past_the_derived_limit_keeps_gapping_by_a_bounded_amount() {
+        // Past CEILING / SAFETY (~227 ms/frame, under 4.5 fps): the ring
+        // (RING_PAIRS: 682 ms at 48 kHz) is not big enough to buy a lead of
+        // twice a frame this long forever, so a *perfectly steady* stall
+        // this far past it gaps every cycle once the lead settles at the
+        // ceiling — a real architectural limit, not a bug (a real, jittery
+        // stall this severe gaps less often, as some frames run under the
+        // local average; `web/PLATFORM.md`, "Sound").
+        let gaps_50 = simulate_sustained_stall_gaps(0.3, 50, 5);
+        assert_eq!(gaps_50, 45, "every cycle past warmup gaps at this sustained a stall");
+        // Bounded, not runaway: twice the cycles gaps (about) twice as
+        // often, not faster — each cycle's shortfall is the same fixed
+        // amount (CEILING short of `2 * s`), never compounding.
+        let gaps_400 = simulate_sustained_stall_gaps(0.3, 400, 5);
+        assert_eq!(gaps_400, 395, "one more gap a cycle, the whole way: no runaway");
+    }
+
+    #[test]
+    fn a_run_of_slow_frames_grows_the_mixers_own_mixahead_and_classic_never_moves() {
+        assert_eq!(boot(), 1);
+        close_menu();
+        modern();
+        let mut audio = Audio::new();
+        audio.device(true, 48000);
+        // A steady run of 150 ms frames, as a sustained slow pass underwater
+        // would be: the lead converges above the floor.
+        run_frames_timed(&mut audio, 30, 1.0 / 72.0, 0.150);
+        let grown = audio.mixer.as_ref().unwrap().cvars.mixahead;
+        assert!(grown > MODERN_MIXAHEAD * 2.0, "grown past the baseline: {grown}");
+        assert!(grown <= 0.55, "never past the ceiling: {grown}");
+        assert_eq!(stats(&audio)["mixahead_ms"], format!("{:.1}", grown * 1000.0), "snd_stats shows it");
+        // Quick frames again: it eases back down.
+        run_frames_timed(&mut audio, 72 * 5, 1.0 / 72.0, 0.0);
+        let eased = audio.mixer.as_ref().unwrap().cvars.mixahead;
+        assert!(eased < grown, "eased back down: {grown} -> {eased}");
+        assert!(eased - MODERN_MIXAHEAD < 0.002, "close to the floor after 5 quick seconds: {eased}");
+
+        // Classic's `_snd_mixahead` is id's fixed 0.1 s, whatever the host
+        // frame took — never adapted.
+        crate::host_cmd::execute_console_command("snd_modern 0");
+        run_frames_timed(&mut audio, 10, 1.0 / 72.0, 0.300);
+        assert_eq!(audio.mixer.as_ref().unwrap().cvars.mixahead, 0.1, "Classic is untouched by slow frames");
+        crate::host_cmd::execute_console_command("snd_modern 1");
     }
 }
