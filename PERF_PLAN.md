@@ -1260,3 +1260,115 @@ page's host hands the program `-hwthreads` (its pool of workers plus one). The 2
 profile's Auto pixel size grows its budget with the threads: a 1080p frame's pixels
 times the whole square root of the thread count, so 4–8 threads draw a 1440p screen at
 pixel size 1.
+
+## 12. Underwater and phone-resolution frames (2026-09-30, branch `fleet/water`)
+
+The user's report: on an Android phone (the threads build, 2026 profile, pixel size
+1 so the 3-D view is roughly 2244x1080–2640x1080), underwater levels (e1m2) felt a tiny
+bit slow. The chair's native measurement at 2640x1080 found underwater +40–50%
+over dry and poor thread scaling at this resolution.
+
+**Where the time actually goes.** Isolated with `quaketool view --bench` (the
+`--vrect` flag forces a plain `render()` with no warp, even with the eye underwater, so
+render cost can be measured apart from the warp) and two focused unit benchmarks (since
+removed; see "Method" below):
+
+- The hires extra (`VideoCvars::hires`, on by default in 2026) renders the submerged view
+  at the SCREEN's own size (`screen::warp_vrect`), not id's 320x200 buffer, so
+  `D_WarpScreen`'s per-pixel gather (`render/warp.rs`'s `warp_scaled`) runs over the whole
+  frame — at 2640x1080, 2.85M pixels of gather, every underwater frame.
+- `warp_scaled`'s inner loop computed `rowptr[v + tu] * w` — a multiply by the view's
+  width on every pixel — when `rowptr` could hold that row's byte offset already
+  multiplied, once, at table-build time (`WarpTables::prepare`, called only when the
+  view/screen sizes change).
+- Independently of the warp: `render/raster.rs`'s `turb16_span` (`Turbulent8`,
+  `D_DrawTurbulent8Span`'s span sampler — the DEFAULT liquid renderer in both profiles,
+  `exact_perspective` is off by default) did two `i32::rem_euclid` divisions per liquid
+  pixel to wrap into the 64x64 texture. Quake's liquid miptextures are always a power of
+  two (64x64), and for a power-of-two modulus `n`, two's-complement `v & (n-1)` equals
+  `v.rem_euclid(n)` for every `i32`, negative included — so the wrap is a mask, not a
+  division, whenever the texture size is a power of two (checked at runtime; any other
+  size, never id's data, still divides). This is on the critical path for EVERY visible
+  liquid pixel, dry or underwater — looking at a lake from above pays it too.
+
+**Changes (both byte-identical; see "Proof").**
+
+- `render/raster.rs`: added `wrap_texel(v, n)`, used by `turb16_span` and by
+  `span_turb`'s exact-perspective branch (the same wrap, written once instead of twice).
+- `render/warp.rs`: `WarpTables::prepare` now stores `rowptr[v] * w` instead of `rowptr[v]`,
+  so `warp_scaled`'s inner loop does `view.pixels[rowptr[v + tu] + column[tv + u]]`, one
+  fewer multiply per output pixel.
+
+**Tried and reverted:** hoisting the column's `tu = sin[phase + u]` lookup out of the row
+loop into a once-per-frame `Vec<usize>` (it only depends on `u`, not `v`, so it is read
+`out_h` times more often than it needs to be). Measured SLOWER (a probe at 2640x1080, 1
+thread: 2.2 ms with the inline lookup vs 6.0 ms hoisted into a fresh `Vec` every frame) —
+the sine table is small enough (one L1-resident array) that the redundant reads are
+nearly free, and the extra allocation and indirection cost more than they saved. Not kept.
+
+**Method.** Two temporary `#[ignore]`d benchmarks (removed before this commit; the
+numbers below are from them and from `quaketool view --bench`) measured `warp_scaled` and
+`turb16_span` in isolation, each the median of several trials (timings are noisy,
+load 7–12 during this round) to avoid chasing one noisy sample. End-to-end numbers below
+are `quaketool view`'s `--bench`, median of 5 interleaved runs of a `before`/`after`
+binary pair (same process, alternating, so both see the same load swings).
+
+**Isolated** (2640x1080, hires scale ~6.7, median of 9 trials of 40 frames):
+
+| | 1 thread | 8 threads |
+|---|---:|---:|
+| `warp_scaled`, before | 2.52 ms | 0.52 ms |
+| `warp_scaled`, after | 2.21 ms | 0.47 ms |
+
+| | before | after |
+|---|---:|---:|
+| `turb16_span`, 2640x100, ns/pixel | 4.92 | 2.17 |
+
+**End to end**, native, e1m2, `--video modern`, median of 5 interleaved runs
+(`quaketool view ... --origin 1788,296,Z --angles 0,-90,0 --bench 120`), Z=96
+underwater / Z=180 dry, same spot:
+
+| resolution | condition | threads | before | after |
+|---|---|---:|---:|---:|
+| 2640x1080 | underwater | 1 | 11.15 ms | 9.57 ms (−14%) |
+| 2640x1080 | underwater | 8 | 2.11 ms | 1.90 ms (−10%) |
+| 2640x1080 | dry | 1 | 7.56 ms | 5.94 ms (−21%) |
+| 2640x1080 | dry | 8 | 1.83 ms | 1.47 ms (−20%) |
+| 1320x540 | underwater | 1 | 2.31 ms | 1.96 ms (−15%) |
+| 1320x540 | underwater | 8 | 0.735 ms | 0.691 ms (−6%) |
+| 1320x540 | dry | 1 | 2.06 ms | 1.61 ms (−22%) |
+| 1320x540 | dry | 8 | 0.643 ms | 0.564 ms (−12%) |
+
+The dry view at this spot already shows a lot of liquid (the pool from above), which is
+why it gains as much as or more than the submerged one: `turb16_span`'s fix pays off
+wherever a liquid surface is on screen, not only underwater. The warp's own fix is the
+smaller of the two (12–14% of `warp_scaled` alone); most of the frame-level gain is the
+division removed from the liquid span. Underwater is still slower than dry at the same
+spot (the gather is real, additional work the C's 320x200 buffer never paid at this
+resolution) — this round made both cheaper, not equal.
+
+In the browser (headless Chromium, the threads build, `web/bench.py --build
+--threads-build --workloads walk_e1m2 --res 1280x800 --threads 1,8 --video modern`;
+1280x800 is the harness's clamp): `post3d` (which includes the warp) read 0 — the
+scripted walk from e1m2's spawn (a 360° look, 1 s forward, about-face, back, about-face)
+never reaches water in its 10 s loop, so this workload does not exercise the warp.
+`quake-wasm` links the same `quake-rs` engine crate unchanged by platform, and its own
+172 tests (byte-identical framebuffers included) pass against this round's code, so the
+native proof above carries over; a true in-browser underwater timing would need a
+scripted teleport or a longer/aimed walk script, not built this round.
+
+**Proof.** Byte-for-byte: the three native goldens; `oracle/classic_check.py` (9/9);
+`quaketool framerate --check` (22 scenarios); `cargo test --release` in both crates (709
+/ 172, 0 failed); `cargo clippy --release --all-targets` in both crates and
+`--target wasm32-wasip1` in `quake-wasm` (0 warnings); all 15 `web/verify_*.py` against a
+threads-build deploy dir (`verify_threads.py` builds its own `threadcheck` program —
+run it with no deploy-dir argument, not against `$D`). Hashes of underwater and dry
+frames at 2640x1080, 1320x540, 640x400 and 320x200, Classic and `--video modern`, 1 and 8
+threads, were recorded before this round's changes and compared identical after (32
+frames, all match). A new test,
+`render::tests::an_underwater_hires_frame_is_the_same_on_any_thread_count`, renders a
+submerged hires-scale view with a liquid surface through `Renderer::render` +
+`Renderer::warp_into` at 1, 2, 3, 5 and 8 threads and asserts the same bytes; a second,
+`render::raster::tests::wrap_texel_matches_rem_euclid_for_every_modulus`, checks the new
+helper against `rem_euclid` directly for power-of-two and non-power-of-two moduli across
+negative, zero and boundary `i32` values.

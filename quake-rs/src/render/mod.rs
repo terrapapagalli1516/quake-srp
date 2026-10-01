@@ -1625,6 +1625,35 @@ mod tests {
     }
 
     #[test]
+    fn an_underwater_hires_frame_is_the_same_on_any_thread_count() {
+        // The hires extra renders a submerged view at the screen's own size
+        // (`screen::warp_vrect`), so `D_WarpScreen`'s gather (warp.rs) runs
+        // over the whole frame rather than id's 320x200 buffer, and a liquid
+        // surface in view goes through the turbulent sampler (raster.rs). At
+        // a size no band split divides evenly, both must still give every
+        // thread count the same bytes.
+        let bsp = special_surface_room();
+        let pal = fixtures::ramp_palette();
+        let cam = Camera::looking_at([-200.0, -150.0, 60.0], [0.0, 0.0, 0.0], 90.0);
+        let (w, h) = (211, 157);
+        let scene = Scene { time: 2.6, ..Scene::new(&bsp, cam, w, h, &pal) };
+        let at = ViewRect { x: 0, y: 0, w, h };
+        let frame_at = |threads: usize| {
+            let mut r = Renderer::new();
+            r.set_threads(threads);
+            let view = r.render(&scene);
+            let mut screen = Image::new(w, h, 9);
+            r.warp_into(view, &mut screen, at, scene.time, true);
+            screen
+        };
+        let one = frame_at(1);
+        assert!(one.pixels.iter().any(|&p| p != 9), "the warp drew nothing");
+        for threads in [2, 3, 5, 8] {
+            assert!(frame_at(threads).pixels == one.pixels, "{threads} threads");
+        }
+    }
+
+    #[test]
     fn a_view_drawn_into_its_place_on_the_screen_is_the_view_drawn_apart() {
         // render_into draws a bordered view (column 13, row 7 of a 200x150
         // screen) straight into the screen, as render draws it on its own,
