@@ -242,9 +242,12 @@ where
         f(0, dst);
         return;
     }
-    // One run a thread, taken from a queue (see `Workers::run`: a thread that
-    // does not start leaves its run to the others).
-    let per = rows.div_ceil(threads);
+    // Several runs a thread, taken from a queue as threads come free (see
+    // `Workers::run`): one run a thread waits on the slowest core, as a
+    // phone's efficiency cores or a busy machine show (the underwater warp
+    // took 70% longer with 2 of 8 cores shared). A thread that does not
+    // start leaves its runs to the others.
+    let per = rows.div_ceil(threads * BANDS_PER_THREAD);
     let queue = Mutex::new(dst.chunks_mut(per * dst_row).enumerate());
     let work = || loop {
         let Some((i, d)) = queue.lock().unwrap_or_else(PoisonError::into_inner).next() else { break };
