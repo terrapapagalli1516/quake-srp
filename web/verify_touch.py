@@ -88,11 +88,21 @@ MENU_POINT = """async ([vx, vy]) => {
           r.top + c.clientTop + vy * s * c.clientHeight / H];
 }"""
 
+# The real Fullscreen API, disabled: headless Chromium grants touch.js's
+# first-tap requestFullscreen (goFullscreen) by actually resizing the
+# browser's own window to the screen, and CDP then refuses to resize a
+# fullscreen window back (9./10. resize the viewport mid-session to sweep
+# phone sizes) — not a thing a page script would ever need to care about,
+# so it is turned off for every context instead of worked around per call.
+NO_FULLSCREEN_JS = "HTMLElement.prototype.requestFullscreen = () => Promise.reject(new Error('disabled for verify_touch.py'));"
+
+
 def main():
     httpd = serve(PORT, True)
     with sync_playwright() as p:
         br = p.chromium.launch(headless=True, args=["--no-sandbox", "--autoplay-policy=no-user-gesture-required"])
         ctx = br.new_context(**PHONE)
+        ctx.add_init_script(NO_FULLSCREEN_JS)
         pg = ctx.new_page()
         errs = []
         pg.on("console", lambda m: errs.append(m.text) if m.type == "error" else None)
@@ -114,10 +124,13 @@ def main():
             if release:
                 touches("touchEnd", [])
 
-        mode = lambda: pg.evaluate("document.getElementById('touch') && document.getElementById('touch').dataset.mode")
+        # `pg_` defaults to the main phone's page; the status-bar safe-zone
+        # sweep (9./10. below) passes a second phone's page through it.
+        mode = lambda pg_=None: (pg_ or pg).evaluate("document.getElementById('touch') && document.getElementById('touch').dataset.mode")
         flags = lambda: pg.evaluate("quake.state.flags")
         screen_id = lambda: pg.evaluate("exp.menu_screen_id()")
-        call = lambda line: pg.evaluate(f"quake.call({json.dumps(line.split()[0])}, ...{json.dumps(line.split()[1:])})")
+        make_call = lambda pg_: (lambda line: pg_.evaluate(f"quake.call({json.dumps(line.split()[0])}, ...{json.dumps(line.split()[1:])})"))
+        call = make_call(pg)
         field = lambda name: pg.evaluate(f"quake.callLine('player_field {name}').then(r => r.value)")
         def tap_menu(vx, vy):
             x, y = pg.evaluate(MENU_POINT, [vx, vy])
@@ -127,11 +140,12 @@ def main():
             box = pg.locator(sel).bounding_box()
             pg.touchscreen.tap(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
             time.sleep(0.25)
-        def shown(sel):
-            return pg.evaluate(f"(() => {{ const e = document.querySelector({json.dumps(sel)}); return !!e && getComputedStyle(e).display !== 'none' && !e.hidden; }})()")
-        def wait(js, timeout=5000):
+        def shown(sel, pg_=None):
+            pg_ = pg_ or pg
+            return pg_.evaluate(f"(() => {{ const e = document.querySelector({json.dumps(sel)}); return !!e && getComputedStyle(e).display !== 'none' && !e.hidden; }})()")
+        def wait(js, timeout=5000, pg_=None):
             try:
-                pg.wait_for_function(js, timeout=timeout)
+                (pg_ or pg).wait_for_function(js, timeout=timeout)
                 return True
             except Exception:
                 return False
@@ -295,6 +309,113 @@ def main():
         tap_menu(160, 82)
         check("Classic: its menu taps", wait("quake.state.menuScreen === 5"))
         call("exec profile 2026")
+        wait("document.getElementById('touch').dataset.mode === 'play'")
+
+        # --- 9. Clear of the status bar -------------------------------------------
+        # FIRE, JUMP, WEAPON and the stick's resting hint must never cover the
+        # HUD's numbers, icons and inventory strip (web/PLATFORM.md, "Clear of
+        # the status bar"). `sbar_height` (automation.rs) answers the
+        # framebuffer rows the status bar covers right now; turned into a CSS
+        # rect here independently of touch.js's own `--bar` (so a bug in its
+        # arithmetic cannot hide from this check) and compared against every
+        # static control's actual box, at several phone sizes and every
+        # Screen size (viewsize 100/110/120).
+        BAR_RECT_JS = """async () => {
+          const rows = (await quake.callLine('sbar_height')).value;
+          const [, H] = quake.size();
+          const r = document.getElementById('c').getBoundingClientRect();
+          const h = H > 0 && rows > 0 ? rows * r.height / H : 0;
+          return { left: r.left, right: r.right, top: r.bottom - h, bottom: r.bottom, rows };
+        }"""
+        BAR_SETTLED_JS = """async () => {
+          const rows = (await quake.callLine('sbar_height')).value;
+          const [, H] = quake.size();
+          const r = document.getElementById('c').getBoundingClientRect();
+          const h = H > 0 && rows > 0 ? rows * r.height / H : 0;
+          const cur = parseFloat(getComputedStyle(document.getElementById('touch')).getPropertyValue('--bar')) || 0;
+          return Math.abs(cur - h) < 0.75;
+        }"""
+        SAFE_ZONE_CONTROLS = ["#tFire", "#tJump", "#tWeapon", "#tHint"]
+        def overlaps(a, b):
+            return a["left"] < b["right"] and b["left"] < a["right"] and a["top"] < b["bottom"] and b["top"] < a["bottom"]
+        def set_viewsize(pg_, call_, vs):
+            call_(f"exec viewsize {vs}")
+            pg_.evaluate("window.dispatchEvent(new Event('resize'))")
+            wait(BAR_SETTLED_JS, pg_=pg_)
+        def safe_zone_check(pg_, label):
+            bar = pg_.evaluate(BAR_RECT_JS)
+            bad = []
+            for sel in SAFE_ZONE_CONTROLS:
+                if not shown(sel, pg_):
+                    continue
+                box = pg_.locator(sel).bounding_box()
+                rect = {"left": box["x"], "right": box["x"] + box["width"], "top": box["y"], "bottom": box["y"] + box["height"]}
+                if overlaps(rect, bar):
+                    bad.append((sel, rect))
+            check(f"{label}: FIRE/JUMP/WEAPON/the hint clear the status bar", not bad,
+                  f"bar {bar}" + (f" overlaps {bad}" if bad else ""))
+
+        for w, h in [(844, 390), (1012, 412), (748, 360)]:
+            pg.set_viewport_size({"width": w, "height": h})
+            pg.evaluate("window.dispatchEvent(new Event('resize'))")
+            time.sleep(0.3)
+            for vs in (100, 110, 120):
+                set_viewsize(pg, call, vs)
+                safe_zone_check(pg, f"{w}x{h}@3 viewsize {vs}")
+            if (w, h) == (748, 360):
+                pg.screenshot(path=os.path.join(WEB, "verify_touch_safezone_748x360.png"))
+        set_viewsize(pg, call, 100)
+        pg.set_viewport_size({"width": 844, "height": 390})
+        pg.evaluate("window.dispatchEvent(new Event('resize'))")
+        time.sleep(0.3)
+
+        # --- 10. The same, at a different pixel ratio and more phone sizes --------
+        # A second phone (a phone-sized landscape viewport at devicePixelRatio 2.6):
+        # native resolution's whole-pixel quantization rounds differently at
+        # a different ratio, so this is not just the same math re-run.
+        PHONE_26 = dict(viewport={"width": 1012, "height": 412}, device_scale_factor=2.6, is_mobile=True, has_touch=True)
+        ctx3 = br.new_context(**PHONE_26)
+        ctx3.add_init_script(NO_FULLSCREEN_JS)
+        pg3 = ctx3.new_page()
+        errs3 = []
+        pg3.on("console", lambda m: errs3.append(m.text) if m.type == "error" else None)
+        pg3.on("pageerror", lambda e: errs3.append("PAGEERROR: " + str(e)))
+        call3 = make_call(pg3)
+        pg3.goto(f"http://127.0.0.1:{PORT}/index.html?2026", wait_until="load")
+        pg3.wait_for_function("window.quake && quake.ready && window.QuakeTouch", timeout=120000)
+        pg3.touchscreen.tap(506, 206)                     # tap to start (viewport centre)
+        wait("document.getElementById('touch') && document.getElementById('touch').dataset.mode === 'demo'", pg_=pg3)
+        call3("boot")                                     # New Game, the walkBtn shortcut
+        time.sleep(0.5)                                    # e1m1 built synchronously inside it
+        pg3.keyboard.press("Escape")                       # close the menu it lands on
+        check("1012x412@2.6: reaches play",
+              wait("document.getElementById('touch').dataset.mode === 'play'", 20000, pg3), mode(pg3))
+        for vs in (100, 110, 120):
+            set_viewsize(pg3, call3, vs)
+            safe_zone_check(pg3, f"1012x412@2.6 viewsize {vs}")
+        pg3.screenshot(path=os.path.join(WEB, "verify_touch_safezone_1012x412.png"))
+
+        pg3.set_viewport_size({"width": 915, "height": 412})
+        pg3.evaluate("window.dispatchEvent(new Event('resize'))")
+        time.sleep(0.3)
+        for vs in (100, 110, 120):
+            set_viewsize(pg3, call3, vs)
+            safe_zone_check(pg3, f"915x412@2.6 viewsize {vs}")
+        set_viewsize(pg3, call3, 100)
+
+        # A portrait phone: the "turn sideways" prompt, not the play layout,
+        # but MENU (a tap to play upright, then the demo's own MENU button)
+        # must still be reachable.
+        pg3.set_viewport_size({"width": 412, "height": 1012})
+        pg3.evaluate("window.dispatchEvent(new Event('resize'))")
+        time.sleep(0.3)
+        check("412x1012 portrait: the rotate prompt", shown("#tRotate", pg3))
+        pg3.locator("#tRotate").click()
+        check("a tap plays upright anyway", not shown("#tRotate", pg3) and shown("#tMenu", pg3))
+        pg3.screenshot(path=os.path.join(WEB, "verify_touch_portrait.png"))
+
+        check("other phone sizes: no console errors", not errs3, str(errs3[-5:]))
+        ctx3.close()
 
         errs_online = list(errs)
         print("errors:", errs_online[-5:])

@@ -794,6 +794,31 @@ what the game's State calls for:
 | the menu | taps on the menu itself; BACK (Escape); YES / NO when it asks (STATE 256) |
 | the console (Options > Go to console) | KEYBOARD (a tap on the console too), TAB, ▲ (the previous line); BACK closes it; a drag scrolls (PgUp/PgDn) |
 
+**Clear of the status bar.** FIRE, JUMP, WEAPON and the stick's resting
+hint (the dashed circle) sit above the HUD's numbers and icons, at any
+phone size, Screen size (viewsize) and resolution — the thing a touch
+control must never cover is the one piece of the page the program itself
+draws, not the page. The program reports it: `sbar_height` (an automation
+call, `quake_rs::screen::status_bar_rows`) answers the framebuffer rows,
+bottom-anchored, the status bar covers *this frame* — the same arithmetic
+`calc_refdef` uses to keep the 3-D view off the bar, so it is exactly right
+for every `viewsize` (0, 24 or 48 virtual rows), the "scaled 2-D" extra's
+whole-number blow-up, and an intermission (always full screen, so 0). The
+page turns that into a CSS custom property, `--bar` (`touch.js`'s
+`refreshBar`/`applyBar`): the frame rows at the canvas box's own CSS-pixel-
+per-frame-pixel ratio, re-read whenever that ratio or the bar might have
+changed — a resize, a rotation, fullscreen, and leaving the menu or console
+(where Screen size and the resolution are set). The four controls' CSS
+`bottom` is then `max(their own fixed default, --bar + a 6px breath + their
+usual gap above the lowest of them, JUMP)`, so raising `--bar` lifts the
+whole cluster together without disturbing its layout — a visible gap above
+the bar rather than the pixel-exact edge, which a phone's devicePixelRatio
+can round a hair short of on the actual screen — and with no status bar
+(Screen size 120) `--bar` is 0 and they sit exactly where they always did.
+The live stick itself still appears wherever the thumb lands (its whole
+point), so a finger placed directly on the bar can still summon it there;
+only the controls with a fixed position are kept off it.
+
 **What a finger sends.** The stick is the client's analog move
 (`set_move fwd side`: `in_fwd`/`in_side`, full speed at 56 CSS px of
 thumb, a 12% dead zone, at most once a display frame); FIRE and JUMP hold

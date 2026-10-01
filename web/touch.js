@@ -76,6 +76,7 @@
   let flushQueued = false;
   let autoPaused = false;         // hidden while playing: paused under the menu
   let wakeLock = null;
+  let barRows = 0;                // sbar_height's last answer: frame pixels, bottom-anchored
 
   // --- The page's state -------------------------------------------------------
   function flags() { return host.state.flags; }
@@ -118,6 +119,28 @@
   // in_touchaccel, from the program (it changes only in the console).
   function readSettings() {
     call('cvar in_touchaccel').then(r => { accel = r.value > 0 ? r.value : 0; });
+    refreshBar();
+  }
+
+  // --- The status bar's safe zone -----------------------------------------
+  // sbar_height (automation.rs): the framebuffer rows, bottom-anchored, the
+  // HUD covers right now (0 with none) — Screen size, the "scaled 2-D"
+  // extra and the resolution all bent into one number by the program, which
+  // draws the thing. Read whenever those might have changed (readSettings'
+  // callers: boot, and leaving the menu or console) and on every box or
+  // orientation change; applied as a CSS variable the bottom-anchored play
+  // buttons' `bottom` keeps clear of (the CSS below, "#touch .tb").
+  function refreshBar() {
+    call('sbar_height').then(r => { barRows = Number.isFinite(r.value) ? Math.max(0, r.value) : 0; applyBar(); });
+  }
+  // The frame's barRows converted to today's CSS pixels (the canvas box may
+  // have changed without the frame's own pixel size changing: a resize, a
+  // fullscreen toggle, image-rendering's own 4:3 box).
+  function applyBar() {
+    const [, h] = host.frameSize();
+    const r = host.canvas.getBoundingClientRect();
+    const px = h > 0 && r.height > 0 ? barRows * r.height / h : 0;
+    layer.style.setProperty('--bar', px.toFixed(1) + 'px');
   }
 
   // --- Sending ----------------------------------------------------------------
@@ -404,9 +427,19 @@
   #touch[data-mode=console] .console { display:flex; }
   #tMenu, #tBack { top:calc(10px + env(safe-area-inset-top)); left:calc(12px + env(safe-area-inset-left)); }
   #tFull { top:calc(10px + env(safe-area-inset-top)); left:calc(92px + env(safe-area-inset-left)); width:34px; padding:0; }
-  #tFire { width:84px; height:84px; right:calc(24px + env(safe-area-inset-right)); bottom:calc(28px + env(safe-area-inset-bottom)); }
-  #tJump { width:62px; height:62px; right:calc(120px + env(safe-area-inset-right)); bottom:calc(20px + env(safe-area-inset-bottom)); }
-  #tWeapon { width:58px; height:58px; right:calc(36px + env(safe-area-inset-right)); bottom:calc(126px + env(safe-area-inset-bottom));
+  /* --bar: the status bar's CSS height (0 with none; refreshBar/applyBar
+     above), kept current for the HUD's actual Screen size and resolution.
+     Every play button's bottom offset is at least --bar, plus a 6px breath
+     of its own above the bar, plus its usual distance above tJump's (the
+     lowest of the four: 20px) — so raising --bar lifts the whole cluster
+     together, with a visible gap, and the HUD's numbers, icons and
+     inventory strip stay clear underneath it, at any phone size. (A zero
+     gap measured to the pixel: a phone's devicePixelRatio rounds the bar's
+     frame-pixel height and the browser's own layout to slightly different
+     CSS pixels, so an exact 0px gap can be a hair short.) */
+  #tFire { width:84px; height:84px; right:calc(24px + env(safe-area-inset-right)); bottom:calc(max(28px, var(--bar,0px) + 14px) + env(safe-area-inset-bottom)); }
+  #tJump { width:62px; height:62px; right:calc(120px + env(safe-area-inset-right)); bottom:calc(max(20px, var(--bar,0px) + 6px) + env(safe-area-inset-bottom)); }
+  #tWeapon { width:58px; height:58px; right:calc(36px + env(safe-area-inset-right)); bottom:calc(max(126px, var(--bar,0px) + 112px) + env(safe-area-inset-bottom));
     font-size:9px; letter-spacing:.04em; text-indent:.04em; }
   #tStick { position:absolute; width:${2 * STICK_RADIUS}px; height:${2 * STICK_RADIUS}px; margin:-${STICK_RADIUS}px 0 0 -${STICK_RADIUS}px;
     border:2px solid rgba(181,131,47,.35); border-radius:50%; background:rgba(11,9,7,.25);
@@ -414,7 +447,7 @@
   #tStick.on { opacity:1; }
   #tKnob { position:absolute; left:50%; top:50%; width:44px; height:44px; margin:-22px 0 0 -22px; border-radius:50%;
     background:radial-gradient(circle at 50% 35%, rgba(217,165,70,.6), rgba(107,74,26,.6)); }
-  #tHint { position:absolute; left:calc(40px + env(safe-area-inset-left)); bottom:calc(40px + env(safe-area-inset-bottom));
+  #tHint { position:absolute; left:calc(40px + env(safe-area-inset-left)); bottom:calc(max(40px, var(--bar,0px) + 26px) + env(safe-area-inset-bottom));
     width:${2 * STICK_RADIUS}px; height:${2 * STICK_RADIUS}px; border:2px dashed rgba(181,131,47,.18); border-radius:50%;
     pointer-events:none; }
   #touch .row { position:absolute; left:50%; transform:translateX(-50%); gap:10px; }
@@ -501,6 +534,13 @@
 
     document.addEventListener('visibilitychange', onVisibility);
     document.addEventListener('fullscreenchange', syncFullscreenButton);
+    // The canvas box can change size (a resize, a rotation, fullscreen)
+    // without the frame's own pixel size changing: re-read the status bar's
+    // CSS height each time (index.html's own listeners resize the canvas
+    // first; this one's call lands a turn later, after they have).
+    addEventListener('resize', refreshBar);
+    addEventListener('orientationchange', refreshBar);
+    document.addEventListener('fullscreenchange', refreshBar);
     // The first tap (the page's "tap to start") also asks for fullscreen and
     // landscape, where the browser has them; iOS has neither for a page: its
     // fullscreen is the home-screen app (manifest.webmanifest).
