@@ -47,7 +47,7 @@ const SLOTS = 3;                         // frame slots (triple buffering), and 
 // The sound ring (web/PLATFORM.md, "Sound"): made by the page, written here,
 // played by the page's AudioWorklet. The control block's Int32 fields:
 const A = { POS: 0, WRITE: 1, RATE: 2, UNDER: 3, PLAYED: 4, CLEARS: 5, PEAK: 6, QUANTA: 7 };
-const AUDIO_CTL_BYTES = 64, RING_PAIRS = 16384;
+const AUDIO_CTL_BYTES = 64, RING_PAIRS = 32768;
 
 // --- Protocol constants (quake-wasm/src/proto.rs) ---------------------------
 const IN_END = 8, IN_AUDIO_WAKE = 11;

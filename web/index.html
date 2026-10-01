@@ -1084,7 +1084,7 @@ function cdLevel() {
 // sound starts, as a sound card's DMA ran whether a speaker was on or not.
 // web/PLATFORM.md, "Sound", has the ring's layout.
 const A = { POS: 0, WRITE: 1, RATE: 2, UNDER: 3, PLAYED: 4, CLEARS: 5, PEAK: 6, QUANTA: 7 };
-const AUDIO_CTL_BYTES = 64, RING_PAIRS = 16384;
+const AUDIO_CTL_BYTES = 64, RING_PAIRS = 32768;
 let audioShared = null, actl = null;     // the ring: made in main(), shared with wasi.js and the worklet
 let audioCtx = null;
 let audioNode = null, audioGraph = null; // the worklet node, and its setup under way
