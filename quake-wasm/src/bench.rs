@@ -71,8 +71,23 @@ pub(crate) fn write_values(_out: &mut impl std::io::Write) -> std::io::Result<()
     Ok(())
 }
 
+/// Hold the host frame about to run late, on purpose: a `verify_*.py`'s way
+/// to prove the 2026 mixer's lead adapts to a slow frame
+/// (`quake-wasm/src/snd_dma.rs`'s `adapt_modern_ahead`). Chromium's CPU
+/// throttle (`Emulation.setCPUThrottlingRate`) reaches the page's main
+/// thread, not a Worker's, so there is no way from outside the program to
+/// make one of its frames slow; this is the hook in its place, set with
+/// `stall_ms` and left set until a `stall_ms 0` turns it off — a whole
+/// stretch of frames can run late, as a slow render pass would. Zero code
+/// without `--features bench`.
+#[inline(always)]
+pub(crate) fn maybe_stall() {
+    #[cfg(feature = "bench")]
+    imp::maybe_stall();
+}
+
 #[cfg(feature = "bench")]
-pub(crate) use imp::{bench_enable, NAMES};
+pub(crate) use imp::{bench_enable, set_stall_ms, NAMES};
 #[cfg(feature = "bench")]
 pub(crate) use workload::bench_start;
 
@@ -108,6 +123,26 @@ alias_models,alias_accepted,alias_tris,bands,band_threads";
         static ACC: RefCell<[f64; N_PHASES]> = const { RefCell::new([0.0; N_PHASES]) };
         static DONE: RefCell<([f64; N_PHASES], RenderStats, usize)> =
             RefCell::new(([0.0; N_PHASES], RenderStats::default(), 0));
+        /// `stall_ms`'s setting: milliseconds [`maybe_stall`] sleeps before
+        /// each host frame, until a `stall_ms 0` clears it.
+        static STALL_MS: Cell<u64> = const { Cell::new(0) };
+    }
+
+    /// Sleep for `stall_ms`'s setting, if any — standing in for a host frame
+    /// the worker's own CPU made slow (a busy render pass), which nothing
+    /// outside the program (short of starving its CPU core) can otherwise
+    /// cause on demand.
+    pub(super) fn maybe_stall() {
+        let ms = STALL_MS.with(Cell::get);
+        if ms > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+        }
+    }
+
+    /// `stall_ms <n>`: [`maybe_stall`] sleeps `n` ms a frame from now on; 0
+    /// turns it back off.
+    pub(crate) fn set_stall_ms(ms: u64) {
+        STALL_MS.with(|c| c.set(ms));
     }
 
     pub(super) fn frame_begin(renderer: Option<&mut render::Renderer>) {

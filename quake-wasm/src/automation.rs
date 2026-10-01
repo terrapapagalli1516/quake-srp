@@ -287,6 +287,10 @@ fn bench_call(name: &str, rest: &str) -> Option<Answer> {
         "bench_names" => Answer { value: 0.0, text: crate::bench::NAMES.to_string() },
         "bench_enable" => done(|| crate::bench::bench_enable(rest.trim().parse().unwrap_or(0))),
         "bench_start" => crate::bench::bench_start(rest.trim()).into(),
+        // A frame late on purpose (`quake-wasm/src/bench.rs::maybe_stall`):
+        // CPU throttling cannot reach a Worker, so `verify_*.py` uses this
+        // to prove the 2026 mixer's lead adapts to one.
+        "stall_ms" => done(|| crate::bench::set_stall_ms(rest.trim().parse::<f64>().unwrap_or(0.0).max(0.0) as u64)),
         _ => return None,
     })
 }
