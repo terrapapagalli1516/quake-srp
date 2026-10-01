@@ -7,11 +7,11 @@
 //   - the game data (`id1/*.pak`): from its cache when it has them, else
 //     from the network, kept. id's shareware pak never changes; bump
 //     DATA_CACHE to fetch it afresh.
-//   - everything else (the page, wasi.js, touch.js, quake.wasm, the
-//     manifest and icons): from the network, kept for later, and from what
-//     was kept when the network fails. So online the page is always the one
-//     deployed (an update takes effect at the next load, with nothing to
-//     bump), and offline it is the one last played.
+//   - everything else (the page, wasi.js, touch.js, endscreen.js,
+//     quake.wasm, the manifest and icons): from the network, kept for
+//     later, and from what was kept when the network fails. So online the
+//     page is always the one deployed (an update takes effect at the next
+//     load, with nothing to bump), and offline it is the one last played.
 //   - every answer carries the two cross-origin isolation headers, which the
 //     page's SharedArrayBuffers need. A server that sends them loses
 //     nothing; one that cannot (a plain static host) gets them from here,
@@ -38,7 +38,7 @@ if (typeof window === 'undefined') {
   // The page's own small files, kept at install so the first visit can be
   // replayed offline (its navigation came before this worker). quake.wasm
   // and the pak are kept as the page fetches them through the worker.
-  const PRECACHE = ['index.html', 'sw.js', 'wasi.js', 'touch.js', 'manifest.webmanifest',
+  const PRECACHE = ['index.html', 'sw.js', 'wasi.js', 'touch.js', 'endscreen.js', 'manifest.webmanifest',
                     'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png'];
 
   self.addEventListener('install', (e) => {

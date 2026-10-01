@@ -121,6 +121,20 @@ impl<W: Write> Sys<W> {
         self.out.flush()
     }
 
+    /// Did the last key or call just decide to quit ([`App::request_quit`]
+    /// through [`crate::app::take_quit`])? If so, this is `Sys_Quit`'s
+    /// moment: write the `Quit` record (id's end screen, if the pak has it)
+    /// and close the turn one last time, so the host hears about it before
+    /// the program ends. True when it did — the caller's turn is over, and
+    /// so is [`run`]'s loop (id's `exit(0)`).
+    fn maybe_quit(&mut self) -> io::Result<bool> {
+        let Some(registered) = crate::app::take_quit() else { return Ok(false) };
+        let screen = crate::common::pak().and_then(|pak| end_screen(&pak, registered));
+        Msg::Quit { registered, screen: screen.as_deref() }.write_to(&mut self.out)?;
+        self.end_turn(false)?;
+        Ok(true)
+    }
+
     /// Read and apply events until the turn's tick (its `dt`), or — when
     /// `polling` — until the host has nothing more (the time since the last
     /// frame). `None` when the input ended.
@@ -138,6 +152,9 @@ impl<W: Write> Sys<W> {
                 Event::End | Event::Unknown(_) => {}
                 Event::Key { keynum, down, ch } => {
                     key_event(i32::from(keynum), i32::from(down), ch.min(i32::MAX as u32) as i32);
+                    if self.maybe_quit()? {
+                        return Ok(None);
+                    }
                     if ui_state() != self.state {
                         self.end_turn(!polling)?;
                     }
@@ -163,6 +180,12 @@ impl<W: Write> Sys<W> {
                         None => automation::call(&line),
                     };
                     Msg::Reply { id, value: answer.value, text: &answer.text }.write_to(&mut self.out)?;
+                    // A call can quit too (the automation calls run through
+                    // the same menu/console paths a key does: `exec quit`,
+                    // `menu_quit_yes`).
+                    if self.maybe_quit()? {
+                        return Ok(None);
+                    }
                     // A call is a turn of its own: answer it now, still
                     // waiting (or polling) for the same tick.
                     self.end_turn(!polling)?;
@@ -252,6 +275,31 @@ impl<W: Write> Sys<W> {
         crate::app::ensure_app(|a| (rumbles, pad) = (a.pad.take_rumbles(), a.pad.pad_read));
         rumbles.into_iter().try_for_each(|rumble| Msg::Rumble { rumble, pad }.write_to(&mut self.out))
     }
+}
+
+/// `Sys_Quit`'s end screen (sys_dos.c, ~570): `end2.bin` registered, else
+/// `end1.bin` — id's `COM_LoadHunkFile`, so it is read through the same
+/// search path as any other file (a player's own `pak1.pak` can carry its
+/// own `end2.bin`). 80x25 of (character, attribute) VGA text-mode byte
+/// pairs; the DOS build stamped its version into row 0's red strip before
+/// drawing it (`sprintf(ver, " v%4.2f", VERSION)`, written to every other
+/// byte from column 72 — [`quake_rs::console::CON_VERSION`] is the same
+/// string `Draw_ConsoleBackground` stamps into the console background).
+/// `None` without that lump, or one that isn't exactly 4000 bytes (a
+/// modified install): the host still quits, just with no screen to draw.
+/// Takes `pak` rather than reading [`crate::common::pak`] itself so a test
+/// can hand it a synthetic one with its own `end2.bin`.
+pub(crate) fn end_screen(pak: &quake_rs::pak::Pak, registered: bool) -> Option<Vec<u8>> {
+    let name = if registered { "end2.bin" } else { "end1.bin" };
+    let mut screen = pak.read_file(name).ok().flatten()?;
+    if screen.len() != 4000 {
+        return None;
+    }
+    let ver = format!(" v{}", quake_rs::console::CON_VERSION);
+    for (i, b) in ver.bytes().enumerate() {
+        screen[72 * 2 + i * 2] = b;
+    }
+    Some(screen)
 }
 
 /// What the page's own UI needs of the game (the `State` record): the
@@ -512,5 +560,106 @@ mod tests {
         assert!(s.iter().skip(3).take(5).all(|&(_, wait)| wait == 0), "{s:?}");
         let frames = recs.iter().filter(|r| r.kind == Record::FRAME).count();
         assert!(frames >= 5, "a frame per End: {frames}");
+    }
+
+    /// Menu > Quit > Y ([`MenuAction::Quit`], `App::request_quit`): one
+    /// `Quit` record — unregistered here, so `end1.bin` from the test pak,
+    /// the DOS version stamped into row 0 — and the program ends right
+    /// there: nothing answers the tick queued after it (`run`'s loop already
+    /// returned, as `Sys_Quit`'s `exit(0)` ends id's process).
+    #[test]
+    fn menu_quit_yes_sends_the_end_screen_and_ends_the_program() {
+        let mut input = Vec::new();
+        input.extend(encode::call(1, "boot"));
+        input.extend(encode::call(2, "menu_up")); // Main's last item is Quit
+        input.extend(encode::call(3, "menu_select")); // raises the confirm prompt
+        input.extend(encode::call(4, "menu_quit_yes"));
+        input.extend(encode::tick(1, 1.0 / 60.0)); // never answered: the program is gone
+        let recs = run_on(&input);
+        let quits: Vec<&Record> = recs.iter().filter(|r| r.kind == Record::QUIT).collect();
+        assert_eq!(quits.len(), 1, "{recs:?}");
+        let q = quits[0];
+        assert_eq!(q.payload[0], 0, "the test pak is unregistered: end1.bin");
+        assert_eq!(q.payload.len(), 4 + 4000, "the whole end1.bin lump");
+        let screen = &q.payload[4..];
+        let pak = crate::common::pak().expect("the test pak");
+        let expect = end_screen(&pak, false).expect("end1.bin is in the shareware pak");
+        assert_eq!(screen, expect, "the same bytes `end_screen` reads and patches");
+        // Row 0, column 72: " v1.09" in the char bytes, the attribute untouched.
+        let ver: Vec<u8> = (0..6).map(|i| screen[72 * 2 + i * 2]).collect();
+        assert_eq!(ver, b" v1.09");
+        assert_eq!(screen[72 * 2 + 1], 0x48, "the attribute byte is id's, not overwritten");
+        // The record order: the call's own Reply, then Quit, then the final
+        // State + Sync `maybe_quit` closes the turn with.
+        assert!(recs.len() >= 4, "{recs:?}");
+        let tail = &recs[recs.len() - 4..];
+        assert_eq!(
+            [tail[0].kind, tail[1].kind, tail[2].kind, tail[3].kind],
+            [Record::REPLY, Record::QUIT, Record::STATE, Record::SYNC],
+        );
+        assert_eq!(tail[3].payload[4], 0, "the last Sync does not wait: nothing follows");
+        assert_eq!(tail[2].u32_at(0) & STATE_MENU, 0, "the menu closed (quit_yes also closes it)");
+    }
+
+    /// `quit` at the console (`key_dest == key_console`) quits at once, with
+    /// no confirmation — `Host_Quit_f`'s immediate branch, same as id's.
+    #[test]
+    fn the_quit_command_from_the_console_skips_the_prompt() {
+        let mut input = Vec::new();
+        input.extend(encode::call(1, "boot"));
+        input.extend(encode::call(2, "menu_cancel"));
+        input.extend(encode::call(3, "console_toggle"));
+        input.extend(encode::call(4, "exec quit"));
+        let recs = run_on(&input);
+        assert_eq!(recs.iter().filter(|r| r.kind == Record::QUIT).count(), 1, "{recs:?}");
+    }
+
+    /// `quit` bound to a key while playing (the console is not the
+    /// keyboard's destination) raises the confirm prompt instead, exactly
+    /// like Menu > Quit — it does not quit on the spot.
+    #[test]
+    fn the_quit_command_while_playing_asks_first() {
+        let mut input = Vec::new();
+        input.extend(encode::call(1, "boot"));
+        input.extend(encode::call(2, "menu_cancel")); // key_dest = key_game
+        input.extend(encode::call(3, "exec quit"));
+        let recs = run_on(&input);
+        assert_eq!(recs.iter().filter(|r| r.kind == Record::QUIT).count(), 0, "{recs:?}");
+        let state = recs.iter().rev().find(|r| r.kind == Record::STATE).unwrap();
+        assert_eq!(state.u32_at(0) & STATE_ASK, STATE_ASK, "the Quit prompt is up");
+    }
+
+    /// `end_screen` picks `end2.bin` registered, `end1.bin` not (`Sys_Quit`'s
+    /// own choice), patches the version into row 0 either way without
+    /// touching the attribute bytes, and is `None` for a missing or
+    /// wrong-length lump (a modified install) — never a panic. A synthetic
+    /// pak stands in for a player's own `pak1.pak` (the real shareware pak
+    /// has no `end2.bin` to test against).
+    #[test]
+    fn end_screen_picks_the_right_file_and_patches_the_version() {
+        let screen = |marker: u8| {
+            let mut v = Vec::with_capacity(4000);
+            for _ in 0..2000 {
+                v.push(0x20); // a space, as most of id's screen is
+                v.push(0x11); // a distinctive attribute, to prove it survives
+            }
+            v[0] = marker;
+            v
+        };
+        let pak = crate::test_util::build_test_pak(&[("end1.bin", &screen(b'1')), ("end2.bin", &screen(b'2'))]);
+        let shareware = end_screen(&pak, false).expect("end1.bin");
+        assert_eq!(shareware[0], b'1', "unregistered reads end1.bin");
+        let registered = end_screen(&pak, true).expect("end2.bin");
+        assert_eq!(registered[0], b'2', "registered reads end2.bin");
+        // " v1.09" (CON_VERSION) into row 0 col 72, the char bytes only
+        // (every other byte): the attribute bytes in between are untouched.
+        let ver: Vec<u8> = (0..6).map(|i| shareware[72 * 2 + i * 2]).collect();
+        assert_eq!(ver, b" v1.09");
+        assert_eq!(shareware[72 * 2 + 1], 0x11, "the attribute byte is id's, not overwritten");
+
+        let short = crate::test_util::build_test_pak(&[("end1.bin", &[0u8; 10])]);
+        assert_eq!(end_screen(&short, false), None, "a modified/short lump: no screen, not a panic");
+        let missing = crate::test_util::build_test_pak(&[]);
+        assert_eq!(end_screen(&missing, false), None, "no end1.bin at all");
     }
 }

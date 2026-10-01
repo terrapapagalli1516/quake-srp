@@ -38,6 +38,7 @@
 //! | 15 | `Audio` | `rate u32`, `mode u32` (0 Classic, 1 2026), `starts u32`, `local u32`, `stops u32`, `clears u32`, `painted u32`: the sound device's counts |
 //! | 16 | `Cd` | `serial u32` (a new value: play `track` from its top), `track u8`, `looping u8`, `mode u8` (0 stopped, 1 playing, 2 paused), `0 u8`, `volume f32` (0..1): the CD player's state, written when it changes (only with a disc: the player's music) |
 //! | 17 | `FrameAt` | `w u16`, `h u16`, `format u8`, `slot u8`, `0 u16`, `pixels u32`, `palette u32`: a frame left in the program's shared memory, at those addresses ([`crate::present`]) |
+//! | 18 | `Quit` | `registered u8`, `0 u8 ×3`, then (if the pak had the file) 4000 bytes: id's end screen (`end2.bin` registered, else `end1.bin` — 80x25 of (character, attribute) VGA text-mode pairs, the DOS build's version stamped into row 0 as `Sys_Quit` did). Written once, the game's last message: `Host_Quit_f`/`M_Quit_Key` decided to quit, the host should leave fullscreen and release the pointer, and the program ends right after (as id's `exit(0)` did) |
 //! | 20 | `Rumble` | `strong f32`, `weak f32`, `ms u32`, `pad u32` (1: the pad is read, rumble it; 0: a phone's vibration): the 2026 `joy_rumble` |
 //!
 //! A `Sync` ends each turn of the program's loop: everything before it is
@@ -205,6 +206,7 @@ const OUT_PCM: u8 = 14;
 const OUT_AUDIO: u8 = 15;
 const OUT_CD: u8 = 16;
 const OUT_FRAME_AT: u8 = 17;
+const OUT_QUIT: u8 = 18;
 const OUT_RUMBLE: u8 = 20;
 
 /// `Frame` pixel formats. RGBA8: four bytes a pixel, what a 2-D canvas
@@ -276,6 +278,11 @@ pub(crate) enum Msg<'a> {
     Cd(quake_rs::cd_audio::CdState),
     /// A rumble, and whether the pad is read (else a phone vibrates).
     Rumble { rumble: Rumble, pad: bool },
+    /// The game just quit (`Sys_Quit`): `registered` says which end screen
+    /// id would show, and `screen` is that file's 4000 raw bytes when the
+    /// pak had it ([`crate::sys::end_screen`]) — the host draws it with no
+    /// extra round trip. The program ends right after this message.
+    Quit { registered: bool, screen: Option<&'a [u8]> },
 }
 
 /// Little-endian field writer for a message's fixed part.
@@ -349,6 +356,9 @@ impl Msg<'_> {
             }
             Msg::Rumble { rumble: r, pad } => {
                 (OUT_RUMBLE, f.f32(r.strong).f32(r.weak).u32(r.ms).u32(u32::from(pad)).0, &[])
+            }
+            Msg::Quit { registered, screen } => {
+                (OUT_QUIT, f.u8(u8::from(registered)).u8(0).u16(0).0, screen.unwrap_or(&[]))
             }
         }
     }
@@ -450,6 +460,7 @@ impl Record {
     pub(crate) const PCM: u8 = OUT_PCM;
     pub(crate) const AUDIO: u8 = OUT_AUDIO;
     pub(crate) const CD: u8 = OUT_CD;
+    pub(crate) const QUIT: u8 = OUT_QUIT;
 
     /// Split a stdout byte stream into records.
     pub(crate) fn split(mut bytes: &[u8]) -> Vec<Record> {

@@ -561,9 +561,17 @@ pub enum MenuAction {
     NewGame,
     /// Backed out of a submenu to the main screen (Escape on a submenu).
     Back,
-    /// The menu just closed (a confirmed Quit, or "No" to a Quit prompt
-    /// raised over the game).
+    /// The menu just closed, with nothing further for the host to do:
+    /// `M_ToggleMenu_f`'s Escape from the main screen ([`Menu::toggle`]), or
+    /// "No"/Escape to a Quit prompt raised over the game (`wasInMenus`
+    /// false: [`Menu::quit_back`] closes the overlay instead of restoring a
+    /// screen). A *confirmed* Quit is [`MenuAction::Quit`], not this.
     Closed,
+    /// The Quit prompt answered "Y" (`M_Quit_Key`, which forces `key_dest =
+    /// key_console` first so `Host_Quit_f` takes its immediate branch): the
+    /// host's turn now — end the session and tell the platform to quit, as
+    /// id's `Sys_Quit` ended the process.
+    Quit,
     /// `M_Main_Key`'s Escape: the menu closed from the main screen. The host
     /// puts the demo loop back (`cls.demonum = m_save_demonum`, which
     /// `M_Menu_Main_f` switched off) and, with nothing playing, starts its
@@ -1448,9 +1456,9 @@ impl Menu {
         self.quit_msg = n & 7;
     }
 
-    /// Answer the Quit prompt "Yes" (the literal `Y` key) — quit: close the menu.
-    /// A no-op off the Quit screen. Returns [`MenuAction::Closed`] when it quit,
-    /// else [`MenuAction::None`].
+    /// Answer the Quit prompt "Yes" (the literal `Y` key) — quit the game.
+    /// A no-op off the Quit screen. Returns [`MenuAction::Quit`] when it
+    /// quit, else [`MenuAction::None`].
     pub fn quit_yes(&mut self) -> MenuAction {
         if self.new_game_confirm {
             // "y" answers the New Game modal: key_dest = key_game, disconnect,
@@ -1465,7 +1473,7 @@ impl Menu {
         }
         self.close();
         self.screen = MenuScreen::Main;
-        MenuAction::Closed
+        MenuAction::Quit
     }
 
     /// Answer the Quit prompt "No" (the literal `N` key) — back out, same as
@@ -3192,7 +3200,7 @@ mod tests {
         assert_eq!(m.select(&mut s), MenuAction::None, "Enter does not answer the Quit prompt");
         assert_eq!(m.keydown(K_ENTER, None, &mut s), MenuAction::None);
         assert!(m.visible && m.screen() == MenuScreen::Quit);
-        assert_eq!(m.keydown(b'Y', Some(b'Y'), &mut s), MenuAction::Closed, "Y quits");
+        assert_eq!(m.keydown(b'Y', Some(b'Y'), &mut s), MenuAction::Quit, "Y quits");
         assert!(!m.visible);
 
         // Main item Multiplayer (item 1) opens the multiplayer screen
@@ -4460,10 +4468,10 @@ mod tests {
         assert_eq!(m.quit_no(), MenuAction::Back);
         assert_eq!(m.screen(), MenuScreen::Main);
         assert!(m.visible);
-        // Raise again, Yes closes the menu.
+        // Raise again, Yes quits (and closes the menu).
         m.set_cursor(4);
         m.select(&mut s);
-        assert_eq!(m.quit_yes(), MenuAction::Closed);
+        assert_eq!(m.quit_yes(), MenuAction::Quit);
         assert!(!m.visible);
 
         // The prompt remembers a NON-Main origin (open_quit from Options -> No

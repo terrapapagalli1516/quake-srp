@@ -7,10 +7,11 @@
 //! the view size, `map`, save/load, `pause`, the demo commands (cl_demo.c's
 //! `playdemo`/`timedemo`, host_cmd.c's demo loop control
 //! `startdemos`/`demos`/`stopdemo`), the port's `profile` and `wasm_help`,
-//! and the cheats god/noclip/fly/kill/give/impulse, which act on the live
+//! the cheats god/noclip/fly/kill/give/impulse, which act on the live
 //! [`Walk`](crate::app::Walk) through the client's host_cmd.c
 //! ([`quake_rs::client::host_cmd`], which also holds the level swaps
-//! `changelevel` and `restart`).
+//! `changelevel` and `restart`), and `quit` (`Host_Quit_f`): immediate from
+//! the console, else the Quit confirmation prompt.
 
 use quake_rs::cd_audio::CdCall;
 use quake_rs::client::cl_demo::MAX_DEMOS;
@@ -21,7 +22,7 @@ use quake_rs::cvar::{self, CVARS};
 use quake_rs::keys::{self, Binding};
 use quake_rs::settings::Profile;
 
-use crate::app::{build_walk_map, ensure_app, App};
+use crate::app::{build_walk_map, ensure_app, App, KeyDest};
 use crate::cl_demo::{cl_disconnect, cl_next_demo, cl_play_demo, cl_stop_playback, cl_timedemo, finish_host_error};
 use crate::savegame::{do_load_command, do_save_command};
 use crate::snd_dma;
@@ -74,6 +75,7 @@ pub(crate) const COMMANDS: &[ConsoleCommand] = &[
     c("map", "map <name>", cmd_map),
     c("fly", "fly mode", cmd_game),
     c("god", "invulnerability", cmd_game),
+    c("quit", "leave the game", cmd_quit),
     c("path", "the search path", cmd_path),
     c("echo", "echo <text>", cmd_echo),
     c("exec", "exec <file>  run a file's lines", cmd_exec),
@@ -191,6 +193,23 @@ fn cmd_play(args: &Args) {
 /// commands, carried out by the sound device's CD.
 fn cmd_cd(args: &Args) {
     snd_dma::cd_command(&args.all());
+}
+
+/// `Host_Quit_f` (host_cmd.c's `Cmd_AddCommand("quit", ...)`): with the
+/// console open — this command can only reach here from the console itself
+/// or from a bound key run with it closed — `key_dest == key_console`
+/// already, so its immediate branch runs: quit at once
+/// ([`App::request_quit`]). Otherwise (bound to a key while playing, or a
+/// script's `quit` with the console down) it raises the Quit confirmation
+/// prompt instead, exactly like Menu > Quit (`M_Menu_Quit_f`).
+fn cmd_quit(_: &Args) {
+    ensure_app(|a| {
+        if a.key_dest() == KeyDest::Console {
+            a.request_quit();
+        } else {
+            a.menu.open_quit();
+        }
+    });
 }
 
 /// `COM_Path_f`: the search path, a pack with its file count.
@@ -956,6 +975,36 @@ mod tests {
         run_console_line("god");
         // Echoed line + "no active game".
         assert!(console_scrollback() >= 2, "god with no walk prints a guard message");
+    }
+
+    /// `Host_Quit_f`'s branch: `quit` with the console NOT the keyboard's
+    /// destination (a bound key, say, run with the console down) raises the
+    /// Quit confirmation prompt instead of quitting on the spot — same as
+    /// Menu > Quit — and leaves the game running; `quit` typed AT the open
+    /// console (`key_dest == key_console`) quits at once, no prompt.
+    #[test]
+    fn quit_from_the_console_is_immediate_else_it_raises_the_prompt() {
+        use crate::menu::{menu_screen_id, menu_visible};
+        assert_eq!(boot(), 1);
+        close_menu(); // key_dest = key_game: playing, console down
+        run_console_line_closed("quit");
+        assert_eq!((menu_visible(), menu_screen_id()), (1, 9), "the Quit screen came up");
+        assert!(APP.with(|c| !c.borrow().as_ref().unwrap().quit), "not quit yet");
+        assert!(APP.with(|c| c.borrow().as_ref().unwrap().walk.is_some()), "still playing");
+
+        close_menu(); // back to playing, as if "No" had been pressed
+        console_toggle(); // key_dest = key_console
+        run_console_line("quit");
+        assert!(APP.with(|c| c.borrow().as_ref().unwrap().quit), "quit requested at once");
+        assert!(APP.with(|c| c.borrow().as_ref().unwrap().walk.is_none()), "CL_Disconnect ran");
+        assert!(APP.with(|c| c.borrow().as_ref().unwrap().disconnected));
+    }
+
+    /// Run a line as a bound key would — through `Cmd_ExecuteString`
+    /// directly, with the console closed (`console.open` stays false, unlike
+    /// [`run_console_line`], which types into the open console).
+    fn run_console_line_closed(line: &str) {
+        execute_console_command(line);
     }
 
     /// QuakeC deadflag values (client.qc / defs.qc).

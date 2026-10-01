@@ -70,6 +70,15 @@ pub(crate) fn apply_menu_action(a: &mut App, action: MenuAction) -> Option<MenuD
                 crate::cl_demo::cl_next_demo(a);
             }
         }
+        MenuAction::Quit => {
+            // M_Quit_Key 'y': key_dest = key_console, then Host_Quit_f —
+            // with the console the destination now, its immediate branch
+            // runs: disconnect, and mark the session over (`App::request_quit`).
+            // `crate::sys` notices on its next read and tells the page with a
+            // `Quit` record before the program ends, as `Sys_Quit`'s
+            // `exit(0)` ended id's process.
+            a.request_quit();
+        }
         // Closed/Back/None already applied to the menu state.
         MenuAction::Closed | MenuAction::Back | MenuAction::None => {}
     }
@@ -145,9 +154,10 @@ pub(crate) fn menu_cancel() {
     press(K_ESCAPE);
 }
 
-/// Answer the Quit prompt "Yes" (the `y` key, `M_Quit_Key`): close the menu.
-/// Also answers New Game's "Are you sure?" (SCR_ModalMessage's `y`), which
-/// starts the new game. A no-op with the menu hidden.
+/// Answer the Quit prompt "Yes" (the `y` key, `M_Quit_Key`): quit the game
+/// ([`MenuAction::Quit`], `App::request_quit`). Also answers New Game's "Are
+/// you sure?" (SCR_ModalMessage's `y`), which starts the new game instead. A
+/// no-op with the menu hidden.
 pub(crate) fn menu_quit_yes() {
     menu_press(b'y');
 }

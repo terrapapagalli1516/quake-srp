@@ -16,7 +16,7 @@ use quake_rs::render::{self, build_gamma_table, Console, Menu, MenuPics};
 use quake_rs::settings::{Profile, Settings};
 use quake_rs::wad::Qpic;
 
-use crate::common::pak;
+use crate::common::{pak, registered};
 use crate::host::ShowFps;
 use crate::present::Present;
 use crate::snd_dma;
@@ -167,6 +167,11 @@ pub(crate) struct App {
     /// The gamepad: in_win.c's joystick state and the 2026 rumble's
     /// ([`crate::input::PadHost`]).
     pub(crate) pad: crate::input::PadHost,
+    /// Set once by [`App::request_quit`] (`Host_Quit_f`'s immediate branch,
+    /// or `M_Quit_Key`'s 'y'): the session is over. [`crate::sys::run`]'s
+    /// loop reads it back with [`take_quit`] and ends the turn — and the
+    /// program — with a `Quit` record, as id's `Sys_Quit` ended the process.
+    pub(crate) quit: bool,
 }
 
 /// keys.c's `key_dest`: who gets the keyboard. The port keeps it as the menu's
@@ -236,6 +241,21 @@ impl App {
         } else {
             KeyDest::Game
         }
+    }
+
+    /// `Host_Quit_f`'s and `M_Quit_Key`'s shared tail, once quitting is
+    /// decided (the console already open when `quit` ran, or 'y' on the
+    /// Quit prompt, which forces `key_dest = key_console` first so
+    /// `Host_Quit_f` takes this branch instead of reopening the prompt):
+    /// `CL_Disconnect`, then mark the session over for [`take_quit`].
+    /// Idempotent — a second call while the first is still pending changes
+    /// nothing.
+    pub(crate) fn request_quit(&mut self) {
+        if self.quit {
+            return;
+        }
+        crate::cl_demo::cl_disconnect(self);
+        self.quit = true;
     }
 
     /// `M_Menu_Main_f` (menu.c): the main menu opens on its kept cursor
@@ -543,6 +563,7 @@ pub(crate) fn ensure_app(f: impl FnOnce(&mut App)) {
                 m_save_demonum: 0,
                 hw_threads: 1,
                 pad: crate::input::PadHost::default(),
+                quit: false,
             });
         }
         if let Some(a) = c.borrow_mut().as_mut() {
@@ -661,6 +682,22 @@ pub(crate) fn in_walk_mode() -> i32 {
             .as_ref()
             .map(|a| (a.mode == 0 && a.walk.is_some()) as i32)
             .unwrap_or(0)
+    })
+}
+
+/// Take the pending quit ([`App::request_quit`]), if any, this turn: whether
+/// the registered end screen (`end2.bin`) should show, else the shareware's
+/// (`end1.bin`) — [`crate::sys::Sys::maybe_quit`] reads it once, and the
+/// program ends.
+pub(crate) fn take_quit() -> Option<bool> {
+    APP.with(|c| {
+        let mut b = c.borrow_mut();
+        let a = b.as_mut()?;
+        if !a.quit {
+            return None;
+        }
+        a.quit = false;
+        Some(registered())
     })
 }
 
