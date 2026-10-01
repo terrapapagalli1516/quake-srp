@@ -14,15 +14,23 @@ pak, the 2021 re-release's folder, and a pak1 without `pop.lmp` (a modified
 shareware game: the program refuses it, and the page takes it out again).
 Removing the files brings the shareware game back.
 
+Then a server's own files (web/PLATFORM.md, "A server's own files"): a
+manifest-less deploy's network log never asks for pak1 or any track; a
+files.json offering pak1 and tracks plays registered with nothing dropped; a
+player's own drop still wins over it, per file; and a broken server pak1
+(not a pak at all) leaves the deploy on pak0, quietly.
+
 Usage: verify_content.py [deploydir]   (PLATFORM.md: index.html, wasi.js,
 quake.wasm, id1/pak0.pak). Screenshots go to $QUAKE_SHOTS (default: the
 deploy dir)."""
-import base64, io, math, os, struct, time, wave
+import base64, io, math, os, shutil, struct, tempfile, time, wave
 from playwright.sync_api import sync_playwright
 import isolated
 
 WEB = isolated.webdir()
 PORT = isolated.port(8171)
+SERVER_PORT = PORT + 1   # a second, independent deploy: "A server's own files"
+SERVER_PORT2 = PORT + 2  # a third, for the broken-pak1 deploy
 SHOTS = os.environ.get("QUAKE_SHOTS", WEB)
 
 # common.c's pop[]: gfx/pop.lmp is these 128 shorts, big-endian.
@@ -89,6 +97,28 @@ PAK1 = write_pak([("gfx/pop.lmp", POP_LMP), ("maps/e2m1.bsp", E1M1)])
 PAK1_MODIFIED = write_pak([("maps/e2m1.bsp", E1M1)])       # no pop.lmp: a mod on shareware
 TRACKS = {2: tone(440, 0.8), 3: tone(660, 0.6), 6: tone(550, 1.0)}
 
+
+def server_deploy(pak1=None, tracks=None):
+    """A fresh deploy dir ("A server's own files"): WEB's page files,
+    quake.wasm and id1/pak0.pak (symlinked — the same bytes, not an 18 MB
+    copy), plus `pak1` at id1/pak1.pak and `tracks` (track number -> bytes)
+    at id1/music/trackNN.wav if given, and the files.json
+    isolated.write_manifest generates from whatever of those is there."""
+    d = tempfile.mkdtemp(prefix="quake-content-server-")
+    os.makedirs(os.path.join(d, "id1", "music"), exist_ok=True)
+    isolated.copy_page(d)
+    for rel in ("quake.wasm", os.path.join("id1", "pak0.pak")):
+        os.symlink(os.path.abspath(os.path.join(WEB, rel)), os.path.join(d, rel))
+    if pak1 is not None:
+        with open(os.path.join(d, "id1", "pak1.pak"), "wb") as f:
+            f.write(pak1)
+    for n, data in (tracks or {}).items():
+        with open(os.path.join(d, "id1", "music", f"track{n:02d}.wav"), "wb") as f:
+            f.write(data)
+    isolated.write_manifest(d)
+    return d
+
+
 DROP = """async (files) => {
     const dt = new DataTransfer();
     for (const [name, b64, type] of files) {
@@ -123,42 +153,53 @@ with sync_playwright() as p:
     pg.on("console", lambda m: errs.append(m.text) if m.type == "error" else None)
     pg.on("pageerror", lambda e: errs.append("PAGEERROR: " + str(e)))
 
-    def ready():
+    def ready(page=None):
         """The page is up and has the program's word on its files. Polled, so
         a start the page answers with another reload (a refusal) is waited
-        out too."""
+        out too. `page` defaults to the main page (pg); the server-files
+        checks below pass their own."""
+        page = page or pg
         until = time.time() + 180
         while time.time() < until:
             try:
-                if pg.evaluate("!!(window.quake && quake.ready && quake.contentPath !== undefined)"):
+                if page.evaluate("!!(window.quake && quake.ready && quake.contentPath !== undefined)"):
                     return
             except Exception:
                 pass                    # the page is reloading
             time.sleep(0.2)
         raise SystemExit("the page did not come up")
 
-    def start_audio():
-        pg.mouse.click(450, 300)       # the first gesture: the overlay; audio runs
-        pg.wait_for_function("quake.audio.ring().running", timeout=10000)
+    def start_audio(page=None):
+        page = page or pg
+        page.mouse.click(450, 300)     # the first gesture: the overlay; audio runs
+        page.wait_for_function("quake.audio.ring().running", timeout=10000)
 
-    def cd():
-        return pg.evaluate("quake.cd.state()")
+    def cd(page=None):
+        return (page or pg).evaluate("quake.cd.state()")
 
-    def call(line):
-        return pg.evaluate(f"quake.callLine({line!r})")
+    def call(line, page=None):
+        return (page or pg).evaluate(f"quake.callLine({line!r})")
 
-    def level(secs=0.8):
+    def level(secs=0.8, page=None):
         """The CD's output RMS: the median of a few analyser windows over
         `secs`, after a moment for a change to reach the output."""
+        page = page or pg
         time.sleep(0.3)
         got = []
         for _ in range(8):
-            got.append(pg.evaluate("quake.cd.state().level"))
+            got.append(page.evaluate("quake.cd.state().level"))
             time.sleep(secs / 8)
         return sorted(got)[len(got) // 2]
 
+    # --- A manifest-less deploy (WEB has no files.json): the network log
+    # never shows a request for pak1 or any track — the point of asking a
+    # manifest instead of guessing ("A server's own files").
+    reqs = []
+    pg.on("request", lambda r: reqs.append(r.url))
     pg.goto(f"http://127.0.0.1:{PORT}/index.html", wait_until="load")
     ready()
+    noisy = [u for u in reqs if "pak1" in u or "/music/" in u]
+    check(not noisy, f"a manifest-less deploy asks for nothing extra ({noisy})")
     st = pg.evaluate("quake.content.state()")
     check(st["registered"] is False and st["tracks"] == [] and st["paks"] == [], f"a fresh page is shareware, no files ({st['registered']}, {st['tracks']}, {st['paks']})")
     check(pg.evaluate("quake.cd.state().want") is None, "no music: no CD records")
@@ -255,10 +296,82 @@ with sync_playwright() as p:
 
     real = [e for e in errs if "exit 1" not in e and "the game stopped" not in e]
     check(not real, f"no console errors {real[-3:]}")
+
+    # --- A server's own files (web/PLATFORM.md, "A server's own files"): a
+    # files.json offering pak1 and three tracks plays registered with
+    # nothing dropped, and a player's own drop still wins, per file.
+    d1 = server_deploy(pak1=PAK1, tracks=TRACKS)
+    httpd1 = isolated.serve(d1, SERVER_PORT)
+    pg2 = br.new_page(viewport={"width": 900, "height": 700})
+    errs2 = []
+    pg2.on("console", lambda m: errs2.append((m.type, m.text)))
+    pg2.on("pageerror", lambda e: errs2.append(("error", "PAGEERROR: " + str(e))))
+    pg2.goto(f"http://127.0.0.1:{SERVER_PORT}/index.html", wait_until="load")
+    ready(pg2)
+    st = pg2.evaluate("quake.content.state()")
+    check(st["registered"] is True and st["paks"] == ["id1/pak1.pak"] and st["serverPaks"] == ["id1/pak1.pak"],
+          f"files.json's pak1 plays registered with nothing dropped ({st['registered']}, {st['paks']}, {st['serverPaks']})")
+    check(st["tracks"] == [2, 3, 6] and st["serverTracks"] == [2, 3, 6], f"and its three tracks ({st['tracks']}, {st['serverTracks']})")
+    start_audio(pg2)
+    pg2.wait_for_function("quake.cd.state().playing", timeout=10000)
+    s = cd(pg2)
+    check(s["want"]["track"] == 2 and s["want"]["looping"], f"demo1 plays the server's track 2, looping ({s['want']})")
+    loud = level(page=pg2)
+    check(loud > 0.05, f"the server's CD track is heard beside the mix (RMS {loud:.3f})")
+
+    # --- The player's own pak1 — here, one the engine will refuse (no
+    # pop.lmp) — is tried before the server's valid one (precedence):
+    # dropping it refuses the whole boot with id's own words, which could
+    # only happen if the player's file, not the server's good one, was the
+    # one the engine saw. The existing auto-retry (web/PLATFORM.md, "Your
+    # files") then takes the bad drop out again and reloads — recovering,
+    # here, to the server's still-valid pak1, not bare pak0.
+    with pg2.expect_navigation(timeout=60000):
+        pg2.evaluate(DROP, [["pak1.pak", b64(PAK1_MODIFIED), ""]])
+    time.sleep(1.0)
+    ready(pg2)
+    st = pg2.evaluate("quake.content.state()")
+    check("could not play with pak1.pak" in st["message"] and "You must have the registered version to use modified games" in st["message"],
+          f"a player's own pak1 is tried first, proving precedence, even though it is refused ({st['message']})")
+    check(st["registered"] is True and st["serverPaks"] == ["id1/pak1.pak"],
+          f"and the page recovers to the server's still-valid pak1, not bare pak0 ({st['registered']}, {st['serverPaks']})")
+
+    # --- And a player's own track 2 overrides the server's by number; the
+    # server's 3 and 6 are still in effect.
+    with pg2.expect_navigation(timeout=60000):
+        pg2.evaluate(ADD, [["track02.wav", "track02.wav", b64(tone(880, 0.5))]])
+    ready(pg2)
+    st = pg2.evaluate("quake.content.state()")
+    check(st["serverTracks"] == [3, 6] and st["tracks"] == [2, 3, 6],
+          f"a player's own track 2 overrides the server's; 3 and 6 are still its ({st['serverTracks']}, {st['tracks']})")
+    httpd1.shutdown()
+    shutil.rmtree(d1, ignore_errors=True)
+
+    # --- A broken server pak1 (not a pak at all): left out quietly (a
+    # console.warn, not an error), and pak0 still plays.
+    d2 = server_deploy(pak1=b"not a pak at all")
+    httpd2 = isolated.serve(d2, SERVER_PORT2)
+    pg3 = br.new_page(viewport={"width": 900, "height": 700})
+    errs3 = []
+    pg3.on("console", lambda m: errs3.append((m.type, m.text)))
+    pg3.on("pageerror", lambda e: errs3.append(("error", "PAGEERROR: " + str(e))))
+    pg3.goto(f"http://127.0.0.1:{SERVER_PORT2}/index.html", wait_until="load")
+    ready(pg3)
+    st = pg3.evaluate("quake.content.state()")
+    check(st["registered"] is False and st["paks"] == [] and st["serverPaks"] == [], f"a broken server pak1 leaves the deploy on pak0 ({st['paks']})")
+    check(any(t == "warning" and "not a pak file" in m for t, m in errs3), f"and says why on the console ({errs3})")
+    check(not any(t == "error" for t, m in errs3), f"as a warning, not an error ({[m for t, m in errs3 if t == 'error']})")
+    httpd2.shutdown()
+    shutil.rmtree(d2, ignore_errors=True)
+
+    real2 = [m for t, m in errs2 if t == "error" and "exit 1" not in m and "the game stopped" not in m]
+    check(not real2, f"no console errors on the server-files page {real2[-3:]}")
     br.close()
 httpd.shutdown()
 
 if fails:
     print("FAIL:", "; ".join(fails))
     raise SystemExit(1)
-print("done: the player's files verified (registered from a dropped pak1, e2m1, the CD's tracks, level, pause, refusals, removal)")
+print("done: the player's files verified (registered from a dropped pak1, e2m1, the CD's tracks, level, pause, "
+      "refusals, removal, and a server's own files.json: no extra requests when absent, registered play and "
+      "music with nothing dropped, the player's own files still winning, and a broken server pak1 left out quietly)")

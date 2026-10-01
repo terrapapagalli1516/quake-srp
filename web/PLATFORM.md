@@ -376,6 +376,105 @@ registered game — episodes 2–4 — with their CD soundtrack.
 from `common.c`'s `pop[]` table and the shareware `maps/e1m1.bsp` copied as
 `maps/e2m1.bsp`, and generated tones as tracks 2, 3 and 6.
 
+## A server's own files
+
+A deploy can offer `id1/pak1.pak` and the CD's tracks itself, so a player
+doesn't have to drop them in every session — the point for a private,
+non-public deploy of the registered game. It is the same "Your files"
+above, with the server as one more source: optional, discovered quietly,
+and merged in before the player's own drops.
+
+- **Discovery, without noise for a plain deploy.** The page fetches an
+  optional manifest, `files.json`, beside `index.html`, once, at boot:
+  ```json
+  { "files": [
+    { "path": "id1/pak1.pak", "size": 41894404 },
+    { "path": "id1/music/track02.ogg", "size": 3456789 }
+  ] }
+  ```
+  Absent (offline, or bad JSON) means pak0 only, and nothing else is
+  fetched: no `GET id1/pak1.pak` to fail, no guessing which of tracks 2–11
+  exist. That one quiet probe, instead of up to eleven failing ones, is the
+  whole point of asking a manifest rather than trying paths directly — and
+  it is truly quiet: a 404 for `files.json` would itself be a failing
+  request Chromium logs as a console error no matter how the page's own
+  code handles it, so the service worker (`web/sw.js`'s `manifestFirst`)
+  answers a missing manifest with an empty one, `{"files":[]}`, 200, before
+  it ever reaches the page — a plain deploy's console stays as clean as it
+  was. Only a manifest present but broken logs anything (`console.warn`,
+  below).
+- **Each path is literal**, used both as the URL to fetch (relative to
+  `index.html`) and as the key the engine's file system sees, exactly as
+  `id1/pak0.pak` already is — so a manifest entry is spelled the way the
+  files actually sit under the deploy dir, lower-case, `id1/`-prefixed.
+  `size` is optional and used only where a response's `Content-Length`
+  can't be trusted (below); it is never otherwise checked against what
+  arrives.
+- **One path into the program.** A manifest entry is sorted into a pak or a
+  track by the same rules a dropped file gets (`isPakPath`'s pattern,
+  `musicTrack`'s name parsing and format check): there is no second set of
+  rules to keep in sync. A pak the manifest lists (pak0 itself is always the
+  deploy's own, never the manifest's) is read with the same `readPak` a
+  drop gets before it is trusted — a deploy mistake (a truncated upload, an
+  unrelated file at that path) is left out with a `console.warn`, and the
+  deploy stays pak0-only rather than refusing to start at all. A track that
+  parses is kept by number; its bytes are never fetched here — "CD music"
+  plays its URL directly once asked for, so offering ten tracks costs
+  nothing until one is actually played.
+- **Precedence: the server is the base, the player's own files win.** The
+  server's paks are merged into the file list right after the deploy's own
+  `pak0.pak` and before whatever the player has dropped and kept
+  (IndexedDB), so a path they both provide — a player's own `pak1.pak`, say
+  — ends up the one the engine sees, the same rule the shareware `pak0.pak`
+  already followed. A track works the same, per number: the player's own
+  kept track for N, if there is one, plays over the server's. Reasoning: the
+  server is a convenience, set once by whoever runs it; a player who
+  deliberately drops their own file onto the page is making a specific
+  choice that should not silently lose to it.
+- **Caching.** `id1/pak1.pak` and `id1/music/*` are routed through the
+  service worker exactly as `id1/*.pak` already was — cache first, since
+  id's own data never changes once deployed — so a reload plays the
+  registered game and its music without a 40+80 MB re-fetch; bump
+  `DATA_CACHE` to force a refetch after replacing the files on the server.
+  `files.json` itself goes through the page's own network-first path, so a
+  deploy that starts offering pak1 later is only picked up once a player has
+  been online since — same trade-off as every other page file ("Offline and
+  install").
+- **The loading bar accounts for the extra bytes**: the manifest's paks are
+  downloaded in the same `download()` call as `quake.wasm` and `id1/pak0.pak`,
+  under the one combined progress bar. Their declared `size` is used as a
+  fallback total only where a response's `Content-Length` is unusable (a
+  compressed transfer: "Loading"'s comment) — most servers need it for
+  nothing at all.
+- **A pak that passes `readPak` but isn't actually id's registered data**
+  (the wrong `pop.lmp`, say) is the engine's call, not the page's: it
+  refuses to start at all, as it does for a dropped pak1 like it ("Your
+  files"). There the page can undo the drop and retry once automatically;
+  here there is no drop to undo, so the page shows the refusal and — unlike
+  a player's own files — does not offer a "remove" button that could not
+  remove a server's file anyway. Accepted gap: a broken server-offered pak1
+  fails the same way on every load until the deploy is fixed. For a deploy
+  one person runs for themselves, that is the right trade: loud and
+  immediate, not a silent fallback that leaves the question of a missing pak1
+  unanswered.
+- **Deploying it.** Put the files where the client expects them and write
+  the manifest from what is actually there:
+  ```sh
+  cp your-pak1.pak deploy/id1/pak1.pak
+  mkdir -p deploy/id1/music && cp your-tracks/track*.ogg deploy/id1/music/
+  (cd web && uv run python -c "import isolated; isolated.write_manifest('$D')")
+  ```
+  `isolated.write_manifest(dest)` (`web/isolated.py`) writes `dest/files.json`
+  from whatever it finds at `dest/id1/pak1.pak` and `dest/id1/music/*`, sizes
+  included — never written by hand, so it can't drift from the files beside
+  it. Skip the call (or delete `files.json`) for a pak0-only deploy.
+
+`verify_content.py` extends its synthesized-data checks to a server-offered
+pak1 and tracks (registered play and music from `files.json`, a player's own
+drop taking precedence over it per track and per pak, a broken server pak1
+leaving the deploy on pak0, and that a manifest-less deploy's network log
+never shows a request for `pak1.pak` or any track).
+
 ## CD music
 
 In 1996 Quake's music was the CD's own audio tracks, which the drive played
@@ -910,16 +1009,20 @@ favicon is the 32-pixel one, inlined.
 **The service worker** (`web/sw.js`, one file: loaded by the page it
 registers itself). What it answers:
 
-- **the pak, cache first**: `id1/*.pak` from the cache once kept, else the
-  network, kept as it streams to the page. id's shareware data never
-  changes; bumping `DATA_CACHE` refetches it.
+- **the game data, cache first**: a pak (`id1/*.pak`) or a CD track
+  (`id1/music/*`) from the cache once kept, else the network, kept as it
+  streams to the page. id's own data never changes once deployed — pak0,
+  and a server's own pak1 and tracks alike ("A server's own files"); bumping
+  `DATA_CACHE` refetches it all.
 - **everything else, network first**: the page, `wasi.js`, `touch.js`,
-  `quake.wasm`, the manifest and icons come from the network and are kept;
-  when the network fails, from what was kept. So online a player always
-  runs what is deployed — an update takes effect at the next load, with
-  nothing to version or bump — and offline, what they last played. The
-  page's small files are kept at install, because the first visit's page
-  loaded before the worker existed.
+  `quake.wasm`, the app manifest, the icons, and a server's own `files.json`
+  come from the network and are kept; when the network fails, from what was
+  kept. So online a player always runs what is deployed — an update takes
+  effect at the next load, with nothing to version or bump — and offline,
+  what they last played (a deploy that starts offering pak1 only reaches
+  that offline copy once a player has been online since). The page's small
+  files are kept at install, because the first visit's page loaded before
+  the worker existed.
 - **nothing marked `no-store`**, which `isolated.py` sends: the checks
   leave no 19 MB copies in the browser profiles (verify_touch.py serves
   without it to check offline play).
@@ -1000,6 +1103,9 @@ deploy/manifest.webmanifest  web/manifest.webmanifest
 deploy/icons/*.png         web/icons/icon-192.png, icon-512.png, apple-touch-icon.png
 deploy/quake.wasm          quake-wasm/target/wasm32-wasip1/release/quake.wasm
 deploy/id1/pak0.pak        quake-data/ID1/PAK0.PAK (lower-case name)
+deploy/id1/pak1.pak        your own (registered) pak — optional
+deploy/id1/music/track02.ogg…   your own CD rip — optional
+deploy/files.json          isolated.write_manifest(dir) — only if either optional row is there
 ```
 
 ```sh
@@ -1013,6 +1119,19 @@ cp quake-data/ID1/PAK0.PAK deploy/id1/pak0.pak
 (`isolated.copy_page(dir)` copies the page's files; `bench.py --build` uses
 it.) A deploy without `sw.js` still plays, but the page's `<script>` for it
 answers 404, which the checks count as a console error.
+
+**Offering the registered game and its music** (your own files — none of
+this is in the repo) is the same deploy dir plus two more rows and a
+generated manifest ("A server's own files"):
+
+```sh
+cp your-pak1.pak deploy/id1/pak1.pak
+mkdir -p deploy/id1/music && cp your-tracks/track*.ogg deploy/id1/music/
+(cd web && uv run python -c "import isolated; isolated.write_manifest('$D')")
+```
+
+Leave both rows (and `files.json`) out for a pak0-only deploy; the page then
+makes no further request than it already did.
 
 **Serve** with the two cross-origin isolation headers (without them, and
 without the service worker, the page says so and stops):

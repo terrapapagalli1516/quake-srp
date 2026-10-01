@@ -4,14 +4,18 @@
 // One file with two roles. Run as the page's service worker (the bottom half
 // registers it), it answers the page's requests:
 //
-//   - the game data (`id1/*.pak`): from its cache when it has them, else
-//     from the network, kept. id's shareware pak never changes; bump
-//     DATA_CACHE to fetch it afresh.
-//   - everything else (the page, wasi.js, touch.js, quake.wasm, the
-//     manifest and icons): from the network, kept for later, and from what
-//     was kept when the network fails. So online the page is always the one
-//     deployed (an update takes effect at the next load, with nothing to
-//     bump), and offline it is the one last played.
+//   - the game data (`id1/*.pak`, `id1/music/*`): from its cache when it has
+//     them, else from the network, kept. id's own data never changes once
+//     deployed (the shareware pak, a server's own pak1 and CD tracks,
+//     web/PLATFORM.md's "A server's own files"); bump DATA_CACHE to fetch
+//     it afresh.
+//   - everything else (the page, wasi.js, touch.js, quake.wasm, the app
+//     manifest and icons, and a server's own files.json): from the network,
+//     kept for later, and from what was kept when the network fails. So
+//     online the page is always the one deployed (an update takes effect at
+//     the next load, with nothing to bump), and offline it is the one last
+//     played — files.json included, so a deploy that later adds pak1 and
+//     tracks is only offered once a player has been online since.
 //   - every answer carries the two cross-origin isolation headers, which the
 //     page's SharedArrayBuffers need. A server that sends them loses
 //     nothing; one that cannot (a plain static host) gets them from here,
@@ -74,8 +78,18 @@ if (typeof window === 'undefined') {
     const req = e.request;
     const url = new URL(req.url);
     if (req.method !== 'GET' || url.origin !== self.location.origin) return;
-    e.respondWith(url.pathname.endsWith('.pak') ? dataFirst(req) : networkFirst(req));
+    if (isManifest(url)) e.respondWith(manifestFirst(req));
+    else e.respondWith(isGameData(url) ? dataFirst(req) : networkFirst(req));
   });
+
+  // id's own data, wherever a deploy keeps it: a pak, or a CD track under
+  // id1/music/ ("A server's own files").
+  function isGameData(url) {
+    return /\/id1\/([^/]*\.pak|music\/[^/]+)$/i.test(url.pathname);
+  }
+  function isManifest(url) {
+    return url.pathname === new URL('files.json', self.registration.scope).pathname;
+  }
 
   // The server allowed it to be kept (a whole, successful answer, not
   // `no-store`).
@@ -106,6 +120,33 @@ if (typeof window === 'undefined') {
       if (kept) return isolated(kept);
       throw err;
     }
+  }
+
+  // files.json ("A server's own files"): network first and kept, like any
+  // other page file — but a deploy with none of its own (most of them) must
+  // never show the page a failing request: answered 200 with an empty list
+  // instead of whatever the network gave (a 404, most often). Not cached
+  // when empty, so a deploy that starts offering one is seen at the very
+  // next online load, with nothing to bump.
+  async function manifestFirst(req) {
+    const key = cacheKey(req);
+    try {
+      const resp = await fetch(req);
+      if (!resp.ok) return isolated(emptyManifest());   // most often: no files.json at all
+      // Used either way; kept only if the server allows it (keepable is
+      // about caching, not about whether this answer is a real one).
+      if (keepable(resp)) {
+        const copy = resp.clone();
+        caches.open(SHELL_CACHE).then(c => c.put(key, copy)).catch(() => {});
+      }
+      return isolated(resp);
+    } catch (err) {
+      const kept = await caches.match(key, { cacheName: SHELL_CACHE });
+      return isolated(kept || emptyManifest());
+    }
+  }
+  function emptyManifest() {
+    return new Response('{"files":[]}', { headers: { 'Content-Type': 'application/json' } });
   }
 
   // A navigation to the page itself (not to some other document in scope).
