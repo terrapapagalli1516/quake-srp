@@ -537,10 +537,10 @@ fn adapt_modern_ahead(current: f32, host_elapsed_s: f32, dt_s: f32) -> f32 {
     /// Never past this: comfortably under the ring's cap (`RING_PAIRS` /
     /// the device rate — 682 ms at 48 kHz, 743 ms at 44.1 kHz).
     const CEILING: f32 = 0.55;
-    /// Fraction of the gap above `MODERN_MIXAHEAD` shed per second of quick
-    /// frames (continuous decay, so splitting a second into more or fewer
-    /// frames gives the same result): a 350 ms lead is back under 75 ms
-    /// within a second, under 15 ms within three.
+    /// Fraction of the gap above `MODERN_MIXAHEAD` that remains after a
+    /// second of quick frames (continuous decay, so splitting a second into
+    /// more or fewer frames gives the same result): a 350 ms lead is back
+    /// under 75 ms within a second.
     const DECAY_PER_SECOND: f32 = 0.07;
 
     let wanted = (host_elapsed_s * SAFETY).clamp(MODERN_MIXAHEAD, CEILING);
