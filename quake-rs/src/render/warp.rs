@@ -83,7 +83,7 @@ fn warp_scaled(tables: &mut WarpTables, view: &Image, out: WarpTarget, clock: f3
             let tv = sin[phase + v] as usize; // 0..2*amp
             for (u, px) in row[x0..x0 + out_w].iter_mut().enumerate() {
                 let tu = sin[phase + u] as usize; // 0..2*amp
-                *px = view.pixels[rowptr[v + tu] * w + column[tv + u]];
+                *px = view.pixels[rowptr[v + tu] + column[tv + u]];
             }
         }
     });
@@ -104,6 +104,9 @@ pub(super) struct WarpTables {
     sizes: (usize, usize, usize, usize),
     /// The scale `sin` is for (1: id's `intsintable`).
     scale: f64,
+    /// `D_WarpScreen`'s `rowptr`, pre-multiplied by the view's width `w`: the
+    /// gather in [`warp_scaled`] then adds `column[..]` straight to a row's
+    /// starting offset instead of multiplying by `w` on every pixel.
     rowptr: Vec<usize>,
     column: Vec<usize>,
     sin: Vec<i32>,
@@ -134,10 +137,11 @@ impl WarpTables {
         let margin = (2.0 * WARP_AMP2 * scale).ceil() as usize;
         let wratio = w as f32 / out_w as f32;
         let hratio = h as f32 / out_h as f32;
-        // rowptr[v] = (int)((float)v * hratio * h / (h + AMP2*2)), v < scr height + 2*AMP2
+        // rowptr[v] = (int)((float)v * hratio * h / (h + AMP2*2)), v < scr height + 2*AMP2,
+        // times `w`: the row's starting offset into `view.pixels` directly.
         self.rowptr.clear();
         self.rowptr.extend((0..out_h + margin).map(|v| {
-            ((v as f32 * hratio * h as f32 / (h + margin) as f32) as usize).min(h - 1)
+            ((v as f32 * hratio * h as f32 / (h + margin) as f32) as usize).min(h - 1) * w
         }));
         // column[u] = (int)((float)u * wratio * w / (w + AMP2*2)), u < scr width + 2*AMP2
         self.column.clear();
