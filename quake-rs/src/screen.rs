@@ -90,6 +90,17 @@ pub fn calc_refdef(vid_w: usize, vid_h: usize, viewsize: f32, intermission: bool
     Refdef { vrect: set_vrect(vid_w as i64, vid_h as i64, viewsize, lineadj, intermission), sb_lines }
 }
 
+/// The framebuffer rows, bottom-anchored, [`calc_refdef`] reserves for the
+/// status bar this frame (its `lineadj`): what anything drawn outside the
+/// renderer must keep clear, so it never sits over the HUD's numbers and
+/// icons ([`crate::sbar::draw_hud_into`]) — the browser's touch layout
+/// (`web/touch.js`, the `sbar_height` automation call) is the one caller
+/// today. 0 with no status bar (viewsize 120, or any viewsize during an
+/// intermission, which is always full screen).
+pub fn status_bar_rows(vid_w: usize, vid_h: usize, viewsize: f32, intermission: bool) -> i64 {
+    status_lines(vid_w, vid_h, viewsize, intermission).2
+}
+
 /// SCR_CalcRefdef's first half: the bounded `viewsize` (a non-number reads as
 /// the default), `sb_lines`, and the framebuffer rows the status bar covers
 /// (the `lineadj` R_SetVrect keeps the view above: `sb_lines` scaled like the
@@ -593,6 +604,30 @@ mod tests {
         let r = calc_refdef(8, 4, 30.0, false);
         assert!(r.vrect.x + r.vrect.w <= 8 && r.vrect.y + r.vrect.h <= 4);
         let _ = calc_refdef(0, 0, 100.0, false);
+    }
+
+    #[test]
+    fn status_bar_rows_is_calc_refdefs_bar_in_framebuffer_pixels() {
+        // id (no "scaled 2-D"): the bar is exactly sb_lines pixels, in every mode.
+        assert_eq!(status_bar_rows(960, 600, 100.0, false), 48);
+        assert_eq!(status_bar_rows(960, 600, 110.0, false), 24);
+        assert_eq!(status_bar_rows(960, 600, 120.0, false), 0);
+        // An intermission is always full screen, whatever viewsize was.
+        assert_eq!(status_bar_rows(960, 600, 100.0, true), 0);
+        // The "scaled 2-D" extra blows the bar up with the rest of the 2-D
+        // layer: 48 virtual rows at the largest whole scale that fits.
+        let _extra = crate::draw::Scaled2dGuard::set(true);
+        assert_eq!(status_bar_rows(960, 600, 100.0, false), 144, "48 rows at 3x (960/320 = 3)");
+        // Agrees with calc_refdef's own bar arithmetic (the test above) at
+        // every preset and Screen size.
+        for &(w, h) in RESOLUTION_PRESETS.iter() {
+            for step in 3..=12 {
+                let viewsize = step as f32 * 10.0;
+                let r = calc_refdef(w as usize, h as usize, viewsize, false);
+                let bar = (r.sb_lines as f32 * crate::draw::screen_2d(w as usize, h as usize).scale).ceil() as i64;
+                assert_eq!(status_bar_rows(w as usize, h as usize, viewsize, false), bar, "{w}x{h} @ {viewsize}");
+            }
+        }
     }
 
     #[test]

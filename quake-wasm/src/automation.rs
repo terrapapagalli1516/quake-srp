@@ -68,6 +68,20 @@ fn render_threads() -> i32 {
     n as i32
 }
 
+/// [`quake_rs::screen::status_bar_rows`] for the frame being drawn now: the
+/// framebuffer rows, bottom-anchored, the status bar covers (0 with none).
+/// `web/touch.js` calls this (`sbar_height`) to keep its own buttons off the
+/// HUD's numbers and icons, at any resolution, Screen size and intermission.
+fn sbar_height() -> i32 {
+    let (w, h) = (width(), height());
+    if w <= 0 || h <= 0 {
+        return 0;
+    }
+    let intermission =
+        APP.with(|c| c.borrow().as_ref().and_then(|a| a.walk.as_ref()).is_some_and(|w| w.intermission != 0));
+    quake_rs::screen::status_bar_rows(w as usize, h as usize, viewsize(), intermission) as i32
+}
+
 /// Run one call line, `name arg...` (numbers, or the rest of the line for
 /// `exec`).
 pub(crate) fn call(line: &str) -> Answer {
@@ -107,6 +121,9 @@ pub(crate) fn call(line: &str) -> Answer {
         "set_viewsize" => done(|| set_viewsize(real(0))),
         "scaled_2d" => scaled_2d().into(),
         "set_scaled_2d" => done(|| set_scaled_2d(int(0))),
+        // The HUD's footprint: framebuffer rows, bottom-anchored, the status
+        // bar covers this frame (0 with none) — the touch layout's safe zone.
+        "sbar_height" => sbar_height().into(),
         // Input.
         "key_event" => done(|| key_event(int(0), int(1), int(2))),
         "key_down" => done(|| key_down(int(0))),
@@ -303,6 +320,22 @@ mod tests {
         assert!(call("no_such_call").value.is_nan());
         assert_eq!(call("player_field health").value, 100.0, "the booted walk's player");
         assert!(call("").value.is_nan());
+    }
+
+    #[test]
+    fn sbar_height_tracks_viewsize_and_resolution() {
+        assert_eq!(call("boot").value, 1.0);
+        call("menu_cancel");
+        call("set_resolution 960 600");
+        call("exec viewsize 100");
+        assert_eq!(call("sbar_height").value, 48.0, "100: the full 48-row bar, at scale 1 in Classic");
+        call("exec viewsize 110");
+        assert_eq!(call("sbar_height").value, 24.0, "110: the status strip alone");
+        call("exec viewsize 120");
+        assert_eq!(call("sbar_height").value, 0.0, "120: no status bar");
+        call("exec viewsize 100");
+        call("set_resolution 480 300");
+        assert_eq!(call("sbar_height").value, 48.0, "still 48 1:1 pixels, a smaller frame");
     }
 
     #[test]
