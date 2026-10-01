@@ -532,6 +532,20 @@ fn turb_adjust(grads: &PolyGrads) -> (i64, i64) {
     )
 }
 
+/// Wrap `v` into `0..n`, the way `D_DrawTurbulent8Span`'s `&63` does for id's
+/// 64-texel liquids: for a power-of-two `n`, two's-complement `v & (n-1)` is
+/// `v.rem_euclid(n)` for every `i32`, negative included, so a liquid texture's
+/// (always power-of-two, 64x64 in id's data) wrap costs a mask, not a
+/// division. Any other `n` (never id's data) falls back to the division.
+#[inline]
+fn wrap_texel(v: i32, n: usize) -> usize {
+    if n.is_power_of_two() {
+        (v & (n as i32 - 1)) as usize
+    } else {
+        v.rem_euclid(n as i32) as usize
+    }
+}
+
 /// `Turbulent8` (d_scan.c; C in the x86 build too) over one of id's spans of a
 /// liquid (`crow`, its pixels): the 16.16 coordinates exact at the span's first
 /// pixel (clamped to `[0, bbextents]`) and at each 16-pixel segment's end
@@ -555,7 +569,6 @@ fn turb16_span(
     phase: usize,
 ) {
     const BBEXTENTS: i64 = (16384 << 16) - 1;
-    let (tw_i, th_i) = (tw as i32, th as i32);
     let end = crow.len();
     let (s0, t0) = sp.st_at(0, sadjust, tadjust);
     let (mut s, mut t) = (s0.clamp(0, BBEXTENTS), t0.clamp(0, BBEXTENTS));
@@ -577,7 +590,7 @@ fn turb16_span(
         let (ss, ts) = (ss as i32, ts as i32);
         for c in &mut crow[k0..k0 + n] {
             let (sturb, tturb) = turb.texel(phase, a, b);
-            let texel = pixels.get(tturb.rem_euclid(th_i) as usize * tw + sturb.rem_euclid(tw_i) as usize);
+            let texel = pixels.get(wrap_texel(tturb, th) * tw + wrap_texel(sturb, tw));
             *c = texel.copied().unwrap_or(0);
             a = a.wrapping_add(ss);
             b = b.wrapping_add(ts);
@@ -670,8 +683,7 @@ pub(super) fn span_turb(
     for c in crow.iter_mut() {
         let z = 1.0 / zi;
         let (s2, t2) = warp_st(turb, (sz * z + st_eye[0]) as f32, (tz * z + st_eye[1]) as f32, time);
-        let tx = s2.rem_euclid(tw as i32) as usize;
-        let ty = t2.rem_euclid(th as i32) as usize;
+        let (tx, ty) = (wrap_texel(s2, tw), wrap_texel(t2, th));
         *c = pixels.get(ty * tw + tx).copied().unwrap_or(0);
         zi += sp.dzi;
         sz += sp.dsz;
@@ -997,6 +1009,19 @@ mod tests {
             }
             // An eye on the plane sees it edge-on: no gradients.
             assert!(PolyGrads::for_plane(&view, [5.0, 7.0, 40.0], [0.0, 0.0, 1.0], 40.0, None).is_none());
+        }
+    }
+
+    /// [`wrap_texel`] against `rem_euclid` directly, across power-of-two
+    /// (id's liquids are always 64x64) and non-power-of-two moduli, and the
+    /// negative, zero and boundary values `D_DrawTurbulent8Span`'s fixed-point
+    /// math can produce.
+    #[test]
+    fn wrap_texel_matches_rem_euclid_for_every_modulus() {
+        for n in [1usize, 2, 4, 8, 64, 128, 3, 5, 60, 96] {
+            for v in [-200i32, -65, -64, -63, -1, 0, 1, 63, 64, 65, 200, i32::MIN / 2, i32::MAX / 2] {
+                assert_eq!(wrap_texel(v, n), v.rem_euclid(n as i32) as usize, "n={n} v={v}");
+            }
         }
     }
 }
