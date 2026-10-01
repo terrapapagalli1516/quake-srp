@@ -520,7 +520,7 @@ fn run_map_command(name: Option<&str>) {
             // Navigation-only reset: the settings are the App's and `map`
             // leaves them alone, as the C's never resets cvars or keybindings.
             a.menu.reset_nav();
-            a.menu.sync_resolution(a.render_w as i32, a.render_h as i32);
+            crate::vid::sync_menu_resolution(a);
         }
         None => a.console.println(format!("map not found: {name}")),
     });

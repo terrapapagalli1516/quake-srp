@@ -41,6 +41,7 @@ httpd = isolated.serve(WEB, PORT)
 
 # menu_screen_id values (the `menu_screen_id` call's mapping).
 MAIN, SP, LOAD, SAVE, MULTI, OPTIONS, KEYS, VIDEO, HELP, QUIT = range(10)
+VIDEO_PRESETS = 7  # quake_rs::menu::RESOLUTION_PRESETS.len(): the native rows follow these
 
 passed, failed = 0, 0
 def check(name, ok, detail=""):
@@ -218,17 +219,25 @@ with sync_playwright() as p:
     key("Escape")
     check("Esc on Keys returns to Options", scr() == OPTIONS)
 
-    # Video Options (row 12): the mode list applies a mode on Enter (the list
-    # opens on the current 960x600; one line up is 800x500). Kept for the
+    # Video Options (row 12): honest about native resolution (review: it used
+    # to show 960x600 as current no matter what the screen actually was). In
+    # this real browser the picture is already native by the time the menu
+    # reaches here (the page reports its box on layout, no gesture needed),
+    # so the list opens on the live native row (Auto), not a stale preset.
+    # Four Ups reach 800x500 (preset index 3); applying it is kept for the
     # reload check at the end.
     key("ArrowDown", 12); key("Enter")
     check("Video Options opens the mode list", scr() == VIDEO)
-    key("ArrowUp")
-    check("moving the line alone keeps the mode", pg.evaluate("exp.width()") == w0)
+    cur0 = pg.evaluate("exp.menu_cursor()")
+    check("...on the live native row (Auto), not a stale preset", cur0 == VIDEO_PRESETS, f"cursor={cur0}")
+    key("ArrowUp", VIDEO_PRESETS - 3)
+    check("moving the line alone keeps the picture", pg.evaluate("exp.width()") == w0)
+    check("...native resolution is still on", pg.evaluate("quake.text('cvar', 'vid_native')") == "1")
     key("Enter")
     time.sleep(0.2)
     wv, hv = pg.evaluate("Promise.all([exp.width(), exp.height()])")
     check("Enter applies the highlighted mode", (wv, hv) == (800, 500), f"{w0} -> {wv}x{hv}")
+    check("...and native resolution is visibly off now", pg.evaluate("quake.text('cvar', 'vid_native')") == "0")
     # The program writes config.cfg on the next frame (Host_WriteConfiguration)
     # and the page keeps it.
     try:
@@ -239,6 +248,13 @@ with sync_playwright() as p:
         kept = False
     check("config.cfg keeps it", kept, str(pg.evaluate("quake.kept('id1/config.cfg')")))
     check("the mode never touches viewsize", pg.evaluate("exp.viewsize()") == 100)
+    # Reversible: wrapping Up from the first preset reaches a native row
+    # (Enter there would turn native back on) — not pressed, so the applied
+    # 800x500 survives for the reload check below (verify_settings.py's
+    # section 7 presses Enter there and checks the full round trip).
+    key("ArrowUp", 4)  # row 3 -> row 0 -> wraps to the last row (native, 4x)
+    cur = pg.evaluate("exp.menu_cursor()")
+    check("wrapping up from the first preset reaches a native row", cur >= VIDEO_PRESETS, f"cursor={cur}")
     key("Escape")
     check("Esc on Video returns to Options", scr() == OPTIONS)
 

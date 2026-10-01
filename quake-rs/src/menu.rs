@@ -334,6 +334,14 @@ pub const RESOLUTION_PRESETS: [(i32, i32); 7] = [
     (1280, 800),
 ];
 
+/// Video Options' native-resolution rows, appended after [`RESOLUTION_PRESETS`]
+/// when they show ([`Menu::native_rows_shown`]): Auto, then the whole pixel
+/// sizes 1..=[`PIXEL_SIZE_MAX`] — one row per value `vid_pixelsize` takes,
+/// the row's offset from [`RESOLUTION_PRESETS`]'s end IS the value (0 =
+/// Auto). The 2026 profile's own "native resolution" extra (AUDIT.md), off
+/// in Classic: a departure from id's `VID_MenuDraw`, which has no such rows.
+const NATIVE_ROWS: usize = PIXEL_SIZE_MAX as usize + 1;
+
 // --- analog cvar ranges (M_AdjustSliders) + their slider fraction mapping ------
 
 /// `sensitivity` (Mouse Speed): 1..=11, step 0.5; slider r = (v-1)/10. Default 3.
@@ -469,7 +477,11 @@ pub enum MenuScreen {
     /// The video-modes screen (`m_video`): this port's mode list is
     /// [`RESOLUTION_PRESETS`]; cursor + Enter applies a mode
     /// ([`MenuAction::ResolutionChanged`]), like `VID_MenuKey`'s K_ENTER
-    /// `VID_SetMode` (vid_win.c).
+    /// `VID_SetMode` (vid_win.c). In 2026 ([`Menu::native_rows_shown`]) the
+    /// native-resolution rows follow the presets ([`NATIVE_ROWS`]), honestly
+    /// marking whichever is actually showing and letting Enter switch
+    /// between them; off in Classic, where this screen is `VID_MenuDraw`'s
+    /// alone.
     Video,
     /// The Help/Ordering screen (`m_help`): pages through
     /// `gfx/help0.lmp`..`help5.lmp` with left/right ([`NUM_HELP_PAGES`] pages).
@@ -577,8 +589,12 @@ pub enum MenuAction {
     /// (default.cfg's viewsize, gamma, volume, sensitivity and bindings); the
     /// host reads them live each frame. The video mode is not in default.cfg.
     ResetDefaults,
-    /// Enter on a Video Options mode line (`VID_MenuKey` K_ENTER -> `VID_SetMode`):
-    /// the host must reallocate its framebuffer to [`Menu::resolution`].
+    /// Enter on a Video Options row: a fixed mode (`VID_MenuKey` K_ENTER ->
+    /// `VID_SetMode`) and the host must reallocate its framebuffer to
+    /// [`Menu::resolution`]; one of the port's own native-resolution rows
+    /// (2026 only) and the host must instead recompute the picture from the
+    /// window and pixel size (`vid_native`/`vid_pixelsize` are now set, but
+    /// there is no stored mode to reallocate to).
     ResolutionChanged,
 }
 
@@ -666,10 +682,26 @@ pub struct Menu {
     /// kept while the player visits other screens.
     cursors: Cursors,
     /// Index into [`RESOLUTION_PRESETS`] of the live video mode (`vid_modenum`):
-    /// what the Video Options list marks as current and opens its cursor on.
-    /// The host keeps it synced to the real framebuffer
-    /// ([`sync_resolution`](Menu::sync_resolution)); Enter on the Video list sets it.
+    /// what the Video Options list marks as current and opens its cursor on,
+    /// while the picture is NOT native ([`Menu::actual_native`]). The host
+    /// keeps it synced to the real framebuffer
+    /// ([`sync_resolution`](Menu::sync_resolution)); Enter on a fixed-mode row
+    /// sets it too.
     res_preset: usize,
+    /// The actual current render size ([`sync_resolution`](Menu::sync_resolution)):
+    /// what the live "Native" row prints, so Video Options never shows a
+    /// number the screen isn't.
+    actual_size: (i32, i32),
+    /// Whether the picture is genuinely native resolution right now — not
+    /// just `vid_native`'s cvar, but the host's `vid::native`, which also
+    /// needs a known window (`sync_resolution`'s `native`). Says which Video
+    /// Options row (a native one, or the matching fixed mode) is current.
+    actual_native: bool,
+    /// Whether the native-resolution rows belong in the Video Options list at
+    /// all: the 2026 profile (`sync_resolution`'s `modern`). Off (Classic),
+    /// the list is [`RESOLUTION_PRESETS`] alone, `VID_MenuDraw` unchanged —
+    /// native resolution doesn't exist there to show or pick.
+    native_rows: bool,
     /// The current Help page (`help_page`, `0..NUM_HELP_PAGES`).
     help_page: usize,
     /// Which screen the Quit prompt was raised from, restored on "No"
@@ -726,6 +758,9 @@ impl Menu {
             screen: MenuScreen::Main,
             cursors: Cursors::default(),
             res_preset: 0,
+            actual_size: RESOLUTION_PRESETS[0],
+            actual_native: false,
+            native_rows: false,
             help_page: 0,
             quit_prev: MenuScreen::Main,
             quit_in_menus: true,
@@ -825,6 +860,9 @@ impl Menu {
             MenuScreen::Setup => c.setup,
             MenuScreen::Options => c.options,
             MenuScreen::Keys => c.keys,
+            // c.video is always Some by the time Video shows (the Options
+            // ROW_VIDEO row sets it with Menu::video_current_row before
+            // switching screens); this fallback is defensive only.
             MenuScreen::Video => c.video.unwrap_or(self.res_preset),
             MenuScreen::Extras => c.extras,
             MenuScreen::Help | MenuScreen::Quit => 0,
@@ -952,7 +990,9 @@ impl Menu {
         if self.screen == MenuScreen::Quit {
             return; // M_Quit_Key: up/down fall through to `default: break`.
         }
-        let n = self.screen.item_count();
+        // Video's row count is dynamic (the native rows, PORT ONLY), unlike
+        // every other screen's fixed MenuScreen::item_count.
+        let n = if self.screen == MenuScreen::Video { self.video_rows() } else { self.screen.item_count() };
         if n == 0 {
             return;
         }
@@ -986,7 +1026,9 @@ impl Menu {
     ///   to `M_AdjustSliders(1)`).
     /// * Keys > row: start the bind grab (`bind_grab`), unbinding first when the
     ///   row already shows two keys (`M_Keys_Key` K_ENTER).
-    /// * Video > row: apply the highlighted preset ([`MenuAction::ResolutionChanged`]).
+    /// * Video > row: apply the highlighted preset, or (2026 only) turn
+    ///   native resolution back on at the highlighted pixel size
+    ///   ([`MenuAction::ResolutionChanged`]).
     /// * Options > Classic / 2026 (port row): the settings page; a row there:
     ///   change it (menu2 + menu3, like an Options checkbox).
     /// * Help and the Quit prompt: Enter is inert ([`MenuAction::None`]; only
@@ -1109,11 +1151,20 @@ impl Menu {
                     MenuAction::None
                 }
                 ROW_VIDEO => {
-                    // M_Menu_Video_f: the mode list, on vid_line (the live mode
-                    // on the first visit; see `Cursors::video`).
+                    // M_Menu_Video_f: the mode list, on vid_line (the live
+                    // mode on the first visit, native rows included — see
+                    // `Cursors::video`; kept on later ones, clamped to
+                    // however many rows the list has NOW, since the native
+                    // rows can appear or disappear between visits as the
+                    // profile changes).
                     self.snd(MenuSound::Menu2);
                     self.screen = MenuScreen::Video;
-                    let line = self.cursor().min(RESOLUTION_PRESETS.len() - 1);
+                    let rows = self.video_rows();
+                    let line = self
+                        .cursors
+                        .video
+                        .unwrap_or_else(|| self.video_current_row(s.cvars.pixel_size))
+                        .min(rows - 1);
                     self.set_cursor(line);
                     MenuAction::None
                 }
@@ -1158,14 +1209,28 @@ impl Menu {
                 MenuAction::None
             }
             MenuScreen::Video => {
-                // VID_MenuKey K_ENTER: menu1 (NOT menu2) + VID_SetMode on the
-                // highlighted mode line. A mode is a size in the 4:3 box, so
-                // picking one leaves native resolution (`vid_native 0`).
                 self.snd(MenuSound::Menu1);
-                self.res_preset = self.cursor().min(RESOLUTION_PRESETS.len() - 1);
-                let (w, h) = RESOLUTION_PRESETS[self.res_preset];
-                s.cvars.vid_resolution = (w as u16, h as u16);
-                s.cvars.native = false;
+                let row = self.cursor();
+                if self.native_rows && row >= RESOLUTION_PRESETS.len() {
+                    // PORT ROW (not in id's Quake, off in Classic): Enter on
+                    // one of the native-resolution rows (Auto, 1x..4x pixel
+                    // size) turns native resolution back on at that pixel
+                    // size — reversing a fixed mode picked below, or just
+                    // reaffirming the live one (AUDIT.md's "native
+                    // resolution" departure).
+                    let pixel = (row - RESOLUTION_PRESETS.len()).min(NATIVE_ROWS - 1);
+                    s.cvars.native = true;
+                    s.cvars.pixel_size = pixel as u8;
+                } else {
+                    // VID_MenuKey K_ENTER: menu1 (NOT menu2) + VID_SetMode on
+                    // the highlighted mode line. A mode is a size in the 4:3
+                    // box, so picking one leaves native resolution
+                    // (`vid_native 0`).
+                    self.res_preset = row.min(RESOLUTION_PRESETS.len() - 1);
+                    let (w, h) = RESOLUTION_PRESETS[self.res_preset];
+                    s.cvars.vid_resolution = (w as u16, h as u16);
+                    s.cvars.native = false;
+                }
                 MenuAction::ResolutionChanged
             }
             MenuScreen::Extras => {
@@ -1590,19 +1655,70 @@ impl Menu {
         }
     }
 
-    /// The video mode the Video Options list marks current
-    /// ([`RESOLUTION_PRESETS`] entry `res_preset`; `320x200` until the host
-    /// syncs it, [`Menu::sync_resolution`]).
+    /// The fixed mode the Video Options list marks current while the picture
+    /// is NOT native ([`RESOLUTION_PRESETS`] entry `res_preset`; `320x200`
+    /// until the host syncs it, [`Menu::sync_resolution`]). While native
+    /// ([`Menu::actual_native`]) no fixed mode is current; see
+    /// [`Menu::video_current_row`].
     pub fn resolution(&self) -> (i32, i32) {
         RESOLUTION_PRESETS.get(self.res_preset).copied().unwrap_or(RESOLUTION_PRESETS[0])
     }
 
-    /// Point the Video Options "current mode" at the preset matching `(w, h)`, if
-    /// one exists (otherwise leave it). The host calls this with its *actual* render
-    /// size so the displayed value always tracks reality — the framebuffer is the
-    /// single source of truth, and the label can never desync from it (e.g. after
-    /// a boot / New Game / `map` that changed the render size independently).
-    pub fn sync_resolution(&mut self, w: i32, h: i32) {
+    /// The actual current render size ([`Menu::sync_resolution`]): what the
+    /// live "Native" row prints.
+    pub fn actual_size(&self) -> (i32, i32) {
+        self.actual_size
+    }
+
+    /// Whether the picture is genuinely native resolution right now
+    /// ([`Menu::sync_resolution`]'s `native`).
+    pub fn actual_native(&self) -> bool {
+        self.actual_native
+    }
+
+    /// Whether Video Options' native-resolution rows show at all
+    /// ([`Menu::sync_resolution`]'s `modern`).
+    pub fn native_rows_shown(&self) -> bool {
+        self.native_rows
+    }
+
+    /// How many rows [`MenuScreen::Video`] has right now: [`RESOLUTION_PRESETS`],
+    /// plus the native-resolution rows ([`NATIVE_ROWS`]: Auto, 1x..4x pixel
+    /// size) appended when they show ([`Menu::native_rows_shown`]). Appended,
+    /// not prepended, so a fixed mode's row index never moves.
+    fn video_rows(&self) -> usize {
+        RESOLUTION_PRESETS.len() + if self.native_rows { NATIVE_ROWS } else { 0 }
+    }
+
+    /// The row [`MenuScreen::Video`] should mark current and open its cursor
+    /// on: a native row (at `pixel_size`'s index) while the picture actually
+    /// is native, else the fixed mode [`Menu::resolution`] marks
+    /// ([`Menu::res_preset`], unmoved by the native rows). `pixel_size` is
+    /// [`crate::cvar::Cvars::pixel_size`]; the caller has it (`Settings`),
+    /// which this engine-level `Menu` does not store.
+    fn video_current_row(&self, pixel_size: u8) -> usize {
+        if self.native_rows && self.actual_native {
+            RESOLUTION_PRESETS.len() + usize::from(pixel_size).min(NATIVE_ROWS - 1)
+        } else {
+            self.res_preset
+        }
+    }
+
+    /// Point Video Options at the live picture: `(w, h)` is the actual render
+    /// size ([`Menu::actual_size`] and, when it matches a preset, the fixed
+    /// mode marked current); `native` says this frame is genuinely native
+    /// resolution (the host's `vid::native`, which also needs a known window
+    /// — not just `vid_native`'s cvar: [`Menu::actual_native`]); `modern`
+    /// says the native rows belong in the list at all — the 2026 profile
+    /// ([`Menu::native_rows_shown`]; Classic's list is `RESOLUTION_PRESETS`
+    /// alone, unchanged). The host calls this every frame (`vid::apply_settings`)
+    /// and at every reset point, so the list can never desync from reality —
+    /// not even across a boot / New Game / `map` that changed the render size
+    /// independently.
+    pub fn sync_resolution(&mut self, w: i32, h: i32, native: bool, modern: bool) {
+        self.actual_size = (w, h);
+        self.actual_native = native;
+        self.native_rows = modern;
         if let Some(i) = RESOLUTION_PRESETS.iter().position(|&(pw, ph)| pw == w && ph == h) {
             self.res_preset = i;
         }
@@ -1715,6 +1831,13 @@ impl Menu {
     pub fn item_at(&self, x: f32, y: f32) -> Option<usize> {
         if !self.visible || self.new_game_confirm || !(0.0..MENU_VIRT_W).contains(&x) {
             return None;
+        }
+        if self.screen == MenuScreen::Video {
+            // Video's row count is dynamic (the native rows, PORT ONLY):
+            // MenuScreen::rows()'s static RESOLUTION_PRESETS.len() would miss
+            // a tap on them, or hit on a row below the list that isn't
+            // showing right now.
+            return RowLayout::Even { y0: VIDEO_ROW_Y0, step: TEXT_ROW_STEP, count: self.video_rows() }.row_at(y);
         }
         self.screen.rows()?.row_at(y)
     }
@@ -2083,7 +2206,7 @@ fn draw_menu_inner(
             return;
         }
         MenuScreen::Video => {
-            draw_video_screen(image, menu, pics, conchars, scale, ox, oy, cursor);
+            draw_video_screen(image, menu, settings, pics, conchars, scale, ox, oy, cursor);
             return;
         }
         _ => {}
@@ -2555,10 +2678,23 @@ fn draw_keys_screen(
 /// it), the flashing cursor on the highlighted row, and hint lines.
 /// Single column — the C's 3-wide grid exists to fit 15+ DOS modes; 7 presets
 /// fit one column.
+///
+/// **2026 only** ([`Menu::native_rows_shown`]; off in Classic, where this
+/// draws exactly as above and nothing else — `VID_MenuDraw` unchanged):
+/// [`NATIVE_ROWS`] more rows follow the presets — Auto, then pixel sizes
+/// 1..=[`PIXEL_SIZE_MAX`] — so the screen can be honest about what native
+/// resolution actually is. While the picture really is native
+/// ([`Menu::actual_native`]) no preset is current; the matching native row
+/// is, and prints the live render size ([`Menu::actual_size`]) instead of a
+/// made-up mode, so the screen never shows a number it isn't. Picking a
+/// preset below turns native off (as id's grid always did); picking a native
+/// row turns it back on — the two halves are the same list, so the way back
+/// is never more than an Up arrow away.
 #[allow(clippy::too_many_arguments)]
 fn draw_video_screen(
     image: &mut Image,
     menu: &Menu,
+    settings: &Settings,
     pics: &MenuPics,
     conchars: Option<&crate::wad::Qpic>,
     scale: f32,
@@ -2571,23 +2707,41 @@ fn draw_video_screen(
         blit_qpic_at(image, t, tx, 4.0, scale, ox, oy);
     }
     let Some(cc) = conchars else { return };
+    let native_now = menu.native_rows_shown() && menu.actual_native();
     // VID_MenuDraw prints every mode with M_Print (bronze) except the current
-    // one, which it prints with M_PrintWhite.
+    // one, which it prints with M_PrintWhite. While native, no preset is it.
     let current = menu.resolution();
     for (i, &(w, h)) in RESOLUTION_PRESETS.iter().enumerate() {
         let y = VIDEO_ROW_Y0 + TEXT_ROW_STEP * i as f32;
         let row = format!("{w}x{h}");
-        if (w, h) == current {
+        if !native_now && (w, h) == current {
             draw_string_scaled(image, cc, 16.0, y, &row, scale, ox, oy);
         } else {
             m_print(image, cc, 16.0, y, &row, scale, ox, oy);
+        }
+    }
+    let mut rows = RESOLUTION_PRESETS.len();
+    if menu.native_rows_shown() {
+        // PORT ROWS (not in id's Quake, off in Classic): Auto, 1x..4x. The
+        // live one (if native_now) prints the actual render size, honestly —
+        // the others are just the choice, not yet applied.
+        for p in 0..=PIXEL_SIZE_MAX {
+            let y = VIDEO_ROW_Y0 + TEXT_ROW_STEP * rows as f32;
+            let label = if p == 0 { "Native  Auto".to_string() } else { format!("Native  {p}x") };
+            if native_now && settings.cvars.pixel_size == p {
+                let (aw, ah) = menu.actual_size();
+                draw_string_scaled(image, cc, 16.0, y, &format!("{label}  {aw}x{ah}"), scale, ox, oy);
+            } else {
+                m_print(image, cc, 16.0, y, &label, scale, ox, oy);
+            }
+            rows += 1;
         }
     }
     let cy = VIDEO_ROW_Y0 + menu.cursor() as f32 * TEXT_ROW_STEP;
     draw_char_scaled(image, cc, 8.0, cy, cursor_glyph, scale, ox, oy);
     // The C's bottom hints ("Press enter to set mode" / "Esc to exit"), at this
     // single column's foot.
-    let hints_y = VIDEO_ROW_Y0 + RESOLUTION_PRESETS.len() as f32 * TEXT_ROW_STEP + 16.0;
+    let hints_y = VIDEO_ROW_Y0 + rows as f32 * TEXT_ROW_STEP + 16.0;
     m_print(image, cc, 9.0 * 8.0, hints_y, "Press Enter to set mode", scale, ox, oy);
     m_print(image, cc, 15.0 * 8.0, hints_y + 16.0, "Esc to exit", scale, ox, oy);
 }
@@ -3070,7 +3224,7 @@ mod tests {
     #[test]
     fn video_opens_on_the_live_mode_then_keeps_vid_line() {
         let (mut m, mut s) = (Menu::new(), Settings::default());
-        m.sync_resolution(RESOLUTION_PRESETS[4].0, RESOLUTION_PRESETS[4].1);
+        m.sync_resolution(RESOLUTION_PRESETS[4].0, RESOLUTION_PRESETS[4].1, false, true);
         m.open();
         m.move_cursor(2);
         m.select(&mut s);
@@ -3079,7 +3233,7 @@ mod tests {
         assert_eq!((m.screen(), m.cursor()), (MenuScreen::Video, 4), "first visit: the live mode");
         m.move_cursor(-3);
         m.cancel();
-        m.sync_resolution(RESOLUTION_PRESETS[6].0, RESOLUTION_PRESETS[6].1);
+        m.sync_resolution(RESOLUTION_PRESETS[6].0, RESOLUTION_PRESETS[6].1, false, true);
         m.select(&mut s);
         assert_eq!(m.cursor(), 1, "vid_line keeps its place");
     }
@@ -3294,7 +3448,7 @@ mod tests {
         let s_px = (56 + 3) * 320 + 16 + 11 * 8 + 3;
         assert_eq!(img.pixels[s_px], 5, "Options labels are M_Print (bronze)");
         // Video Options: the current mode white, the others bronze.
-        m.sync_resolution(640, 400);
+        m.sync_resolution(640, 400, false, true);
         m.set_cursor(ROW_VIDEO);
         m.select(&mut s);
         let mut img = Image::new(320, 200, 0);
@@ -4194,7 +4348,7 @@ mod tests {
     #[test]
     fn video_screen_lists_and_applies_presets() {
         let (mut m, mut s) = (Menu::new(), Settings::default());
-        m.sync_resolution(RESOLUTION_PRESETS[2].0, RESOLUTION_PRESETS[2].1);
+        m.sync_resolution(RESOLUTION_PRESETS[2].0, RESOLUTION_PRESETS[2].1, false, true);
         m.open();
         m.set_cursor(2);
         m.select(&mut s); // -> Options
@@ -4213,8 +4367,11 @@ mod tests {
             "VID_MenuKey K_ENTER plays menu1 (not menu2)"
         );
         assert_eq!(m.screen(), MenuScreen::Video, "the mode list stays up after applying");
-        // The cursor wraps over the preset list; left/right also step it.
-        m.set_cursor(RESOLUTION_PRESETS.len() - 1);
+        // The cursor wraps over the WHOLE list — the presets, then (2026:
+        // Settings::default() is Modern) the native rows; left/right also
+        // step it.
+        assert_eq!(m.video_rows(), RESOLUTION_PRESETS.len() + NATIVE_ROWS);
+        m.set_cursor(m.video_rows() - 1);
         m.move_cursor(1);
         assert_eq!(m.cursor(), 0);
         let mode = m.resolution();
@@ -4697,5 +4854,155 @@ mod tests {
         // A phone's 1266x585 frame: 2x (585/200 = 2.9), the 633-wide 2-D
         // screen puts the menu at (633 - 320) / 2 = 156, 312 pixels in.
         assert_eq!(menu_layout_point(1266, 585, 312.0 + 200.0, 100.0), (100.0, 50.0));
+    }
+
+    // -- Video Options' native-resolution rows (2026; review: "shows 960x600
+    //    as current, and picking a mode silently turns Native resolution
+    //    off") -------------------------------------------------------------
+
+    #[test]
+    fn video_rows_are_the_presets_alone_until_2026_native_rows_sync() {
+        // A fresh Menu (nothing synced yet) and Classic both keep id's plain
+        // 7-row grid: no native rows to show or navigate onto.
+        let mut m = Menu::new();
+        assert_eq!(m.video_rows(), RESOLUTION_PRESETS.len());
+        m.sync_resolution(320, 200, false, false); // modern = false: Classic
+        assert_eq!(m.video_rows(), RESOLUTION_PRESETS.len());
+        assert!(!m.native_rows_shown());
+        m.sync_resolution(320, 200, false, true); // modern = true: 2026
+        assert_eq!(m.video_rows(), RESOLUTION_PRESETS.len() + NATIVE_ROWS);
+        assert!(m.native_rows_shown());
+    }
+
+    #[test]
+    fn video_options_opens_honest_when_the_picture_is_native() {
+        // The review's bug: in 2026 (native resolution the default), Video
+        // Options used to show the fixed-mode default (960x600) as current —
+        // a size the screen wasn't — and Enter on a mode silently dropped
+        // native resolution with no sign it had. Now: synced to a genuinely
+        // native frame that matches NO fixed preset (960x540, not
+        // 960x600), opening Video Options lands on the native row for the
+        // live pixel size (Auto, Settings::default()'s), not a stale preset.
+        let (mut m, mut s) = (Menu::new(), Settings::default());
+        assert_eq!(s.cvars.pixel_size, 0, "2026 defaults to Auto");
+        m.sync_resolution(960, 540, true, true);
+        assert_eq!(m.actual_size(), (960, 540));
+        assert!(m.actual_native());
+        m.open();
+        m.move_cursor(2);
+        m.select(&mut s); // -> Options
+        m.move_cursor(ROW_VIDEO as i32);
+        m.select(&mut s); // -> Video
+        assert_eq!(m.screen(), MenuScreen::Video);
+        assert_eq!(
+            m.cursor(),
+            RESOLUTION_PRESETS.len(),
+            "opens on the native row (Auto), not a fixed-mode guess"
+        );
+        // The old bug: a fresh Menu's res_preset defaults to 0, and nothing
+        // here ever set it to match 960x540 (there IS no such preset) — so a
+        // reader of `resolution()` alone could once mistake "the fixed-mode
+        // default" for "current". It no longer matters: see
+        // `video_options_marks_the_live_native_row_white_with_its_real_size`
+        // for what the screen actually marks and prints.
+        assert_ne!(m.resolution(), (960, 600), "never claims the Classic default is current");
+    }
+
+    #[test]
+    fn picking_a_fixed_mode_is_reversible_back_to_native() {
+        // Enter on a mode still turns native off (id's VID_SetMode), same as
+        // before — but it is no longer a one-way trip: the native rows stay
+        // in the very same list, so Up and Enter undo it.
+        let (mut m, mut s) = (Menu::new(), Settings::default());
+        m.sync_resolution(960, 540, true, true);
+        m.open();
+        m.move_cursor(2);
+        m.select(&mut s);
+        m.move_cursor(ROW_VIDEO as i32);
+        m.select(&mut s);
+        m.set_cursor(3); // 800x500
+        assert_eq!(m.select(&mut s), MenuAction::ResolutionChanged);
+        assert!(!s.cvars.native, "picking a mode turns native off, visibly");
+        assert_eq!(s.cvars.vid_resolution, (800, 500));
+        assert_eq!(m.resolution(), (800, 500));
+        // The native rows are still right there: Up from the first preset
+        // reaches the last native row (4x); Enter turns native back on at it.
+        m.set_cursor(0);
+        m.move_cursor(-1);
+        assert_eq!(m.cursor(), m.video_rows() - 1, "wrapped up into the native rows");
+        assert_eq!(m.select(&mut s), MenuAction::ResolutionChanged);
+        assert!(s.cvars.native, "native resolution chosen back");
+        assert_eq!(s.cvars.pixel_size, PIXEL_SIZE_MAX, "the 4x row");
+    }
+
+    #[test]
+    fn a_native_row_sets_its_own_pixel_size() {
+        let (mut m, mut s) = (Menu::new(), Settings::default());
+        s.cvars.native = false; // start on a fixed mode, like Classic's default
+        m.sync_resolution(640, 400, false, true);
+        m.open();
+        m.move_cursor(2);
+        m.select(&mut s);
+        m.move_cursor(ROW_VIDEO as i32);
+        m.select(&mut s);
+        // Row RESOLUTION_PRESETS.len() + 2 is the "2x" native row.
+        m.set_cursor(RESOLUTION_PRESETS.len() + 2);
+        m.take_sounds();
+        assert_eq!(m.select(&mut s), MenuAction::ResolutionChanged);
+        assert!(s.cvars.native);
+        assert_eq!(s.cvars.pixel_size, 2);
+        assert_eq!(m.take_sounds(), vec![MenuSound::Menu1], "menu1, like a fixed mode");
+    }
+
+    #[test]
+    fn classic_video_options_ignores_native_rows_even_if_native_is_on() {
+        // modern=false (Classic: the host never passes it true there) keeps
+        // VID_MenuDraw's plain grid even if `native` itself were somehow on —
+        // the native rows are a 2026 extra, not a reaction to the raw cvar.
+        let (mut m, mut s) = (Menu::new(), Settings::new(Profile::Classic));
+        m.sync_resolution(1920, 1080, true, false);
+        m.open();
+        m.move_cursor(2);
+        m.select(&mut s);
+        m.move_cursor(ROW_VIDEO as i32);
+        m.select(&mut s);
+        assert_eq!(m.screen(), MenuScreen::Video);
+        assert_eq!(m.video_rows(), RESOLUTION_PRESETS.len());
+        assert_eq!(m.cursor(), m.res_preset, "the id's grid, no native row to open on");
+    }
+
+    #[test]
+    fn video_options_marks_the_live_native_row_white_with_its_real_size() {
+        // The same bronze/white conchars trick as
+        // options_labels_are_m_print_bronze_and_the_current_video_mode_white:
+        // a 'N' (for "Native") at bronze index 5, white index 6.
+        let mut data = vec![0u8; 128 * 128];
+        let mut fill = |cell: usize, idx: u8| {
+            let (cx, cy) = ((cell % 16) * 8, (cell / 16) * 8);
+            for y in 0..8 {
+                for x in 0..8 {
+                    data[(cy + y) * 128 + cx + x] = idx;
+                }
+            }
+        };
+        for c in 32..127usize {
+            fill(c, 6);
+            fill(c + 128, 5);
+        }
+        let conchars = crate::wad::Qpic { width: 128, height: 128, data };
+        let (mut m, s) = (Menu::new(), Settings::default());
+        m.sync_resolution(960, 540, true, true); // genuinely native, Auto
+        m.open();
+        m.screen = MenuScreen::Video;
+        m.set_cursor(RESOLUTION_PRESETS.len()); // the Auto native row
+        let mut img = Image::new(320, 200, 0);
+        draw_menu(&mut img, &m, &s, &MenuPics::default(), Some(&conchars), clock(0.0, 0.0));
+        let row_px = |row: usize| (36 + row * 8 + 3) * 320 + 16 + 3;
+        assert_eq!(img.pixels[row_px(RESOLUTION_PRESETS.len())], 6, "the live native row is M_PrintWhite");
+        assert_eq!(img.pixels[row_px(4)], 5, "960x600 is NOT current (it isn't what the screen is)");
+        // The actual render size is printed on that row: "960x540" starts
+        // right after "Native  Auto  " (14 columns in, from x=16).
+        let digit_px = (36 + RESOLUTION_PRESETS.len() * 8 + 3) * 320 + 16 + 14 * 8 + 3;
+        assert_eq!(img.pixels[digit_px], 6, "the live size is printed, in white, on its row");
     }
 }

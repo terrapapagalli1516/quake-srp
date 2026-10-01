@@ -23,8 +23,15 @@
      and Screen size; a `?classic` visit sticks for a plain reload after it;
      a returning visitor's old localStorage settings keep their choice (Show
      FPS) and get the 2026 defaults (uncapped, scaled 2-D).
+  7. Video Options is honest about native resolution (review: it used to show
+     960x600 as current and a pick silently turned Native off): opened while
+     actually native, the cursor lands on the live native row (not a stale
+     preset) and `vid_native` is still 1; picking a fixed mode turns it off,
+     visibly (that mode is now the one marked); and native is one Up/Enter
+     away again, at the picked pixel size — the same list, never a dead end.
 
-Screenshots (in the web dir): verify_settings_2026.png, verify_settings_classic.png.
+Screenshots (in the web dir): verify_settings_2026.png, verify_settings_classic.png,
+verify_settings_video_native.png.
 Also passes with QUAKE_BROWSER=firefox, whose headless build ignores the
 context's devicePixelRatio: section 2 is skipped there. Not verified: a real
 high-DPI screen, a GPU compositor, Safari.
@@ -42,6 +49,8 @@ httpd = isolated.serve(WEB, PORT)
 URL = f"http://127.0.0.1:{PORT}/index.html"
 OPTIONS, EXTRAS = 5, 10
 NATIVE, FKEY = 32, 64
+ROW_VIDEO = 12
+VIDEO_PRESETS = 7  # quake_rs::menu::RESOLUTION_PRESETS.len(): the native rows follow these
 
 passed, failed = 0, 0
 def check(name, ok, detail=""):
@@ -255,6 +264,53 @@ with sync_playwright() as p:
     ext = pg.evaluate("exp.extras()")
     check("old settings: the choice kept (Show FPS), the 2026 defaults on (uncapped, scaled 2-D)",
           text(pg, "profile") == "2026" and ext == 11, f"extras {ext}; {text(pg, 'config_text')!r}")
+    ctx.close()
+
+    # 7. Video Options is honest about native resolution, and reversible.
+    ctx = br.new_context(viewport={"width": 1280, "height": 800})
+    pg = page(ctx)
+    boot(pg)
+    walk(pg)
+    frames(pg)
+    cursor = lambda: pg.evaluate("exp.menu_cursor()")
+    c = pg.evaluate(CANVAS)
+    check("walking in: native resolution is actually on", bool(c["flags"] & NATIVE), str(c))
+
+    pg.keyboard.press("Escape")
+    pg.keyboard.press("ArrowDown"); pg.keyboard.press("ArrowDown"); pg.keyboard.press("Enter")  # -> Options
+    for _ in range(ROW_VIDEO):
+        pg.keyboard.press("ArrowDown")
+    pg.keyboard.press("Enter")  # -> Video Options
+    time.sleep(0.2)
+    check("Video Options opens on the live native row (Auto), not a stale preset",
+          cursor() == VIDEO_PRESETS, f"cursor={cursor()}, pixel_size={cvar(pg, 'vid_pixelsize')}")
+    check("...and native resolution is still on (no silent change just from opening)",
+          cvar(pg, "vid_native") == "1")
+    pg.locator("#c").screenshot(path=os.path.join(WEB, "verify_settings_video_native.png"))
+
+    # Picking a fixed mode (3 Up from the Auto row: preset index 3, 800x500)
+    # turns native off, visibly — a preset is now the one Enter marked.
+    for _ in range(VIDEO_PRESETS - 3):
+        pg.keyboard.press("ArrowUp")
+    pg.keyboard.press("Enter")
+    time.sleep(0.2)
+    check("picking a mode turns native off, visibly", cvar(pg, "vid_native") == "0")
+    c = pg.evaluate(CANVAS)
+    check("...and the picture is that mode (800x500)", (c["w"], c["h"]) == (800, 500), str(c))
+    check("still on the Video Options list", pg.evaluate("exp.menu_screen_id()") == 7)
+
+    # Reversible: wrapping Up past the first preset reaches a native row;
+    # Enter there turns native back on, at that row's pixel size.
+    for _ in range(4):
+        pg.keyboard.press("ArrowUp")
+    cur = int(cursor())
+    check("wrapped up into a native row", cur >= VIDEO_PRESETS, f"cursor={cur}")
+    pg.keyboard.press("Enter")
+    time.sleep(0.2)
+    check("native resolution chosen back", cvar(pg, "vid_native") == "1")
+    check("...at the row's own pixel size", cvar(pg, "vid_pixelsize") == str(cur - VIDEO_PRESETS))
+    for _ in range(3):
+        pg.keyboard.press("Escape")
     ctx.close()
 
     print("errors:", errs[-5:])

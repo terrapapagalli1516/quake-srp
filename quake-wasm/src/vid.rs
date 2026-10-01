@@ -118,6 +118,20 @@ pub(crate) fn native(a: &App) -> bool {
     a.settings.cvars.native && a.window.is_some()
 }
 
+/// Point Video Options at the live picture (`Menu::sync_resolution`): the
+/// render size, [`native`] (not just `vid_native`'s cvar — a window must be
+/// known too, or there's nothing to fill natively), and whether the
+/// native-resolution rows belong in the list at all (the 2026 profile;
+/// Classic's list is `RESOLUTION_PRESETS` alone). Every caller that used to
+/// hand `Menu::sync_resolution` the render size alone goes through this now,
+/// so the two new facts can never drift out of sync with it.
+pub(crate) fn sync_menu_resolution(a: &mut App) {
+    let native = native(a);
+    let modern = a.settings.profile == quake_rs::settings::Profile::Modern;
+    let (w, h) = (a.render_w as i32, a.render_h as i32);
+    a.menu.sync_resolution(w, h, native, modern);
+}
+
 /// Once a frame, before the client frame: the framebuffer to the size the
 /// settings ask for, and the 2-D layer's scale (a setting `draw` still keeps
 /// per thread). The renderer's settings go with the frame, in [`vid`].
@@ -125,7 +139,7 @@ pub(crate) fn apply_settings(a: &mut App) {
     let (w, h) = picture_size(&a.settings.cvars, a.window, render_threads(a));
     a.set_render_size(w, h);
     quake_rs::draw::set_scaled_2d(a.settings.cvars.scaled_2d);
-    a.menu.sync_resolution(w as i32, h as i32);
+    sync_menu_resolution(a);
 }
 
 /// The checks' and the benchmark's shorthand for the picture (the
@@ -170,7 +184,7 @@ pub(crate) fn set_resolution(w: i32, h: i32) {
         a.settings.cvars.native = false;
         a.set_render_size(cw, ch);
         // Keep the Video Options "current mode" pointing at the new size too.
-        a.menu.sync_resolution(cw as i32, ch as i32);
+        sync_menu_resolution(a);
     });
 }
 

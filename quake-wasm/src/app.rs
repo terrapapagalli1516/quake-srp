@@ -579,7 +579,7 @@ pub(crate) fn boot() -> i32 {
             // current framebuffer size (the source of truth) and point the fresh
             // menu's current video mode at it, instead of snapping back to DEFAULT.
             // (Re-booting used to revert a menu-picked resolution; it no longer does.)
-            a.menu.sync_resolution(a.render_w as i32, a.render_h as i32);
+            crate::vid::sync_menu_resolution(a);
         }
     });
     ok as i32
@@ -602,7 +602,7 @@ pub(crate) fn boot_demo() -> i32 {
             // menu's current video mode at it so it's correct when the player
             // next opens Video Options.
             a.menu.reset_nav();
-            a.menu.sync_resolution(a.render_w as i32, a.render_h as i32);
+            crate::vid::sync_menu_resolution(a);
         }
     });
     ok as i32
@@ -638,7 +638,7 @@ pub(crate) fn boot_attract() -> i32 {
             // On the very first load the framebuffer is at DEFAULT; the page
             // then restores any saved resolution over it.
             a.menu.reset_boot();
-            a.menu.sync_resolution(a.render_w as i32, a.render_h as i32);
+            crate::vid::sync_menu_resolution(a);
         }
     });
     if built {

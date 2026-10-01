@@ -313,7 +313,7 @@ pub(crate) fn step(dt: f32) -> i32 {
             // Keep the Video Options "current mode" tracking the actual render
             // resolution (the framebuffer is the source of truth), so a boot /
             // New Game / `map` that changed the render size can't leave it stale.
-            a.menu.sync_resolution(a.render_w as i32, a.render_h as i32);
+            crate::vid::sync_menu_resolution(a);
             if let Some(img) = img.as_mut() {
                 // M_Draw: over the console background while the console
                 // is out (scr_con_current: forced up, disconnected),
