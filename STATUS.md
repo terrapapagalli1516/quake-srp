@@ -1,8 +1,8 @@
 # Quake-RS — status and hand-off
 
-Last updated 2026-09-26, after the 2026 push (`quake/2026`). The first section is where
-things stand. The second is what the day changed, branch by branch. Then how to work
-here, and the older history, kept as evidence, with superseded items marked.
+Last updated 2026-10-02, after the phone round (`main` @ 2fd0ea4). The first section is
+where things stand. Then the rounds, newest first, branch by branch; how to work here; and
+the older history, kept as evidence, with superseded items marked.
 
 ---
 
@@ -51,14 +51,14 @@ here, and the older history, kept as evidence, with superseded items marked.
     timedemo counts, the census and id's edicts on nine maps, the eight 3-D oracle rows
     at 100.00%, 146 2-D shots at their recorded match, demo playback against id's client
     over 17,500 frames, and the mixer against id's C in 28 of 28 cases.
-  - **Tests:** `cargo test --release` gives 707 library + 6 `quaketool` + 8
-    integration + 1 doctest in quake-rs, and 172 in quake-wasm (1 ignored: the 2-D
-    oracle's harness).
+  - **Tests:** `cargo test --release` gives 732 in quake-rs and 185 in quake-wasm (1
+    ignored: the 2-D oracle's harness).
   - **Clippy:** 0 warnings in both crates.
-  - **Browser checks:** the 15 `web/verify_*.py` checks pass in headless Chromium
-    (today's run). The 14 page checks ran on both builds' deploy dirs;
-    `verify_threads` builds its own program. The branches also ran most checks
-    in headless Firefox.
+  - **Browser checks:** the 17 `web/verify_*.py` checks pass in headless Chromium
+    (2026-10-02). `verify_threads` builds its own program and
+    `verify_audio_resilience` needs a `--features bench` build; the rest run on a
+    deploy dir of either build. Earlier branches also ran most checks in headless
+    Firefox.
   - **Frame rate:** `quaketool framerate --check` passes: 22 scenarios, uncapped at
     60–480 Hz against 72.
   - **Speed:** `timedemo demo1` in Classic natively is 1.35–1.44x id's portable C. In
@@ -69,16 +69,18 @@ here, and the older history, kept as evidence, with superseded items marked.
   - a real browser on a real display: every browser check ran headless, on a
     desktop GPU at best;
   - Safari and iOS (Playwright's WebKit would not start here);
-  - a real phone (the phone checks emulate one; real-phone speed at pixel size 1 on the
-    threads build is unknown);
-  - a real 120–480 Hz display;
+  - a real phone beyond one: an Android phone was measured through Chrome's
+    remote debugging (2026-10-01, below); nothing else, and no other browser;
+  - a real 120–480 Hz display (the phone's Chrome caps the page's main thread at 60 Hz
+    unless a finger moves; see below);
   - real pointer lock (headless Chromium's lock jumps the pitch to −70);
   - a real gamepad (emulated);
   - Esc under the Keyboard Lock API;
   - sound by ear (only its counters, samples and the C oracle).
-- **Deployed.** The chair serves the threads build of the final tree over https on the
-  private network, from its ledger's deploy dir (the ledger has the address). `README.md`
-  describes serving generically.
+- **Deployed.** The threads build of `main` is served over https on a private network:
+  the shareware page, and a registered one that offers `pak1.pak` and the CD tracks
+  through `files.json` (`web/PLATFORM.md`, "A server's own files"). No game data is in
+  the repo. `README.md` describes serving generically.
 - **What is left.** `AUDIT.md`, "Open, as of 2026-09-26", is the one list. The closing
   review's ranked next steps:
   1. old-era names (`wasm_*` cvars, `MenuScreen::Extras`, `EXTRAS_*`; renaming needs
@@ -86,13 +88,58 @@ here, and the older history, kept as evidence, with superseded items marked.
   2. rustfmt and edition 2024 for quake-rs (CODE_PLAN W0a);
   3. 12 rustdoc warnings and dead public functions in `server/` and the VM;
   4. 16 thread-locals left;
-  5. on a phone, the touch buttons overlap the ammo count;
-  6. in 2026, Video Options shows 960x600 as current and a pick silently turns Native
-     resolution off; the menu's fade dither is a fine screen-door under a 4–6x menu;
+  5. ~~on a phone, the touch buttons overlap the ammo count~~ (fixed 2026-09-30);
+  6. ~~in 2026, Video Options shows 960x600 as current and a pick silently turns Native
+     resolution off~~ (fixed 2026-09-30; the fade dither was already fixed);
   7. no `version` command, and `disconnect` does not end the game.
 
   The structural work is `CODE_PLAN.md`'s menu:
   W0a/W0b, R1, R6, R8, R9, R11, and the engine-owned `Host` session (§7).
+
+---
+
+## 2026-09-30 to 2026-10-02: its own repo, and an Android phone
+
+The project moved out of the repository it came from into this one, with its whole history
+(`git filter-repo --subdirectory-filter`, 583 commits). Then a round of Sonnet agents, each
+on a `fleet/*` branch, merged by the chair, from the user's notes after playing on a
+phone.
+
+- **Standalone** (chair). id's C source is read from `quake-c/` beside `quake-data/` (both
+  ignored links); `classic_check` builds the oracle itself from a fresh checkout; check
+  screenshots and unreferenced early renders left the tree.
+- **Quit** (`fleet/quit`). Menu > Quit > Y and the console's `quit` end the program as
+  `Sys_Quit` did: a `Quit` record (kind 18) carries `end1.bin`/`end2.bin`, the page leaves
+  fullscreen, releases the pointer and keyboard locks, and draws DOS Quake's text-mode end
+  screen (`web/endscreen.js`); a tap or key reloads into a fresh game.
+- **Touch layout** (`fleet/touch`). The buttons sit above the status bar at any phone size
+  and Screen size (`sbar_height`, from `calc_refdef`'s own arithmetic).
+- **A server's own files** (`fleet/serverfiles`). An optional `files.json` lets a deploy
+  offer `id1/pak1.pak` and `id1/music/trackNN.ogg`; the player's dropped files still win.
+- **Video Options** (`fleet/video`). In 2026 it lists Native Auto / 1x-4x below id's
+  modes, marks what is really showing, and switches either way.
+- **Speed at phone resolutions** (`fleet/water`, `fleet/sched`). Liquid texels wrap with a
+  mask, the warp's row multiply is in its tables, and `band::for_rows` hands out several
+  runs a thread like the bands do; frames byte-identical (PERF_PLAN.md §12).
+- **An Android phone, measured** (chair; adb + Chrome's remote debugging over USB). At pixel size
+  1 (2640x1080, 8 threads) frames took 13 ms dry and 19 ms underwater against 60 Hz's
+  16.7, with the phone throttled at ~40 C and its cores at ~40% of their clocks, and the
+  audio ring ran dry. At 2x2: 8 and 9 ms, clean. So Auto now starts a phone (devicePixelRatio
+  2 or more, shorter side at most 540 CSS pixels) at 2x2; the `Window` record carries the
+  ratio.
+- **Late frames and sound** (`fleet/audio`). In 2026 the mixer's lead grows to 2.5x a late
+  host frame (at most 0.55 s) and eases back within about a second; the ring doubled.
+  Classic's fixed lead is untouched. `verify_audio_resilience.py` stalls frames on purpose
+  (`stall_ms`, bench builds only).
+- **Parked, not merged: `fleet/present120`.** The presenter and the tick loop in a worker on
+  an `OffscreenCanvas`. On an Android phone with "Force peak refresh rate", Chrome gave the
+  page's main thread 60 animation frames a second and a worker canvas 120. With the
+  phone's default adaptive refresh the display idles at 60 anyway, so the change (two
+  writers on the input ring, asynchronous readback) buys nothing today. Its `?ratecheck`
+  measures the two rates.
+- **Not changed:** exact perspective stays off in 2026 (id's 16-pixel spans; it changes
+  about 1% of pixels at a phone's 2x2 and costs a divide a pixel; its cost was not
+  measured on a quiet machine).
 
 ---
 

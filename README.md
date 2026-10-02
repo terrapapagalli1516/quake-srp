@@ -200,8 +200,9 @@ Beyond Classic:
 - `cargo test` passes in both crates, and clippy shows zero warnings.
 - `quake-rs/target/release/quaketool framerate quake-data/ID1/PAK0.PAK --check` runs 22
   gameplay scenarios at high frame rates and compares them with id's 72 Hz.
-- 15 headless-browser checks (`web/verify_*.py`) cover everything from walking and the
-  menus to the gamepad, touch, and reading back the canvas.
+- 17 headless-browser checks (`web/verify_*.py`) cover everything from walking and the
+  menus to the gamepad, touch, quitting, sound through late frames, and reading back the
+  canvas.
 
 ## Numbers
 
