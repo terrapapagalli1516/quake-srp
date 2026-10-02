@@ -28,6 +28,14 @@ check is Chromium's only.
      a reload plays from the cache.
   8. Any static host: served with no isolation headers, the page reloads
      under its service worker and runs isolated.
+  9./10. Clear of the status bar, at several phone sizes and the phone profile's
+     (PHONE_26, devicePixelRatio 2.6).
+  11. The game picker (PHONE_26), on a deploy offering a synthesized mission
+     pack: the start overlay's buttons, the running game marked; a finger on
+     Scourge of Armagon (pointerdown, pointerup, click) reloads the page as
+     ?game=hipnotic and is never also the tap that starts the game; GAME in
+     the menu opens the same choices without tapping the menu under them;
+     the quit screen offers them too. A shareware-only deploy shows none.
 
 Not verifiable here: Safari and iOS (Playwright's WebKit does not start on
 the test host), a real phone's touch screen, fullscreen and the landscape
@@ -40,7 +48,7 @@ Usage: verify_touch.py [webdir]   (a deploy dir, PLATFORM.md: index.html,
 wasi.js, touch.js, sw.js, manifest.webmanifest, icons/, quake.wasm,
 id1/pak0.pak.) Screenshots verify_touch_*.png go into it.
 """
-import functools, http.server, json, math, os, socketserver, sys, threading, time
+import functools, http.server, json, math, os, shutil, socketserver, sys, tempfile, threading, time
 from playwright.sync_api import sync_playwright
 import isolated
 
@@ -62,13 +70,55 @@ class Handler(isolated.Handler):
         http.server.SimpleHTTPRequestHandler.end_headers(self)
 
 
-def serve(port, isolation):
+def serve(port, isolation, directory=WEB):
     socketserver.ThreadingTCPServer.allow_reuse_address = True
     handler = type("H", (Handler,), {"isolation": isolation})
-    httpd = socketserver.ThreadingTCPServer(("127.0.0.1", port), functools.partial(handler, directory=WEB))
+    httpd = socketserver.ThreadingTCPServer(("127.0.0.1", port), functools.partial(handler, directory=directory))
     httpd.daemon_threads = True
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     return httpd
+
+
+def pack_deploy():
+    """A deploy offering Scourge of Armagon (web/PLATFORM.md, "The game
+    picker"), from synthesized data (isolated.py): WEB's page, engine and
+    pak0 (symlinked), a registered pak1 — a mission pack runs only on the
+    registered game (COM_CheckRegistered) — with id's end screen as its
+    end2.bin, and a hipnotic/pak0.pak whose hip1m1 is e1m1; files.json
+    lists both."""
+    d = tempfile.mkdtemp(prefix="quake-touch-packs-")
+    isolated.copy_page(d)
+    for sub in ("id1", "hipnotic"):
+        os.makedirs(os.path.join(d, sub), exist_ok=True)
+    for rel in ("quake.wasm", os.path.join("id1", "pak0.pak")):
+        os.symlink(os.path.abspath(os.path.join(WEB, rel)), os.path.join(d, rel))
+    pak0 = os.path.join(WEB, "id1", "pak0.pak")
+    e1m1, end1 = isolated.pak_file(pak0, "maps/e1m1.bsp"), isolated.pak_file(pak0, "end1.bin")
+    with open(os.path.join(d, "id1", "pak1.pak"), "wb") as f:
+        f.write(isolated.write_pak([("gfx/pop.lmp", isolated.POP_LMP), ("maps/e2m1.bsp", e1m1), ("end2.bin", end1)]))
+    with open(os.path.join(d, "hipnotic", "pak0.pak"), "wb") as f:
+        f.write(isolated.write_pak([("maps/hip1m1.bsp", e1m1)]))
+    isolated.write_manifest(d)
+    return d
+
+
+# What a page did with a finger on a game choice, kept for the page after
+# it (sessionStorage, at pagehide): the pointer events and click the
+# choice's link saw (capture phase, so the link's own stopPropagation does
+# not hide them), and whether the page also took the tap as its start —
+# the overlay gone, fullscreen asked for (index.html's gameList).
+PICK_PROBE_JS = """(() => {
+  const ask = HTMLElement.prototype.requestFullscreen;
+  HTMLElement.prototype.requestFullscreen = function (...a) { window.__fullscreenAsked = true; return ask.apply(this, a); };
+  const seq = [];
+  for (const t of ['pointerdown', 'pointerup', 'click'])
+    addEventListener(t, e => { const a = e.target.closest && e.target.closest('.games a'); if (a) seq.push(t + ' ' + a.dataset.game); }, true);
+  addEventListener('pagehide', () => {
+    const o = document.getElementById('overlay'), t = document.getElementById('touch');
+    sessionStorage.setItem('pickProbe', JSON.stringify({ seq, overlayHidden: !!o && o.classList.contains('hidden'),
+      fullscreenAsked: !!window.__fullscreenAsked, mode: t ? t.dataset.mode : null }));
+  });
+})();"""
 
 
 passed, failed = 0, 0
@@ -182,6 +232,7 @@ def main():
               pg.evaluate("document.documentElement.classList.contains('touch') && !!document.getElementById('touch')"))
         check("no keyboard-and-mouse note", pg.evaluate("!document.getElementById('touchNote')"))
         check("the start prompt says tap", pg.evaluate("document.getElementById('play').textContent") == "tap to start")
+        check("a shareware-only deploy: no game picker", not shown("#gamePicker"))
         # The first frame sizes the canvas; `ready` can come a moment before it.
         try:
             pg.wait_for_function("(() => { const r = document.getElementById('c').getBoundingClientRect();"
@@ -213,6 +264,7 @@ def main():
         pg.touchscreen.tap(500, 200)                      # any tap: the menu
         check("a tap on the demo opens the menu", wait("quake.state.flags & 1") and mode() == "menu" and shown("#tBack"))
         check("menu pad shown in menu mode", shown("#tMenuPad"))
+        check("no GAME in the menu: no mission pack on this deploy", not shown("#tGame"))
         pg.screenshot(path=os.path.join(WEB, "verify_touch_menu.png"))
         tap_menu(160, 42)                                 # Main > Single Player
         check("Single Player by a tap", wait("quake.state.menuScreen === 1"), str(screen_id()))
@@ -542,6 +594,131 @@ def main():
 
         check("other phone sizes: no console errors", not errs3, str(errs3[-5:]))
         ctx3.close()
+
+        # --- 11. The game picker -------------------------------------------------
+        # PLATFORM.md "The game picker", in the phone profile (PHONE_26), with a
+        # deploy offering a mission pack (pack_deploy). Every tap is CDP
+        # touch events, a finger's touchStart/touchEnd, from which the
+        # browser makes the pointerdown, pointerup and click itself.
+        packs = pack_deploy()
+        httpd4 = serve(PORT + 2, True, packs)
+        ctx4 = br.new_context(**PHONE_26)
+        ctx4.add_init_script(NO_FULLSCREEN_JS)
+        ctx4.add_init_script(PICK_PROBE_JS)
+        pg4 = ctx4.new_page()
+        errs4 = []
+        pg4.on("console", lambda m: errs4.append(m.text) if m.type == "error" else None)
+        pg4.on("pageerror", lambda e: errs4.append("PAGEERROR: " + str(e)))
+        cdp4 = ctx4.new_cdp_session(pg4)
+        base4 = f"http://127.0.0.1:{PORT + 2}/index.html"
+        def finger(x, y):
+            cdp4.send("Input.dispatchTouchEvent", {"type": "touchStart", "touchPoints": [{"x": x, "y": y, "id": 9}]})
+            time.sleep(0.06)
+            cdp4.send("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
+            time.sleep(0.25)
+        def finger_on(sel):
+            box = pg4.locator(sel).bounding_box()
+            finger(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+        def up4():
+            pg4.wait_for_function("window.quake && quake.ready && window.QuakeTouch", timeout=120000)
+        def went(url):
+            try:
+                pg4.wait_for_url(url, timeout=15000)
+                up4()
+                return True
+            except Exception:
+                return False
+        def probe():
+            return json.loads(pg4.evaluate("sessionStorage.getItem('pickProbe') || 'null'") or "null")
+        CHOICES = """sel => [...document.querySelectorAll(sel + ' .game')].map(g => { const r = g.getBoundingClientRect();
+            return { game: g.dataset.game, name: g.textContent, cur: g.classList.contains('cur'), href: g.getAttribute('href'), h: r.height }; })"""
+        choices = lambda sel: pg4.evaluate(CHOICES, sel)
+        def marked(sel, game):
+            cs = choices(sel)
+            return bool(cs) and all(c["cur"] == (c["game"] == game) and (c["href"] is None) == c["cur"] for c in cs)
+        mode4 = lambda: mode(pg4)
+
+        pg4.goto(base4 + "?2026", wait_until="load")
+        up4()
+        cs = choices("#gamePicker")
+        check("11. the start overlay offers Quake and Scourge of Armagon, Quake marked",
+              [c["name"] for c in cs] == ["Quake", "Scourge of Armagon"] and marked("#gamePicker", "id1"), str(cs))
+        check("...each a fingertip's height (44 CSS px)", all(c["h"] >= 44 for c in cs), str([c["h"] for c in cs]))
+        pg4.screenshot(path=os.path.join(WEB, "verify_touch_picker_start.png"))
+        finger_on("#gamePicker a.game[data-game=hipnotic]")
+        check("a finger on Scourge of Armagon reloads the page as ?game=hipnotic",
+              went(base4 + "?2026&game=hipnotic"), pg4.url)
+        pr = probe()
+        check("...its pointerdown, pointerup and click all on the link",
+              pr and pr["seq"] == ["pointerdown hipnotic", "pointerup hipnotic", "click hipnotic"], str(pr))
+        check("...and never also the tap that starts: the overlay stayed, no fullscreen asked",
+              pr and not pr["overlayHidden"] and not pr["fullscreenAsked"] and pr["mode"] == "boot", str(pr))
+        check("the new page marks Scourge of Armagon, the engine runs it",
+              marked("#gamePicker", "hipnotic") and pg4.evaluate("quake.content.state().game") == "hipnotic", str(choices("#gamePicker")))
+        pg4.screenshot(path=os.path.join(WEB, "verify_touch_picker_hipnotic.png"))
+
+        finger_on("#play")                                # tap to start (the running game: no choice)
+        check("tap to start: the attract demo, no GAME outside the menu",
+              wait("document.getElementById('touch').dataset.mode === 'demo'", pg_=pg4) and not shown("#tGame", pg4), mode4())
+        finger(500, 200)                                  # any tap: the menu
+        check("in the menu: GAME beside BACK", wait("quake.state.flags & 1", pg_=pg4) and mode4() == "menu"
+              and shown("#tGame", pg4) and shown("#tBack", pg4), mode4())
+        menu_left = pg4.evaluate(MENU_POINT, [0, 0])[0]
+        game_box = pg4.locator("#tGame").bounding_box()
+        check("...clear of the menu's own layout", game_box["x"] + game_box["width"] <= menu_left,
+              f"GAME's right {game_box['x'] + game_box['width']:.0f}px, the menu's left {menu_left:.0f}px")
+        pg4.screenshot(path=os.path.join(WEB, "verify_touch_picker_menu.png"))
+        finger_on("#tGame")
+        check("GAME opens the same choices, Scourge of Armagon marked", shown("#tGames", pg4) and marked("#tGames", "hipnotic"),
+              str(choices("#tGames")))
+        # Beside the choices, on Main's Quit row (the menu's layout x 8,
+        # left of the panel's column): with the panel up, it only closes it.
+        qx, qy = pg4.evaluate(MENU_POINT, [8, 120])
+        before = (pg4.evaluate("exp.menu_screen_id()"), pg4.evaluate("exp.menu_cursor()"))
+        finger(qx, qy)
+        time.sleep(0.3)
+        after = (pg4.evaluate("exp.menu_screen_id()"), pg4.evaluate("exp.menu_cursor()"))
+        check("a tap beside the choices closes them, the menu under them untouched",
+              not shown("#tGames", pg4) and before == after and mode4() == "menu" and not pg4.evaluate("quake.state.flags & 256"),
+              f"{before} -> {after}")
+        finger(qx, qy)                                    # the control: without the panel, that spot is Quit
+        check("...where, without the panel, the same tap is the menu's (Quit asks)",
+              wait("quake.state.flags & 256", pg_=pg4) and mode4() == "ask", mode4())
+        finger_on("#tNo")
+        wait("!(quake.state.flags & 256)", pg_=pg4)
+        finger_on("#tGame")
+        pg4.screenshot(path=os.path.join(WEB, "verify_touch_picker_panel.png"))
+        finger_on("#tGamesCancel")
+        check("CANCEL closes them", not shown("#tGames", pg4) and mode4() == "menu")
+        finger_on("#tGame")
+        finger_on("#tGames a.game[data-game=id1]")
+        check("its Quake reloads the page as plain ?2026", went(base4 + "?2026"), pg4.url)
+        pr = probe()
+        check("...from a finger on the link", pr and pr["seq"] == ["pointerdown id1", "pointerup id1", "click id1"], str(pr))
+        check("Quake marked again", marked("#gamePicker", "id1"), str(choices("#gamePicker")))
+
+        # The quit screen (endscreen.js) offers them too: any tap there
+        # restarts this game, a choice starts that one.
+        finger_on("#play")
+        wait("document.getElementById('touch').dataset.mode === 'demo'", pg_=pg4)
+        pg4.evaluate("quake.callLine('console_toggle')")
+        pg4.evaluate("quake.callLine('exec quit')")
+        try:
+            pg4.wait_for_selector("#quakeEndScreen", timeout=12000)
+            ended = True
+        except Exception:
+            ended = False
+        check("the quit screen offers the choices, Quake marked", ended and marked("#quakeEndScreen", "id1")
+              and pg4.evaluate("!!document.querySelector('#quakeEndScreen .qesGrid')"), str(choices("#quakeEndScreen")) if ended else "no end screen")
+        pg4.screenshot(path=os.path.join(WEB, "verify_touch_picker_end.png"))
+        finger_on("#quakeEndScreen a.game[data-game=hipnotic]")
+        check("...its Scourge of Armagon starts that game, not this one again",
+              went(base4 + "?2026&game=hipnotic") and marked("#gamePicker", "hipnotic"), pg4.url)
+        check("the game picker: no console errors", not errs4, str(errs4[-5:]))
+        ctx4.close()
+        httpd4.shutdown()
+        httpd4.server_close()
+        shutil.rmtree(packs, ignore_errors=True)
 
         errs_online = list(errs)
         print("errors:", errs_online[-5:])
