@@ -5,8 +5,8 @@
 //! `Sbar_IntermissionOverlay`, `Sbar_FinaleOverlay`.
 
 use crate::draw::{
-    blit_qpic_at, blit_scaled, conchars_pic, draw_tile_clear, screen_2d, HUD_TRANSPARENT,
-    HUD_VIRT_W,
+    blit_qpic_at, blit_scaled, conchars_pic, draw_tile_clear, scaled_2d, screen_2d,
+    HUD_TRANSPARENT, HUD_VIRT_W,
 };
 use crate::render::Image;
 use crate::screen::draw_center_string_revealed;
@@ -61,7 +61,7 @@ impl BarXf {
         let sc = screen_2d(vid_w, vid_h);
         BarXf {
             scale: sc.scale,
-            ox: ((sc.w - HUD_VIRT_W as i32) >> 1) as f32 * sc.scale,
+            ox: sc.centred_320_x(),
             vy_top: (sc.h as f32 - HUD_BAR_H) * sc.scale,
         }
     }
@@ -969,8 +969,16 @@ fn intermission_number(
 /// and the big-number time (minutes:seconds), secrets found/total and monsters
 /// killed/total beside the plaque's labels. The C draws them all with plain
 /// `Draw_Pic`/`Draw_TransPic` at those screen coordinates — no centring — so
-/// on a screen bigger than 320x200 they sit in its top-left corner; the
-/// "scaled 2-D" extra blows them up with the rest of the 2-D layer.
+/// on a screen wider than 320 they sit in its top-left corner, while the
+/// status bar (`Sbar_DrawPic`), the menus (`M_DrawPic`) and the episode's
+/// finale ([`draw_finale_overlay`]) centre themselves: id's own
+/// inconsistency, invisible at 320x200.
+///
+/// The "scaled 2-D" extra lays the 2-D layer out on a screen a little wider
+/// than 320 on most frames (a 16:9 one is 384 wide, a phone's twice that),
+/// so there the screen's 320 columns are centred as `Sbar_DrawPic` centres
+/// the bar ([`Screen2d::centred_320_x`](crate::draw::Screen2d::centred_320_x)),
+/// in line with the bar, the menus and the finale. Off, id's placement.
 ///
 /// `complete`/`inter` are the two pak pics (`Draw_CachePic` in the C); either
 /// being absent just skips that blit — the numbers still draw, never a panic.
@@ -985,8 +993,10 @@ pub fn draw_intermission_overlay(
     if image.w == 0 || image.h == 0 {
         return;
     }
-    let scale = screen_2d(image.w, image.h).scale;
-    let (ox, oy) = (0.0, 0.0);
+    let sc = screen_2d(image.w, image.h);
+    let scale = sc.scale;
+    let ox = if scaled_2d() { sc.centred_320_x() } else { 0.0 };
+    let oy = 0.0;
 
     // Draw_Pic(64, 24, "gfx/complete.lmp") — the "Level Complete" banner.
     if let Some(pic) = complete {
@@ -1578,6 +1588,54 @@ mod tests {
         let mut img2 = Image::new(320, 200, 0);
         draw_intermission_overlay(&mut img2, &wad, None, None, &stats);
         assert_eq!(px(208 + 2, 64 + 2), 103, "numbers still draw without pics");
+    }
+
+    #[test]
+    fn intermission_overlay_centres_on_the_scaled_2d_screen_as_the_bar_and_finale_do() {
+        // Off, id's absolute coordinates: a 640x400 screen keeps the overlay
+        // in its top-left corner. On (2026), a 2-D screen wider than 320 —
+        // a wide 1315x535 frame at scale 2 (658 wide), and 1920x1080
+        // at scale 5 (384 wide) — centres its 320 columns as Sbar_DrawPic
+        // centres the bar; a 16:10 frame (320 wide) is id's placement.
+        let wad = build_hud_wad();
+        let complete = Qpic { width: 192, height: 24, data: vec![50u8; 192 * 24] };
+        let inter = Qpic { width: 160, height: 144, data: vec![51u8; 160 * 144] };
+        let finale = Qpic { width: 288, height: 24, data: vec![52u8; 288 * 24] };
+        let stats = IntermissionStats { completed_time: 205, secrets: 3, total_secrets: 7, monsters: 12, total_monsters: 45 };
+        // (scaled 2-D, frame, scale, framebuffer x of the overlay's x = 0)
+        for (on, (w, h), scale, ox) in [
+            (false, (640, 400), 1, 0),
+            (false, (1920, 1080), 1, 0),
+            (true, (1315, 535), 2, 338), // ((658 - 320) >> 1) * 2
+            (true, (1920, 1080), 5, 160), // ((384 - 320) >> 1) * 5
+            (true, (1280, 800), 4, 0),
+        ] {
+            let _extra = crate::draw::Scaled2dGuard::set(on);
+            let case = format!("{w}x{h} scaled 2-D {on}");
+            let mut img = Image::new(w, h, 0);
+            draw_intermission_overlay(&mut img, &wad, Some(&complete), Some(&inter), &stats);
+            let px = |x: usize, y: usize| img.pixels[y * w + x];
+            // Each pic's leftmost framebuffer column, on a row it covers.
+            let left = |idx: u8, y: usize| (0..w).find(|&x| px(x, y * scale) == idx);
+            assert_eq!(left(51, 100), Some(ox), "{case}: inter.lmp at x = 0");
+            assert_eq!(left(50, 30), Some(ox + 64 * scale), "{case}: complete.lmp at x = 64");
+            assert_eq!(px(ox + 210 * scale, 66 * scale), 103, "{case}: the minutes' 3 at x = 208");
+            assert_eq!(px(ox + 290 * scale, 146 * scale), 105, "{case}: the monster total's 5 at x = 288");
+            if !on {
+                continue;
+            }
+            // In line with the status bar's 320 columns ...
+            assert_eq!(BarXf::new(w, h).ox, ox as f32, "{case}: the bar's x = 0");
+            // ... and the finale plaque's centre, (vid.width - 288) / 2.
+            let mut fin = Image::new(w, h, 0);
+            draw_finale_overlay(&mut fin, None, Some(&finale), "", 0.0);
+            let row = &fin.pixels[20 * scale * w..(20 * scale + 1) * w];
+            let lit: Vec<usize> = (0..w).filter(|&x| row[x] == 52).collect();
+            let (a, b) = (lit[0], lit[lit.len() - 1] + 1);
+            assert_eq!((a + b) / 2, ox + 160 * scale, "{case}: one centre with the finale");
+            // Which is the frame's own, to within half a 2-D pixel.
+            assert!((ox + 160 * scale).abs_diff(w / 2) * 2 <= scale, "{case}: centred");
+        }
     }
 
     #[test]

@@ -372,7 +372,8 @@ pub fn draw_fps(
 /// (`cl_crossx`/`cl_crossy`, id's offsets from there, are 0 and not
 /// modelled). `vrect` is in framebuffer pixels; the character is drawn on the
 /// 2-D layer's screen ([`screen_2d`]), so with the scaled 2-D extra it has
-/// that layer's size, at the same place.
+/// that layer's size, at the same place. The client leaves it off an
+/// intermission or finale, as id's GLQuake does (`walk_frame`).
 pub fn draw_crosshair(image: &mut Image, conchars: &crate::wad::Qpic, vrect: &ViewRect) {
     let sc = screen_2d(image.w, image.h);
     if image.w == 0 || image.h == 0 || sc.scale.is_nan() || sc.scale <= 0.0 {

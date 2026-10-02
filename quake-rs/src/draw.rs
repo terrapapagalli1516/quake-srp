@@ -27,7 +27,10 @@ thread_local! {
 /// browser canvases) lays the 2-D layer out on a 320x200 screen, as id does
 /// in mode 0, and blows every pixel of it up to fill the frame
 /// ([`screen_2d`]). The 3-D view is unaffected either way, except that the
-/// status bar it must clear grows with the scale.
+/// status bar it must clear grows with the scale. Where that screen comes
+/// out wider than 320, the level-complete screen, which id draws at absolute
+/// coordinates, is centred as the status bar is
+/// ([`draw_intermission_overlay`](crate::sbar::draw_intermission_overlay)).
 pub fn set_scaled_2d(on: bool) {
     SCALED_2D.with(|c| c.set(on));
 }
@@ -73,6 +76,13 @@ impl Screen2d {
     /// The framebuffer pixel of 2-D coordinate `v` (its top or left edge).
     pub fn px(&self, v: i32) -> i64 {
         (v as f32 * self.scale).floor() as i64
+    }
+
+    /// The framebuffer x of column 0 of a layout 320 columns wide, centred
+    /// on this screen: the `(vid.width - 320) >> 1` that `Sbar_DrawPic` adds
+    /// to the status bar and `M_DrawPic` to the menus, in framebuffer pixels.
+    pub fn centred_320_x(&self) -> f32 {
+        ((self.w - HUD_VIRT_W as i32) >> 1) as f32 * self.scale
     }
 }
 

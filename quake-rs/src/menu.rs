@@ -2180,7 +2180,7 @@ pub fn draw_menu_over_console(
 /// 320-wide menu centred across the top of the 2-D screen.
 fn menu_origin(w: usize, h: usize) -> (f32, f32) {
     let sc = screen_2d(w, h);
-    (sc.scale, ((sc.w - MENU_VIRT_W as i32) >> 1) as f32 * sc.scale)
+    (sc.scale, sc.centred_320_x())
 }
 
 /// PORT: the point of the menu's layout (menu.c's coordinates, what
