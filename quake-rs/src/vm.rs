@@ -2039,6 +2039,58 @@ mod tests {
         let _ = OFS_NULL;
     }
 
+    /// `PR_RunError("Bad builtin call number")`: a function whose
+    /// `first_statement` names a builtin number past the table — as the
+    /// mission packs' re-release `progs.dat` declares for `finaleFinished`
+    /// (#79) and `localsound` (#80), neither ever called — loads fine and
+    /// runs fine until something actually calls it; only then does the VM
+    /// error, matching id's lazy behaviour (`common.rs`'s doc, which no
+    /// longer scans for this eagerly).
+    #[test]
+    fn calling_an_unknown_builtin_errors_at_the_call_not_at_load() {
+        let mut b = Builder::new();
+        // "foreign": builtin #79, one past the port's 79-entry table
+        // (0..=78) — declared here, but this test never calls it.
+        let foreign_name = b.intern("foreign");
+        b.functions.push(Function {
+            first_statement: -79,
+            parm_start: 0,
+            locals: 0,
+            profile: 0,
+            s_name: foreign_name,
+            s_file: 0,
+            numparms: 0,
+            parm_size: [0; 8],
+        });
+        let foreign_idx = b.functions.len() - 1;
+
+        // main: CALL0 through a global holding "foreign"'s index.
+        let g_func = 40usize;
+        let main_first = b.statements.len() as i32;
+        let main_name = b.intern("main");
+        b.statements.push(Statement { op: Op::Call0, a: g_func as i16, b: 0, c: 0 });
+        b.statements.push(Statement { op: Op::Done, a: 0, b: 0, c: 0 });
+        b.functions.push(Function {
+            first_statement: main_first,
+            parm_start: RESERVED_OFS as i32,
+            locals: 0,
+            profile: 0,
+            s_name: main_name,
+            s_file: 0,
+            numparms: 0,
+            parm_size: [0; 8],
+        });
+        let main_idx = b.functions.len() - 1;
+
+        let img = b.build();
+        // Loading never inspects a function it does not run: the
+        // declaration alone, with nothing calling it, is not an error.
+        let mut vm = Vm::load(&img).expect("a declared, uncalled foreign builtin loads fine");
+        vm.set_gi(g_func, foreign_idx as i32);
+        let err = vm.execute(main_idx).unwrap_err();
+        assert!(err.to_string().contains("bad builtin call number 79"), "{err}");
+    }
+
     /// D2: the handles in `fo`/`go` are the by-name lookups done once at load —
     /// same cells, and a field the progs lacks reads 0 and drops writes.
     #[test]
