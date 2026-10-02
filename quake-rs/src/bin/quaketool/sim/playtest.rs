@@ -408,7 +408,8 @@ pub fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> CmdRes
             if let Some(num) = m.strip_prefix('*') {
                 if let Ok(idx) = num.parse::<usize>() {
                     let origin = server.vm.ent_get_vector(ent, "origin");
-                    bmodels.push(render::BModelInstance { model_index: idx, origin, frame: server.vm.ent_get_float(ent, "frame") as i32 });
+                    let angles = server.vm.ent_get_vector(ent, "angles");
+                    bmodels.push(render::BModelInstance { model_index: idx, origin, frame: server.vm.ent_get_float(ent, "frame") as i32, angles });
                 }
                 continue;
             }

@@ -280,7 +280,7 @@ marked *(2026-06)* were not re-checked since. Struck items were closed on 2026-0
 - A map with no lighting lump renders lit; id draws it fullbright. Test maps only (fid1).
 - Edge renderer: id's fixed pools (`r_maxedges`, `r_maxsurfs`, `MAXSPANS`) are growable
   buffers, so where id would drop far faces the port draws them (id's demos never come
-  close); brush models do not rotate (none do in the shareware); brush entities join the
+  close); brush entities join the
   edge list in a fixed order, not `cl_visedicts`' (exact ties only); `r_clearcolor` is
   fixed at 2; a camera inside solid shows floors id leaves as background (not understood,
   not reachable in play) (edge).

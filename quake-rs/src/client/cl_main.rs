@@ -649,7 +649,11 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
                 // The entity's `frame` selects the alternate (+a..+j) texture cycle
                 // for activated buttons/doors (a pressed button shows its lit face).
                 let frame = w.server.vm.ent_float(ent, w.server.vm.fo().frame) as i32;
-                let inst = render::BModelInstance { model_index: idx, origin, frame };
+                // The entity's current `angles`: zero for the shareware's
+                // doors/plats/buttons, turning live for the mission packs'
+                // func_rotate_door/func_rotate_train/func_rotate_entity.
+                let angles = w.server.vm.ent_vec(ent, w.server.vm.fo().angles);
+                let inst = render::BModelInstance { model_index: idx, origin, frame, angles };
                 if is_static {
                     // model->mins/maxs of "*N": the submodel's spread bounds.
                     if let Some(m) = w.bsp.models.get(idx) {

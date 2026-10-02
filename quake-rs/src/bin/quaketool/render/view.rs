@@ -1,4 +1,7 @@
-//! `quaketool view <pak> <map.bsp> <out.ppm> [options]` — render ONE exactly specified view,
+//! `quaketool view <pak>[,<pak>...] <map.bsp> <out.ppm> [options]` — render ONE exactly specified view,
+//! `<pak>` is usually one file, but a comma-separated list layers like a mod's
+//! own game directory (last one listed searched first) — a mission pack's map
+//! needs its own pak for the bsp/progs over id1's for the shared palette.
 //! so the C oracle (`oracle/`: id's own software renderer, headless) can be diffed
 //! against this port pixel for pixel. The camera is given in Quake's convention —
 //! `r_refdef.vieworg` and `r_refdef.viewangles` (pitch positive looks DOWN) — and
@@ -154,7 +157,19 @@ pub fn cmd_view(args: &[String]) -> CmdResult {
         (w, h) = parse_res(r, video.cvars)?;
     }
 
-    let pak = Pak::open(pak_path)?;
+    // A comma-separated list layers like `-game`'s own mod_dirs (common.rs's
+    // `init_filesystem`): each pak over the ones before it, so the last one
+    // listed is searched first — e.g. "id1/pak0.pak,id1/pak1.pak,hipnotic/
+    // pak0.pak" puts hip1m1.bsp's own hipnotic pak on top of id1's shared
+    // gfx/palette.lmp and progs builtins, the way `-hipnotic` would. A bare
+    // path (no comma) is unchanged from before this existed.
+    let pak = pak_path
+        .split(',')
+        .map(Pak::open)
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .reduce(|under, over| over.over(under))
+        .ok_or_else(|| format!("{pak_path}: empty pak list"))?;
     let read_pak = |name: &str| -> Result<Vec<u8>, String> {
         pak.read_file(name)
             .map_err(|e| e.to_string())?
@@ -207,7 +222,10 @@ pub fn cmd_view(args: &[String]) -> CmdResult {
             let (model, org, ang) = (model.to_string(), [ox, oy, oz], [ap, ay, ar]);
             if let Some(n) = model.strip_prefix('*') {
                 let model_index = n.parse().map_err(|_| format!("{p}: bad submodel {model:?}"))?;
-                bmodels.push(render::BModelInstance { model_index, origin: org, frame: fr as i32 });
+                // The `.ents` line carries this entity's angles too (oracle.c
+                // writes every entity's, bmodel or not): a mission-pack door
+                // caught mid-turn in id's own frame turns the same way here.
+                bmodels.push(render::BModelInstance { model_index, origin: org, frame: fr as i32, angles: ang });
             } else if model.ends_with(".bsp") {
                 ext.entry(model.clone()).or_insert_with(|| read_pak(&model).ok().and_then(|b| Bsp::parse(&b).ok()));
                 ext_descs.push((model, org));
