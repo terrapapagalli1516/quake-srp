@@ -11,6 +11,7 @@ uv run oracle/compare.py      # e1m1/2/3/7 x world/ents, 320x200: table + side-b
 oracle/characterise.sh        # re-derive every number and crop in this README (~10 s)
 uv run oracle/screen2d.py     # the 2-D layer (status bar, menus, console, ...): see its section
 uv run oracle/sound.py        # id's mixer against the port's, sample for sample: see "Sound"
+uv run oracle/sound_walk.py   # a walk through id's game and the port's, every sound call compared
 uv run oracle/classic_check.py  # all of Classic's proof in one run: see "Classic"
 ```
 
@@ -53,7 +54,7 @@ gives the match rate over the pixels an entity touches (in either renderer). The
 edited in place), makes one edit on the copy — `quakedef.h`'s `id386` switch, so
 the portable C paths are used (the `nonintel.c` route, no assembly) — and
 compiles `Makefile.linuxi386`'s C files with `cd_null`/`in_null`/`snd_null`,
-loopback-only `net_none`, and three files of ours (`c/`, GPL like id's):
+loopback-only `net_none`, and four files of ours (`c/`, GPL like id's):
 
 - `vid_oracle.c` — `vid_null.c` at any resolution (`-width`/`-height`, up to id's
   1280x1024 `MAXWIDTH`/`MAXHEIGHT`), buffers sized with `D_SurfaceCacheForRes` as
@@ -61,8 +62,11 @@ loopback-only `net_none`, and three files of ours (`c/`, GPL like id's):
   320x200 used 0.8333 — `--aspect`, which also hands the port the same value).
 - `sys_oracle.c` — `sys_null.c`'s file IO plus a deterministic clock: every
   `Host_Frame` is exactly 0.1 s and `Sys_FloatTime` is that virtual clock
-  (`-oracle_realtime` switches to the wall clock for `timedemo`). `Sys_Quit` never
-  writes `config.cfg`, so runs cannot leak cvars into each other.
+  (`-oracle_realtime` switches to the wall clock for `timedemo`; `-oracle_dt`
+  sets the step; `-oracle_loadtime T` makes a level load take T seconds of it, as
+  loads took seconds on id's machines, so the frame after one runs
+  `Host_FilterTime`'s 0.1 s clamp). `Sys_Quit` never writes `config.cfg`, so runs
+  cannot leak cvars into each other.
 - `oracle.c` — console commands (`oracle_view`, `oracle_time`, `oracle_shot`,
   `oracle_settle`, `oracle_stage`, `oracle_exit`; cvars `oracle_spans`,
   `oracle_bench`; see the file header). The link wraps `R_RenderView` and
@@ -74,6 +78,10 @@ loopback-only `net_none`, and three files of ours (`c/`, GPL like id's):
   frame's draw list, statics included: model, origin, angles, frame, skin,
   syncbase) and `.parts` (the particles `R_DrawParticles` is about to draw, in
   its order: origin and colour, written before the render moves them).
+- `walk_oracle.c` — a scripted walk (`oracle_walk`, driven from a wrapped
+  `CL_SendCmd`) and a log of every call into the sound layer (`oracle_sndlog`:
+  `snd_null`'s entry points and the server's `SV_StartSound`, wrapped at link
+  time); `sound_walk.py` drives both (see "Sound").
 
 It is built as a static 32-bit i386 binary (1996 code assumes 32-bit pointers) in
 a digest-pinned `i386/debian` container and runs directly on the x86_64 host.
@@ -536,6 +544,84 @@ is not within a hair of a whole number, where 64 and 80 bits could part),
 and `ResampleSfx`'s `stepscale` (above). The output stream skips a stretch
 the play position overtook (`S_Update_`'s "overshot" reset), on both sides.
 
+### The game's calls (`sound_walk.py`)
+
+`sound.py` hands both mixers the same calls; `sound_walk.py` checks that the
+game makes the same calls. One scripted walk runs through id's whole game
+(this oracle, its sound log on: `walk_oracle.c`) and through the port's Classic
+client (`quaketool sndwalk`), and every call each makes into the sound layer is
+compared, walk frame by walk frame.
+
+```sh
+uv run oracle/sound_walk.py                  # every case: a timeline each, exit 1 on a difference
+uv run oracle/sound_walk.py --instant-load   # id's loads take no time (the oracle's own clock)
+```
+
+**How.** Both sides start from a fresh `map`, run a host frame every 1/72 s,
+run at id's Always Run speed, and take the script's next frame in each host
+frame that sends a move (`CL_SendCmd` with `cls.signon == SIGNONS` on id's
+side), so a level change's signon frames, which send none, keep the walk in
+step. id's level loads take a second of its clock (`-oracle_loadtime 1`), as
+they took seconds on id's machines. A script turns only in steps of 45
+degrees: a yaw crosses id's wire as a byte, and the port's server takes it
+unrounded. Compared exactly: the player's and the teleport fog's sounds
+(class, channel, sample, the volume and attenuation bytes, the position as the
+client has it; any `misc/r_tele1..5` matches any, `play_teleport` picks one
+with `random()`), `S_StopAllSounds`, the levels' `S_StaticSound` loops,
+`S_StopSound`, `S_LocalSound`, and the player's path. Other sounds are the
+world's: monsters, and what they set off, on `random()` (id's `rand()` is
+stirred every host frame; the port draws from its own streams), listed and not
+compared. The log also lists the sounds id's server started that its client
+never got.
+
+**`telegate`** walks the start map from its spawn down the NORMAL skill hall
+into its teleporter, across the hub, west down the first episode's hall and
+into its slipgate (`trigger_changelevel` *14, `spawnflags` 1), then stands a
+second in e1m1. **Result (2026-10-02): every call identical** (11 compared:
+the land thud, four `misc/talk.wav` from the halls' message triggers, the two
+teleport fogs 0.2 s after the teleport, both loads' `S_StopAllSounds` and
+loops), and the path identical but for the first 8 frames of each level.
+What it shows:
+
+- **The slipgate makes no sound, in id's game or the port's.**
+  `changelevel_touch` starts none (`SUB_UseTargets` on a trigger with no
+  target and no message; `GotoNextMap`; `changelevel`), and the arrival's
+  teleport fog is deathmatch and coop only (`PutClientInServer`:
+  `if (deathmatch || coop) spawn_tfog`). The teleport sound on this walk is the
+  skill hall's: `teleport_touch`'s two fogs, where the player stood and at the
+  hub, 0.2 s after.
+- **The cut.** id's: the frame after the touch runs the `changelevel` the
+  touch queued (`Cbuf_Execute`), and `Host_Reconnect_f`'s
+  `SCR_BeginLoadingPlaque` calls `S_StopAllSounds (true)`: every channel goes,
+  the loops and ambients with them, and `S_ClearBuffer` erases the 0.1 s
+  already mixed ahead. The load is silent; the server's stuffed `reconnect`
+  stops everything again in the frame after it; e1m1's 14 loops start one
+  frame later still (signon 1), heard from the world's origin until signon 4
+  (`S_Update`'s zero listener: of e1m1's loops only `ambience/comp1.wav`, 325
+  units off, is faintly audible from there), and the walk's next move comes 3
+  frames after them. The port's load fits in the touch
+  frame: it stops everything and starts e1m1's loops there. So the start map's
+  sound ends one frame (1/72 s) sooner than in id's game, and e1m1's loops
+  follow at once, where id's left the load's silence between. A sound started
+  in the touch frame itself would play for that one frame in id's game and not
+  at all in the port's: there is none on this walk.
+- **Fixed on the way:** a sound's position now reaches the mixer as id's client
+  had it, through `MSG_ReadCoord` (1/8 unit, toward zero: the fog where the
+  player stood is at y 1352.375, not 1352.469), for `S_StartSound`, the
+  temp entities' sounds and `S_StaticSound` (`server::wire_coord`).
+- **Not sound, measured on the way.** Walk frame 0 is at `cl.time` 1.4278 in
+  id's game and 1.4000 in the port's, and e1m1's first at 1.4417 and 1.4000
+  (with `--instant-load`, id's 1.3417 and 1.3556): the port connects the player
+  at `sv.time` 1.2 and runs two 0.1 s signon frames after it, where id's
+  connects it at about 1.4 and its signon frames are the host's (AUDIT.md's
+  open list); so id's player is still falling from its spawn spot for the
+  first 8 frames. e1m1's sliding door (`doors/hydro1.wav`) opens
+  when the soldier patrolling past it walks into its trigger field, and the
+  soldier sets off `random()`*0.5 s into the level (`walkmonster_start`): in
+  id's game the door opened at `sv.time` 1.1, 1.3 or 1.54 as the stand before
+  the walk changed (the first two in the signon, never heard), so it is the
+  world's.
+
 ## Classic (`classic_check.py`)
 
 ```sh
@@ -559,7 +645,7 @@ to each tool's own output):
 | `oracle` | `compare.py --aspect 0.8333333 --spans 16`: the eight standard rows | id's C: none below its recorded match (100.00%; e1m7 99.9969%, two pixels) |
 | `screen2d` | `screen2d.py`, 320x200 and 640x400, the port in its Classic profile | id's C: no shot below its recorded `2d exact%` (the residues above) |
 | `demolerp` | `demo_lerp.py`: id's client against the port's over the attract loop, frame by frame (below) | id's C: every demo MATCH |
-| `sound` | `sound.py`: id's mixer against the engine's `Fixes::NONE` | id's C: every case sample-identical |
+| `sound` | `sound.py`: id's mixer against the engine's `Fixes::NONE`; `sound_walk.py`: a walk through id's game and the port's | id's C: every case sample-identical; every call the walk makes identical |
 
 The recorded list is `oracle/classic_expected.txt`, with a note for each
 recording (first on `a50d8d7`, the settings branch's base). A change that

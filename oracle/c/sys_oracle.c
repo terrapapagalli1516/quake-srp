@@ -21,6 +21,11 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 // plus a deterministic clock (every Host_Frame advances exactly -oracle_dt seconds,
 // default 0.1, and Sys_FloatTime returns that virtual clock) or, with
 // -oracle_realtime, the wall clock (for timedemo).
+//
+// -oracle_loadtime T: a level load (SV_SpawnServer) takes T seconds of the
+// virtual clock, as loads took seconds of real time on id's machines: the host
+// frame after one is handed T more, so Host_FilterTime clamps it to 0.1 s as it
+// did there. Default 0, an instant load.
 
 #include "quakedef.h"
 #include "errno.h"
@@ -30,6 +35,15 @@ qboolean		isDedicated;
 
 static qboolean	oracle_realtime;
 static double	oracle_clock;		// virtual seconds since start (deterministic mode)
+static qboolean	oracle_loaded;		// SV_SpawnServer ran in this host frame
+
+void __real_SV_SpawnServer (char *server);
+
+void __wrap_SV_SpawnServer (char *server)
+{
+	__real_SV_SpawnServer (server);
+	oracle_loaded = true;
+}
 
 /*
 ===============================================================================
@@ -238,7 +252,7 @@ void Sys_SetFPCW (void)
 int main (int argc, char **argv)
 {
 	static quakeparms_t    parms;
-	double		dt, oldtime, newtime;
+	double		dt, loadtime, pending, oldtime, newtime;
 	int			i;
 
 	parms.memsize = 32*1024*1024;
@@ -259,6 +273,11 @@ int main (int argc, char **argv)
 	i = COM_CheckParm ("-oracle_dt");
 	if (i && i < com_argc-1)
 		dt = Q_atof (com_argv[i+1]);
+	loadtime = 0;
+	i = COM_CheckParm ("-oracle_loadtime");
+	if (i && i < com_argc-1)
+		loadtime = Q_atof (com_argv[i+1]);
+	pending = 0;
 
 	Host_Init (&parms);
 
@@ -273,8 +292,10 @@ int main (int argc, char **argv)
 		}
 		else
 		{
-			oracle_clock += dt;
-			Host_Frame (dt);
+			oracle_clock += dt + pending;
+			Host_Frame (dt + pending);
+			pending = oracle_loaded ? loadtime : 0;
+			oracle_loaded = false;
 		}
 	}
 	return 0;

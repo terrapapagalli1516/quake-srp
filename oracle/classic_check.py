@@ -36,7 +36,9 @@ Two kinds of check:
     frames: demo1, demo2, demo3, demo1 again) against the port's, frame by
     frame — the clock identical, the camera and every entity within 0.01;
   - `sound`: `sound.py`, id's mixer against the engine's `Fixes::NONE`
-    mixer: every case sample-identical.
+    mixer: every case sample-identical; and `sound_walk.py`, a walk through
+    id's game and the port's (start, a teleporter, the e1m1 slipgate): every
+    sound call the walk makes identical.
 
 Needs cargo, uv, the shareware pak at `quake-data/ID1/PAK0.PAK`, and for
 `edicts`/`oracle`/`screen2d`/`sound` the C oracles (`oracle/build.sh`,
@@ -210,6 +212,11 @@ def check_sound(qt: Path, out: Path) -> dict:
     (out / "sound.txt").write_text(text)
     if "Classic: every case identical" not in text:
         raise RuntimeError("sound.py: not every Classic case is identical (see sound.txt)")
+    walk = ["uv", "run", str(HERE / "sound_walk.py"), "--quaketool", str(qt), "--out", str(out / "sound-walk")]
+    res = subprocess.run(walk, cwd=PROJECT, capture_output=True, text=True, timeout=1800)
+    (out / "sound_walk.txt").write_text(res.stdout + res.stderr)
+    if res.returncode != 0 or "every case identical" not in res.stdout:
+        raise RuntimeError("sound_walk.py: the walks' sound calls left id's (see sound_walk.txt)")
     return {}
 
 

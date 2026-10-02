@@ -138,6 +138,7 @@ pub struct SoundEvent {
 /// One placed looping ambient sound — the `svc_spawnstaticsound` payload the C
 /// `PF_ambientsound` wrote into the signon, captured for a front-end.
 ///
+/// `origin` is the position as the wire carried it ([`wire_coord`]), and
 /// `volume`/`attenuation` are kept in the QuakeC domain (`0.0..=1.0` /
 /// `0.0..=4.0`) but quantized through the same bytes the wire format used
 /// (`vol*255` and `atten*64`, truncated), so a front-end hears exactly what the
@@ -145,8 +146,9 @@ pub struct SoundEvent {
 /// the precache slot, or `-1` when no host resolved it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StaticSound {
-    /// World-space emission point (`PF_ambientsound`'s literal `pos` argument —
-    /// static sounds are placed at a point, not on an entity).
+    /// World-space emission point: `PF_ambientsound`'s `pos` argument through
+    /// `MSG_WriteCoord` ([`wire_coord`]) — static sounds are placed at a point,
+    /// not on an entity.
     pub origin: [f32; 3],
     /// Precache index of `sample`, or `-1` when it was not resolved.
     pub sound_index: i32,
@@ -170,6 +172,16 @@ fn entity_sound_origin(vm: &Vm, e: i32) -> [f32; 3] {
         origin[1] + 0.5 * (mins[1] + maxs[1]),
         origin[2] + 0.5 * (mins[2] + maxs[2]),
     ]
+}
+
+/// A world coordinate as it crossed the wire: `MSG_WriteCoord` sent
+/// `(int)(f*8)` as a short (the fraction truncated toward zero, the bits past
+/// 16 dropped) and `MSG_ReadCoord` read back `short * (1.0/8)`. id's client
+/// knew every position the server sent it to the 1/8 unit, so where a
+/// position reaches the sound layer it goes through this first.
+#[must_use]
+pub fn wire_coord(f: f32) -> f32 {
+    f32::from((f * 8.0) as i32 as i16) * (1.0 / 8.0)
 }
 
 // ---------------------------------------------------------------------------
@@ -827,7 +839,8 @@ pub(super) fn bi_sound(vm: &mut Vm) -> Result<()> {
 /// `Con_Printf ("no precache: %s\n", samp); return;` — registering nothing.
 /// The message routes to [`Vm::output`] like the `print`/`dprint` builtins.
 ///
-/// The wire format quantized volume and attenuation into bytes
+/// The wire format carried the position as three coordinates ([`wire_coord`])
+/// and quantized volume and attenuation into bytes
 /// (`MSG_WriteByte(vol*255)` / `MSG_WriteByte(attenuation*64)`, C float→int
 /// truncation); `CL_ParseStaticSound` handed those bytes to `S_StaticSound`,
 /// which divided the attenuation byte back by 64. We apply the same round-trip
@@ -850,7 +863,7 @@ pub(super) fn bi_ambientsound(vm: &mut Vm) -> Result<()> {
     let vol_byte = (volume * 255.0).clamp(0.0, 255.0) as u8;
     let atten_byte = (attenuation * 64.0).clamp(0.0, 255.0) as u8;
     let ev = StaticSound {
-        origin: pos,
+        origin: pos.map(wire_coord),
         sound_index,
         sample,
         volume: vol_byte as f32 / 255.0,
@@ -1083,6 +1096,38 @@ mod tests {
             server.drain_static_sounds().is_empty(),
             "drain_static_sounds cleared the registry"
         );
+    }
+
+    #[test]
+    fn wire_coord_truncates_to_the_eighth_and_wraps_at_a_short() {
+        // MSG_WriteCoord's (int)(f*8): toward zero, both signs.
+        assert_eq!(wire_coord(1352.469), 1352.375);
+        assert_eq!(wire_coord(-7.969), -7.875);
+        assert_eq!(wire_coord(0.124), 0.0);
+        assert_eq!(wire_coord(-0.124), 0.0);
+        // Eighths cross unchanged.
+        assert_eq!(wire_coord(43.0), 43.0);
+        assert_eq!(wire_coord(-4095.875), -4095.875);
+        // MSG_WriteShort keeps 16 bits: 4096 comes back as -4096.
+        assert_eq!(wire_coord(4096.0), -4096.0);
+    }
+
+    #[test]
+    fn bi_ambientsound_sends_its_position_through_the_wire() {
+        let (img, _sound_fn) = attack_progs();
+        let progs = Progs::parse(&img).expect("parse");
+        let mut server = Server::new(floor_bsp(), progs).expect("server");
+        let _ = server.drain_static_sounds();
+        let sample = "ambience/fire1.wav";
+        server.vm.with_host(|_vm, h| h.precache_sound(sample));
+        let s_t = server.vm.intern(sample);
+        server.vm.set_gv(OFS_PARM0, [100.3, -50.06, 24.2]);
+        server.vm.set_gi(OFS_PARM0 + 3, s_t);
+        server.vm.set_gf(OFS_PARM0 + 6, 1.0);
+        server.vm.set_gf(OFS_PARM0 + 9, 3.0);
+        bi_ambientsound(&mut server.vm).expect("bi_ambientsound");
+        // CL_ParseStaticSound's three MSG_ReadCoords.
+        assert_eq!(server.drain_static_sounds()[0].origin, [100.25, -50.0, 24.125]);
     }
 
     #[test]

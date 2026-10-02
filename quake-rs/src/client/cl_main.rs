@@ -15,7 +15,7 @@ use crate::mdl::Mdl;
 use crate::particles::{TrailHead, TrailStep};
 use crate::stepping::advance_clock;
 use crate::render::{self, Camera, ModelInstance, Viewmodel};
-use crate::server::{EntFlags, MoveType, UserCmd};
+use crate::server::{wire_coord, EntFlags, MoveType, SoundEvent, UserCmd};
 use crate::vm::{Fld, Glb};
 use crate::tent::BeamModel;
 
@@ -80,7 +80,7 @@ fn parse_client_damage(w: &mut Walk, ent_origin: [f32; 3]) {
         vm.ent_vec(other, vm.fo().mins),
         vm.ent_vec(other, vm.fo().maxs),
     );
-    let coord = |i: usize| ((o[i] + 0.5 * (mins[i] + maxs[i])) * 8.0) as i32 as i16 as f32 / 8.0;
+    let coord = |i: usize| wire_coord(o[i] + 0.5 * (mins[i] + maxs[i]));
     let from = [coord(0), coord(1), coord(2)];
     vm.set_ent_float(p, vm.fo().dmg_take, 0.0);
     vm.set_ent_float(p, vm.fo().dmg_save, 0.0);
@@ -419,8 +419,14 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
     stamp_item_gettime(&mut w.cl_items, &mut w.item_gettime, items, now_sv);
 
     // 2. Surface the sounds the world fired this frame (gunshots, doors, monster
-    //    voices) to the sound layer.
-    let events = w.server.drain_sounds();
+    //    voices) to the sound layer, each where CL_ParseStartSoundPacket's
+    //    MSG_ReadCoords put it: to the 1/8 unit.
+    let events: Vec<SoundEvent> = w
+        .server
+        .drain_sounds()
+        .into_iter()
+        .map(|e| SoundEvent { origin: e.origin.map(wire_coord), ..e })
+        .collect();
     sound.push(SoundCall::Start { events, view_entity: w.player });
 
     // 2a. Drain QuakeC's on-screen messages (centerprint / sprint / bprint) into
@@ -457,7 +463,7 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
     //     their `weapons/r_exp3.wav` sound through the SAME spatial-audio path the
     //     other sounds use, with the explosion's world position as its origin.
     let tents = w.server.drain_temp_entities();
-    let mut te_sounds: Vec<crate::server::SoundEvent> = Vec::new();
+    let mut te_sounds: Vec<SoundEvent> = Vec::new();
     for ev in &tents {
         // Beam types (CL_ParseTEnt's TE_LIGHTNING1/2/3 + TE_BEAM cases): refresh
         // the entity's beam slot (CL_ParseBeam) and load its bolt model now —
@@ -486,12 +492,15 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
             }
         }
         if let Some(name) = spawn_temp_entity(&mut w.particles, ev, now, &mut w.prng) {
-            te_sounds.push(crate::server::SoundEvent {
+            // CL_ParseTEnt read the position with MSG_ReadCoord, so the sound
+            // starts to the 1/8 unit (the particles above still start at the
+            // unrounded position: an open item, in the particles' code).
+            te_sounds.push(SoundEvent {
                 entity: 0,
                 channel: 0,
                 sound_index: -1,
                 sample: name.to_string(),
-                origin: ev.pos,
+                origin: ev.pos.map(wire_coord),
                 volume: 1.0,
                 attenuation: 1.0,
             });
