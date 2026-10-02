@@ -100,6 +100,10 @@ pub trait Host {
     /// over `sv.sound_precache` (pr_cmds.c). `None` = not precached; never
     /// registers.
     fn find_sound(&self, name: &str) -> Option<i32>;
+    /// `SV_ModelIndex` without its error: the precache index of a model
+    /// already precached, or `None` (id's errors, "model not precached").
+    /// It is what `STAT_WEAPON` carries for the view weapon.
+    fn find_model(&self, name: &str) -> Option<i32>;
     /// Bounding box `(mins, maxs)` for a model name. Brush submodels (`"*N"`)
     /// return the BSP submodel bounds; unknown models return `None`.
     fn model_bbox(&self, name: &str) -> Option<(Vec3, Vec3)>;

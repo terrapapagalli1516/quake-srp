@@ -115,14 +115,13 @@ pub fn client_punchangle(w: &Walk) -> [f32; 3] {
 }
 
 /// `r_lerpmodels`' "model identity" for the view weapon ([`lerpmodels::FrameLerps::blend`]):
-/// the view weapon is not an edict, so it has no `modelindex` to compare like
-/// an entity's; its precache name hashed is just as stable a key (changes
-/// exactly when the weapon model does, same as any other entity's).
-fn weapon_model_id(name: &str) -> usize {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    name.hash(&mut hasher);
-    hasher.finish() as usize
+/// the view weapon is not an edict, so it has no `modelindex` of its own; id's
+/// client knows it by `cl.stats[STAT_WEAPON]`, `SV_ModelIndex` of the player's
+/// `weaponmodel` — the same precache index a demo's view weapon is keyed by
+/// (`cl_demo.rs`). 0 if the model was never precached (QuakeC precaches
+/// every weapon it sets, so only a broken progs gets here).
+fn weapon_model_index(w: &Walk, name: &str) -> usize {
+    w.server.vm.host().and_then(|h| h.find_model(name)).unwrap_or(0) as usize
 }
 
 /// `cl.items` as SV_WriteClientdataToMessage sends it: the player's `items`
@@ -996,10 +995,10 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
                 let angles = render::viewmodel_angles(&cam, punch, ang[2]);
                 // r_lerpmodels: the gun blends too (a weapon switch is a model
                 // change, which snaps like any other). The view weapon is not
-                // an edict, so its "model identity" is the weapon name's hash,
-                // not a modelindex, under lerpmodels::VIEWMODEL's sentinel key.
+                // an edict, so its "model identity" is its precache index
+                // (STAT_WEAPON's), under lerpmodels::VIEWMODEL's sentinel key.
                 let blend = if smooth_frames {
-                    let model_id = weapon_model_id(&weapon_name);
+                    let model_id = weapon_model_index(w, &weapon_name);
                     let is_group = mdl.frame_is_group(weapon_frame as i32);
                     w.frame_lerps.blend(lerpmodels::VIEWMODEL, model_id, weapon_frame, is_group, cam.pos, f64::from(w.clock))
                 } else {

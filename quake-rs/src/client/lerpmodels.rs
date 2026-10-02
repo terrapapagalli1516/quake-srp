@@ -98,6 +98,9 @@ struct Lerp {
     /// When `cur_frame` arrived, and how long the blend to it runs.
     start: f64,
     length: f32,
+    /// `cur_frame` is a group frame: the next change snaps too (a group's
+    /// pose is the clock's, not one the next frame can be blended from).
+    group: bool,
     /// [`FrameLerps::frame`] when this entry was last asked for, so a frame
     /// it is not asked for in is forgotten (the next sighting snaps).
     seen: u32,
@@ -124,10 +127,10 @@ impl FrameLerps {
     /// ([`crate::mdl::Mdl::frame_is_group`]): a group frame always snaps.
     pub fn blend(&mut self, num: i32, model: usize, frame: usize, is_group: bool, origin: Vec3, time: f64) -> Option<(usize, f32)> {
         let seen = self.frame;
-        let snap = Lerp { model, origin, prev_frame: frame, cur_frame: frame, start: time, length: 0.0, seen };
+        let snap = Lerp { model, origin, prev_frame: frame, cur_frame: frame, start: time, length: 0.0, group: is_group, seen };
         let entry = self.lerps.entry(num).or_insert(snap);
         let jumped = (0..3).any(|i| (origin[i] - entry.origin[i]).abs() > TELEPORT);
-        if is_group || entry.model != model || time < entry.start || jumped {
+        if is_group || entry.group || entry.model != model || time < entry.start || jumped {
             *entry = snap;
         } else if frame != entry.cur_frame {
             // A frame change: blend for GLIDE_FRAME from the frame that was
@@ -142,7 +145,7 @@ impl FrameLerps {
             let changed_before = entry.length > 0.0 || entry.prev_frame != entry.cur_frame;
             let since = (time - entry.start) as f32;
             let length = if changed_before && since < GLIDE_FRAME / 2.0 { since.max(0.0) } else { GLIDE_FRAME };
-            *entry = Lerp { model, origin, prev_frame: entry.cur_frame, cur_frame: frame, start: time, length, seen };
+            *entry = Lerp { model, origin, prev_frame: entry.cur_frame, cur_frame: frame, start: time, length, group: false, seen };
         } else {
             entry.origin = origin;
         }
@@ -198,11 +201,13 @@ mod tests {
         l.blend(1, 7, 0, false, [0.0; 3], 0.0);
         // The new frame is a group: snaps instead of blending from frame 0.
         assert_eq!(l.blend(1, 7, 1, true, [0.0; 3], 0.05), None);
-        // And blending FROM a group (is_group was true last call, so the
-        // entry snapped to prev==cur==1): the next ordinary frame starts a
-        // fresh blend from 1, not from whatever frame 0 looked like.
-        let b = l.blend(1, 7, 2, false, [0.0; 3], 0.1).expect("blending from 1");
-        assert_eq!(b.0, 1);
+        // And FROM a group: the pose a group frame showed was the clock's
+        // (`mdl_frame_verts` at the time of the next draw would resolve it
+        // afresh), so the next ordinary frame snaps too, and only the one
+        // after that blends, from a named pose.
+        assert_eq!(l.blend(1, 7, 2, false, [0.0; 3], 0.1), None, "from a group: snaps");
+        let b = l.blend(1, 7, 3, false, [0.0; 3], 0.2).expect("blending from 2");
+        assert_eq!(b.0, 2);
     }
 
     #[test]
