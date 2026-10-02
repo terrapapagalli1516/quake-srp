@@ -78,8 +78,8 @@ pub fn cmd_shot(args: &[String]) -> Result<String, String> {
     let pak = Pak::from_bytes("pak0.pak".into(), bytes).map_err(|e| e.to_string())?;
     let mut sound = Vec::new();
     let rand = std::rc::Rc::new(quake_rs::qrand::QRand::new());
-    let mut wk =
-        host_cmd::build_walk_map(pak, map, &rand, &mut sound).ok_or_else(|| format!("{map} would not load"))?;
+    let mut wk = host_cmd::build_walk_map(pak, map, &rand, &mut sound, quake_rs::vm::MAX_EDICTS)
+        .ok_or_else(|| format!("{map} would not load"))?;
     wk.viewsize = viewsize;
     wk.renderer.set_threads(video.threads());
     if let Some(contents) = liquid {

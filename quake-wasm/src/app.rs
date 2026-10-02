@@ -495,7 +495,14 @@ pub(crate) fn build_walk() -> Option<Walk> {
 pub(crate) fn build_walk_map(map: &str) -> Option<Walk> {
     let pak = pak()?;
     let mut sound = Vec::new();
-    let walk = host_cmd::build_walk_map(pak.clone(), map, &session_rand(), &mut sound);
+    // The live sv_max_edicts cvar (id's 600 in Classic, higher in 2026 —
+    // crate::cvar::CVARS' `sv_max_edicts` row), sized onto the new server
+    // exactly where SV_SpawnServer would size sv.edicts. ensure_app (not a
+    // bare APP.with) because this runs at boot, before anything else has
+    // created the session's App.
+    let mut max_edicts = quake_rs::vm::MAX_EDICTS;
+    ensure_app(|a| max_edicts = a.settings.cvars.max_edicts as usize);
+    let walk = host_cmd::build_walk_map(pak.clone(), map, &session_rand(), &mut sound, max_edicts);
     snd_dma::play(&pak, sound);
     walk
 }

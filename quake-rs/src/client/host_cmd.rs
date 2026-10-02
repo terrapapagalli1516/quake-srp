@@ -171,8 +171,17 @@ fn run_give_command(w: &mut Walk, argv: &[&str], out: &mut Vec<String>) {
 /// uses [`crate::render::NEW_GAME_MAP`] (the `start` hub). Its server draws
 /// from the host session's `rand` ([`Server::set_rand`]), and so do the level
 /// changes it makes. The level's sounds start through `sound`
-/// ([`SoundCall::StopAll`], then its placed loops).
-pub fn build_walk_map(pak: Pak, map: &str, rand: &Rc<QRand>, sound: &mut Vec<SoundCall>) -> Option<Walk> {
+/// ([`SoundCall::StopAll`], then its placed loops). `max_edicts` is the live
+/// `sv_max_edicts` cvar (pass [`crate::vm::MAX_EDICTS`] for Classic-equivalent
+/// behaviour); it is set on the new server before [`Server::spawn_entities`]
+/// runs, exactly where `SV_SpawnServer` would size `sv.edicts`.
+pub fn build_walk_map(
+    pak: Pak,
+    map: &str,
+    rand: &Rc<QRand>,
+    sound: &mut Vec<SoundCall>,
+    max_edicts: usize,
+) -> Option<Walk> {
     let read = |n: &str| pak.read_file(n).ok().flatten();
     let bsp = Bsp::parse(&read(map)?).ok()?;
     let bsp_sim = Bsp::parse(&read(map)?).ok()?;
@@ -183,6 +192,9 @@ pub fn build_walk_map(pak: Pak, map: &str, rand: &Rc<QRand>, sound: &mut Vec<Sou
     // damage (the explosive box becomes shootable).
     let mut server = Server::with_pak(bsp_sim, progs, Some(pak.clone())).ok()?;
     server.set_rand(Rc::clone(rand));
+    // SV_SpawnServer sizing sv.edicts: before spawn_entities, like every
+    // other setting a fresh server needs applied before it (skill, gravity).
+    server.set_max_edicts(max_edicts);
     // SV_SpawnServer set world.model + the mapname global before loading the
     // entities (the QuakeC episode-end finale check reads world.model).
     server.set_map_name(map);
@@ -289,6 +301,10 @@ pub fn try_changelevel(w: &mut Walk, next_map: &str, sound: &mut Vec<SoundCall>)
     ns.set_serverflags(serverflags);
     ns.set_skill(skill as f32);
     ns.set_sv_gravity(w.server.sv_gravity());
+    // The edict ceiling (sv_max_edicts) is host-session state like skill and
+    // gravity, not per-map: carry it forward rather than resetting to id's
+    // 600 on every level change.
+    ns.set_max_edicts(w.server.max_edicts());
     let up = (|| {
         ns.spawn_entities()?;
         // Capture the new level's placed ambient loops now (registered during
@@ -413,6 +429,8 @@ pub fn try_restart(w: &mut Walk, sound: &mut Vec<SoundCall>) {
     ns.set_serverflags(serverflags);
     ns.set_skill(skill as f32);
     ns.set_sv_gravity(w.server.sv_gravity());
+    // See try_changelevel: host-session state, carried across the reload.
+    ns.set_max_edicts(w.server.max_edicts());
     let entry_parms = w.entry_parms;
     let up = (|| {
         // Static loops as in try_changelevel: spawn, then capture this (re)load's.
@@ -478,11 +496,15 @@ pub fn try_restart(w: &mut Walk, sound: &mut Vec<SoundCall>) {
 /// world. Errors return the console message to print (the C's where it has
 /// one); the caller leaves the current game untouched on `Err`. The loaded
 /// server draws from the host session's `rand`, like [`build_walk_map`]'s.
+/// `max_edicts` is the live `sv_max_edicts` cvar, exactly as
+/// [`build_walk_map`] takes it — a save written with the extra on needs it
+/// raised to load back (see [`Server::load_savegame`]).
 pub fn build_walk_savegame(
     pak: Pak,
     text: &str,
     rand: &Rc<QRand>,
     sound: &mut Vec<SoundCall>,
+    max_edicts: usize,
 ) -> Result<Walk, String> {
     use crate::save::{parse_savegame, SAVEGAME_VERSION};
 
@@ -506,8 +528,8 @@ pub fn build_walk_savegame(
     // The engine-side load: header -> SV_SpawnServer (map spawn functions DO
     // run, rebuilding precaches; see save.rs) -> lightstyles -> globals ->
     // edicts -> sv.time/spawn_parms. No entrance script, no signon settle.
-    let mut server =
-        Server::load_savegame(sim_bsp, progs, Some(pak.clone()), rand, text).map_err(|e| e.to_string())?;
+    let mut server = Server::load_savegame(sim_bsp, progs, Some(pak.clone()), rand, text, max_edicts)
+        .map_err(|e| e.to_string())?;
     let player = server.player_edict().ok_or_else(|| "savegame has no player edict".to_string())?;
     // Host_Spawn_f names the client edict (`netname = host_client->name`) only
     // for a fresh spawn: a loaded game keeps the save's. Saves the port wrote

@@ -160,7 +160,7 @@ impl Sim {
     fn new(pak: &Pak, map: &str, rate: Rate, stepping: Stepping) -> Sim {
         let path = format!("maps/{map}.bsp");
         let rand = std::rc::Rc::new(quake_rs::qrand::QRand::new());
-        let mut w = host_cmd::build_walk_map(pak.clone(), &path, &rand, &mut Vec::new())
+        let mut w = host_cmd::build_walk_map(pak.clone(), &path, &rand, &mut Vec::new(), quake_rs::vm::MAX_EDICTS)
             .unwrap_or_else(|| panic!("{path} would not load"));
         w.stepping = stepping;
         let mut s = Sim { w, clock: FrameClock::new(rate, stepping), t: 0.0, dt: 0.0, sounds: Vec::new() };

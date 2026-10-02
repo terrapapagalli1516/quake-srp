@@ -41,8 +41,14 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // A game on e1m1: server, client and renderer, owned by one value.
     let mut sound = Vec::new();
-    let mut walk = host_cmd::build_walk_map(pak.clone(), "maps/e1m1.bsp", &Rc::new(QRand::new()), &mut sound)
-        .ok_or("maps/e1m1.bsp would not load")?;
+    let mut walk = host_cmd::build_walk_map(
+        pak.clone(),
+        "maps/e1m1.bsp",
+        &Rc::new(QRand::new()),
+        &mut sound,
+        quake_rs::vm::MAX_EDICTS,
+    )
+    .ok_or("maps/e1m1.bsp would not load")?;
     let mut mixer = Mixer::new(&pak, RATE, Fixes::NONE);
     mixer.run(&pak, &sound);
 

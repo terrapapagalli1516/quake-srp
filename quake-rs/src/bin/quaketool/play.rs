@@ -177,11 +177,12 @@ impl Host {
         self.mode = Some(if is_walk {
             // boot(): e1m1; then the console's `map <map>` for another map.
             let e1m1 = "maps/e1m1.bsp";
-            let mut walk = host_cmd::build_walk_map(self.pak.clone(), e1m1, &self.rand, sound)
+            let max_edicts = self.settings.cvars.max_edicts as usize;
+            let mut walk = host_cmd::build_walk_map(self.pak.clone(), e1m1, &self.rand, sound, max_edicts)
                 .ok_or_else(|| format!("{e1m1} would not load"))?;
             let map = format!("maps/{}.bsp", &workload[5..]);
             if map != e1m1 {
-                walk = host_cmd::build_walk_map(self.pak.clone(), &map, &self.rand, sound)
+                walk = host_cmd::build_walk_map(self.pak.clone(), &map, &self.rand, sound, max_edicts)
                     .ok_or_else(|| format!("{map} would not load"))?;
             }
             if workload.starts_with("quad_") {
