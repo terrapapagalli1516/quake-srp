@@ -12,6 +12,7 @@ oracle/characterise.sh        # re-derive every number and crop in this README (
 uv run oracle/screen2d.py     # the 2-D layer (status bar, menus, console, ...): see its section
 uv run oracle/sound.py        # id's mixer against the port's, sample for sample: see "Sound"
 uv run oracle/sound_walk.py   # a walk through id's game and the port's, every sound call compared
+uv run oracle/rotate_check.py --id1-pak1 … --hipnotic …   # a rotating brush model (Scourge's start door) through its swing
 uv run oracle/classic_check.py  # all of Classic's proof in one run: see "Classic"
 ```
 
@@ -36,6 +37,7 @@ Needs docker (for the build only), uv, cargo, and the shareware pak at
 | `--viewsize N` | id's `scr_viewsize` (default 120, the whole screen). Below 120 the 3-D view rectangle (`r_refdef.vrect` from id's `.json`) is compared: the port renders it placed on the screen (`quaketool view --vrect`) |
 | `--c-only --full --viewsize 100 --settle 10` | id's composited screen (sbar etc.) alone — the port's `view` cannot draw the HUD; `screen2d.py` compares the 2-D layer |
 | `--quaketool PATH` / `--oracle PATH` | A/B a different build of either side |
+| `--game-dir NAME DIR` `--pak1 PAK` | a mission pack: `DIR`'s `pak0.pak`/`pak1.pak` layered over id1 as id's `-NAME` does (`-hipnotic`, `-rogue`), with id1's registered `pak1.pak` (id's own `-hipnotic` refuses the shareware id1); the port's `quaketool view` takes the same paks as a comma list |
 
 ### Reading the output
 
@@ -68,7 +70,8 @@ loopback-only `net_none`, and four files of ours (`c/`, GPL like id's):
   `Host_FilterTime`'s 0.1 s clamp). `Sys_Quit` never writes `config.cfg`, so runs
   cannot leak cvars into each other.
 - `oracle.c` — console commands (`oracle_view`, `oracle_time`, `oracle_shot`,
-  `oracle_settle`, `oracle_stage`, `oracle_exit`; cvars `oracle_spans`,
+  `oracle_settle`, `oracle_stage`, `oracle_exit`, `oracle_entfield num field v…` to
+  pose any edict for a shot, as `rotate_check.py` swings a door; cvars `oracle_spans`,
   `oracle_bench`; see the file header). The link wraps `R_RenderView` and
   `D_DrawSpans8` (`-Wl,--wrap`), so a shot can pin the view/clock for one frame and
   dump `vid.buffer` the instant the 3-D view is done — before the sbar, console,

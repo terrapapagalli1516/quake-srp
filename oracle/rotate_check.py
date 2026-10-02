@@ -59,7 +59,10 @@ ROLLS = (0, 30, 60, 90)
 def run_c(oracle: Path, base: Path, roll: float, out: Path, case: str) -> dict:
     x, y, z, p, yaw, r = SPAWN
     lines = (
-        ["oracle_exit 1", "viewsize 120", "r_drawviewmodel 0", "r_drawentities 1", "crosshair 0", "map start"]
+        # oracle_spans 16: the x86 asm's 16-pixel spans in C, what the port draws (compare.py's
+        # own default is id's portable 8-pixel C, whose whole-scene match is ~4 points lower:
+        # README, "Discrepancy classes").
+        ["oracle_exit 1", "viewsize 120", "r_drawviewmodel 0", "r_drawentities 1", "crosshair 0", "oracle_spans 16", "map start"]
         + ["wait"] * 30
         + [f"oracle_entfield {DOOR_EDICT} angles 0 0 {roll}"]
         + ["wait"] * 3
