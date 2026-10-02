@@ -127,13 +127,36 @@ fn shared_frames() -> bool {
     std::env::args().any(|a| a == "-sharedframes")
 }
 
+/// `COM_InitFilesystem`'s `-rogue`/`-hipnotic`/`-game <dir>`: the game
+/// directories to layer over `id1`, in id's order (`rogue`, then
+/// `hipnotic`, then `-game`'s own directory — `common::init_filesystem`'s
+/// doc), and whether `-game` was given (it forces `com_modified`, id's way,
+/// whatever that directory's own pak says).
+fn mod_dirs() -> (Vec<String>, bool) {
+    let args: Vec<String> = std::env::args().collect();
+    let mut dirs = Vec::new();
+    if args.iter().any(|a| a == "-rogue") {
+        dirs.push("rogue".to_string());
+    }
+    if args.iter().any(|a| a == "-hipnotic") {
+        dirs.push("hipnotic".to_string());
+    }
+    let game_dir = args.iter().position(|a| a == "-game").and_then(|i| args.get(i + 1));
+    if let Some(dir) = game_dir {
+        dirs.push(dir.clone());
+    }
+    (dirs, game_dir.is_some())
+}
+
 fn main() -> ExitCode {
     // IN_StartupJoystick's `-nojoy`: no pad is ever read.
     let nojoy = std::env::args().any(|a| a == "-nojoy");
     // COM_InitFilesystem: a Sys_Error here (a pack that is not one, a
     // modified shareware game, a progs.dat this engine cannot run) ends the
     // program before it starts, its message on stderr for the page to show.
-    let log = match common::init(&basedir()) {
+    let (dirs, force_modified) = mod_dirs();
+    let dirs: Vec<&str> = dirs.iter().map(String::as_str).collect();
+    let log = match common::init(&basedir(), &dirs, force_modified) {
         Ok(log) => log,
         Err(e) => {
             eprintln!("quake: {e}");

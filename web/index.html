@@ -1989,12 +1989,21 @@ function sendWindow() {
 // `?classic` / `?2026` in the address: the profile to switch to, as the
 // command line's `+profile` (run after config.cfg, like the menu's switch,
 // so it sticks).
+// `?game=hipnotic` / `?game=rogue` (COM_InitFilesystem's `-hipnotic`/
+// `-rogue`): layers that mission pack's own game directory over `id1`'s —
+// `hipnotic/pak0.pak` or `rogue/pak0.pak` beside `id1/pak0.pak`, the same
+// shape `-basedir` always had (quake-rs's `common.rs`). This only builds
+// the argument; whether the page has that file to serve at all (a drop, or
+// a server's own `files.json`) is a separate question the loader answers
+// before the worker starts (see `web/PLATFORM.md`).
 // The CD's tracks the player added: the disc in the program's drive
 // (`-cdtracks 2,3,…`, CDAudio_Init).
 function commandLine(tracks) {
   const q = new URLSearchParams(location.search);
   const cdtracks = tracks && tracks.length ? ['-cdtracks', tracks.join(',')] : [];
-  return [...cdtracks, ...(q.has('classic') ? ['+profile', 'classic'] : q.has('2026') ? ['+profile', '2026'] : [])];
+  const game = q.get('game');
+  const mod = game === 'hipnotic' ? ['-hipnotic'] : game === 'rogue' ? ['-rogue'] : [];
+  return [...cdtracks, ...mod, ...(q.has('classic') ? ['+profile', 'classic'] : q.has('2026') ? ['+profile', '2026'] : [])];
 }
 addEventListener('resize', () => { sendWindow(); fitCanvas(); });
 document.addEventListener('fullscreenchange', () => { sendWindow(); fitCanvas(); });
