@@ -31,6 +31,7 @@ mod tests {
     use quake_rs::client::host_cmd::{try_changelevel, try_restart};
     use quake_rs::server::EntFlags;
     use quake_rs::client::net_angle;
+    use quake_rs::client::SoundCall;
     use quake_rs::tent::BeamModel;
 
     use crate::app::{boot, boot_attract, build_walk, build_walk_map, APP};
@@ -948,5 +949,68 @@ mod tests {
         let (hidden, hidden_models) = rerender(&mut w, rng);
         assert_eq!(shown_models, hidden_models + visible.len() as u64, "the visible statics reach the renderer");
         assert!(pixels_differing(&shown, &hidden) > 0, "and draw");
+    }
+
+    // -------------------------------------------------------------------
+    // The start map's teleporters and slipgates, as oracle/sound_walk.py
+    // walks them through id's game
+    // -------------------------------------------------------------------
+
+    /// The centres of the brush triggers `classname` whose `key` is `value`
+    /// (InitTrigger clears a trigger's `model`; its keys tell them apart).
+    fn trigger_centres(w: &Walk, classname: &str, key: &str, value: &str) -> Vec<[f32; 3]> {
+        let vm = &w.server.vm;
+        (1..vm.num_edicts() as i32)
+            .filter(|&e| {
+                !vm.is_free_edict(e)
+                    && vm.ent_string_ref(e, "classname") == classname
+                    && vm.ent_string_ref(e, key) == value
+            })
+            .map(|e| {
+                let (a, b) = (vm.ent_get_vector(e, "absmin"), vm.ent_get_vector(e, "absmax"));
+                [0.5 * (a[0] + b[0]), 0.5 * (a[1] + b[1]), 0.5 * (a[2] + b[2])]
+            })
+            .collect()
+    }
+
+    /// One frame of the live walk at 72 Hz, and the calls it made into the
+    /// sound layer.
+    fn sound_frame(w: &mut Walk) -> Vec<SoundCall> {
+        let frame = walk_frame(w, 1.0 / 72.0, false, &crate::vid::mode_vid(320, 200));
+        render::recycle_image(frame.image);
+        frame.sound
+    }
+
+    fn started(calls: &[SoundCall]) -> Vec<quake_rs::server::SoundEvent> {
+        calls
+            .iter()
+            .flat_map(|c| if let SoundCall::Start { events, .. } = c { events.clone() } else { Vec::new() })
+            .collect()
+    }
+
+    /// A sound reaches the mixer where id's client placed it:
+    /// CL_ParseStartSoundPacket reads its position with MSG_ReadCoord, to the
+    /// 1/8 unit. The NORMAL skill hall's teleporter, entered at x 544.3: the
+    /// fog left where the player stood (play_teleport, 0.2 s on) sounds at x
+    /// 544.25, as in id's game (sound_walk.py's `telegate`).
+    #[test]
+    fn a_teleporters_fog_sounds_where_ids_client_put_it() {
+        let mut w = build_walk_map("maps/start.bsp").expect("start boots");
+        // The skill halls end in trigger_teleports to the hub (t1); NORMAL's
+        // is the middle one, at x 544.
+        let c = *trigger_centres(&w, "trigger_teleport", "target", "t1")
+            .iter()
+            .find(|c| (c[0] - 544.0).abs() < 1.0)
+            .expect("the NORMAL skill hall's teleporter");
+        let p = w.player;
+        set_origin(&mut w, p, [c[0] + 0.3, c[1], c[2]]);
+        let mut fog = Vec::new();
+        for _ in 0..30 {
+            fog.extend(started(&sound_frame(&mut w)).into_iter().filter(|e| e.sample.starts_with("misc/r_tele")));
+        }
+        assert_eq!(fog.len(), 2, "a fog where the player stood and one at the destination: {fog:?}");
+        let on_the_wire = |v: f32| (v * 8.0).fract() == 0.0;
+        assert!(fog.iter().all(|e| e.origin.iter().all(|&v| on_the_wire(v))), "{fog:?}");
+        assert!(fog.iter().any(|e| e.origin[0] == 544.25), "the player's x, 544.3, as the wire carried it: {fog:?}");
     }
 }

@@ -78,7 +78,8 @@ mod sv_world;
 
 pub use lightstyle::{lightstyle_scales_at, MAX_LIGHTSTYLES};
 pub use msg::{
-    te_consts, GameMessage, Outbox, ParticleBurst, SoundEvent, StaticSound, SvcEvent, TempEntityEvent,
+    te_consts, wire_coord, GameMessage, Outbox, ParticleBurst, SoundEvent, StaticSound, SvcEvent,
+    TempEntityEvent,
 };
 pub use pr_cmds::install_engine_builtins;
 pub use sv_main::{EntityDlight, EF_BRIGHTLIGHT, EF_DIMLIGHT, EF_MUZZLEFLASH};
