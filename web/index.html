@@ -107,13 +107,30 @@
      below shrinks the canvas under 640px (it must wrap, never spill). */
   #play { font-size:17px; color:#e6dcc6; text-shadow:0 1px 6px #000;
     max-width:100%; box-sizing:border-box; padding:0 16px; text-align:center; }
-  /* The game picker: plain links that set ?game= and reload (main(), "Game
-     directories"). Lives in #overlay itself, not #boot/#play, so it shows
-     through both the download and the click-to-play prompt, and is gone
-     for good once the first gesture retires the whole overlay. Hidden by
-     renderGamePicker() until there is a mission pack to offer. */
-  #gamePicker { font-size:13px; color:var(--dim); margin-top:14px;
-    max-width:100%; box-sizing:border-box; padding:0 16px; text-align:center; }
+  /* The game choices (gameList(), "Game directories" below): Quake and each
+     mission pack this page can offer, as buttons that are plain links — a
+     choice reloads the page with ?game= — in the start overlay, the bar's
+     "game" menu, touch.js's GAME panel and endscreen.js's quit screen
+     alike. The game running is filled, the others outlined; the one just
+     chosen pulses until the new page replaces this one. */
+  .games { display:flex; flex-wrap:wrap; justify-content:center; gap:10px; }
+  .games .game { display:inline-flex; align-items:center; justify-content:center; box-sizing:border-box;
+    min-height:34px; padding:0 14px; border:1px solid rgba(181,131,47,.55); border-radius:4px;
+    background:rgba(11,9,7,.82); color:var(--ink); font:inherit; font-size:13px; letter-spacing:.03em;
+    text-decoration:none; white-space:nowrap; cursor:pointer; text-shadow:none;
+    transition:border-color .15s, color .15s; }
+  .games a.game:hover { border-color:var(--bronze-hi); color:var(--bronze-hi); }
+  .games a.game:focus-visible { outline:2px solid var(--bronze); outline-offset:2px; }
+  .games .game.cur, .games .game.going { background:rgba(181,131,47,.34); border-color:var(--bronze-hi);
+    color:#fff0b0; font-weight:600; }
+  .games .game.cur { cursor:inherit; }
+  .games .game.going { animation:going .7s ease-in-out infinite alternate; }
+  @keyframes going { to { background:rgba(181,131,47,.1); } }
+  /* The start overlay's own: in #overlay itself, not #boot/#play, so it
+     shows through both the download and the click-to-play prompt; gone with
+     the overlay at the first gesture (the bar's "game" and the menu's GAME
+     take over). Hidden by offerGames() until there is a mission pack. */
+  #gamePicker { margin-top:18px; max-width:100%; box-sizing:border-box; padding:0 16px; }
   #gamePicker.hidden { display:none; }
 
   /* Small non-blocking chips anchored inside #wrap (so they ride along into
@@ -130,21 +147,30 @@
   /* transient key hint on entering fullscreen */
   #fsHint { top:10px; left:50%; transform:translateX(-50%); }
 
-  /* The line under the view: wordmark, status, three text buttons. width:0 +
+  /* The line under the view: wordmark, status, the text buttons. width:0 +
      min-width:100% keeps it from widening the shrink-wrapped #stage. */
-  #bar { width:0; min-width:100%; display:flex; flex-wrap:wrap; align-items:baseline;
+  #bar { position:relative; width:0; min-width:100%; display:flex; flex-wrap:wrap; align-items:baseline;
     gap:4px 18px; margin-top:9px; font-size:12.5px; }
   #mark { font-size:12.5px; font-weight:600; letter-spacing:.35em; color:var(--bronze-hi); }
   #mark .sep { color:#7d5a1e; }
   #status { flex:1 1 12rem; min-width:0; color:#a08c5a; white-space:nowrap;
     overflow:hidden; text-overflow:ellipsis; }
   #barBtns { display:flex; gap:16px; }
-  button.link, a.link { font:inherit; font-size:12.5px; background:none; border:0; padding:0;
+  button.link { font:inherit; font-size:12.5px; background:none; border:0; padding:0;
     color:var(--dim); cursor:pointer; text-decoration:underline; text-decoration-color:transparent;
     text-underline-offset:3px; transition:color .15s, text-decoration-color .15s; }
-  button.link:hover, a.link:hover { color:var(--bronze-hi); text-decoration-color:currentColor; }
-  button.link:focus-visible, a.link:focus-visible { outline:2px solid var(--bronze); outline-offset:3px; border-radius:2px; }
+  button.link:hover { color:var(--bronze-hi); text-decoration-color:currentColor; }
+  button.link:focus-visible { outline:2px solid var(--bronze); outline-offset:3px; border-radius:2px; }
   button.link[aria-expanded="true"], #sndBtn.on { color:var(--bronze-hi); }
+  /* The bar's "game" menu: the same choices, opening upward over the
+     view's right corner (the bar is the page's last line in the window) —
+     placed against the bar, not the button, so it stays over the view
+     when a narrow window wraps the buttons to the bar's left. */
+  #gameMenu { position:absolute; right:0; bottom:calc(100% + 12px); z-index:5; width:max-content;
+    max-width:min(340px, 100%); box-sizing:border-box; padding:12px; border:1px solid var(--edge); border-radius:4px;
+    background:rgba(11,9,7,.97); box-shadow:0 8px 28px rgba(0,0,0,.7); text-align:left; }
+  #gameMenu .games { flex-direction:column; align-items:stretch; }
+  #gameMenu p { margin:10px 2px 0; font-size:11.5px; line-height:1.5; color:var(--faint); white-space:normal; }
 
   /* The drawer: controls reference, console commands, shortcuts, credit. */
   #drawer { width:100%; box-sizing:border-box; max-width:920px; margin:22px auto 36px; padding:0 16px; text-align:left; }
@@ -202,6 +228,8 @@
       <span id="mark">QUAKE<span class="sep">·</span>RS</span>
       <span id="status">loading…</span>
       <span id="barBtns">
+        <span id="gameCtl" hidden><button id="gameBtn" class="link" aria-expanded="false" aria-controls="gameMenu"
+          title="play Quake or a mission pack (a reload)">game</button><div id="gameMenu" hidden></div></span>
         <button id="fs" class="link" title="fullscreen (F)">fullscreen</button>
         <button id="sndBtn" class="link" title="play a test sound — in-game audio unlocks on your first click">sound off</button>
         <button id="keysBtn" class="link" aria-expanded="false" aria-controls="drawer">keys</button>
@@ -242,6 +270,7 @@
           <span class="k"><kbd>F</kbd></span><span>fullscreen (2026; Classic leaves F unbound, as id's)</span>
           <span class="k"><kbd>F6</kbd> / <kbd>F9</kbd></span><span>quicksave / quickload (id's own binds — also <kbd>F1</kbd> help, <kbd>F2</kbd>/<kbd>F3</kbd> the Save/Load screen, <kbd>F4</kbd> Options, <kbd>F10</kbd> quit, <kbd>F12</kbd> a screenshot — a <code>.pcx</code> file in this page's storage, not a download yet; F12 only reaches the game in fullscreen, where the browser keeps it for devtools otherwise)</span>
           <span class="k"><kbd>~</kbd></span><span>console (see below)</span>
+          <span class="k">game</span><span>with a mission pack on this page (the server's or your own): Quake, Scourge of Armagon or Dissolution of Eternity — on the start screen, under the view, or GAME in a phone's menu. A choice reloads the page as <code>?game=hipnotic</code> / <code>?game=rogue</code> (none for Quake): bookmark one to start there. Saves stay; an unsaved game ends</span>
         </div>
       </div>
     </section>
@@ -299,6 +328,9 @@ const bootMsg = document.getElementById('bootMsg');
 const bootFill = document.getElementById('bootFill');
 const playEl = document.getElementById('play');
 const gamePickerEl = document.getElementById('gamePicker');
+const gameCtl = document.getElementById('gameCtl');
+const gameBtn = document.getElementById('gameBtn');
+const gameMenuEl = document.getElementById('gameMenu');
 const lockChip = document.getElementById('lockChip');
 const fsHint = document.getElementById('fsHint');
 // The keys whose browser default (scrolling, or a click on a focused button)
@@ -327,7 +359,7 @@ const MOUSE_KEYNUMS = { 0: 200, 1: 202, 2: 201 };
 // a server's own files.json — reads GAME_DIR, never GAME_PARAM, so id1
 // plays with no mission pack in the search path at all, as it always did.
 const GAME_DIRS = ['id1', 'hipnotic', 'rogue'];
-const GAME_NAMES = { id1: 'id1', hipnotic: 'Scourge of Armagon', rogue: 'Dissolution of Eternity' };
+const GAME_NAMES = { id1: 'Quake', hipnotic: 'Scourge of Armagon', rogue: 'Dissolution of Eternity' };
 function gameParam() {
   const g = new URLSearchParams(location.search).get('game');
   return g === 'hipnotic' || g === 'rogue' ? g : null;
@@ -335,12 +367,13 @@ function gameParam() {
 const GAME_PARAM = gameParam();
 const GAME_DIR = GAME_PARAM || 'id1';
 // The address with `game` set to switch to (or removed, for id1), keeping
-// every other query param (?classic, ?2026) as it was.
+// every other query param as it was, spelling included: `?2026&touch`
+// stays that, where URLSearchParams would write `?2026=&touch=` — the
+// address is the choice, and the player may read or bookmark it.
 function gameHref(g) {
-  const q = new URLSearchParams(location.search);
-  if (g === 'id1') q.delete('game'); else q.set('game', g);
-  const s = q.toString();
-  return location.pathname + (s ? '?' + s : '');
+  const keep = location.search.slice(1).split('&').filter(p => p && p.split('=')[0] !== 'game');
+  if (g !== 'id1') keep.push('game=' + g);
+  return location.pathname + (keep.length ? '?' + keep.join('&') : '');
 }
 // Which of hipnotic/rogue this deploy can actually offer — a manifest
 // entry or a kept file for that pack's own pak0.pak — so the picker never
@@ -358,18 +391,55 @@ function packsAvailable(manifestFiles, storedPaths) {
   for (const g of ['hipnotic', 'rogue']) if (storedPaths.has(`${g}/pak0.pak`)) have.add(g);
   return have;
 }
-// The start overlay's picker: id1 plus every mission pack this deploy (or
-// the player's own files) can offer — "the dumb way" (mission-page.md):
-// plain links that set ?game= and reload, not a live in-page switch. The
-// game actually running is plain text (even one whose data turned out
-// missing, so there is always a link back to id1). Hidden entirely for a
-// plain id1 deploy — nothing to pick.
-function renderGamePicker(have, active) {
-  const shown = GAME_DIRS.filter(g => g === 'id1' || have.has(g) || g === active);
+// The games this page offers: id1 plus every mission pack this deploy (or
+// the player's own files) can offer, and whichever one ?game= asks for
+// even if its data turned out missing (so there is always a way back to
+// id1) — or null, for good, on a plain id1 deploy: nothing to pick, and no
+// picker anywhere. Set once by offerGames(), from main().
+let gamesOffered = null;
+function offerGames(have) {
+  const shown = GAME_DIRS.filter(g => g === 'id1' || have.has(g) || g === GAME_PARAM);
   if (shown.length < 2) return;
-  gamePickerEl.innerHTML = shown.map(g => g === (active || 'id1')
-    ? GAME_NAMES[g] : `<a class="link" href="${gameHref(g)}">${GAME_NAMES[g]}</a>`).join(' &nbsp;·&nbsp; ');
+  gamesOffered = shown;
+  gamePickerEl.replaceChildren(gameList());
   gamePickerEl.classList.remove('hidden');
+  const note = document.createElement('p');
+  note.innerHTML = 'A choice reloads the page: the address says which game '
+    + '(<code>?game=hipnotic</code>, <code>?game=rogue</code>, none for Quake) — bookmark it. Saves stay; an unsaved game ends.';
+  gameMenuEl.replaceChildren(gameList(), note);
+  gameCtl.hidden = false;
+}
+// The choices, as a fresh element for wherever they show (the start
+// overlay, the bar's menu, touch.js's GAME panel, endscreen.js's quit
+// screen), or null when there is nothing to pick. The dumb way on purpose
+// (mission-page.md): each game but the running one is a plain link to
+// gameHref(), a reload — `?game=` stays the only state, so nothing here can
+// disagree with the address. The running one is marked, not a link. A
+// press on a link is only ever that choice: it stops at the link, so the
+// start overlay never also takes it as the tap that starts the game (which,
+// while the next page loaded, started id1 under the player's finger and
+// asked for fullscreen on a phone), touch.js's layer never takes it as a
+// menu tap, and the quit screen never as "any key restarts".
+function gameList() {
+  if (!gamesOffered) return null;
+  const list = document.createElement('div');
+  list.className = 'games';
+  for (const g of gamesOffered) {
+    const el = document.createElement(g === GAME_DIR ? 'span' : 'a');
+    el.className = 'game';
+    el.textContent = GAME_NAMES[g];
+    el.dataset.game = g;
+    if (g === GAME_DIR) {
+      el.classList.add('cur');
+      el.setAttribute('aria-current', 'true');
+    } else {
+      el.setAttribute('href', gameHref(g));
+      for (const t of ['pointerdown', 'touchstart']) el.addEventListener(t, e => e.stopPropagation(), { passive: true });
+      el.addEventListener('click', e => { e.stopPropagation(); el.classList.add('going'); });
+    }
+    list.appendChild(el);
+  }
+  return list;
 }
 
 // ===========================================================================
@@ -541,6 +611,7 @@ function gameExited(m) {
 // bytes (endscreen.js draws it), or null if the pak had neither file. The
 // worker has already returned from its `main` (or is about to): no more
 // frames come, and endscreen.js's dismiss reloads the page to play again
+// — or, with a mission pack on offer, the game picked there (gameList)
 // (`web/PLATFORM.md`, "Quit" — saves and config.cfg already live in
 // IndexedDB, so nothing is lost).
 function onQuit(dv, p, len) {
@@ -554,7 +625,7 @@ function onQuit(dv, p, len) {
   try { if (document.pointerLockElement) document.exitPointerLock(); } catch (e) { /* unsupported */ }
   unlockEscape();
   if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
-  window.QuakeEndScreen?.show(registered, screen);
+  window.QuakeEndScreen?.show(registered, screen, gameList());
 }
 
 // ===========================================================================
@@ -663,11 +734,19 @@ function typedChar(e) {
 addEventListener('keydown', e => {
   const k = e.key.toLowerCase();
 
+  // --- The bar's "game" menu, open: Esc closes it, and nothing else.
+  if (k === 'escape' && !gameMenuEl.hidden) {
+    showGameMenu(false);
+    e.preventDefault();
+    return;
+  }
+
   // --- First-gesture overlay. While the click-to-play prompt is up, Enter or
   //     Space starts exactly like a click (one gesture: unlock audio + reveal
   //     the attract loop). Routed FIRST so the key can't also reach the game
-  //     underneath. Only the ready prompt accepts it, not the boot panel.
-  if (!firstGestureDone && readyToPlay && (k === 'enter' || k === ' ')) {
+  //     underneath. Only the ready prompt accepts it, not the boot panel,
+  //     and not a game choice's link with the focus (its Enter is its own).
+  if (!firstGestureDone && readyToPlay && (k === 'enter' || k === ' ') && !(e.target instanceof HTMLAnchorElement)) {
     startFromOverlay();
     e.preventDefault();
     return;
@@ -771,6 +850,15 @@ keysBtn.addEventListener('click', () => {
   keysBtn.setAttribute('aria-expanded', String(!drawerEl.hidden));
   if (!drawerEl.hidden) drawerEl.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
 });
+// "game" (only with a mission pack to offer: offerGames) opens the same
+// choices as the start overlay's, over the view's corner; a click anywhere
+// else, or Esc, closes them.
+function showGameMenu(open) {
+  gameMenuEl.hidden = !open;
+  gameBtn.setAttribute('aria-expanded', String(open));
+}
+gameBtn.addEventListener('click', () => showGameMenu(gameMenuEl.hidden));
+document.addEventListener('click', e => { if (!gameMenuEl.hidden && !gameCtl.contains(e.target)) showGameMenu(false); });
 
 // --- Esc in fullscreen ---------------------------------------------------------
 // The browser RESERVES Esc: with the mouse captured the first Esc only releases
@@ -1984,7 +2072,7 @@ async function main() {
   // the download below, not just once it finishes (GAME_DIR's own data
   // may turn out missing, in which case the engine falls back to plain
   // shareware further down; the picker at least offers the way back).
-  renderGamePicker(packsAvailable(manifestFiles, new Set(files.keys())), GAME_PARAM);
+  offerGames(packsAvailable(manifestFiles, new Set(files.keys())));
   const server = planServerFiles(manifestFiles, GAME_DIR);
   serverTracks = server.tracks;
   const urls = ['quake.wasm', 'id1/pak0.pak', ...server.paks.map(p => p.path)];
@@ -2621,6 +2709,8 @@ function startTouch() {
       call: callLine,                         // a CALL: automation.rs
       unlockAudio, audio: () => audioCtx,
       frameSize: () => [W, H],                // the presented frame's pixels
+      hasGames: () => !!gamesOffered,         // a mission pack on offer: the GAME pill
+      gameList,                               // the game choices, a fresh element
     });
   };
   document.head.appendChild(s);

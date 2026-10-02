@@ -22,9 +22,11 @@ player's own drop still wins over it, per file; and a broken server pak1
 
 Then a mission pack in files.json ("The game picker"): a synthesized
 `hipnotic/pak0.pak` (the same `e1m1.bsp` trick, as `maps/hip1m1.bsp`) is
-never fetched playing plain id1, and the start overlay's picker offers it;
-`?game=hipnotic` fetches only it (never `rogue/pak0.pak`, never offered
-here), no 404s, hip1m1 loads and plays its own CD tracks.
+never fetched playing plain id1, and the start overlay's picker offers it,
+the running game marked; so does the bar's "game" menu (Esc closes it, and
+only it), whose Scourge of Armagon reloads the page as `?game=hipnotic`,
+which then marks that one; it fetches only it (never `rogue/pak0.pak`,
+never offered here), no 404s, hip1m1 loads and plays its own CD tracks.
 
 Usage: verify_content.py [deploydir]   (PLATFORM.md: index.html, wasi.js,
 quake.wasm, id1/pak0.pak). Screenshots go to $QUAKE_SHOTS (default: the
@@ -32,6 +34,7 @@ deploy dir)."""
 import base64, io, math, os, shutil, struct, tempfile, time, wave
 from playwright.sync_api import sync_playwright
 import isolated
+from isolated import POP_LMP, pak_file, write_pak
 
 WEB = isolated.webdir()
 PORT = isolated.port(8171)
@@ -39,47 +42,6 @@ SERVER_PORT = PORT + 1   # a second, independent deploy: "A server's own files"
 SERVER_PORT2 = PORT + 2  # a third, for the broken-pak1 deploy
 SERVER_PORT3 = PORT + 3  # a fourth, for a mission pack's own files.json entry
 SHOTS = os.environ.get("QUAKE_SHOTS", WEB)
-
-# common.c's pop[]: gfx/pop.lmp is these 128 shorts, big-endian.
-POP = [
-    0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x6600, 0x0000, 0x0000, 0x0000, 0x6600, 0x0000,
-    0x0000, 0x0066, 0x0000, 0x0000, 0x0000, 0x0000, 0x0067, 0x0000, 0x0000, 0x6665, 0x0000, 0x0000, 0x0000, 0x0000, 0x0065, 0x6600,
-    0x0063, 0x6561, 0x0000, 0x0000, 0x0000, 0x0000, 0x0061, 0x6563, 0x0064, 0x6561, 0x0000, 0x0000, 0x0000, 0x0000, 0x0061, 0x6564,
-    0x0064, 0x6564, 0x0000, 0x6469, 0x6969, 0x6400, 0x0064, 0x6564, 0x0063, 0x6568, 0x6200, 0x0064, 0x6864, 0x0000, 0x6268, 0x6563,
-    0x0000, 0x6567, 0x6963, 0x0064, 0x6764, 0x0063, 0x6967, 0x6500, 0x0000, 0x6266, 0x6769, 0x6a68, 0x6768, 0x6a69, 0x6766, 0x6200,
-    0x0000, 0x0062, 0x6566, 0x6666, 0x6666, 0x6666, 0x6562, 0x0000, 0x0000, 0x0000, 0x0062, 0x6364, 0x6664, 0x6362, 0x0000, 0x0000,
-    0x0000, 0x0000, 0x0000, 0x0062, 0x6662, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0061, 0x6661, 0x0000, 0x0000, 0x0000,
-    0x0000, 0x0000, 0x0000, 0x0000, 0x6500, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x6400, 0x0000, 0x0000, 0x0000,
-]
-POP_LMP = b"".join(struct.pack(">H", v) for v in POP)
-
-
-def read_pak(path):
-    """A pak's directory: name -> (filepos, filelen)."""
-    with open(path, "rb") as f:
-        magic, dirofs, dirlen = struct.unpack("<4sii", f.read(12))
-        assert magic == b"PACK", path
-        f.seek(dirofs)
-        d = f.read(dirlen)
-    return {d[i:i + 56].split(b"\0")[0].decode(): struct.unpack("<ii", d[i + 56:i + 64]) for i in range(0, dirlen, 64)}
-
-
-def pak_file(path, name):
-    pos, n = read_pak(path)[name]
-    with open(path, "rb") as f:
-        f.seek(pos)
-        return f.read(n)
-
-
-def write_pak(files):
-    """A PACK image of (name, bytes) pairs: header, contents, directory."""
-    body = b"".join(b for _, b in files)
-    out = struct.pack("<4sii", b"PACK", 12 + len(body), 64 * len(files)) + body
-    pos = 12
-    for name, b in files:
-        out += name.encode().ljust(56, b"\0") + struct.pack("<ii", pos, len(b))
-        pos += len(b)
-    return out
 
 
 def tone(freq, secs, rate=22050):
@@ -225,6 +187,8 @@ with sync_playwright() as p:
     st = pg.evaluate("quake.content.state()")
     check(st["registered"] is False and st["tracks"] == [] and st["paks"] == [], f"a fresh page is shareware, no files ({st['registered']}, {st['tracks']}, {st['paks']})")
     check(pg.evaluate("quake.cd.state().want") is None, "no music: no CD records")
+    check(not pg.is_visible("#gamePicker") and not pg.is_visible("#gameBtn"),
+          "a shareware-only deploy: no game picker, no game control in the bar")
 
     # --- Drop pak1.pak and three tracks (and a stray file) on the page.
     files = [["pak1.pak", b64(PAK1), ""], ["readme.txt", b64(b"hello"), "text/plain"]]
@@ -414,9 +378,35 @@ with sync_playwright() as p:
     check(not noisy, f"and never fetches it ({noisy})")
     picker = pg4.eval_on_selector("#gamePicker", "e => e.innerHTML")
     check("Scourge of Armagon" in picker and "?game=hipnotic" in picker, f"the picker offers it ({picker})")
-
-    pg4.goto(f"http://127.0.0.1:{SERVER_PORT3}/index.html?game=hipnotic", wait_until="load")
+    # Each choice a button (the running one marked, not a link), here and
+    # in the bar's "game" menu.
+    CHOICES = "e => [...e.querySelectorAll('.game')].map(g => [g.textContent, g.classList.contains('cur'), g.getAttribute('href')])"
+    marked = pg4.eval_on_selector("#gamePicker", CHOICES)
+    check(marked == [["Quake", True, None], ["Scourge of Armagon", False, "/index.html?game=hipnotic"]],
+          f"the picker marks the running game, Quake ({marked})")
+    check(pg4.is_visible("#gameBtn") and not pg4.is_visible("#gameMenu"), "the bar has a game control, closed")
+    pg4.click("#gameBtn")
+    check(pg4.is_visible("#gameMenu") and pg4.eval_on_selector("#gameMenu", CHOICES) == marked,
+          f"\"game\" opens the same choices ({pg4.eval_on_selector('#gameMenu', CHOICES)})")
+    pg4.screenshot(path=os.path.join(SHOTS, "verify_content_game_menu.png"))
+    pg4.keyboard.press("Escape")
+    check(not pg4.is_visible("#gameMenu") and pg4.evaluate("!document.getElementById('overlay').classList.contains('hidden')")
+          and not pg4.evaluate("quake.state.flags & 1"),
+          "Esc closes it, and nothing else (the start overlay still up, no game menu)")
+    pg4.click("#gameBtn")
+    pg4.click("#gameMenu a.game[data-game=hipnotic]")
+    try:
+        pg4.wait_for_url("**/index.html?game=hipnotic", timeout=10000)
+        went = True
+    except Exception:
+        went = False
+    check(went, f"its Scourge of Armagon reloads the page as ?game=hipnotic ({pg4.url})")
     ready(pg4)
+    marked = pg4.eval_on_selector("#gamePicker", CHOICES)
+    check(marked == [["Quake", False, "/index.html"], ["Scourge of Armagon", True, None]]
+          and pg4.eval_on_selector("#gameMenu", CHOICES) == marked,
+          f"the picker and the bar's menu now mark Scourge of Armagon ({marked})")
+    pg4.screenshot(path=os.path.join(SHOTS, "verify_content_picker_hipnotic.png"))
     st = pg4.evaluate("quake.content.state()")
     check(st["game"] == "hipnotic" and st["paks"] == ["id1/pak1.pak", "hipnotic/pak0.pak"] and st["tracks"] == [2, 6],
           f"?game=hipnotic plays from the manifest's hipnotic/pak0.pak ({st['game']}, {st['paks']}, {st['tracks']})")
@@ -425,7 +415,7 @@ with sync_playwright() as p:
     non200 = {u: s for u, s in statuses4.items() if s >= 400}
     check(not non200, f"no 404s ({non200})")
     # #play, not a raw coordinate: the picker (below it in the overlay) has
-    # a live "id1" link while a mission pack is playing, which a guessed
+    # a live "Quake" link while a mission pack is playing, which a guessed
     # click point could land on instead.
     pg4.click("#play")
     pg4.wait_for_function("quake.audio.ring().running", timeout=10000)
@@ -453,4 +443,5 @@ if fails:
 print("done: the player's files verified (registered from a dropped pak1, e2m1, the CD's tracks, level, pause, "
       "refusals, removal, and a server's own files.json: no extra requests when absent, registered play and "
       "music with nothing dropped, the player's own files still winning, a broken server pak1 left out quietly, "
-      "and a mission pack in files.json: fetched and offered by the picker only for the game starting)")
+      "and a mission pack in files.json: offered by the start overlay's picker and the bar's game menu, the running "
+      "game marked, and fetched only for the game starting)")
