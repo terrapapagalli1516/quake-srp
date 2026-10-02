@@ -267,6 +267,50 @@ static void Oracle_Client_f (void)
 	fclose (f);
 }
 
+// oracle_move sx sy sz  minx miny minz  maxx maxy maxz  ex ey ez [path] -- one
+// SV_Move (MOVE_NORMAL, no passedict) through the running server, and the same
+// move against the world alone (SV_ClipMoveToEntity on edict 0): fraction,
+// allsolid, startsolid, endpos, the plane and the entity hit, printed (or
+// appended to path). The census's collision probe: what a droptofloor or a
+// walkmove saw, in id's own hull code, at any point of a map.
+trace_t SV_ClipMoveToEntity (edict_t *ent, vec3_t start, vec3_t mins, vec3_t maxs, vec3_t end); // world.c
+
+static void Oracle_Move_f (void)
+{
+	vec3_t	v[4];
+	trace_t	t[2];
+	FILE	*f = NULL;
+	int		i, j;
+
+	if ((Cmd_Argc () != 13 && Cmd_Argc () != 14) || !sv.active)
+	{
+		Con_Printf ("oracle_move start mins maxs end [path] (12 numbers; needs a running server)\n");
+		return;
+	}
+	for (i=0 ; i<4 ; i++)
+		for (j=0 ; j<3 ; j++)
+			v[i][j] = Q_atof (Cmd_Argv (1 + 3*i + j));
+	t[0] = SV_Move (v[0], v[1], v[2], v[3], MOVE_NORMAL, NULL);
+	t[1] = SV_ClipMoveToEntity (sv.edicts, v[0], v[1], v[2], v[3]);
+	if (Cmd_Argc () == 14)
+		f = fopen (Cmd_Argv (13), "a");
+	for (i=0 ; i<2 ; i++)
+	{
+		char *line = va ("%s fraction=%.6f allsolid=%d startsolid=%d inopen=%d inwater=%d "
+			"endpos=%.3f %.3f %.3f normal=%g %g %g dist=%g ent=%d\n",
+			i ? "world" : "move", t[i].fraction, t[i].allsolid, t[i].startsolid,
+			t[i].inopen, t[i].inwater, t[i].endpos[0], t[i].endpos[1], t[i].endpos[2],
+			t[i].plane.normal[0], t[i].plane.normal[1], t[i].plane.normal[2], t[i].plane.dist,
+			t[i].ent ? NUM_FOR_EDICT (t[i].ent) : -1);
+		if (f)
+			fputs (line, f);
+		else
+			Con_Printf ("%s", line);
+	}
+	if (f)
+		fclose (f);
+}
+
 // oracle_quit -- Sys_Quit now (the stock `quit` opens the M_Menu_Quit confirm
 // unless the console is down, which a script run never has).
 static void Oracle_Quit_f (void)
@@ -449,6 +493,7 @@ void Oracle_Init (void)
 	Cmd_AddCommand ("oracle_shot", Oracle_Shot_f);
 	Cvar_RegisterVariable (&oracle_spans);
 	Cvar_RegisterVariable (&oracle_bench);
+	Cmd_AddCommand ("oracle_move", Oracle_Move_f);
 }
 
 //=============================================================================
