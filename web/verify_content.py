@@ -32,6 +32,7 @@ deploy dir)."""
 import base64, io, math, os, shutil, struct, tempfile, time, wave
 from playwright.sync_api import sync_playwright
 import isolated
+from isolated import POP_LMP, pak_file, write_pak
 
 WEB = isolated.webdir()
 PORT = isolated.port(8171)
@@ -39,47 +40,6 @@ SERVER_PORT = PORT + 1   # a second, independent deploy: "A server's own files"
 SERVER_PORT2 = PORT + 2  # a third, for the broken-pak1 deploy
 SERVER_PORT3 = PORT + 3  # a fourth, for a mission pack's own files.json entry
 SHOTS = os.environ.get("QUAKE_SHOTS", WEB)
-
-# common.c's pop[]: gfx/pop.lmp is these 128 shorts, big-endian.
-POP = [
-    0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x6600, 0x0000, 0x0000, 0x0000, 0x6600, 0x0000,
-    0x0000, 0x0066, 0x0000, 0x0000, 0x0000, 0x0000, 0x0067, 0x0000, 0x0000, 0x6665, 0x0000, 0x0000, 0x0000, 0x0000, 0x0065, 0x6600,
-    0x0063, 0x6561, 0x0000, 0x0000, 0x0000, 0x0000, 0x0061, 0x6563, 0x0064, 0x6561, 0x0000, 0x0000, 0x0000, 0x0000, 0x0061, 0x6564,
-    0x0064, 0x6564, 0x0000, 0x6469, 0x6969, 0x6400, 0x0064, 0x6564, 0x0063, 0x6568, 0x6200, 0x0064, 0x6864, 0x0000, 0x6268, 0x6563,
-    0x0000, 0x6567, 0x6963, 0x0064, 0x6764, 0x0063, 0x6967, 0x6500, 0x0000, 0x6266, 0x6769, 0x6a68, 0x6768, 0x6a69, 0x6766, 0x6200,
-    0x0000, 0x0062, 0x6566, 0x6666, 0x6666, 0x6666, 0x6562, 0x0000, 0x0000, 0x0000, 0x0062, 0x6364, 0x6664, 0x6362, 0x0000, 0x0000,
-    0x0000, 0x0000, 0x0000, 0x0062, 0x6662, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0061, 0x6661, 0x0000, 0x0000, 0x0000,
-    0x0000, 0x0000, 0x0000, 0x0000, 0x6500, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x6400, 0x0000, 0x0000, 0x0000,
-]
-POP_LMP = b"".join(struct.pack(">H", v) for v in POP)
-
-
-def read_pak(path):
-    """A pak's directory: name -> (filepos, filelen)."""
-    with open(path, "rb") as f:
-        magic, dirofs, dirlen = struct.unpack("<4sii", f.read(12))
-        assert magic == b"PACK", path
-        f.seek(dirofs)
-        d = f.read(dirlen)
-    return {d[i:i + 56].split(b"\0")[0].decode(): struct.unpack("<ii", d[i + 56:i + 64]) for i in range(0, dirlen, 64)}
-
-
-def pak_file(path, name):
-    pos, n = read_pak(path)[name]
-    with open(path, "rb") as f:
-        f.seek(pos)
-        return f.read(n)
-
-
-def write_pak(files):
-    """A PACK image of (name, bytes) pairs: header, contents, directory."""
-    body = b"".join(b for _, b in files)
-    out = struct.pack("<4sii", b"PACK", 12 + len(body), 64 * len(files)) + body
-    pos = 12
-    for name, b in files:
-        out += name.encode().ljust(56, b"\0") + struct.pack("<ii", pos, len(b))
-        pos += len(b)
-    return out
 
 
 def tone(freq, secs, rate=22050):
