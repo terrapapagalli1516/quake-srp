@@ -331,24 +331,38 @@ path; there is no `fd_readdir`); anything else a newer `std` imports answers
 
 A player who owns Quake (the Steam, GOG and CD versions all ship id's
 original `id1/pak0.pak` and `id1/pak1.pak`) adds their files, and plays the
-registered game — episodes 2–4 — with their CD soundtrack.
+registered game — episodes 2–4 — with their CD soundtrack; a player who
+owns Scourge of Armagon or Dissolution of Eternity adds that pack's own
+`hipnotic/pak0.pak` or `rogue/pak0.pak` the same way, and plays it with
+`?game=hipnotic`/`?game=rogue` (the start overlay's own picker links there,
+once a pack is in reach — "The game picker", below).
 
 - **Adding.** Drop the files, or the whole Quake folder, anywhere on the
   page, or pick them with the drawer's line ("Own Quake? …"). The page takes
-  `pak1.pak`, a `pak0.pak` that is not id's shareware one (the same file
-  in every 1.06 copy: recognised by `COM_LoadPackFile`'s count and CRC, 339
-  and 32981, and skipped), and CD tracks as files, `track02.ogg`… (the
-  track number from the name: `track02`, `Track 2`, a leading `02`; any
-  format the browser can play). It checks a pak as `COM_LoadPackFile` reads
-  one — the `PACK` header, a directory inside the file of at most 2048
-  entries, each inside the file — and says what it left out and why.
-- **Keeping.** A pak goes into the game directory, the IndexedDB store the
-  program's files live in (`id1/pak1.pak`), and so to the worker's file
-  system at every start; the music goes to a store of its own (`music`,
-  keyed by track), which the worker never sees: the page hands the program
-  the list of tracks (`-cdtracks 2,3,…`, "CD music") and plays a track's
-  file when the program asks for it. The files stay in this browser until
-  removed (the drawer's "remove them").
+  `pak1.pak` or a mission pack's own `pak0.pak` — which game directory a
+  dropped file means is read from its own path (`hipnotic/pak0.pak`,
+  `Quake/rogue/pak0.pak`, however deep a whole-folder drop nests it;
+  `index.html`'s `dropGameDir`), id1 where there is none, exactly as
+  before mission packs — a `pak0.pak` that is not id's shareware one (the
+  same file in every 1.06 copy: recognised by `COM_LoadPackFile`'s count
+  and CRC, 339 and 32981, and skipped), and CD tracks as files,
+  `track02.ogg`… (the track number from the name: `track02`, `Track 2`, a
+  leading `02`; any format the browser can play), under the same game
+  directory as the pak beside them (`hipnotic/music/track02.ogg`, this
+  page's own convention — the mission packs' own CDs had no file layout to
+  match). It checks a pak as `COM_LoadPackFile` reads one — the `PACK`
+  header, a directory inside the file of at most 2048 entries, each inside
+  the file — and says what it left out and why.
+- **Keeping.** A pak goes into its game directory, the IndexedDB store the
+  program's files live in (`id1/pak1.pak`, `hipnotic/pak0.pak`…), and so to
+  the worker's file system at every start; the music goes to a store of its
+  own (`music`, keyed by `"<game dir>:<track>"` — each game directory has
+  its own track 2..11, so a mission pack's soundtrack never collides with
+  id1's or another pack's), which the worker never sees: the page hands the
+  program the active game directory's own list of tracks (`-cdtracks
+  2,3,…`, "CD music") and plays a track's file when the program asks for
+  it. The files stay in this browser until removed (the drawer's "remove
+  them", which removes every game directory's kept files at once).
 - **Restarting.** The worker takes its files before it starts, so adding
   or removing files reloads the page: the engine and `pak0.pak` come from
   the HTTP cache, the saves and settings from storage. (A reload asks for
@@ -359,10 +373,16 @@ registered game — episodes 2–4 — with their CD soundtrack.
   read), and refuses a modified game without it ("You must have the
   registered version to use modified games") or a `pop.lmp` that is not
   id's ("Corrupted data file."); `PR_LoadProgs` refuses a `progs.dat` made
-  against other system globals; and the port refuses one that calls
-  builtins id's engine never had. A refusal ends the program before it
-  starts, its message on stderr; if it came with files just added, the page
-  takes them out again, restarts, and shows the message in the drawer.
+  against other system globals; and the port refuses one that *calls* a
+  builtin id's engine never had (not merely declares one: the mission
+  packs' own re-release `progs.dat` declare two id's never did, but never
+  call either — AUDIT.md, "The mission packs' own file layout and progs").
+  A refusal ends the program before it starts, its message on stderr; if it
+  came with files just added, the page takes them out again, restarts, and
+  shows the message in the drawer. With `?game=hipnotic`/`?game=rogue` and
+  no such file in reach, the mission pack's own game directory just
+  contributes nothing to the search path — the program starts anyway, as
+  plain shareware (or registered, if `pak1` is there), not a refusal.
 - **Not supported, and why.** The 2021 re-release's files
   (`rerelease/id1/pak0.pak`) are a different game build: its `progs.dat`
   calls the new engine's builtins by name (numbered `#0`, resolved at load),
@@ -370,12 +390,32 @@ registered game — episodes 2–4 — with their CD soundtrack.
   WinQuake. The page leaves out anything under a `rerelease/` folder and
   says to use the `id1/` files beside it; a re-release pak dropped on its
   own reaches the program, which refuses it (a modified game, or its
-  progs). Mission packs and mods (`-game`, `-hipnotic`, more paks) are out
-  of the port's scope; the page takes `pak0.pak` and `pak1.pak` only.
+  progs). A mod beyond the two mission packs (`-game` with any other
+  directory) is out of the port's scope; the page only ever recognises
+  `id1`, `hipnotic` and `rogue`.
 
 `verify_content.py` checks it all with synthesized data: a `pak1.pak` made
 from `common.c`'s `pop[]` table and the shareware `maps/e1m1.bsp` copied as
-`maps/e2m1.bsp`, and generated tones as tracks 2, 3 and 6.
+`maps/e2m1.bsp`, and generated tones as tracks 2, 3 and 6; and a synthesized
+`hipnotic/pak0.pak` (the same `e1m1.bsp`, as `maps/hip1m1.bsp`) for the
+mission-pack case — no real mission-pack data is in the repo, or needed.
+
+## The game picker
+
+The start overlay (`#boot`/`#play`, inside `#overlay`) shows a small picker
+once there is more than one game to play: id1 plus every mission pack a
+server's `files.json` or the player's own kept files can actually offer
+(`packsAvailable`) — and, even if not, whichever one `?game=` already asks
+for, so there is always a link back to id1 if that turns out missing (the
+previous bullet's silent fallback). It is the dumb way on purpose: plain
+`<a href="?game=hipnotic">` links (`gameHref`, which keeps `?classic`/
+`?2026` as they were) that reload the page, not a live in-page switch —
+switching games is a fresh command-line argument to a fresh program, same
+as changing `-hipnotic` on a real command line always was. It lives in
+`#overlay` itself, not `#boot`/`#play`, so it shows through both the
+download and the click-to-play prompt, and is retired for good with the
+rest of the overlay on the first real gesture (there is no in-game way to
+switch after that — reload, or edit the address).
 
 ## A server's own files
 

@@ -3017,12 +3017,41 @@ same trick `make_paks.py` used for id1's registered `pak1.pak`).
   `-rogue` and, checked live (headless Chromium, no hipnotic data present), fails
   exactly as id's own engine would — silently plays plain shareware, since an empty
   `hipnotic/` game directory contributes nothing to the search path — not a crash or a
-  hang. The page's own file layer is unchanged and still id1-only: `index.html`'s drop
-  handler explicitly refuses anything but `pak0.pak`/`pak1.pak`
-  (`"only id's pak0.pak and pak1.pak are played (no mods or mission packs)"`), its
-  `files.json` manifest only ever adds `id1/pak1.pak`, and `fileList` (what `wasi.js`'s
-  `path_open` can ever see — a plain in-memory map, nothing fetched on demand) hardcodes
-  `id1/pak0.pak` as the one file every deploy always sends. The next round's page-side
-  work: teach the drop handler and `files.json` about `hipnotic/pak0.pak` /
-  `rogue/pak0.pak` (and their `music/trackNN.ogg`), add them to `fileList` when `?game=`
-  asks for them, and a picker so a player can choose without typing the URL.
+  hang. ~~The page's own file layer is unchanged and still id1-only~~ — done, branch
+  `fleet/mission-page`, below.
+- ✅ **The page's file layer, the mission packs' own game directory, and the game
+  picker** (branch `fleet/mission-page`): `index.html`'s drop handler recognises a
+  dropped `hipnotic/pak0.pak`/`rogue/pak0.pak` (and their own `music/trackNN.ogg`) by
+  the nearest `GAME_DIRS` name in the dropped path itself (`dropGameDir` — a bare file,
+  or id1's own un-prefixed `music/…` the way Steam and GOG actually ship it, still means
+  `id1`, exactly as before); `isPakPath` and `planServerFiles` generalise the same way
+  for `files.json`. A mission pack's own files are fetched — from a server's manifest or
+  kept in IndexedDB — only for the game `?game=` is actually starting: never for id1,
+  and never the other pack's (AUDIT and the brief's own wording: "and never requests
+  them for id1"); id1's own extra paks (`pak1`…) still layer under every game, since the
+  search path always does. `files.json`'s manifest and `web/isolated.py`'s
+  `write_manifest` generalise past `id1/pak1.pak` the same way (`GAME_DIRS`), excepting
+  only `id1/pak0.pak` itself (always the deploy's own baseline fetch). The CD's kept
+  tracks move from a bare `<track>` IndexedDB key to `"<game dir>:<track>"`
+  (`storage.music*`) — id1, hipnotic and rogue each shipped their own soundtrack, so
+  without this a mission pack's track 2 would silently overwrite id1's kept one;
+  `storage.migrateMusicKeys()` moves an existing bare-numbered key under `"id1:"` once, so
+  a kept CD rip from before this round still plays. The start overlay's picker
+  (`renderGamePicker`, `#gamePicker`) offers id1 plus every mission pack a manifest or
+  the player's own files actually have (`packsAvailable`) as plain `?game=` links (a
+  reload, not a live switch — "the dumb way"), plus whichever game is already selected
+  even if its data turns out missing, so there is always a way back to id1.
+  Tested: live, against the real 2021 re-release packs (`mission_paks.py`, a scratch
+  deploy) — `?game=hipnotic`/`?game=rogue` each fetch only their own pak (plus id1's
+  pak1) and no 404s, the network log shows zero requests touching the other two
+  directories while on the third, and `hip1m1`/`r1m1` load and render (screenshots in the
+  branch's report) with each pack's own status bar; a dropped (not server-offered)
+  `hipnotic/pak0.pak` on a plain id1 deploy is found by path, listed, offered by the
+  picker, and reached by the engine on the next `?game=hipnotic` load with no network
+  request for it at all. `web/verify_content.py` gained a synthesized mission-pack case
+  (a fake `hipnotic/pak0.pak` holding `maps/hip1m1.bsp` — the existing `e1m1.bsp`-as-
+  `e2m1.bsp` trick, not real mission-pack data) for permanent regression coverage; the
+  existing id1-only checks in it and `verify_touch`'s offline step were re-run unchanged
+  and still pass. Not verified: the picker's visuals on a phone-size viewport, and
+  `verify_touch`'s touch/menu steps with a mission pack selected (only its unchanged
+  id1-only path was re-run).

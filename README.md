@@ -130,9 +130,11 @@ departures") lists every setting and why it exists.
 
 Two extras sit outside the profiles:
 - drop your own `pak1.pak` onto the page to play episodes 2–4, and your CD tracks to hear
-  them as the CD played them — or, running your own server, put them beside its
-  `index.html` and it offers them itself, for every player on it ([PLATFORM.md](web/PLATFORM.md),
-  "A server's own files"; no game data is in this repo);
+  them as the CD played them — the mission packs the same way, each its own
+  `hipnotic`/`rogue` folder with its own `pak0.pak` and music, picked with `?game=hipnotic`/
+  `?game=rogue` or the start screen's own links — or, running your own server, put them
+  beside its `index.html` and it offers them itself, for every player on it
+  ([PLATFORM.md](web/PLATFORM.md), "A server's own files"; no game data is in this repo);
 - the page can be installed as an app, and it works offline.
 
 ## How it works
