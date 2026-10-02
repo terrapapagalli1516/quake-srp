@@ -1098,7 +1098,13 @@ mod tests {
     /// and never transparent), `anum_0..anum_9` (24x24, index `120+d`), and the
     /// intermission `num_colon`/`num_slash`/`num_minus` (index 140/141/142).
     fn build_hud_wad() -> Wad2 {
-        // (name, payload) pairs.
+        wad_from_pics(base_hud_pics())
+    }
+
+    /// [`build_hud_wad`]'s own (name, payload) pairs, reusable by
+    /// [`build_hud_wad_with`] so a test can add mission-pack lumps without
+    /// re-deriving the base set.
+    fn base_hud_pics() -> Vec<(String, Vec<u8>)> {
         let mut pics: Vec<(String, Vec<u8>)> = Vec::new();
         pics.push(("sbar".to_string(), qpic_payload(320, 24, 1)));
         for d in 0..10u8 {
@@ -1110,7 +1116,27 @@ mod tests {
         pics.push(("num_colon".to_string(), qpic_payload(16, 24, 140)));
         pics.push(("num_slash".to_string(), qpic_payload(16, 24, 141)));
         pics.push(("num_minus".to_string(), qpic_payload(16, 24, 142)));
+        pics
+    }
 
+    /// [`build_hud_wad`] plus `extra` named lumps (each `(name, fill)`, a
+    /// 24x16 pic filled with `fill` so "did this draw" is a one-value pixel
+    /// search) — for a test that exercises a lump the base set doesn't have
+    /// (a mission pack's own). A name also in the base set (`"ibar"`, a
+    /// mission pack's own background) replaces it.
+    fn build_hud_wad_with(extra: &[(&str, u8)]) -> Wad2 {
+        let mut pics = base_hud_pics();
+        for &(name, fill) in extra {
+            pics.retain(|(n, _)| n != name);
+            let (w, h) = if name == "ibar" || name.starts_with("r_invbar") { (320, 24) } else { (24, 16) };
+            pics.push((name.to_string(), qpic_payload(w, h, fill)));
+        }
+        wad_from_pics(pics)
+    }
+
+    /// Serialize `pics` as a minimal WAD2 and parse it back (the body both
+    /// [`build_hud_wad`] and [`build_hud_wad_with`] share).
+    fn wad_from_pics(pics: Vec<(String, Vec<u8>)>) -> Wad2 {
         // Lay payloads right after the 12-byte header; build the directory after.
         let mut payloads = Vec::new();
         let mut offsets = Vec::new();
@@ -1921,4 +1947,201 @@ mod tests {
         let img = draw(48, 0);
         assert_eq!((img.pixels[ibar_row], img.pixels[sbar_row]), (2, 3));
     }
+
+    // -- Hipnotic / Rogue item bits -------------------------------------------
+
+    /// Every mission-pack constant against `quakedef.h`'s own numbers (not
+    /// id's bit-shift expressions, the literal values), since there is no C
+    /// oracle to catch a transcription slip here (the oracle's `-rogue` run
+    /// hangs on at least one map — the mission's report says why — so this
+    /// module's Rogue arms are proven only by these and the `draw_hud_into`
+    /// tests below, not pixel-for-pixel against id's C).
+    #[test]
+    fn mission_pack_item_bits_match_quakedef_h() {
+        assert_eq!(HIT_MJOLNIR_BIT, 7);
+        assert_eq!(HIT_PROXIMITY_GUN_BIT, 16);
+        assert_eq!(HIT_LASER_CANNON_BIT, 23);
+        assert_eq!(HIT_PROXIMITY_GUN, 65536);
+        assert_eq!(HIPWEAPONS, [23, 7, 4, 16]);
+        assert_eq!(RIT_LAVA_NAILGUN, 4096);
+        assert_eq!(RIT_SHELLS, 128);
+        assert_eq!(RIT_NAILS, 256);
+        assert_eq!(RIT_ROCKETS, 512);
+        assert_eq!(RIT_CELLS, 1024);
+        assert_eq!(RIT_ARMOR1, 8_388_608);
+        assert_eq!(RIT_ARMOR2, 16_777_216);
+        assert_eq!(RIT_ARMOR3, 33_554_432);
+        assert_eq!(RIT_LAVA_NAILS, 67_108_864);
+        assert_eq!(RIT_PLASMA_AMMO, 134_217_728);
+        assert_eq!(RIT_MULTI_ROCKETS, 268_435_456);
+        assert_eq!(1 << RIT_SHIELD_BIT, 536_870_912);
+        assert_eq!(1 << (RIT_SHIELD_BIT + 1), 1_073_741_824);
+        // The five tier-2 weapon icons are RIT_LAVA_NAILGUN<<0..4 exactly:
+        // lava nailgun, lava super nailgun, multi-grenade (pic "r_gren"),
+        // multi-rocket, plasma gun.
+        assert_eq!([RIT_LAVA_NAILGUN, RIT_LAVA_NAILGUN << 1, RIT_LAVA_NAILGUN << 2, RIT_LAVA_NAILGUN << 3, RIT_LAVA_NAILGUN << 4], [4096, 8192, 16384, 32768, 65536]);
+    }
+
+    /// [`flashon_for`] (Hipnotic's weapons) against the same formula
+    /// [`weapon_flashon`]'s own tests already prove for the standard ones —
+    /// settled-active, settled-inactive, and the `inva1..5` cycle in the
+    /// first second — just at Hipnotic's bit/slot (laser cannon, bit 23).
+    #[test]
+    fn flashon_for_cycles_like_weapon_flashon_at_a_different_bit_and_slot() {
+        let wad = build_hud_wad();
+        let laser = 1 << HIT_LASER_CANNON_BIT;
+        let mk = |time: f32, gettime: &'static [f32; 32], weapon: i32| Hud {
+            wad: &wad,
+            mode: GameMode::Hipnotic,
+            health: 100,
+            ammo: 0,
+            armor: 0,
+            items: laser,
+            weapon,
+            ammo_shells: 0,
+            ammo_nails: 0,
+            ammo_rockets: 0,
+            ammo_cells: 0,
+            time,
+            item_gettime: Some(gettime),
+            monsters: 0,
+            total_monsters: 0,
+            secrets: 0,
+            total_secrets: 0,
+            level_name: "",
+            show_scores: false,
+            face_pain: false,
+            sb_lines: SB_LINES_FULL,
+        };
+        static GT: [f32; 32] = {
+            let mut g = [0.0f32; 32];
+            g[HIT_LASER_CANNON_BIT] = 10.0; // got at t=10
+            g
+        };
+        // Just got it (t=10.3, 0.3s in -> raw 3, wrapped 3%5+2=5 -> inva4):
+        // neither settled value, so weapon-active doesn't matter yet.
+        assert_eq!(flashon_for(&mk(10.3, &GT, 0), laser, HIT_LASER_CANNON_BIT), 5);
+        // A full second on: settled. Active -> 1; not active -> 0.
+        assert_eq!(flashon_for(&mk(11.0, &GT, laser), laser, HIT_LASER_CANNON_BIT), 1);
+        assert_eq!(flashon_for(&mk(11.0, &GT, 0), laser, HIT_LASER_CANNON_BIT), 0);
+        // No get-times at all (a demo without them): always settled.
+        let no_gt = Hud { item_gettime: None, ..mk(11.0, &GT, laser) };
+        assert_eq!(flashon_for(&no_gt, laser, HIT_LASER_CANNON_BIT), 1);
+    }
+
+    /// `hsb_weapons`/`rsb_weapons`/`hsb_items`/`rsb_items` icon names resolve
+    /// to id's own lump names, and the mode gate actually changes what draws:
+    /// a Hipnotic Hud shows the laser cannon in its own slot and wetsuit/
+    /// shields in the sigil slot; the SAME items bits under `GameMode::Id1`
+    /// (where they mean nothing) draw neither.
+    #[test]
+    fn hipnotic_weapons_and_items_draw_only_in_hipnotic_mode() {
+        // Each lump this test touches gets a distinct fill, so "something
+        // drew here" is unambiguous.
+        let wad = build_hud_wad_with(&[
+            ("inv_laser", 250),
+            ("inv_mjolnir", 251),
+            ("sb_wsuit", 252),
+            ("sb_eshld", 253),
+            ("ibar", 254),
+        ]);
+
+        let laser = 1 << HIT_LASER_CANNON_BIT;
+        let mjolnir = 1 << HIT_MJOLNIR_BIT;
+        let wetsuit = 1 << 24; // sbar.c's own `1<<(24+i)`, not HIT_WETSUIT (see the comment above)
+        let shields = 1 << 25;
+        let items = laser | mjolnir | wetsuit | shields;
+        let base = |mode: GameMode| Hud {
+            wad: &wad,
+            mode,
+            health: 100,
+            ammo: 0,
+            armor: 0,
+            items,
+            weapon: 0,
+            ammo_shells: 0,
+            ammo_nails: 0,
+            ammo_rockets: 0,
+            ammo_cells: 0,
+            time: 0.0,
+            item_gettime: None,
+            monsters: 0,
+            total_monsters: 0,
+            secrets: 0,
+            total_secrets: 0,
+            level_name: "",
+            show_scores: false,
+            face_pain: false,
+            sb_lines: SB_LINES_FULL,
+        };
+
+        let drew = |mode: GameMode, fill: u8| {
+            let mut img = Image::new(320, 200, 0);
+            draw_hud_into(&mut img, &base(mode));
+            img.pixels.contains(&fill)
+        };
+        assert!(drew(GameMode::Hipnotic, 250), "laser cannon icon drew in Hipnotic mode");
+        assert!(drew(GameMode::Hipnotic, 251), "mjolnir icon drew in Hipnotic mode");
+        assert!(drew(GameMode::Hipnotic, 252), "wetsuit icon drew in Hipnotic mode");
+        assert!(drew(GameMode::Hipnotic, 253), "empathy shields icon drew in Hipnotic mode");
+        assert!(!drew(GameMode::Id1, 250), "the same items bits mean nothing to id1's own sbar path");
+        assert!(!drew(GameMode::Id1, 252), "id1 never draws Hipnotic's item icons");
+    }
+
+    /// Rogue's remapped armour bit and tier-2 weapon row: the standard
+    /// `IT_ARMOR1` bit (which Rogue repurposes for `RIT_LAVA_SUPER_NAILGUN`)
+    /// does NOT show an armour icon in Rogue mode, but `RIT_ARMOR1` does; the
+    /// active tier-2 weapon's own icon draws over the standard row's slot.
+    #[test]
+    fn rogue_remaps_the_armour_bits_and_draws_its_tier2_weapon_icon() {
+        let wad = build_hud_wad_with(&[
+            ("r_lava", 240),
+            ("sb_armor1", 241),
+            ("ibar", 242),
+            ("r_invbar1", 243),
+            ("r_invbar2", 244),
+        ]);
+
+        let base = |mode: GameMode, items: i32, weapon: i32| Hud {
+            wad: &wad,
+            mode,
+            health: 100,
+            ammo: 0,
+            armor: 10,
+            items,
+            weapon,
+            ammo_shells: 0,
+            ammo_nails: 0,
+            ammo_rockets: 0,
+            ammo_cells: 0,
+            time: 0.0,
+            item_gettime: None,
+            monsters: 0,
+            total_monsters: 0,
+            secrets: 0,
+            total_secrets: 0,
+            level_name: "",
+            show_scores: false,
+            face_pain: false,
+            sb_lines: SB_LINES_FULL,
+        };
+        let drew = |hud: &Hud, fill: u8| {
+            let mut img = Image::new(320, 200, 0);
+            draw_hud_into(&mut img, hud);
+            img.pixels.contains(&fill)
+        };
+
+        // Standard IT_ARMOR1 (8192): nothing, in Rogue mode (it's a weapon bit there).
+        assert!(!drew(&base(GameMode::Rogue, IT_ARMOR1, 0), 241), "IT_ARMOR1 means a weapon to Rogue, not armour");
+        // Rogue's own RIT_ARMOR1 (8388608): the armour icon.
+        assert!(drew(&base(GameMode::Rogue, RIT_ARMOR1, 0), 241), "RIT_ARMOR1 shows the armour icon in Rogue mode");
+        // The active tier-2 weapon (lava nailgun) draws its own icon.
+        assert!(drew(&base(GameMode::Rogue, 0, RIT_LAVA_NAILGUN), 240), "the active tier-2 weapon's own icon drew");
+        // The inventory background swaps once a tier-2 weapon is active: Rogue
+        // never draws the plain "ibar" at all, only its own r_invbar1/2.
+        assert!(drew(&base(GameMode::Rogue, 0, 0), 244), "r_invbar2 below RIT_LAVA_NAILGUN");
+        assert!(drew(&base(GameMode::Rogue, 0, RIT_LAVA_NAILGUN), 243), "r_invbar1 at or above RIT_LAVA_NAILGUN");
+        assert!(!drew(&base(GameMode::Rogue, 0, 0), 242), "Rogue never draws the plain ibar");
+    }
+
 }
