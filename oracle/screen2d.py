@@ -18,6 +18,16 @@ harness's `blank`), so what differs is the 2-D layer: the status bar, the
 inventory and scoreboards, the menus and their fade, the console, the notify
 lines, centerprints, the intermission and finale overlays, the backtile.
 
+With `--game hipnotic|rogue --data DIR` (DIR holds `id1/pak0.pak`,
+`id1/pak1.pak` and `<game>/pak0.pak`) both sides run that mission pack as
+`-hipnotic`/`-rogue` run it, on its first map, and the scenarios are the
+pack's own status bar (`PACK_SCENARIOS`): its weapons, its items (the
+`items2` bits), its ammo and armour types. id's console prints `Cvar_Set:
+variable campaign not found` every frame under the re-release's progs (a
+cvar its own engine has and id's does not), so id's side runs with
+`con_notifytime -1` there (0 still shows the line printed in the frame
+itself): the notify lines are not compared in a pack.
+
 Per shot it writes <out>/<res>/<scenario>.<shot>.{c.ppm,c.pgm,c.json,port.ppm,side.png}
 (side = C | port | diff at 2x, diff white where the RGB differs) and prints
 exact% over the whole screen and over the 2-D pixels (those that are not the
@@ -180,15 +190,75 @@ SCENARIOS: dict[str, list] = {
                           ("key", "ENTER"), ("frames", 1), ("shot", "options")],
 }
 
+# The mission packs' own status bars (sbar.c's `if (hipnotic)` / `if (rogue)`
+# arms), with each pack's own item bits (defs.qc of each: Rogue moves the
+# ammo bits down one and the axe to 2048). `items2` reaches the bar as
+# `items | items2 << 23` (SV_WriteClientdataToMessage), in place of the runes
+# `serverflags << 28` (set to 15 here to show they are not drawn).
+HIP_LASER_CANNON, HIP_MJOLNIR, HIP_PROXIMITY_GUN = 1 << 23, 128, 65536
+HIP_WETSUIT, HIP_EMPATHY = 2, 4  # items2
+R_SHELLS, R_NAILS, R_ROCKETS, R_CELLS, R_AXE = 128, 256, 512, 1024, 2048
+R_LAVA_NAILGUN, R_LAVA_SUPER_NAILGUN, R_MULTI_GRENADE, R_MULTI_ROCKET, R_PLASMA_GUN = (
+    4096, 8192, 16384, 32768, 65536)
+R_ARMOR1, R_ARMOR2, R_ARMOR3, R_LAVA_NAILS, R_PLASMA, R_MULTI_ROCKETS, R_SHIELD, R_ANTIGRAV = (
+    1, 2, 4, 8, 16, 32, 64, 128)  # items2
+HIP_ALL = ALL_WEAPONS | HIP_LASER_CANNON | HIP_MJOLNIR | HIP_PROXIMITY_GUN | IT_KEY1 | IT_KEY2 | IT_ARMOR2
+ROGUE_ALL = (IT_SHOTGUN | IT_SUPER_SHOTGUN | IT_NAILGUN | IT_SUPER_NAILGUN | IT_GRENADE_LAUNCHER
+             | IT_ROCKET_LAUNCHER | IT_LIGHTNING | R_AXE | R_LAVA_NAILGUN | R_LAVA_SUPER_NAILGUN
+             | R_MULTI_GRENADE | R_MULTI_ROCKET | R_PLASMA_GUN | R_NAILS | IT_KEY1 | IT_KEY2)
+
+
+def pack_stats(items, weapon, current, items2, armor=0):
+    return [("field", "health", 100), ("field", "armorvalue", armor), ("field", "items", items),
+            ("field", "items2", items2), ("field", "weapon", weapon), ("field", "currentammo", current),
+            ("field", "ammo_shells", 40), ("field", "ammo_nails", 173), ("field", "ammo_rockets", 12),
+            ("field", "ammo_cells", 9), ("serverflags", 15)]
+
+
+PACK_SCENARIOS: dict[str, dict[str, list]] = {
+    "hipnotic": {
+        "hip_inv": pack_stats(HIP_ALL, IT_SUPER_NAILGUN, 173, HIP_WETSUIT | HIP_EMPATHY, 150) + SETTLE
+        + [("shot", "all"), ("field", "items2", HIP_WETSUIT), ("frames", 1), ("shot", "wetsuit"),
+           ("field", "items2", HIP_EMPATHY), ("frames", 1), ("shot", "empathy"),
+           ("field", "items2", 0), ("frames", 1), ("shot", "none")],
+        "hip_weapons": pack_stats(HIP_ALL, IT_SHOTGUN, 40, 0) + SETTLE + sum(
+            ([("field", "weapon", wb), ("field", "currentammo", amm), ("frames", 1), ("shot", nm)]
+             for nm, wb, amm in [("laser", HIP_LASER_CANNON, 9), ("mjolnir", HIP_MJOLNIR, 9),
+                                 ("prox", HIP_PROXIMITY_GUN, 12), ("gl", IT_GRENADE_LAUNCHER, 12)]), []),
+        "hip_scores": pack_stats(HIP_ALL, IT_SHOTGUN, 40, HIP_WETSUIT) + SETTLE
+        + [("showscores", 1), ("frames", 1), ("shot", "tab")],
+    },
+    "rogue": {
+        "rogue_inv": pack_stats(ROGUE_ALL, IT_SUPER_NAILGUN, 173, R_ARMOR3 | R_SHIELD | R_ANTIGRAV, 200)
+        + SETTLE + [("shot", "all"), ("field", "items2", R_SHIELD), ("frames", 1), ("shot", "shield"),
+                    ("field", "items2", R_ANTIGRAV | R_ARMOR1), ("frames", 1), ("shot", "belt_green"),
+                    ("field", "items2", R_ARMOR2), ("frames", 1), ("shot", "yellow"),
+                    ("field", "items2", 0), ("frames", 1), ("shot", "none")],
+        "rogue_weapons": pack_stats(ROGUE_ALL, IT_SHOTGUN, 40, 0) + SETTLE + sum(
+            ([("field", "weapon", wb), ("field", "items2", it2), ("field", "currentammo", amm), ("frames", 1),
+              ("shot", nm)]
+             for nm, wb, it2, amm in [("lava_ng", R_LAVA_NAILGUN, R_LAVA_NAILS, 50),
+                                      ("lava_sng", R_LAVA_SUPER_NAILGUN, R_LAVA_NAILS, 50),
+                                      ("multi_gl", R_MULTI_GRENADE, R_MULTI_ROCKETS, 7),
+                                      ("multi_rl", R_MULTI_ROCKET, R_MULTI_ROCKETS, 7),
+                                      ("plasma", R_PLASMA_GUN, R_PLASMA, 30),
+                                      ("sng", IT_SUPER_NAILGUN, 0, 173)]), []),
+        "rogue_scores": pack_stats(ROGUE_ALL, IT_SHOTGUN, 40, R_SHIELD) + SETTLE
+        + [("showscores", 1), ("frames", 1), ("shot", "tab")],
+    },
+}
+FIRST_MAP = {"hipnotic": "hip1m1", "rogue": "r1m1"}
+
 
 # ---------------------------------------------------------------------------
 
 
-def c_lines(steps, out: Path, name: str) -> list[str]:
+def c_lines(steps, out: Path, name: str, mapname: str = "e1m1", game: str | None = None) -> list[str]:
     # id's defaults (default.cfg): the port's side runs its Classic profile,
     # every departure off and id's key bindings
+    quiet = ["con_notifytime -1"] if game else []  # the `campaign` spam (the module doc)
     lines = ["oracle_exit 0", "oracle_stage 1", f"oracle_blank {BLANK}", "crosshair 0", "viewsize 100",
-             "map e1m1"] + ["wait"] * 30
+             *quiet, f"map {mapname}"] + ["wait"] * 30
     for st in steps:
         op, args = st[0], st[1:]
         if op == "viewsize":
@@ -232,9 +302,9 @@ def c_lines(steps, out: Path, name: str) -> list[str]:
     return lines + ["wait", "oracle_quit"]
 
 
-def port_lines(steps, out: Path, name: str, res, metas: dict) -> list[str]:
+def port_lines(steps, out: Path, name: str, res, metas: dict, mapname: str = "e1m1") -> list[str]:
     w, h = res
-    lines = [f"res {w} {h}", f"blank {BLANK}", "map e1m1", "cmd viewsize 100", "frames 30"]
+    lines = [f"res {w} {h}", f"blank {BLANK}", f"map {mapname}", "cmd viewsize 100", "frames 30"]
     for st in steps:
         op, args = st[0], st[1:]
         if op == "viewsize":
@@ -263,14 +333,28 @@ def port_lines(steps, out: Path, name: str, res, metas: dict) -> list[str]:
     return lines
 
 
-def run_c(oracle: Path, pak: Path, res, steps, out: Path, name: str) -> dict:
+def link_game(base: Path, pak: Path, game: str | None, data: Path | None) -> None:
+    """A `-basedir` of links: id1's pak (and, for a mission pack, id1's
+    registered pak1 — `-hipnotic`/`-rogue` refuse the shareware game — and
+    the pack's own pak0)."""
+    (base / "id1").mkdir(exist_ok=True)
+    (base / "id1" / "pak0.pak").symlink_to(pak.resolve())
+    if game:
+        (base / "id1" / "pak1.pak").symlink_to((data / "id1" / "pak1.pak").resolve())
+        (base / game).mkdir()
+        (base / game / "pak0.pak").symlink_to((data / game / "pak0.pak").resolve())
+
+
+def run_c(oracle: Path, pak: Path, res, steps, out: Path, name: str, game: str | None = None,
+          data: Path | None = None) -> dict:
     w, h = res
     with tempfile.TemporaryDirectory(prefix="quake-screen2d-") as tmp:
         base = Path(tmp)
-        (base / "id1").mkdir()
-        (base / "id1" / "pak0.pak").symlink_to(pak.resolve())
-        (base / "id1" / "screen.cfg").write_text("\n".join(c_lines(steps, out, name)) + "\n")
-        res_ = subprocess.run([str(oracle), "-basedir", str(base), "-width", str(w), "-height", str(h),
+        link_game(base, pak, game, data)
+        mapname = FIRST_MAP[game] if game else "e1m1"
+        (base / "id1" / "screen.cfg").write_text("\n".join(c_lines(steps, out, name, mapname, game)) + "\n")
+        flags = [f"-{game}"] if game else []
+        res_ = subprocess.run([str(oracle), "-basedir", str(base), "-width", str(w), "-height", str(h), *flags,
                                "+exec", "screen.cfg"], cwd=base, capture_output=True, text=True, timeout=300)
     metas = {}
     for st in steps:
@@ -298,12 +382,18 @@ def build_harness() -> Path:
     sys.exit("no test executable in cargo's output")
 
 
-def run_port(harness: Path, script: list[str], out: Path, name: str):
+def run_port(harness: Path, script: list[str], out: Path, name: str, game: str | None = None,
+             pak: Path | None = None, data: Path | None = None):
     sp = out / f"{name}.port.txt"
     sp.write_text("\n".join(script) + "\n")
-    res = subprocess.run([str(harness), "--exact", "oracle_screen::oracle_screen", "--ignored", "--test-threads=1"],
-                         env=dict(os.environ, QUAKE_SCREEN_SCRIPT=str(sp)), capture_output=True, text=True,
-                         timeout=600)
+    env = dict(os.environ, QUAKE_SCREEN_SCRIPT=str(sp))
+    with tempfile.TemporaryDirectory(prefix="quake-screen2d-port-") as tmp:
+        if game:
+            # the same layout as id's side; the harness boots `-basedir tmp -<game>`
+            link_game(Path(tmp), pak, game, data)
+            env.update(QUAKE_SCREEN_BASEDIR=tmp, QUAKE_SCREEN_GAME=game)
+        res = subprocess.run([str(harness), "--exact", "oracle_screen::oracle_screen", "--ignored",
+                              "--test-threads=1"], env=env, capture_output=True, text=True, timeout=600)
     if res.returncode != 0:
         sys.exit(f"port harness failed for {name}:\n{res.stdout[-3000:]}{res.stderr[-2000:]}")
 
@@ -349,14 +439,23 @@ def main() -> None:
     ap.add_argument("--oracle", help="C oracle binary (default oracle/build/quake-oracle)")
     ap.add_argument("--harness", help="port harness test binary (default: build quake-wasm's tests)")
     ap.add_argument("--out", type=Path, help="output dir (default: a new temp dir)")
+    ap.add_argument("--game", choices=sorted(PACK_SCENARIOS),
+                    help="a mission pack: its first map and its own status-bar scenarios (needs --data)")
+    ap.add_argument("--data", type=Path, help="with --game: holds id1/pak0.pak, id1/pak1.pak, <game>/pak0.pak")
     args = ap.parse_args()
+    scenarios = PACK_SCENARIOS[args.game] if args.game else SCENARIOS
+    if args.game:
+        if not args.data:
+            sys.exit("--game needs --data")
+        if args.pak == DEFAULT_PAK:
+            args.pak = args.data / "id1" / "pak0.pak"
     if args.list:
-        for n, steps in SCENARIOS.items():
+        for n, steps in scenarios.items():
             print(f"{n:<14} shots: {', '.join(s[1] for s in steps if s[0] == 'shot')}")
         return
-    names = args.only.split(",") if args.only else list(SCENARIOS)
+    names = args.only.split(",") if args.only else list(scenarios)
     for n in names:
-        if n not in SCENARIOS:
+        if n not in scenarios:
             sys.exit(f"unknown scenario {n!r} (--list)")
     out_root = (args.out or Path(tempfile.mkdtemp(prefix="quake-screen2d-"))).resolve()
     oracle = ensure_oracle(args.oracle)
@@ -366,9 +465,11 @@ def main() -> None:
     def one(res, name):
         out = out_root / f"{res[0]}x{res[1]}"
         out.mkdir(parents=True, exist_ok=True)
-        steps = SCENARIOS[name]
-        metas = run_c(oracle, args.pak, res, steps, out, name)
-        run_port(harness, port_lines(steps, out, name, res, metas), out, name)
+        steps = scenarios[name]
+        metas = run_c(oracle, args.pak, res, steps, out, name, args.game, args.data)
+        mapname = FIRST_MAP[args.game] if args.game else "e1m1"
+        run_port(harness, port_lines(steps, out, name, res, metas, mapname), out, name, args.game, args.pak,
+                 args.data)
         return [(res, name, s[1], measure(out, name, s[1], pal, metas[s[1]])) for s in steps if s[0] == "shot"]
 
     t0 = time.time()
