@@ -13,7 +13,11 @@
 // or tap — the simplest robust way back in, since the worker's `main` has
 // already returned and there is no live game left to resume
 // (`quake-wasm/src/config.rs`: saves and `config.cfg` are already files the
-// page persists in IndexedDB, so a reload loses nothing).
+// page persists in IndexedDB, so a reload loses nothing). With a mission
+// pack on offer, index.html also hands over its game choices (its
+// `gameList`, styled by its own CSS): shown under the screen, each a link
+// into that game, whose presses stop at the link rather than restarting
+// this one.
 //
 // An IIFE (like touch.js): index.html's own script shares this file's
 // top-level scope (two classic `<script>`s in one document), so nothing
@@ -61,14 +65,19 @@ const CSS = `
 #quakeEndScreen {
   position: fixed; inset: 0; z-index: 2147483647; box-sizing: border-box;
   padding: 2vh 2vw;
-  background: #000; display: flex; align-items: center; justify-content: center;
-  cursor: pointer; -webkit-user-select: none; user-select: none;
+  background: #000; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 2vh; cursor: pointer; -webkit-user-select: none; user-select: none;
 }
 #quakeEndScreen .qesGrid {
   font-family: Consolas, 'Cascadia Mono', 'DejaVu Sans Mono', 'Courier New', monospace;
   font-size: min(1.9vw, 3.1vh);
   line-height: 1.22;
 }
+/* With the game choices under it: the 25 rows (1.22 lines each) share the
+   height with them, at most 52px, the choices' own fingertip height. */
+#quakeEndScreen.qesWithGames .qesGrid { font-size: min(1.9vw, calc((94vh - 52px) / 30.5)); }
+#quakeEndScreen .qesGames { display: flex; align-items: center; gap: 12px; color: #aaa;
+  font: 13px Consolas, 'DejaVu Sans Mono', monospace; }
 #quakeEndScreen .qesRow { white-space: pre; }
 /* An inline background covers only the glyphs' height, leaving a dark seam
    between rows; an inline-block one fills the whole line box, as a text-mode
@@ -141,10 +150,12 @@ function buildScreen(bytes) {
 let overlay = null;
 
 // Show the end screen (or, without one, a plain message saying the game
-// quit) over the whole page; any key, click or tap reloads it. Safe to call
-// more than once (the second call is a no-op) — the program only ever sends
-// one `Quit` record, but a page should never assume its own invariants.
-function show(registered, screen) {
+// quit) over the whole page; any key, click or tap reloads it. `games`, if
+// given, is index.html's game choices (an element), shown under it. Safe to
+// call more than once (the second call is a no-op) — the program only ever
+// sends one `Quit` record, but a page should never assume its own
+// invariants.
+function show(registered, screen, games) {
   if (overlay) return;
   ensureStyle();
   overlay = document.createElement('div');
@@ -162,6 +173,13 @@ function show(registered, screen) {
     p.className = 'qesFallback';
     p.textContent = 'Quake has quit.\n\nPress any key, click or tap to play again.';
     overlay.appendChild(p);
+  }
+  if (games) {
+    const row = document.createElement('div');
+    row.className = 'qesGames';
+    row.append('play', games);
+    overlay.classList.add('qesWithGames');
+    overlay.appendChild(row);
   }
   document.body.appendChild(overlay);
   const restart = () => location.reload();

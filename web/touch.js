@@ -29,7 +29,8 @@
 //                                   arrows repeating; BACK is Escape; YES /
 //                                   NO when it asks (the pad hides then,
 //                                   and while Customize controls waits for
-//                                   a key to bind)
+//                                   a key to bind); GAME, with a mission
+//                                   pack on offer: the page's game choices
 //   the console                     KEYBOARD (the phone's own, through a
 //                                   hidden text field; a tap on the console
 //                                   too), TAB, the previous line; BACK
@@ -119,6 +120,11 @@
       }
     }
     if (next !== 'console' && !naming) closeKeyboard();
+    // GAME: only with a mission pack on offer (which the page knows once
+    // its boot has read files.json and the player's files), and its panel
+    // only over the menu.
+    if (ui.game.hidden === host.hasGames()) ui.game.hidden = !host.hasGames();
+    if (next !== 'menu' && !ui.games.hidden) closeGames();
     // Multiplayer > Setup's name fields want the keyboard too.
     if (ui.menuKeys.hidden === naming) ui.menuKeys.hidden = !naming;
     // Customize controls waiting for a key to bind (STATE 8): a pad key
@@ -335,6 +341,20 @@
     if (aims) el.addEventListener('pointermove', (e) => onMove(e));
   }
 
+  // --- The game: Quake or a mission pack (PLATFORM.md "The game picker") -------
+  // GAME (in the menu, beside BACK) opens a panel of the page's own game
+  // choices (index.html's gameList: links that reload the page with
+  // ?game=, the running game marked) over the menu. The panel keeps every
+  // finger to itself — none reaches the layer, so none is a menu tap under
+  // it — and a tap beside the choices, or CANCEL, closes it.
+  function openGames() {
+    const list = host.gameList();
+    if (!list) return;
+    ui.gamesList.replaceChildren(list);
+    ui.games.hidden = false;
+  }
+  function closeGames() { ui.games.hidden = true; }
+
   // --- The phone's keyboard, for the console and Setup's names -----------------
   function openKeyboard() {
     ui.type.value = SENTINEL;
@@ -460,6 +480,17 @@
   #touch[data-mode=console] .console { display:flex; }
   #tMenu, #tBack { top:calc(10px + env(safe-area-inset-top)); left:calc(12px + env(safe-area-inset-left)); }
   #tFull { top:calc(10px + env(safe-area-inset-top)); left:calc(92px + env(safe-area-inset-left)); width:34px; padding:0; }
+  /* GAME: beside BACK, where the game's own FULL sits (never both). */
+  #tGame { top:calc(10px + env(safe-area-inset-top)); left:calc(92px + env(safe-area-inset-left)); }
+  /* The game choices at a fingertip's size, wherever they show (the start
+     overlay, the GAME panel, the quit screen: index.html's gameList). */
+  html.touch .games .game { min-height:44px; padding:0 18px; font-size:14px; }
+  #tGames { position:absolute; inset:0; z-index:4; display:flex; flex-direction:column; gap:14px;
+    align-items:center; justify-content:center; background:rgba(0,0,0,.84); color:#8a7d68;
+    font-size:12px; letter-spacing:.06em; text-align:center; }
+  #tGames .tTitle { color:#d9a546; font-weight:600; letter-spacing:.3em; text-indent:.3em; }
+  #tGames .games { flex-direction:column; align-items:stretch; width:min(340px, 80%); }
+  #tGames .tb { position:static; }
   /* --bar: the status bar's CSS height (0 with none; refreshBar/applyBar
      above), kept current for the HUD's actual Screen size and resolution.
      Every play button's bottom offset is at least --bar, plus a 6px breath
@@ -530,6 +561,7 @@
       <div id="tMenu" class="tb pill gameonly" role="button" aria-label="menu">MENU</div>
       <div id="tFull" class="tb pill gameonly" role="button" aria-label="fullscreen" hidden>${FULL_SVG}</div>
       <div id="tBack" class="tb pill menuonly console" role="button" aria-label="back">BACK</div>
+      <div id="tGame" class="tb pill menuonly" role="button" aria-label="choose the game" hidden>GAME</div>
       <div id="tFire" class="tb play" role="button" aria-label="fire">FIRE</div>
       <div id="tJump" class="tb play" role="button" aria-label="jump">JUMP</div>
       <div id="tWeapon" class="tb play" role="button" aria-label="next weapon">WEAPON</div>
@@ -547,10 +579,17 @@
         <div id="tPadDown" class="tb" role="button" aria-label="down">&#9660;</div>
         <div id="tPadOk" class="tb" role="button" aria-label="OK">OK</div>
       </div>
-      <input id="tType" type="text" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" enterkeyhint="send" aria-label="type">`;
+      <input id="tType" type="text" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" enterkeyhint="send" aria-label="type">
+      <div id="tGames" role="dialog" aria-label="choose the game" hidden>
+        <div class="tTitle">GAME</div>
+        <div id="tGamesList"></div>
+        <div>a reload · saves stay, an unsaved game ends</div>
+        <div id="tGamesCancel" class="tb pill" role="button">CANCEL</div>
+      </div>`;
     host.wrap.appendChild(layer);
     const $ = (id) => layer.querySelector('#' + id);
-    ui = { stick: $('tStick'), knob: $('tKnob'), full: $('tFull'), type: $('tType'), menuKeys: $('tMenuKeys'), menuPad: $('tMenuPad') };
+    ui = { stick: $('tStick'), knob: $('tKnob'), full: $('tFull'), type: $('tType'), menuKeys: $('tMenuKeys'), menuPad: $('tMenuPad'),
+           game: $('tGame'), games: $('tGames'), gamesList: $('tGamesList') };
 
     layer.addEventListener('pointerdown', onDown);
     layer.addEventListener('pointermove', onMove);
@@ -578,6 +617,17 @@
     button($('tPadLeft'), { down: () => padHoldStart(K.LEFT), up: () => padHoldStop(K.LEFT) });
     button($('tPadRight'), { down: () => padHoldStart(K.RIGHT), up: () => padHoldStop(K.RIGHT) });
     button($('tPadOk'), { up: () => press(K.ENTER) });
+    // GAME opens its panel on the tap's click, not its pointerup as the
+    // other buttons act: a panel shown at the pointerup would be under the
+    // finger when the browser then sends that same tap's click, and take it
+    // as a tap beside the choices.
+    button(ui.game, {});
+    ui.game.addEventListener('click', openGames);
+    button($('tGamesCancel'), { up: closeGames });
+    // The panel's fingers stay in it (its links stop their own: gameList);
+    // a tap on it beside the choices closes it.
+    ui.games.addEventListener('pointerdown', (e) => e.stopPropagation());
+    ui.games.addEventListener('click', (e) => { if (e.target === ui.games) closeGames(); });
     ui.type.addEventListener('input', onType);
     ui.type.addEventListener('compositionend', onType);
     ui.type.addEventListener('keydown', onTypeKey);

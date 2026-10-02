@@ -334,7 +334,7 @@ original `id1/pak0.pak` and `id1/pak1.pak`) adds their files, and plays the
 registered game — episodes 2–4 — with their CD soundtrack; a player who
 owns Scourge of Armagon or Dissolution of Eternity adds that pack's own
 `hipnotic/pak0.pak` or `rogue/pak0.pak` the same way, and plays it with
-`?game=hipnotic`/`?game=rogue` (the start overlay's own picker links there,
+`?game=hipnotic`/`?game=rogue` (the page's game picker switches there,
 once a pack is in reach — "The game picker", below).
 
 - **Adding.** Drop the files, or the whole Quake folder, anywhere on the
@@ -402,28 +402,89 @@ mission-pack case — no real mission-pack data is in the repo, or needed.
 
 ## The game picker
 
-The start overlay (`#boot`/`#play`, inside `#overlay`) shows a small picker
-once there is more than one game to play: id1 plus every mission pack a
-server's `files.json` or the player's own kept files can actually offer
-(`packsAvailable`) — and, even if not, whichever one `?game=` already asks
-for, so there is always a link back to id1 if that turns out missing (the
-previous bullet's silent fallback). It is the dumb way on purpose: plain
-`<a href="?game=hipnotic">` links (`gameHref`, which keeps `?classic`/
-`?2026` as they were) that reload the page, not a live in-page switch —
-switching games is a fresh command-line argument to a fresh program, same
-as changing `-hipnotic` on a real command line always was. It lives in
-`#overlay` itself, not `#boot`/`#play`, so it shows through both the
-download and the click-to-play prompt, and is retired for good with the
-rest of the overlay on the first real gesture (there is no in-game way to
-switch after that — reload, or edit the address).
+With a mission pack in reach — a server's `files.json` lists its
+`hipnotic/pak0.pak` or `rogue/pak0.pak`, or the player kept their own
+(`packsAvailable`) — the page offers a choice of game: Quake (`id1`),
+Scourge of Armagon, Dissolution of Eternity (and whichever one `?game=`
+asks for even if its data is missing, so there is always a way back to
+Quake: the previous bullet's silent fallback). A plain `id1` deploy shows
+no picker anywhere. One renderer (`gameList`) puts the same choices in
+reach at every stage:
+
+- **the start overlay**, under "click to start" / "tap to start", through
+  the download too;
+- **the bar** under the view: "game", beside fullscreen · sound · keys,
+  opens them over the view's corner (a click elsewhere, or Esc, closes
+  them);
+- **a phone's menu**: GAME, beside BACK while the menu is up (the attract
+  demo's first tap, or MENU in a game, gets there), opens them in a panel
+  over the menu (touch.js);
+- **the quit screen** (endscreen.js), under id's end screen; any other key
+  or tap still restarts the game that quit.
+
+Each is a button: the game running filled and marked (`aria-current`), the
+others outlined, 44 CSS px tall on a touch screen.
+
+**The address is the choice.** A choice is a plain link to the same page
+with `?game=hipnotic` / `?game=rogue` (none for Quake; `gameHref` keeps the
+rest of the query as written: `?2026&game=hipnotic`) — a reload, not a live
+switch: a game directory is a command-line argument to a fresh program
+(`-hipnotic`), as it always was. `?game=` is the only state; nothing is kept
+that could disagree with it, so a bookmark starts there and Back returns to
+the game before. The reload keeps what the browser keeps (saves,
+`config.cfg`, the player's files); an unsaved game ends, which the bar's
+menu and the GAME panel say.
+
+**A press on a choice is only that** (`gameList`: the link stops its own
+`pointerdown`, `touchstart` and `click`). The user's report that on a phone the
+expansion packs could not be chosen (2026-10-02) was this: the picker sat in
+`#overlay`, whose click is the first gesture, and touch.js's overlay click
+asks for fullscreen and the landscape lock. So until the next page arrived
+(a network-first navigation through the service worker; on a phone's
+network, a while) the old page took the tap as "tap to start" — overlay
+gone, id1's attract demo under the finger, fullscreen asked for — and then
+the reload threw that away into a boot screen whose picker looked as before:
+the running game was plain text in the links' own grey, and a phone has no
+hover to tell a link. Small text, too: 12.5 CSS px, two millimetres on the
+phone. Now the overlay stays up, the chosen button pulses until the new
+page replaces it, and the new page marks its game. Likewise the GAME panel
+keeps its fingers from the touch layer (whose `pointerdown` captures a
+finger for a menu tap), and GAME opens it on its `click`, not its
+`pointerup`, or the panel would be under the finger when that tap's own
+click arrives and take it as a tap beside the choices; on the quit screen
+a choice's `pointerdown` stops before "any tap restarts".
+
+**The installed app** (`start_url: ./`) opens Quake: it does not remember
+the last game. Remembering is a second piece of state beside `?game=` — the
+address would no longer say which game runs, and a deploy that later drops
+a pack would open into a fallback. Accepted gap: a player who mostly plays
+a pack picks it once per launch (one reload; its pak is already kept by the
+service worker). Not done either: manifest `shortcuts` to each pack — the
+manifest is one file for every deploy, so a shareware deploy would offer
+packs it does not have.
+
+**Also accepted.** On a desktop in fullscreen the bar is off screen (leave
+fullscreen, or quit, to choose); the bar's menu and the quit screen's
+choices are for the mouse (Tab is the scoreboard here, and any key on the
+quit screen restarts).
+
+`verify_touch.py` (11., at the phone size) checks the overlay's
+buttons, a finger's pointerdown, pointerup and click on Scourge of Armagon
+reloading as `?game=hipnotic` without the old page starting, GAME and its
+panel (a tap beside the choices touches no menu row), and the quit screen's
+choices; `verify_content.py` the bar's menu; both that a shareware-only
+deploy shows none of it.
 
 ## A server's own files
 
-A deploy can offer `id1/pak1.pak` and the CD's tracks itself, so a player
-doesn't have to drop them in every session — the point for a private,
-non-public deploy of the registered game. It is the same "Your files"
-above, with the server as one more source: optional, discovered quietly,
-and merged in before the player's own drops.
+A deploy can offer `id1/pak1.pak`, a mission pack's own `hipnotic/pak0.pak`
+or `rogue/pak0.pak`, and the CD's tracks itself, so a player doesn't have to
+drop them in every session — the point for a private deploy
+of the registered game. It is the same "Your files" above, with the server
+as one more source: optional, discovered quietly, and merged in before the
+player's own drops. A mission pack's files are fetched only when that game
+is the one starting (`planServerFiles`); listing one is what puts the game
+picker on every player's page ("The game picker", above).
 
 - **Discovery, without noise for a plain deploy.** The page fetches an
   optional manifest, `files.json`, beside `index.html`, once, at boot:
@@ -503,10 +564,12 @@ and merged in before the player's own drops.
   ```sh
   cp your-pak1.pak deploy/id1/pak1.pak
   mkdir -p deploy/id1/music && cp your-tracks/track*.ogg deploy/id1/music/
+  mkdir -p deploy/hipnotic && cp your-hipnotic/pak0.pak deploy/hipnotic/   # a mission pack, if any
   (cd web && uv run python -c "import isolated; isolated.write_manifest('$D')")
   ```
   `isolated.write_manifest(dest)` (`web/isolated.py`) writes `dest/files.json`
-  from whatever it finds at `dest/id1/pak1.pak` and `dest/id1/music/*`, sizes
+  from whatever paks and `music/*` it finds under `dest/id1`, `dest/hipnotic`
+  and `dest/rogue` (`id1/pak0.pak` excepted: the deploy's own), sizes
   included — never written by hand, so it can't drift from the files beside
   it. Skip the call (or delete `files.json`) for a pak0-only deploy.
 
@@ -585,9 +648,8 @@ bindings, and the port's departures, which the profiles **Classic** and
   worked, so `hipnotic/pak0.pak` or `rogue/pak0.pak` beside `id1/pak0.pak`
   is all it needs. This is only the argument: whether the page actually has
   that file to send at all — a drop, or a server's own `files.json` — is a
-  separate question ("A server's own files", below, is `id1`-only today;
-  teaching it about a mission pack's own directory, and its `music/`, is
-  this round's open item, `AUDIT.md` says where). Without the file, the
+  separate question ("Your files", "A server's own files"; the page's
+  picker sets the argument: "The game picker"). Without the file, the
   program starts anyway and just plays plain `id1` (an empty `hipnotic`/
   `rogue` directory contributes nothing to the search path), the same as
   id's own engine would.
@@ -745,7 +807,9 @@ A page cannot exit, so the host does the next best thing:
   IndexedDB ("Files", above), and the pak is re-served from the cache.
 
 Phones get the same screen, scaled to fit a landscape width; a tap anywhere
-dismisses it, same as a click.
+dismisses it, same as a click. With a mission pack on offer the game
+choices sit under the screen ("The game picker"): one starts that game, any
+other key or tap this one again.
 
 `quake-wasm/src/sys.rs`'s tests cover both quit paths (immediate from the
 console, confirmed from the menu) and the record's exact bytes, including
@@ -1099,7 +1163,7 @@ what the game's State calls for:
 | the live game, `in_touch` on (2026) | a stick wherever the left thumb lands (the left 45%); look by dragging anywhere else; FIRE (hold; dragging it aims too), JUMP, WEAPON (`impulse 10`, the next weapon owned), MENU |
 | the live game, `in_touch` off (Classic) | MENU only: id's game has no touch controls, but a phone must never be left without a way back to the menu |
 | a demo (the attract loop) | MENU; a tap anywhere is Escape, as any key is during id's demo playback |
-| the menu | taps on the menu itself; a pad (▲▼◀▶, OK), keys like a keyboard's, held arrows repeating; BACK (Escape); YES / NO when it asks (STATE 256; the pad hides then, and while Customize controls waits for a key to bind) |
+| the menu | taps on the menu itself; a pad (▲▼◀▶, OK), keys like a keyboard's, held arrows repeating; BACK (Escape); YES / NO when it asks (STATE 256; the pad hides then, and while Customize controls waits for a key to bind); GAME beside BACK, with a mission pack on offer ("The game picker") |
 | the console (Options > Go to console) | KEYBOARD (a tap on the console too), TAB, ▲ (the previous line); BACK closes it; a drag scrolls (PgUp/PgDn) |
 
 **Clear of the status bar.** FIRE, JUMP, WEAPON and the stick's resting
