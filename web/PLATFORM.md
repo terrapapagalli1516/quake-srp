@@ -121,10 +121,10 @@ zeros, and an unknown kind is skipped, so either side can grow a record.
 |---|---|---|
 | 1 | FRAME | `w u16`, `h u16`, `format u8` (0 RGBA8, 1 INDEXED8), `0 ×3`, then for INDEXED8 the palette (256 × RGBA), then the pixels (4 bytes each, or one palette index) |
 | 2 | SYNC | `seq u32` (last tick consumed), `wait u8` (1: block for the next tick; 0: poll) |
-| 3 | STATE | `flags u32` (1 menu, 2 console has the keyboard, 4 live game, 8 binding a key, 16 timedemo, 32 native resolution, 64 F toggles fullscreen), `menu_screen i32`, `pixel_size u32` (native: device pixels per picture pixel) |
+| 3 | STATE | `flags u32` (1 menu, 2 console has the keyboard, 4 live game, 8 binding a key, 16 timedemo, 32 native resolution, 64 Alt+Enter toggles fullscreen), `menu_screen i32`, `pixel_size u32` (native: device pixels per picture pixel) |
 | 4–11 | — | retired: the sound records of the page's own mixing, before the program mixed |
 
-| 3 | STATE | `flags u32` (1 menu, 2 console has the keyboard, 4 live game, 8 binding a key, 16 timedemo, 32 native resolution, 64 F toggles fullscreen, 128 touch controls (`in_touch`), 256 the menu asks y or n, 512 the live game is paused), `menu_screen i32`, `pixel_size u32` (native: device pixels per picture pixel) |
+| 3 | STATE | `flags u32` (1 menu, 2 console has the keyboard, 4 live game, 8 binding a key, 16 timedemo, 32 native resolution, 64 Alt+Enter toggles fullscreen (`vid_altenter`), 128 touch controls (`in_touch`), 256 the menu asks y or n, 512 the live game is paused), `menu_screen i32`, `pixel_size u32` (native: device pixels per picture pixel) |
 | 4 | SAMPLE | `id u32`, a RIFF/WAV (each distinct sample once, by content) |
 | 5 | SOUND | `id u32`, `origin f32×3`, `volume f32`, `attenuation f32`, `entity i32`, `channel i32`, `view u32`, `loop_start f32`, `loop_end f32` |
 | 6 | STOP_SOUND | `entity i32`, `channel i32` |
@@ -635,8 +635,8 @@ bindings, and the port's departures, which the profiles **Classic** and
   the box's own aspect (the view is Hor+: `fov_adapt`). Off (Classic), the
   picture is the video mode (`_vid_resolution`, Options > Video Options)
   in the largest 4:3 box the window fits, as before.
-- **F toggles fullscreen** (`vid_fkey`, 2026; id's `default.cfg` leaves F
-  unbound).
+- **Alt+Enter toggles fullscreen** (`vid_altenter`, 2026; in Classic the
+  chord is id's ALT `+strafe` and ENTER `+jump`): "Fullscreen", below.
 - **The profile from the address.** `?classic` and `?2026` add `+profile
   classic` / `+profile 2026` to the program's command line (`wasi.js` hands
   it `args`), which quake.rc's `stuffcmds` runs after `config.cfg`: the same
@@ -767,6 +767,68 @@ Nothing cheap is left in the page: keys and mouse go to the program when
 they happen and it applies them at once, the pad is read as late as the
 tick, and the frame is presented in the refresh that ticked. What would cut
 more is the browser's (`?lowlatency`, below) or the frame's own time.
+
+## Fullscreen
+
+**The ways in and out.** The bar's *fullscreen* button, in every profile;
+the fullscreen key, **Alt+Enter** (Option+Return on a Mac), in 2026
+(`vid_altenter`); the browser's own F11, which fills the screen with the
+whole window (Alt+Enter still works inside it); and on a phone the first tap
+(`touch.js`, "Touch").
+
+**One rule for a shortcut: it works whatever has the keyboard** — the game,
+the menu, the console, a demo, with the mouse captured or not. The page
+takes Alt+Enter in a capture-phase `keydown` listener, before any other:
+the game never sees the Enter (the Alt reaches it: `+strafe`, for a
+moment), and what the key toggles is the browser's own
+`document.fullscreenElement`, never a copy.
+
+The key was F until 2026-10-02, and only in the live game with the menu and
+the console down (they type and bind letters). In a real Chromium that
+broke the most natural sequence: hold Esc to leave fullscreen, then F to go
+back. A held Esc's first press is a tap the page gets (Keyboard Lock, below),
+so the menu opens; 1.5 s later the browser drops the pointer lock and leaves
+fullscreen, the menu still up; and F, gated on the menu, did nothing until
+Esc closed it. A letter can't keep the rule (the console types it, a
+player's bind takes it), so F is the game's again, unbound as in id's
+`default.cfg`.
+
+Why Alt+Enter: web games mostly offer a button in their own chrome and leave
+the browser its F11; video players take F because they have no text to type
+and no binds; games with a native heritage use Alt+Enter — QuakeSpasm's
+`VID_Toggle`, DOSBox, Windows games at large — and browsers leave the
+chord to the page. In Classic it stays the game's: `default.cfg`
+binds ALT `+strafe` and ENTER `+jump`, a strafe-jump in WinQuake, so
+Classic has the button and F11. `vid_altenter` was `vid_fkey`; a
+`config.cfg` with the old name still sets it (`quake_rs::cvar`'s
+`OLD_NAMES`) and the next save writes the new one.
+
+**Esc in fullscreen.** Browsers reserve Esc. Where the Keyboard Lock API
+exists (Chromium: Chrome, Edge, Opera) the page locks Escape (and F12, "The
+F-keys" above) on entering fullscreen: a tapped Esc is the game's, id's
+`togglemenu`, with the mouse still captured; a held Esc is the browser's
+way out. Elsewhere the browser's two steps stand: the first Esc releases
+the mouse (the page opens the menu, "Input"), the next leaves fullscreen.
+The hint on entering says which.
+
+**When the browser says no** — no user activation (a script's call, not a
+key or a click), a frame embedding the page without `allow="fullscreen"`
+(`document.fullscreenEnabled` false), no element fullscreen at all (an
+iPhone's Safari) — the page says so in the console, with the browser's
+reason, and on the view; the next press of the key or the button is a fresh
+gesture.
+
+**Verified.** In a headed Chromium 146 (2026-10-02: X11 on the Wayland compositor's virtual
+output on a Linux desktop, keys typed through the X server's XTEST; keys sent over
+the DevTools protocol reach the page but not the browser's own Esc handling,
+so a held one never left fullscreen there): the walk above, before and
+after — click to play, the key, play, hold Esc, the key again, from the
+menu, the console, after a `changelevel`, after the mouse was released and
+captured again, in Classic and with `vid_fkey 1`, F11, and a request
+without activation (`TypeError: Permissions check failed`, reported).
+`verify_extras.py` checks the page's side headless, where Chromium has
+Keyboard Lock but no browser Esc handling. Not tried: Firefox and Safari
+headed, macOS, Windows.
 
 ## Quit
 
