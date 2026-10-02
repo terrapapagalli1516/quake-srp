@@ -979,6 +979,10 @@ fn render_demo_frame(
         // the recorded health hits 0, like Sbar_Draw's scoreboard flip.
         let hud = render::Hud {
             wad,
+            // Demo playback has no live progs.dat to detect a mode from (the
+            // recorded wire messages are all `draw_hud_into` reads); no
+            // mission-pack demo is in scope here, so this is always id1.
+            mode: crate::server::GameMode::Id1,
             health: client.health,
             ammo: client.ammo,
             armor: client.armor,

@@ -19,7 +19,7 @@
 
 use super::pr_cmds::install_engine_builtins;
 use super::sv_world::link_edict;
-use super::{EntFlags, MoveType, Server, Solid, SysFn, WorldModel, NUM_SPAWN_PARMS};
+use super::{EntFlags, GameMode, MoveType, Server, Solid, SysFn, WorldModel, NUM_SPAWN_PARMS};
 use std::collections::HashMap;
 
 use crate::bsp::{Bsp, CONTENTS_SOLID};
@@ -80,6 +80,7 @@ impl Server {
         // Capture the entity text before the BSP moves into the host.
         let entities = bsp.entities.clone();
 
+        let mode = GameMode::detect(&progs);
         let mut vm = Vm::new(progs);
         install_engine_builtins(&mut vm);
         vm.set_host(Box::new(WorldModel::with_pak(bsp, pak)));
@@ -101,6 +102,7 @@ impl Server {
 
         Ok(Server {
             vm,
+            mode,
             entities,
             player: None,
             lightstyles: std::array::from_fn(|_| String::new()),

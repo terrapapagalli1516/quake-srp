@@ -19,18 +19,29 @@
 //! check; the engine then reads every file through the path's head, which
 //! reads like one pak.
 //!
-//! What is not ported: `-game`, `-rogue`/`-hipnotic` and `-path` (mods and
-//! mission packs, out of the port's scope), `-cachedir` (a CD-ROM cache),
-//! and `proghack`.
+//! `-rogue`/`-hipnotic`/`-game <dir>` are ported too: each layers another
+//! game directory over `id1`, in id's order ([`init_filesystem`]'s
+//! `mod_dirs`), and `com_gamedir` (saves, `config.cfg`) becomes the last one
+//! added — all through the same [`Pak::over`] chain, so no other engine code
+//! changes shape. Not ported: `-path` (fully replaces the generated search
+//! path; mission-pack-shaped mods are already there through `-game`),
+//! `-cachedir` (a CD-ROM cache), and `proghack` (Quake 2 maps with Quake 1
+//! progs).
 //!
-//! One check is the port's own, [`check_progs`]: a `progs.dat` that calls
-//! builtins id's engine never had (a builtin numbered past `pr_builtin[]`, or
-//! numbered 0 and found by name — the extension builtins later engines,
-//! among them the 2021 re-release's, resolve) is refused at startup, where
-//! id's engine would have run it until the first such call (`PR_RunError
-//! ("Bad builtin call number")`) or, for a builtin #0, run statement 0 in
-//! its place and gone on without it. Either way it is not a game the port
-//! can play, and the player is better told so at once.
+//! A `progs.dat` that *calls* a builtin id's engine never had (a builtin
+//! numbered past `pr_builtin[]`, or numbered 0 and found by name — the
+//! extension builtins later engines, among them the 2021 re-release's,
+//! resolve) fails the way id's does: lazily, at the call, with
+//! `PR_RunError("Bad builtin call number")` (ported as `Vm`'s own bounds
+//! check on `OP_CALLn`, `vm.rs`). Earlier this module also scanned every
+//! *declared* function at startup and refused the whole game if any used
+//! such a number, whether ever called or not — stricter than id's engine,
+//! and wrong for the mission packs' re-release `progs.dat`, which declare
+//! `finaleFinished` (#79) and `localsound` (#80) but never call either
+//! (`quaketool dis`, grepped for both names outside their own declaration).
+//! [`check_progs`] no longer does that scan; it keeps id's own two eager
+//! checks (`PR_LoadProgs`'s version and `PROGHEADER_CRC`), and leaves
+//! anything builtin-shaped to the call that may never come.
 
 use std::path::{Path, PathBuf};
 
@@ -95,26 +106,41 @@ pub struct Filesystem {
 }
 
 /// `COM_InitFilesystem` for `basedir` (`-basedir`, `.` by default):
-/// `COM_AddGameDirectory ("<basedir>/id1")`, then `COM_CheckRegistered`.
-/// An `Err` is one of id's `Sys_Error`s, in id's words: the game does not
-/// start.
-pub fn init_filesystem(basedir: &Path) -> Result<Filesystem, String> {
-    let gamedir = basedir.join(GAMENAME);
+/// `COM_AddGameDirectory ("<basedir>/id1")`, then one more
+/// `COM_AddGameDirectory` per name in `mod_dirs` — in id's order, `-rogue`'s
+/// `"rogue"` and/or `-hipnotic`'s `"hipnotic"`, then `-game <dir>`'s `dir` —
+/// each layered in front of what came before, so the last given is searched
+/// first; then `COM_CheckRegistered`. `force_modified` is `-game`'s own
+/// `com_modified = true`, set outright and not by any pack's CRC.
+/// `com_gamedir` (returned as [`Filesystem::gamedir`]) becomes whichever
+/// directory was added last. An `Err` is one of id's `Sys_Error`s, in id's
+/// words: the game does not start.
+pub fn init_filesystem(basedir: &Path, mod_dirs: &[&str], force_modified: bool) -> Result<Filesystem, String> {
     let mut log = Vec::new();
-    let packs = load_packs(&gamedir, &mut log)?;
-    // COM_LoadPackFile: any pack that is not the shareware pak0.
-    let modified = packs.iter().any(Pak::is_modified);
+    let mut dirs: Vec<(PathBuf, Vec<Pak>)> = Vec::new();
+    for name in std::iter::once(GAMENAME).chain(mod_dirs.iter().copied()) {
+        let dir = basedir.join(name);
+        let packs = load_packs(&dir, &mut log)?;
+        dirs.push((dir, packs));
+    }
+    // COM_LoadPackFile: any pack that is not the shareware pak0, across every
+    // directory added, OR'd with -game's own forced com_modified.
+    let modified = force_modified || dirs.iter().flat_map(|(_, packs)| packs).any(Pak::is_modified);
     // COM_FindFile starts with static_registered = 1, so COM_CheckRegistered's
     // own search may find a loose gfx/pop.lmp; every later search goes by its
     // answer.
-    let registered = check_registered(&add_game_directory(&gamedir, &packs, true), modified)?;
+    let registered = check_registered(&build_search_path(&dirs, true), modified)?;
     log.push(format!("Playing {} version.", if registered { "registered" } else { "shareware" }));
-    let files = add_game_directory(&gamedir, &packs, registered);
+    let files = build_search_path(&dirs, registered);
+    let gamedir = dirs.last().expect("id1 is always added").0.clone();
     Ok(Filesystem { files, gamedir, registered, modified, log })
 }
 
 /// `COM_AddGameDirectory`'s loop: `pak0.pak`, `pak1.pak`, … in `dir` until
-/// one is not there, each opened and logged as `COM_LoadPackFile` does.
+/// one is not there, each opened and logged as `COM_LoadPackFile` does. A
+/// `dir` with no `pak0.pak` (a mod directory that does not exist, or has
+/// none) yields no packs; `COM_FindFile` still falls through to its loose
+/// files, which is simply nothing found.
 fn load_packs(dir: &Path, log: &mut Vec<String>) -> Result<Vec<Pak>, String> {
     let mut packs = Vec::new();
     for i in 0..MAX_PAKS {
@@ -129,11 +155,27 @@ fn load_packs(dir: &Path, log: &mut Vec<String>) -> Result<Vec<Pak>, String> {
     Ok(packs)
 }
 
-/// `COM_AddGameDirectory`'s search path: the directory itself, then `packs`
-/// in front of it in order, so the last is searched first. `registered` is
-/// `static_registered`, for the directory's loose files.
-fn add_game_directory(dir: &Path, packs: &[Pak], registered: bool) -> Pak {
-    packs.iter().cloned().fold(Pak::directory(dir, registered), |path, pack| pack.over(path))
+/// `COM_AddGameDirectory`'s search path for one directory, over `rest` (the
+/// chain built from the directories before it, searched after this one;
+/// `None` for the first — `id1`): the directory itself, then its `packs` in
+/// front of it in order, so the last pak is searched first. `registered` is
+/// `static_registered`, one value for every directory (id's is a single
+/// global), gating loose files below each directory alike.
+fn add_game_directory(dir: &Path, packs: &[Pak], registered: bool, rest: Option<Pak>) -> Pak {
+    let base = Pak::directory(dir, registered);
+    let base = if let Some(rest) = rest { base.over(rest) } else { base };
+    packs.iter().cloned().fold(base, |path, pack| pack.over(path))
+}
+
+/// Every directory in `dirs` (id's order: `id1`, then each mod directory),
+/// chained with [`add_game_directory`] so each is searched before the ones
+/// that came before it.
+fn build_search_path(dirs: &[(PathBuf, Vec<Pak>)], registered: bool) -> Pak {
+    let mut chain: Option<Pak> = None;
+    for (dir, packs) in dirs {
+        chain = Some(add_game_directory(dir, packs, registered, chain));
+    }
+    chain.expect("at least one game directory (id1)")
 }
 
 /// `COM_LoadPackFile`'s `Sys_Error`s: not a pack, too many files (or, the
@@ -207,10 +249,12 @@ pub fn path_lines(files: &Pak) -> Vec<String> {
     out
 }
 
-/// `PR_LoadProgs`'s refusals of the path's `progs.dat` — missing, the wrong
-/// bytecode version, made against another `progdefs.h` — and the port's
-/// own: builtins id's engine never had (the module's doc says why). An
-/// `Err` is the message the game stops with.
+/// `PR_LoadProgs`'s eager refusals of the path's `progs.dat`: missing, the
+/// wrong bytecode version, made against another `progdefs.h`. A function
+/// that *declares* a builtin id's engine never had is not refused here —
+/// id's own engine does not notice until that builtin is actually called,
+/// and nor does this one (`vm.rs`'s `OP_CALLn`, the module's doc). An `Err`
+/// is the message the game stops with.
 pub fn check_progs(files: &Pak) -> Result<(), String> {
     let Ok(Some(bytes)) = files.read_file("progs.dat") else {
         return Err("PR_LoadProgs: couldn't load progs.dat".to_string());
@@ -222,37 +266,7 @@ pub fn check_progs(files: &Pak) -> Result<(), String> {
     if progs.crc != PROGHEADER_CRC {
         return Err("progs.dat system vars have been modified, progdefs.h is out of date".to_string());
     }
-    let missing = foreign_builtins(&progs);
-    if missing.is_empty() {
-        return Ok(());
-    }
-    Err(format!(
-        "progs.dat calls {} builtin{} id's engine does not have ({}): it was made for another engine \
-         (the 2021 re-release's is), not for id's 1996 Quake, which this port plays",
-        missing.len(),
-        if missing.len() == 1 { "" } else { "s" },
-        missing.iter().take(4).cloned().collect::<Vec<_>>().join(", ") + if missing.len() > 4 { ", …" } else { "" },
-    ))
-}
-
-/// The builtins `progs` declares that id's `pr_builtin[]` does not have: a
-/// number past its end, or 0 (a builtin found by name) on any function but
-/// the null function 0. Each as `name #n`.
-fn foreign_builtins(progs: &Progs) -> Vec<String> {
-    let known = crate::builtins::default_builtins().len();
-    progs
-        .functions
-        .iter()
-        .skip(1)
-        .filter_map(|f| {
-            let number = match f.builtin() {
-                Some(n) if n >= known => n,
-                None if f.first_statement == 0 => 0,
-                _ => return None,
-            };
-            Some(format!("{} #{number}", progs.string(f.s_name)))
-        })
-        .collect()
+    Ok(())
 }
 
 #[cfg(test)]
@@ -329,13 +343,13 @@ mod tests {
         // COM_LoadPackFile sets com_modified for any pack that is not id's pak0;
         // without gfx/pop.lmp that is Sys_Error.
         let base = basedir("modified", &[pak0()]);
-        let fs = init_filesystem(&base);
+        let fs = init_filesystem(&base, &[], false);
         let err = fs.err().unwrap_or_default();
         assert_eq!(err, "You must have the registered version to use modified games");
         // pak1.pak with id's pop.lmp: the registered game, e2m1 on the path.
         let pak1 = write_pack(&[("gfx/pop.lmp", &pop_lmp()), ("maps/e2m1.bsp", b"e2m1")]);
         let base = basedir("registered", &[pak0(), pak1]);
-        let fs = init_filesystem(&base).expect("registered");
+        let fs = init_filesystem(&base, &[], false).expect("registered");
         assert!(fs.registered && fs.modified);
         assert_eq!(fs.files.read_file("maps/e2m1.bsp").unwrap().as_deref(), Some(&b"e2m1"[..]));
         assert_eq!(fs.files.read_file("maps/e1m1.bsp").unwrap().as_deref(), Some(&b"e1m1"[..]));
@@ -365,9 +379,9 @@ mod tests {
         let mut pop = pop_lmp();
         pop[21] ^= 1;
         let base = basedir("corrupted", &[pak0(), write_pack(&[("gfx/pop.lmp", &pop)])]);
-        assert_eq!(init_filesystem(&base).err().as_deref(), Some("Corrupted data file."));
+        assert_eq!(init_filesystem(&base, &[], false).err().as_deref(), Some("Corrupted data file."));
         let short = basedir("short", &[pak0(), write_pack(&[("gfx/pop.lmp", &pop_lmp()[..200])])]);
-        assert_eq!(init_filesystem(&short).err().as_deref(), Some("Corrupted data file."));
+        assert_eq!(init_filesystem(&short, &[], false).err().as_deref(), Some("Corrupted data file."));
     }
 
     #[test]
@@ -375,10 +389,10 @@ mod tests {
         // pak2 without pak1 is never loaded (COM_AddGameDirectory's loop ends).
         let base = basedir("gap", &[pak0()]);
         std::fs::write(base.join(GAMENAME).join("pak2.pak"), write_pack(&[("gfx/pop.lmp", &pop_lmp())])).unwrap();
-        let refused = init_filesystem(&base).err();
+        let refused = init_filesystem(&base, &[], false).err();
         assert_eq!(refused.as_deref(), Some("You must have the registered version to use modified games"), "pak2 is not on the path");
         std::fs::write(base.join(GAMENAME).join("pak1.pak"), b"not a pack at all").unwrap();
-        let err = init_filesystem(&base).unwrap_err();
+        let err = init_filesystem(&base, &[], false).unwrap_err();
         assert!(err.ends_with("pak1.pak is not a packfile"), "{err}");
     }
 
@@ -392,20 +406,24 @@ mod tests {
         std::fs::create_dir_all(id1.join("maps")).unwrap();
         std::fs::write(id1.join("gfx/pop.lmp"), pop_lmp()).unwrap();
         std::fs::write(id1.join("maps/mine.bsp"), b"mine").unwrap();
-        let fs = init_filesystem(&base).expect("registered by the loose lump");
+        let fs = init_filesystem(&base, &[], false).expect("registered by the loose lump");
         assert!(fs.registered);
         assert_eq!(fs.files.read_file("maps/mine.bsp").unwrap().as_deref(), Some(&b"mine"[..]));
     }
 
     #[test]
-    fn progs_with_builtins_id_never_had_are_refused() {
+    fn a_progs_that_only_declares_foreign_builtins_is_not_refused_at_startup() {
         let ok = write_pack(&[("progs.dat", &progs_image(&[1, -1, -78], PROGHEADER_CRC))]);
         let pak = Pak::from_bytes("pak0.pak".into(), ok).unwrap();
         assert_eq!(check_progs(&pak), Ok(()));
-        // A builtin by name (#0) and one past pr_builtin[]'s 79.
+        // A builtin by name (#0) and one past pr_builtin[]'s 79, same as the
+        // mission packs' re-release progs.dat (finaleFinished #79, localsound
+        // #80): declared, never called. check_progs no longer scans for
+        // these — only an actual call fails, lazily, in the VM (vm.rs's
+        // `calling_an_unknown_builtin_errors_at_the_call_not_at_load`).
         let foreign = write_pack(&[("progs.dat", &progs_image(&[1, 0, -99], PROGHEADER_CRC))]);
-        let err = check_progs(&Pak::from_bytes("pak0.pak".into(), foreign).unwrap()).unwrap_err();
-        assert!(err.starts_with("progs.dat calls 2 builtins id's engine does not have (ex_bot_movetopoint #0, checkextension #99)"), "{err}");
+        assert_eq!(check_progs(&Pak::from_bytes("pak0.pak".into(), foreign).unwrap()), Ok(()));
+        // The other eager checks (id's own, at load) still apply.
         let other_defs = write_pack(&[("progs.dat", &progs_image(&[1], 1234))]);
         assert_eq!(
             check_progs(&Pak::from_bytes("pak0.pak".into(), other_defs).unwrap()),
@@ -413,6 +431,46 @@ mod tests {
         );
         let none = Pak::from_bytes("pak0.pak".into(), write_pack(&[])).unwrap();
         assert_eq!(check_progs(&none), Err("PR_LoadProgs: couldn't load progs.dat".to_string()));
+    }
+
+    #[test]
+    fn mod_dirs_layer_over_id1_in_ids_order_and_the_last_becomes_com_gamedir() {
+        // id1/pak0 has e1m1, id1/pak1 is a registered pak1 (pop.lmp): the real
+        // shape, since a mission pack's own pak0.pak carries no pop.lmp and
+        // needs the registered id1 behind it. rogue/pak0 (same shape as the
+        // real mission pack's own pak0.pak) overrides maps/start.bsp and adds
+        // maps/r1m1.bsp; -game "xyz" (a plain directory, no pak) is layered
+        // on top of that and forces com_modified even though it carries no
+        // pack at all.
+        let base = basedir("moddirs", &[pak0(), write_pack(&[("gfx/pop.lmp", &pop_lmp())])]);
+        let rogue_pak = write_pack(&[("maps/start.bsp", b"rogue-start"), ("maps/r1m1.bsp", b"r1m1")]);
+        std::fs::create_dir_all(base.join("rogue")).unwrap();
+        std::fs::write(base.join("rogue").join("pak0.pak"), rogue_pak).unwrap();
+        std::fs::create_dir_all(base.join("xyz")).unwrap();
+        std::fs::write(base.join("xyz").join("extra.txt"), b"hi").unwrap();
+
+        let fs = init_filesystem(&base, &["rogue", "xyz"], true).expect("layers over id1");
+        assert!(fs.modified, "-game forces com_modified even with no pack to judge");
+        assert!(fs.registered, "id1's pak1 (pop.lmp) registers it, found through the chain");
+        assert_eq!(fs.gamedir, base.join("xyz"), "com_gamedir is the last directory added");
+        // rogue's own start.bsp shadows id1's pak0 (which has none); id1's
+        // e1m1.bsp still reads through, since rogue's pak doesn't have it.
+        assert_eq!(fs.files.read_file("maps/start.bsp").unwrap().as_deref(), Some(&b"rogue-start"[..]));
+        assert_eq!(fs.files.read_file("maps/r1m1.bsp").unwrap().as_deref(), Some(&b"r1m1"[..]));
+        assert_eq!(fs.files.read_file("maps/e1m1.bsp").unwrap().as_deref(), Some(&b"e1m1"[..]));
+        let id1 = base.join(GAMENAME);
+        assert_eq!(
+            path_lines(&fs.files),
+            [
+                "Current search path:".to_string(),
+                base.join("xyz").display().to_string(),
+                format!("{} (2 files)", base.join("rogue").join("pak0.pak").display()),
+                base.join("rogue").display().to_string(),
+                format!("{} (1 files)", id1.join("pak1.pak").display()),
+                format!("{} (2 files)", id1.join("pak0.pak").display()),
+                id1.display().to_string(),
+            ]
+        );
     }
 
     /// id's own data: the shareware `pak0.pak` alone is id's shareware game,
@@ -425,7 +483,7 @@ mod tests {
             return;
         };
         let base = basedir("id", &[bytes]);
-        let fs = init_filesystem(&base).expect("id's shareware game starts");
+        let fs = init_filesystem(&base, &[], false).expect("id's shareware game starts");
         assert!(!fs.registered && !fs.modified);
         let file = base.join(GAMENAME).join("pak0.pak");
         assert_eq!(fs.log, [format!("Added packfile {} (339 files)", file.display()), "Playing shareware version.".into()]);

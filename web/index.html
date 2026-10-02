@@ -107,6 +107,14 @@
      below shrinks the canvas under 640px (it must wrap, never spill). */
   #play { font-size:17px; color:#e6dcc6; text-shadow:0 1px 6px #000;
     max-width:100%; box-sizing:border-box; padding:0 16px; text-align:center; }
+  /* The game picker: plain links that set ?game= and reload (main(), "Game
+     directories"). Lives in #overlay itself, not #boot/#play, so it shows
+     through both the download and the click-to-play prompt, and is gone
+     for good once the first gesture retires the whole overlay. Hidden by
+     renderGamePicker() until there is a mission pack to offer. */
+  #gamePicker { font-size:13px; color:var(--dim); margin-top:14px;
+    max-width:100%; box-sizing:border-box; padding:0 16px; text-align:center; }
+  #gamePicker.hidden { display:none; }
 
   /* Small non-blocking chips anchored inside #wrap (so they ride along into
      fullscreen). pointer-events:none — clicks pass straight through to the
@@ -131,11 +139,11 @@
   #status { flex:1 1 12rem; min-width:0; color:#a08c5a; white-space:nowrap;
     overflow:hidden; text-overflow:ellipsis; }
   #barBtns { display:flex; gap:16px; }
-  button.link { font:inherit; font-size:12.5px; background:none; border:0; padding:0;
+  button.link, a.link { font:inherit; font-size:12.5px; background:none; border:0; padding:0;
     color:var(--dim); cursor:pointer; text-decoration:underline; text-decoration-color:transparent;
     text-underline-offset:3px; transition:color .15s, text-decoration-color .15s; }
-  button.link:hover { color:var(--bronze-hi); text-decoration-color:currentColor; }
-  button.link:focus-visible { outline:2px solid var(--bronze); outline-offset:3px; border-radius:2px; }
+  button.link:hover, a.link:hover { color:var(--bronze-hi); text-decoration-color:currentColor; }
+  button.link:focus-visible, a.link:focus-visible { outline:2px solid var(--bronze); outline-offset:3px; border-radius:2px; }
   button.link[aria-expanded="true"], #sndBtn.on { color:var(--bronze-hi); }
 
   /* The drawer: controls reference, console commands, shortcuts, credit. */
@@ -185,6 +193,7 @@
           <div id="bootBar"><div id="bootFill"></div></div>
         </div>
         <div id="play" class="hidden">click (or press Enter) to start &nbsp;·&nbsp; then press any key for the menu</div>
+        <div id="gamePicker" class="hidden"></div>
       </div>
       <div id="lockChip" class="chip">click to capture mouse</div>
       <div id="fsHint" class="chip">Esc = menu &nbsp;·&nbsp; F = leave fullscreen</div>
@@ -253,8 +262,10 @@
       </div>
     </details>
     <section id="content">
-      <p id="contentLine">Own Quake? Add your copy's <code>id1/pak1.pak</code> for episodes 2–4, and its CD music
-        (<code>music/track02.ogg</code>…): drop the files, or the whole Quake folder, anywhere on this page, or
+      <p id="contentLine">Own Quake? Add your copy's <code>id1/pak1.pak</code> for episodes 2–4, a mission
+        pack's own <code>hipnotic/pak0.pak</code> or <code>rogue/pak0.pak</code>, and the CD music
+        (<code>music/track02.ogg</code>…, or <code>hipnotic/music/track02.ogg</code> for its own): drop the files,
+        or the whole Quake folder, anywhere on this page, or
         <button id="addBtn" class="link">choose files</button>. They stay in this browser.</p>
       <p id="contentMsg" class="hidden"></p>
       <input id="fileInput" type="file" multiple hidden>
@@ -262,7 +273,7 @@
     <p class="aside">Shortcuts: <button id="walkBtn" class="link">walk e1m1</button> · <button id="demoBtn" class="link">play demo1 (e1m3)</button></p>
     <p class="aside">id Software's 1996 Quake, ported to Rust from its GPL source and software-rendered in your browser — no GPU, no dependencies. Shareware episode included.</p>
   </div>
-<div id="dropHint" class="hidden">drop your Quake files — pak1.pak, the music</div>
+<div id="dropHint" class="hidden">drop your Quake files — pak1.pak, a mission pack's pak0.pak, the music</div>
 <script>
 // The page is a small host for the game, which runs as a program in a Web
 // Worker (wasi.js runs quake.wasm there). The page owns what a browser
@@ -287,6 +298,7 @@ const bootEl = document.getElementById('boot');
 const bootMsg = document.getElementById('bootMsg');
 const bootFill = document.getElementById('bootFill');
 const playEl = document.getElementById('play');
+const gamePickerEl = document.getElementById('gamePicker');
 const lockChip = document.getElementById('lockChip');
 const fsHint = document.getElementById('fsHint');
 // The keys whose browser default (scrolling, or a click on a focused button)
@@ -301,6 +313,64 @@ const MOVE_KEYNUMS = [119, 97, 115, 100, 99, 32, 128, 129, 130, 131];
 const F_KEY_KEYNUMS = [135, 137, 139, 140, 144]; // F1, F3, F5, F6, F10
 // MouseEvent.button -> Quake keynum (keys.h K_MOUSE1/2/3): left, middle, right.
 const MOUSE_KEYNUMS = { 0: 200, 1: 202, 2: 201 };
+
+// ===========================================================================
+// Game directories: id1 always, and the two mission packs
+// (quake-rs's common.rs: `mod_dirs`; AUDIT.md "The mission packs' own file
+// layout and progs")
+// ===========================================================================
+// `?game=hipnotic` / `?game=rogue` in the address is this load's `-hipnotic`
+// / `-rogue` (commandLine(), below); read once, since changing it needs a
+// fresh program (a new game directory layered over id1 is a command-line
+// argument, decided before the worker starts, not something swapped live).
+// Everything that is scoped per game — the CD's tracks, the drop handler,
+// a server's own files.json — reads GAME_DIR, never GAME_PARAM, so id1
+// plays with no mission pack in the search path at all, as it always did.
+const GAME_DIRS = ['id1', 'hipnotic', 'rogue'];
+const GAME_NAMES = { id1: 'id1', hipnotic: 'Scourge of Armagon', rogue: 'Dissolution of Eternity' };
+function gameParam() {
+  const g = new URLSearchParams(location.search).get('game');
+  return g === 'hipnotic' || g === 'rogue' ? g : null;
+}
+const GAME_PARAM = gameParam();
+const GAME_DIR = GAME_PARAM || 'id1';
+// The address with `game` set to switch to (or removed, for id1), keeping
+// every other query param (?classic, ?2026) as it was.
+function gameHref(g) {
+  const q = new URLSearchParams(location.search);
+  if (g === 'id1') q.delete('game'); else q.set('game', g);
+  const s = q.toString();
+  return location.pathname + (s ? '?' + s : '');
+}
+// Which of hipnotic/rogue this deploy can actually offer — a manifest
+// entry or a kept file for that pack's own pak0.pak — so the picker never
+// links to a pack that isn't there (the engine would just fall back to
+// plain shareware, silently: AUDIT.md's "The browser"). `manifestFiles` is
+// fetchManifest()'s raw list (every game's entries, unfiltered — unlike
+// planServerFiles's, which is already narrowed to GAME_DIR); `storedPaths`
+// is the player's own kept files (storage.all()'s keys).
+function packsAvailable(manifestFiles, storedPaths) {
+  const have = new Set();
+  for (const f of manifestFiles || []) {
+    const path = typeof f === 'string' ? f : f && f.path;
+    if (path === 'hipnotic/pak0.pak' || path === 'rogue/pak0.pak') have.add(path.split('/')[0]);
+  }
+  for (const g of ['hipnotic', 'rogue']) if (storedPaths.has(`${g}/pak0.pak`)) have.add(g);
+  return have;
+}
+// The start overlay's picker: id1 plus every mission pack this deploy (or
+// the player's own files) can offer — "the dumb way" (mission-page.md):
+// plain links that set ?game= and reload, not a live in-page switch. The
+// game actually running is plain text (even one whose data turned out
+// missing, so there is always a link back to id1). Hidden entirely for a
+// plain id1 deploy — nothing to pick.
+function renderGamePicker(have, active) {
+  const shown = GAME_DIRS.filter(g => g === 'id1' || have.has(g) || g === active);
+  if (shown.length < 2) return;
+  gamePickerEl.innerHTML = shown.map(g => g === (active || 'id1')
+    ? GAME_NAMES[g] : `<a class="link" href="${gameHref(g)}">${GAME_NAMES[g]}</a>`).join(' &nbsp;·&nbsp; ');
+  gamePickerEl.classList.remove('hidden');
+}
 
 // ===========================================================================
 // The host: shared memory, the worker, and the protocol (web/PLATFORM.md;
@@ -1044,7 +1114,7 @@ function cdGraph() {
 async function cdLoad(track) {
   cd.loading = true;
   try {
-    const blob = await storage.musicGet(track);
+    const blob = await storage.musicGet(GAME_DIR, track);
     if (cd.url) { URL.revokeObjectURL(cd.url); cd.url = null; }
     cd.track = track;
     const serverUrl = serverTracks.get(track);
@@ -1360,37 +1430,63 @@ const storage = {
       tx.oncomplete = tx.onerror = () => resolve();
     });
   },
-  // The CD's tracks: the music store's values are the player's files (Blobs),
-  // keyed by track number.
-  musicTracks() {
+  // The CD's tracks: the music store's values are the player's files
+  // (Blobs), keyed by "<game dir>:<track>" — id1, hipnotic and rogue each
+  // shipped their own CD, so a mission pack's track 2 is never the one
+  // id1's track 2 is (migrateMusicKeys() moves a pre-mission-pack kept
+  // track, keyed by its bare number, under "id1:" once).
+  musicTracks(dir) {
     if (this.fallback || !this.db) return Promise.resolve([]);
     return new Promise(resolve => {
       const req = this.db.transaction('music').objectStore('music').getAllKeys();
-      req.onsuccess = () => resolve(req.result.map(Number).sort((a, b) => a - b));
+      req.onsuccess = () => resolve(req.result.filter(k => typeof k === 'string' && k.startsWith(dir + ':'))
+        .map(k => Number(k.slice(dir.length + 1))).sort((a, b) => a - b));
       req.onerror = () => resolve([]);
     });
   },
-  musicGet(track) {
+  musicGet(dir, track) {
     if (this.fallback || !this.db) return Promise.resolve(null);
     return new Promise(resolve => {
-      const req = this.db.transaction('music').objectStore('music').get(track);
+      const req = this.db.transaction('music').objectStore('music').get(`${dir}:${track}`);
       req.onsuccess = () => resolve(req.result || null);
       req.onerror = () => resolve(null);
     });
   },
-  musicPut(track, blob) {
+  musicPut(dir, track, blob) {
     return new Promise((resolve, reject) => {
       const tx = this.db.transaction('music', 'readwrite');
-      tx.objectStore('music').put(blob, track);
+      tx.objectStore('music').put(blob, `${dir}:${track}`);
       tx.oncomplete = () => resolve();
       tx.onerror = tx.onabort = () => reject(tx.error);
     });
   },
+  // Every kept track, of every game: "remove yours" sweeps them all, same
+  // as it always swept every kept pak (removeContent).
   musicClear() {
     if (this.fallback || !this.db) return Promise.resolve();
     return new Promise(resolve => {
       const tx = this.db.transaction('music', 'readwrite');
       tx.objectStore('music').clear();
+      tx.oncomplete = tx.onerror = () => resolve();
+    });
+  },
+  // One-time: a track kept before mission packs existed is keyed by its
+  // bare number (an IndexedDB key, not a string) — move it to "id1:<n>",
+  // the only game directory that could have meant, so an existing kept CD
+  // rip still plays after this round. A store can mix key types with no
+  // version bump; this only changes which keys this code itself writes.
+  migrateMusicKeys() {
+    if (this.fallback || !this.db) return Promise.resolve();
+    return new Promise(resolve => {
+      const tx = this.db.transaction('music', 'readwrite'), store = tx.objectStore('music');
+      const req = store.getAllKeys();
+      req.onsuccess = () => {
+        for (const k of req.result) {
+          if (typeof k !== 'number') continue;
+          const get = store.get(k);
+          get.onsuccess = () => { if (get.result !== undefined) store.put(get.result, `id1:${k}`); store.delete(k); };
+        }
+      };
       tx.oncomplete = tx.onerror = () => resolve();
     });
   },
@@ -1452,20 +1548,25 @@ async function migrateLocalStorage(have) {
 // Your Quake: the player's own files (web/PLATFORM.md, "Your files")
 // ===========================================================================
 // A player who owns Quake adds id's files: id1/pak1.pak (episodes 2–4; a
-// registered id1/pak0.pak too, if it is not the shareware one) and the CD's
-// tracks as files (Steam and GOG ship them as music/track02.ogg…). They are
-// dropped anywhere on the page — files, or the whole Quake folder — or
-// chosen with the drawer's button. The page checks that a pak is a pak,
-// keeps it in the game directory the program reads (the `files` store: the
-// worker gets it at start), keeps the music in a store of its own (the
-// drive gets a track at a time), and restarts the game: a reload, since
-// the worker takes its files before it starts. The program then decides as
-// id's did (COM_CheckRegistered, PR_LoadProgs); if it will not start with
-// what was just added, the page takes that out again and says why.
+// registered id1/pak0.pak too, if it is not the shareware one), a mission
+// pack's own hipnotic/pak0.pak or rogue/pak0.pak, and the CD's tracks as
+// files (Steam and GOG ship id1's as music/track02.ogg…; a mission pack's
+// own, this page's own convention, as hipnotic/music/track02.ogg…, next to
+// its pak — "A server's own files" below lays a deploy out the same way).
+// They are dropped anywhere on the page — files, or the whole Quake folder
+// — or chosen with the drawer's button. The page checks that a pak is a
+// pak, keeps it in the game directory the program reads (the `files`
+// store: the worker gets it at start), keeps the music in a store of its
+// own (the drive gets a track at a time), and restarts the game: a reload,
+// since the worker takes its files before it starts. The program then
+// decides as id's did (COM_CheckRegistered, PR_LoadProgs); if it will not
+// start with what was just added, the page takes that out again and says
+// why.
 //
 // Not supported, by design: the 2021 re-release's files (rerelease/…:
 // its progs.dat needs its own engine's builtins, which the program refuses
-// by name), mods and mission packs (more paks, other game directories).
+// by name), and any mod beyond id1/hipnotic/rogue (`-game` on the engine's
+// own command line has no page-side counterpart).
 const PAK0_COUNT = 339, PAK0_CRC = 32981, MAX_FILES_IN_PACK = 2048;
 const CONTENT_KEY = 'quake-rs.content';   // localStorage: { pending: [paths], note, ok }
 const MUSIC_TYPES = { ogg: 'audio/ogg', oga: 'audio/ogg', opus: 'audio/ogg; codecs=opus', mp3: 'audio/mpeg',
@@ -1478,7 +1579,9 @@ const contentLine = document.getElementById('contentLine');
 const contentMsg = document.getElementById('contentMsg');
 const fileInput = document.getElementById('fileInput');
 const dropHint = document.getElementById('dropHint');
-const isPakPath = (p) => /^id1\/pak\d+\.pak$/.test(p);
+// Any game directory's pak, kept or server-offered: "id1/pak1.pak",
+// "hipnotic/pak0.pak"... (GAME_DIRS, above).
+const isPakPath = (p) => /^(id1|hipnotic|rogue)\/pak\d+\.pak$/.test(p);
 // track number -> the server's URL for it, set once at boot (planServerFiles).
 let serverTracks = new Map();
 
@@ -1537,27 +1640,41 @@ function musicTrack(name) {
   return m ? parseInt(m[1], 10) : 0;
 }
 
+// The game directory a dropped file's path means: the nearest of GAME_DIRS
+// among its own folder and the one above it (so both "hipnotic/pak0.pak"
+// and "hipnotic/music/track02.ogg" are found, however deep a whole
+// "Quake/hipnotic/…" folder drop nests them). Not found — a bare file, or
+// id1's own un-prefixed "music/…" the way Steam and GOG actually ship it —
+// means id1, exactly as every drop meant before mission packs.
+function dropGameDir(parts) {
+  for (let i = parts.length - 2; i >= Math.max(0, parts.length - 3); i--) {
+    if (GAME_DIRS.includes(parts[i])) return parts[i];
+  }
+  return 'id1';
+}
+
 // Sort what was dropped or chosen ({ file, path } each) into what to keep,
 // and say what was left out and why.
 async function planContent(items) {
-  const plan = { paks: [], music: new Map(), notes: [] };
+  const plan = { paks: [], music: [], notes: [] };
   let ignored = 0, rerelease = 0;
   const probe = new Audio();
   for (const { file, path } of items) {
-    const lower = path.toLowerCase(), base = lower.split('/').pop();
+    const lower = path.toLowerCase(), parts = lower.split('/'), base = parts[parts.length - 1];
     if (/(^|\/)rerelease\//.test(lower)) { rerelease++; continue; }
+    const dir = dropGameDir(parts);
     if (/^pak\d+\.pak$/.test(base)) {
       if (base !== 'pak0.pak' && base !== 'pak1.pak') {
-        plan.notes.push(`${file.name}: only id's pak0.pak and pak1.pak are played (no mods or mission packs)`);
+        plan.notes.push(`${file.name}: only pak0.pak and pak1.pak are played, in id1, hipnotic or rogue — no other mods`);
         continue;
       }
       const pak = await readPak(file);
       if (pak.error) { plan.notes.push(`${file.name}: ${pak.error}`); continue; }
-      if (base === 'pak0.pak' && pak.count === PAK0_COUNT && pak.crc === PAK0_CRC) {
+      if (dir === 'id1' && base === 'pak0.pak' && pak.count === PAK0_COUNT && pak.crc === PAK0_CRC) {
         plan.notes.push("pak0.pak is id's own, which the page already has");
         continue;
       }
-      plan.paks.push({ path: 'id1/' + base, file, pak });
+      plan.paks.push({ path: `${dir}/${base}`, file, pak });
       continue;
     }
     const track = musicTrack(base);
@@ -1565,7 +1682,7 @@ async function planContent(items) {
       const ext = base.split('.').pop();
       if (track < 2) plan.notes.push(`${file.name}: track 1 is the CD's data; the music is tracks 2–11`);
       else if (!probe.canPlayType(MUSIC_TYPES[ext])) plan.notes.push(`${file.name}: this browser cannot play .${ext}`);
-      else plan.music.set(track, file);
+      else plan.music.push({ dir, track, file });
       continue;
     }
     ignored++;
@@ -1580,23 +1697,29 @@ async function planContent(items) {
 // ===========================================================================
 // A server's own files (web/PLATFORM.md, "A server's own files")
 // ===========================================================================
-// A deploy can offer id1/pak1.pak and the CD's tracks itself — so its own
-// player (or anyone on its private network) doesn't have to drop them in every
-// session — by an optional manifest, files.json, beside index.html:
-// { "files": [ { "path": "id1/pak1.pak", "size": 41894404 }, ... ] }.
+// A deploy can offer id1/pak1.pak, a mission pack's own hipnotic/pak0.pak
+// or rogue/pak0.pak, and the CD's tracks itself — so its own player (or
+// anyone on its private network) doesn't have to drop them in every session — by
+// an optional manifest, files.json, beside index.html:
+// { "files": [ { "path": "id1/pak1.pak", "size": 41894404 },
+//              { "path": "hipnotic/pak0.pak", "size": 15335808 }, ... ] }.
 // Fetched once, quietly: absent (no such deploy, or offline) just means
-// pak0 only, with no further requests for pak1 or any track — the point of
-// asking a manifest instead of guessing (a GET for pak1.pak, then ten for
-// tracks 2..11) is exactly to make a plain pak0 deploy's page load with no
-// failing requests. A size is used only where a response's Content-Length
-// can't be (download()'s comment): it is not otherwise trusted.
+// pak0 only, with no further requests for pak1, a mission pack or any
+// track — the point of asking a manifest instead of guessing (a GET for
+// pak1.pak, then ten for tracks 2..11) is exactly to make a plain pak0
+// deploy's page load with no failing requests. A size is used only where a
+// response's Content-Length can't be (download()'s comment): it is not
+// otherwise trusted.
 //
 // What it finds is classified exactly as a dropped file is (isPakPath,
-// musicTrack): one path into the program either way. The paks come down
-// with quake.wasm and pak0, in the same download() and its one progress
-// bar; a track is never fetched here at all — the CD plays its URL
-// directly ("CD music"), streamed by the browser, so offering ten tracks
-// costs nothing until one is actually played.
+// musicTrack), then kept only if it is id1's own (always relevant: the
+// mission packs' search path layers over it) or GAME_DIR's own — never
+// fetched at all for a pack that is not the one this load is starting
+// (planServerFiles's `dir`/`gameDir` below). The paks come down with
+// quake.wasm and pak0, in the same download() and its one progress bar; a
+// track is never fetched here at all — the CD plays its URL directly ("CD
+// music"), streamed by the browser, so offering ten tracks costs nothing
+// until one is actually played.
 async function fetchManifest() {
   try {
     const r = await fetch('files.json', { cache: 'no-cache' });
@@ -1609,20 +1732,29 @@ const musicProbe = new Audio();
 function canPlayMusic(ext) {
   return !!MUSIC_TYPES[ext] && !!musicProbe.canPlayType(MUSIC_TYPES[ext]);
 }
-// The manifest's entries, sorted into extra paks to download (pak0 is
-// always the deploy's own, never the manifest's) and tracks (by name, never
+// The manifest's entries for `gameDir` (GAME_DIR: id1 if no mission pack is
+// playing), sorted into extra paks to download and tracks (by name, never
 // downloaded here) — { paks: [{path, size}], tracks: Map<track, path> }.
-function planServerFiles(list) {
+// A pak is kept if it is id1's own extra pak (pak1…: the search path layers
+// every game directory over id1, so its own paks are always in effect) or
+// gameDir's own (pak0's where gameDir is a mission pack — id1's own pak0 is
+// never the manifest's: it is always the deploy's own baseline fetch). CD
+// music does not layer like the search path — whichever game is running,
+// its own track N is what plays — so a track is kept only if it is
+// gameDir's own, id1's included only when gameDir is id1.
+function planServerFiles(list, gameDir) {
   const paks = [], tracks = new Map();
   for (const f of list || []) {
     const path = typeof f === 'string' ? f : f && f.path;
     if (typeof path !== 'string') continue;
     const size = (f && typeof f === 'object' && Number.isFinite(f.size) && f.size > 0) ? f.size : 0;
-    const base = path.toLowerCase().split('/').pop();
+    const parts = path.toLowerCase().split('/'), dir = parts[0], base = parts[parts.length - 1];
     if (/^pak\d+\.pak$/.test(base)) {
-      if (base !== 'pak0.pak') paks.push({ path, size });
+      if (dir === 'id1' && base === 'pak0.pak') continue;
+      if (dir === 'id1' || dir === gameDir) paks.push({ path, size });
       continue;
     }
+    if (dir !== gameDir) continue;
     const track = musicTrack(base);
     if (track >= 2 && canPlayMusic(base.split('.').pop())) tracks.set(track, path);
   }
@@ -1634,16 +1766,19 @@ async function addContent(items) {
   if (storage.fallback || !storage.db) { contentShow('your files need IndexedDB, which this browser does not offer here', false); return; }
   contentShow('reading your files…', true);
   const plan = await planContent(items);
-  if (!plan.paks.length && !plan.music.size) { contentShow(plan.notes.join('; ') || 'nothing to add', false); return; }
+  if (!plan.paks.length && !plan.music.length) { contentShow(plan.notes.join('; ') || 'nothing to add', false); return; }
   try {
     for (const { path, file } of plan.paks) await storage.put(path, new Uint8Array(await file.arrayBuffer()));
-    for (const [track, file] of plan.music) await storage.musicPut(track, file);
+    for (const { dir, track, file } of plan.music) await storage.musicPut(dir, track, file);
   } catch (e) {
     contentShow('could not keep your files: ' + (e && e.message || e) + ' (storage full?)', false);
     return;
   }
-  const added = [...plan.paks.map(p => p.path.slice(4))];
-  if (plan.music.size) added.push(`${plan.music.size} CD track${plan.music.size === 1 ? '' : 's'}`);
+  // id1's own path reads as its bare name (as it always did: "pak1.pak",
+  // not "id1/pak1.pak"); a mission pack's own is distinct from another's
+  // pak0.pak only with its directory shown.
+  const added = plan.paks.map(p => p.path.startsWith('id1/') ? p.path.slice(4) : p.path);
+  if (plan.music.length) added.push(`${plan.music.length} CD track${plan.music.length === 1 ? '' : 's'}`);
   setContentNote({ pending: plan.paks.map(p => p.path), note: ['added ' + added.join(' and '), ...plan.notes].join('; ') });
   location.reload();
 }
@@ -1669,7 +1804,8 @@ async function contentStarted() {
   quake.contentPath = text;
   const have = content.paks.length || content.tracks.length;
   if (have) {
-    const what = content.registered ? 'registered Quake, episodes 1–4' : 'shareware Quake, episode 1';
+    const what = GAME_PARAM ? GAME_NAMES[GAME_PARAM]
+      : content.registered ? 'registered Quake, episodes 1–4' : 'shareware Quake, episode 1';
     const music = content.tracks.length ? `CD music: track${content.tracks.length === 1 ? '' : 's'} ${spans(content.tracks)}` : 'no CD music';
     const fromServer = content.serverPaks.length || content.serverTracks.length;
     // Removable: something of the player's own, over and above whatever
@@ -1838,18 +1974,24 @@ async function main() {
     fetchManifest(),
     (async () => {
       await storage.open();
+      await storage.migrateMusicKeys();
       const have = new Map(await storage.all().catch(() => []));
       await migrateLocalStorage(have);
       return have;
     })(),
   ]);
-  const server = planServerFiles(manifestFiles);
+  // The picker shows as soon as we know what's actually offered — during
+  // the download below, not just once it finishes (GAME_DIR's own data
+  // may turn out missing, in which case the engine falls back to plain
+  // shareware further down; the picker at least offers the way back).
+  renderGamePicker(packsAvailable(manifestFiles, new Set(files.keys())), GAME_PARAM);
+  const server = planServerFiles(manifestFiles, GAME_DIR);
   serverTracks = server.tracks;
   const urls = ['quake.wasm', 'id1/pak0.pak', ...server.paks.map(p => p.path)];
   const hints = [0, 0, ...server.paks.map(p => p.size)];
   const [wasm, pak, ...serverPakBytes] = await download(urls, hints);
 
-  const playerTracks = await storage.musicTracks();
+  const playerTracks = await storage.musicTracks(GAME_DIR);
   content.tracks = [...new Set([...server.tracks.keys(), ...playerTracks])].sort((a, b) => a - b);
   content.serverTracks = [...server.tracks.keys()].filter(t => !playerTracks.includes(t));
 
@@ -2004,12 +2146,22 @@ function sendWindow() {
 // `?classic` / `?2026` in the address: the profile to switch to, as the
 // command line's `+profile` (run after config.cfg, like the menu's switch,
 // so it sticks).
+// `?game=hipnotic` / `?game=rogue` (COM_InitFilesystem's `-hipnotic`/
+// `-rogue`, GAME_PARAM above): layers that mission pack's own game
+// directory over `id1`'s — `hipnotic/pak0.pak` or `rogue/pak0.pak` beside
+// `id1/pak0.pak`, the same shape `-basedir` always had (quake-rs's
+// `common.rs`). This only builds the argument; whether the page has that
+// file to serve at all (a drop, or a server's own `files.json`) is a
+// separate question the loader answers before the worker starts (see
+// `web/PLATFORM.md`) — with none, id's own engine (and this port) falls
+// back to plain shareware, silently.
 // The CD's tracks the player added: the disc in the program's drive
 // (`-cdtracks 2,3,…`, CDAudio_Init).
 function commandLine(tracks) {
   const q = new URLSearchParams(location.search);
   const cdtracks = tracks && tracks.length ? ['-cdtracks', tracks.join(',')] : [];
-  return [...cdtracks, ...(q.has('classic') ? ['+profile', 'classic'] : q.has('2026') ? ['+profile', '2026'] : [])];
+  const mod = GAME_PARAM === 'hipnotic' ? ['-hipnotic'] : GAME_PARAM === 'rogue' ? ['-rogue'] : [];
+  return [...cdtracks, ...mod, ...(q.has('classic') ? ['+profile', 'classic'] : q.has('2026') ? ['+profile', '2026'] : [])];
 }
 addEventListener('resize', () => { sendWindow(); fitCanvas(); });
 document.addEventListener('fullscreenchange', () => { sendWindow(); fitCanvas(); });
@@ -2447,7 +2599,7 @@ const quake = window.quake = {
       ({ file: new File([bytes], name, { type: type || '' }), path: path || name }))),
     remove: removeContent,
     state: () => ({ ...content, line: contentLine.textContent.trim(), message: contentMsg.textContent,
-                    path: quake.contentPath || '' }),
+                    path: quake.contentPath || '', game: GAME_PARAM }),
   },
 };
 

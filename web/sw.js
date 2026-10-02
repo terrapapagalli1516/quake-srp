@@ -4,11 +4,12 @@
 // One file with two roles. Run as the page's service worker (the bottom half
 // registers it), it answers the page's requests:
 //
-//   - the game data (`id1/*.pak`, `id1/music/*`): from its cache when it has
+//   - the game data (`id1/*.pak`, `id1/music/*`, and the same under
+//     `hipnotic/`/`rogue/` for a mission pack): from its cache when it has
 //     them, else from the network, kept. id's own data never changes once
-//     deployed (the shareware pak, a server's own pak1 and CD tracks,
-//     web/PLATFORM.md's "A server's own files"); bump DATA_CACHE to fetch
-//     it afresh.
+//     deployed (the shareware pak, a server's own pak1, a mission pack's
+//     own pak0, and CD tracks, web/PLATFORM.md's "A server's own files");
+//     bump DATA_CACHE to fetch it afresh.
 //   - everything else (the page, wasi.js, touch.js, endscreen.js,
 //     quake.wasm, the app manifest and icons, and a server's own
 //     files.json): from the network, kept for later, and from what was kept
@@ -84,9 +85,10 @@ if (typeof window === 'undefined') {
   });
 
   // id's own data, wherever a deploy keeps it: a pak, or a CD track under
-  // id1/music/ ("A server's own files").
+  // music/ — id1's own, or a mission pack's own hipnotic/rogue directory
+  // ("A server's own files"; index.html's GAME_DIRS).
   function isGameData(url) {
-    return /\/id1\/([^/]*\.pak|music\/[^/]+)$/i.test(url.pathname);
+    return /\/(id1|hipnotic|rogue)\/([^/]*\.pak|music\/[^/]+)$/i.test(url.pathname);
   }
   function isManifest(url) {
     return url.pathname === new URL('files.json', self.registration.scope).pathname;

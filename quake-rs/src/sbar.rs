@@ -10,6 +10,7 @@ use crate::draw::{
 };
 use crate::render::Image;
 use crate::screen::draw_center_string_revealed;
+use crate::server::GameMode;
 
 // ---------------------------------------------------------------------------
 // HUD / status bar (Quake's `sbar.c` `Sbar_Draw`)
@@ -130,6 +131,12 @@ pub struct Hud<'a> {
     /// strip and the status bar, 24 the status bar alone, 0 neither — though
     /// the death / Tab scoreboard still shows at 0, as in `Sbar_Draw`.
     pub sb_lines: i32,
+    /// `standard_quake`/`hipnotic`/`rogue` (common.c): which game this is —
+    /// id1 or one of the two mission packs, detected from the `progs.dat`
+    /// ([`crate::server::GameMode::detect`]). Draws the extra weapons/items
+    /// and the remapped armour/ammo-type bits `Sbar_DrawInventory`/`Sbar_Draw`
+    /// draw when `hipnotic`/`rogue` is set.
+    pub mode: GameMode,
 }
 
 /// Blit one `Qpic` at bar position `(vx, vy)` (`Sbar_DrawPic`): its top-left
@@ -264,6 +271,97 @@ pub(crate) const IT_INVISIBILITY: i32 = 524288; // 1<<19
 pub(crate) const IT_INVULNERABILITY: i32 = 1048576; // 1<<20
 pub(crate) const IT_SUIT: i32 = 2097152; // 1<<21 (Biosuit)
 pub(crate) const IT_QUAD: i32 = 4194304; // 1<<22
+const IT_KEY1: i32 = 131072; // 1<<17
+const IT_KEY2: i32 = 262144; // 1<<18
+
+// ---------------------------------------------------------------------------
+// Hipnotic's and Rogue's own item bits (`quakedef.h`'s "hipnotic added
+// defines" / "rogue changed and added defines") and `gfx.wad` lump names
+// (`Sbar_Init`'s `if (hipnotic)`/`if (rogue)` arms). Drawn only when
+// [`Hud::mode`] says so; id1's `Sbar_Draw`/`Sbar_DrawInventory` path (mode
+// [`GameMode::Id1`]) is unchanged.
+// ---------------------------------------------------------------------------
+
+/// `HIT_MJOLNIR_BIT` (quakedef.h): reuses standard's unused bit 7
+/// (`IT_SUPER_LIGHTNING`, never assigned a weapon in id1).
+const HIT_MJOLNIR_BIT: usize = 7;
+/// `HIT_PROXIMITY_GUN_BIT`: reuses standard's unused bit 16 (`IT_SUPERHEALTH`,
+/// dead in id1's QC).
+const HIT_PROXIMITY_GUN_BIT: usize = 16;
+/// `HIT_LASER_CANNON_BIT`: a fresh bit past every standard one.
+const HIT_LASER_CANNON_BIT: usize = 23;
+/// `HIT_PROXIMITY_GUN` (used by name: the combo-slot check reads it directly,
+/// unlike the other three weapon bits, which the [`HIPWEAPONS`]-indexed loop
+/// reaches by shifting their `_BIT` constant instead).
+const HIT_PROXIMITY_GUN: i32 = 1 << HIT_PROXIMITY_GUN_BIT;
+// Wetsuit and empathy shields, Hipnotic's two inventory items, are drawn
+// below straight off `1<<(24+i)` — sbar.c:699's own literal, which does NOT
+// match `quakedef.h`'s `HIT_WETSUIT`/`HIT_EMPATHY_SHIELDS` (`1<<25`/`1<<26`,
+// one bit higher). That mismatch is id's own (checked against the C: the
+// `#define`s exist but sbar.c never uses them, using `24+i` instead); ported
+// faithfully as the *engine* (sbar.c, what this module ports) checks it.
+
+/// `hipweapons[4]` (sbar.c): the `items` bit index for each of the 4
+/// inventory-bar slots — laser cannon, mjolnir, the grenade-launcher/
+/// proximity-gun combo slot (bit 4, `IT_GRENADE_LAUNCHER`'s), proximity gun.
+const HIPWEAPONS: [usize; 4] = [HIT_LASER_CANNON_BIT, HIT_MJOLNIR_BIT, 4, HIT_PROXIMITY_GUN_BIT];
+
+/// `hsb_weapons[flash][0..4]` suffixes (`Sbar_Init`): laser, mjolnir, the
+/// combo slot's two pics (grenade-launcher-holds-proximity-gun and
+/// proximity-gun-holds-grenade), proximity gun alone.
+const HIP_WEAPON_SUFFIX: [&str; 5] = ["laser", "mjolnir", "gren_prox", "prox_gren", "prox"];
+/// `hsb_items[0..1]` (`Sbar_Init`): wetsuit, empathy shields.
+const HIP_ITEM_NAMES: [&str; 2] = ["sb_wsuit", "sb_eshld"];
+
+/// Rogue's weapon-tier-2 bits (`quakedef.h`): the five `rsb_weapons` icons'
+/// `items` bits, each one bit above the last — `RIT_LAVA_NAILGUN << i`
+/// (`Sbar_DrawInventory`/`Sbar_Draw`'s `cl.stats[STAT_ACTIVEWEAPON] >=
+/// RIT_LAVA_NAILGUN` gate for the whole powered-weapon row).
+const RIT_LAVA_NAILGUN: i32 = 4096;
+/// Rogue's ammo-type bits — NOT the standard `IT_SHELLS`.. ones: Rogue shifts
+/// the whole ammo/weapon bit range down by one from standard (freeing bit 7,
+/// unused in id1, for `RIT_SHELLS`), so these are distinct constants.
+const RIT_SHELLS: i32 = 128;
+const RIT_NAILS: i32 = 256;
+const RIT_ROCKETS: i32 = 512;
+const RIT_CELLS: i32 = 1024;
+/// Rogue's armour-type bits — also not the standard ones: standard's
+/// `IT_ARMOR1/2/3` bits (13/14/15) are Rogue's weapon-tier-2 bits instead
+/// (`RIT_LAVA_SUPER_NAILGUN`/`RIT_MULTI_GRENADE`/`RIT_MULTI_ROCKET`), so
+/// armour moved to fresh bits past them.
+const RIT_ARMOR1: i32 = 8_388_608;
+const RIT_ARMOR2: i32 = 16_777_216;
+const RIT_ARMOR3: i32 = 33_554_432;
+/// The two extra ammo-icon bits past the standard four (`rsb_ammo[0..2]`
+/// covers lava nails, plasma, and multi-rockets — the C has no separate icon
+/// for multi-grenades).
+const RIT_LAVA_NAILS: i32 = 67_108_864;
+const RIT_PLASMA_AMMO: i32 = 134_217_728;
+const RIT_MULTI_ROCKETS: i32 = 268_435_456;
+/// Rogue's new inventory items (shield, anti-grav belt) — `rsb_items[0..1]`,
+/// same bar position as Hipnotic's wetsuit/shields (mutually exclusive modes).
+/// `rsb_items[0..1]`'s base bit (shield at `+0`, anti-grav belt at `+1`,
+/// `RIT_SHIELD`/`RIT_ANTIGRAV` — `1<<29`/`1<<30`).
+const RIT_SHIELD_BIT: usize = 29;
+
+/// `rsb_weapons[0..4]` lump names (`Sbar_Init`): lava nailgun, lava super
+/// nailgun, multi-grenade launcher, multi-rocket launcher, plasma gun.
+const RSB_WEAPON_NAMES: [&str; 5] = ["r_lava", "r_superlava", "r_gren", "r_multirock", "r_plasma"];
+/// `rsb_items[0..1]`: shield, anti-grav belt.
+const RSB_ITEM_NAMES: [&str; 2] = ["r_shield1", "r_agrav1"];
+/// `rsb_ammo[0..2]` (`Sbar_Init`) and which `items` bit shows each
+/// (`Sbar_Draw`'s ammo-icon slot, Rogue's extra `else if` arm past the
+/// standard four): `RIT_LAVA_NAILS` → `rsb_ammo[0]` "r_ammolava",
+/// `RIT_PLASMA_AMMO` → `rsb_ammo[1]` "r_ammomulti", `RIT_MULTI_ROCKETS` →
+/// `rsb_ammo[2]` "r_ammoplasma" — the last two names look swapped against
+/// their bit, but that is id's/Rogue's C exactly (sbar.c:1018-1022); kept
+/// faithfully, mismatch and all.
+const RSB_AMMO_ICONS: [(i32, &str); 3] =
+    [(RIT_LAVA_NAILS, "r_ammolava"), (RIT_PLASMA_AMMO, "r_ammomulti"), (RIT_MULTI_ROCKETS, "r_ammoplasma")];
+/// `rsb_invbar[0..1]` (`Sbar_Init`): the inventory strip's background, swapped
+/// to the "powered" art while a tier-2 weapon is active
+/// (`cl.stats[STAT_ACTIVEWEAPON] >= RIT_LAVA_NAILGUN`).
+const RSB_INVBAR_NAMES: [&str; 2] = ["r_invbar1", "r_invbar2"];
 
 /// `inv_*` (owned, dim) weapon icon lump names, `sb_weapons[0][i]` in `Sbar_Init`.
 const WEAPON_INV_NAMES: [&str; 7] = [
@@ -346,6 +444,32 @@ fn weapon_icon_name(flashon: i32, i: usize) -> String {
     }
 }
 
+/// [`weapon_flashon`] generalized to an arbitrary `items` bit and its
+/// `item_gettime` slot — Hipnotic's weapons use slots 4/7/16/23, not 0..6.
+/// Same formula: `(int)((cl.time - item_gettime[idx])*10)`; from 10 on, 1 for
+/// the active weapon and 0 otherwise; before that, `flashon%5 + 2`.
+fn flashon_for(hud: &Hud, bit: i32, idx: usize) -> i32 {
+    let settled = || i32::from(hud.weapon == bit);
+    let Some(gettime) = hud.item_gettime else { return settled() };
+    let Some(&t) = gettime.get(idx) else { return settled() };
+    let flashon = ((hud.time - t) * 10.0) as i32;
+    if flashon >= 10 {
+        settled()
+    } else {
+        flashon % 5 + 2
+    }
+}
+
+/// `hsb_weapons[flashon]` (Sbar_Init): `inv_*`, `inv2_*`, then `inva1..5_*` —
+/// Hipnotic's own suffix family, the same shape as [`weapon_icon_name`].
+fn flashed_hip_name(flashon: i32, suffix: &str) -> String {
+    match flashon {
+        0 => format!("inv_{suffix}"),
+        1 => format!("inv2_{suffix}"),
+        f => format!("inva{}_{suffix}", f - 1),
+    }
+}
+
 /// Try to fetch a HUD pic by name and blit it at virtual `(vx, vy)`; a missing or
 /// unparseable lump is silently skipped (`wad.qpic(name).ok()`), so the bar
 /// degrades gracefully exactly as the task requires.
@@ -422,17 +546,90 @@ fn draw_sbar_inventory(
     xf: BarXf,
 ) {
     let wad = hud.wad;
-    // The `ibar` strip in the 24 rows above the sbar: Sbar_DrawPic(0, -24, sb_ibar).
-    blit_named(image, wad, "ibar", 0.0, -24.0, xf);
+    // The inventory strip's background: Rogue swaps to the "powered" art while
+    // a tier-2 weapon is active (Sbar_DrawInventory's first lines); id1 and
+    // Hipnotic always draw `ibar`.
+    if hud.mode == GameMode::Rogue {
+        let name = if hud.weapon >= RIT_LAVA_NAILGUN { RSB_INVBAR_NAMES[0] } else { RSB_INVBAR_NAMES[1] };
+        blit_named(image, wad, name, 0.0, -24.0, xf);
+    } else {
+        blit_named(image, wad, "ibar", 0.0, -24.0, xf);
+    }
 
     // Weapon icons: for each owned weapon (items bit IT_SHOTGUN<<i, i=0..6), draw
     // `sb_weapons[flashon][i]` at Sbar_DrawPic(i*24, -16, ...): the `inva1..5_*`
     // flash for the first second after it was got, then the bright `inv2_*` for
-    // the active weapon and the dim `inv_*` for the rest (weapon_flashon).
+    // the active weapon and the dim `inv_*` for the rest (weapon_flashon). Runs
+    // unchanged for every mode — Rogue keeps all seven standard weapons as
+    // upgrade bases; its own tier-2 icon (below) draws over the same slot when
+    // that tier-2 weapon is the active one.
     for i in 0..7 {
         if hud.items & (IT_SHOTGUN << i) != 0 {
             let name = weapon_icon_name(weapon_flashon(hud, i), i);
             blit_named(image, wad, &name, (i as f32) * 24.0, -16.0, xf);
+        }
+    }
+
+    // Hipnotic's four weapons (Sbar_DrawInventory's `if (hipnotic)` block):
+    // laser cannon and mjolnir each at their own slot (176, 200), and a combo
+    // slot at x=96 shared by the grenade launcher (if it also holds the
+    // proximity gun) and the proximity gun (if it also holds a grenade
+    // launcher) — exactly id's nested logic, including which one wins when a
+    // player has picked up both.
+    if hud.mode == GameMode::Hipnotic {
+        let mut grenade_flashing = false;
+        for (i, &bit) in HIPWEAPONS.iter().enumerate() {
+            if hud.items & (1 << bit) == 0 {
+                continue;
+            }
+            let flashon = flashon_for(hud, 1 << bit, bit);
+            match i {
+                2 => {
+                    // The grenade-launcher slot (bit 4): only draws while the
+                    // proximity gun is ALSO owned (the "combo" pic), and only
+                    // while flashing.
+                    if hud.items & HIT_PROXIMITY_GUN != 0 && flashon != 0 {
+                        grenade_flashing = true;
+                        let name = flashed_hip_name(flashon, HIP_WEAPON_SUFFIX[2]);
+                        blit_named(image, wad, &name, 96.0, -16.0, xf);
+                    }
+                }
+                3 => {
+                    // The proximity-gun slot (bit 16): if the grenade launcher is
+                    // ALSO owned, this slot shows the combo pic while flashing (or
+                    // its settled "inv_" pic once the grenade slot stopped
+                    // flashing); otherwise the plain proximity-gun pic.
+                    if hud.items & (IT_SHOTGUN << 4) != 0 {
+                        if flashon != 0 && !grenade_flashing {
+                            let name = flashed_hip_name(flashon, HIP_WEAPON_SUFFIX[3]);
+                            blit_named(image, wad, &name, 96.0, -16.0, xf);
+                        } else if !grenade_flashing {
+                            let name = flashed_hip_name(0, HIP_WEAPON_SUFFIX[3]);
+                            blit_named(image, wad, &name, 96.0, -16.0, xf);
+                        }
+                    } else {
+                        let name = flashed_hip_name(flashon, HIP_WEAPON_SUFFIX[4]);
+                        blit_named(image, wad, &name, 96.0, -16.0, xf);
+                    }
+                }
+                _ => {
+                    let name = flashed_hip_name(flashon, HIP_WEAPON_SUFFIX[i]);
+                    blit_named(image, wad, &name, 176.0 + (i as f32) * 24.0, -16.0, xf);
+                }
+            }
+        }
+    }
+
+    // Rogue's powered-weapon row (Sbar_DrawInventory's `if (rogue)` block): the
+    // currently active tier-2 weapon's own icon, drawn over the standard loop's
+    // slot at the same column — `cl.stats[STAT_ACTIVEWEAPON]`, not `items`, so
+    // only the ACTIVE one shows (no "owned but not selected" dim variant, and
+    // no flash cycle: each has one pic).
+    if hud.mode == GameMode::Rogue && hud.weapon >= RIT_LAVA_NAILGUN {
+        for (i, name) in RSB_WEAPON_NAMES.iter().enumerate() {
+            if hud.weapon == RIT_LAVA_NAILGUN << i {
+                blit_named(image, wad, name, (i as f32 + 2.0) * 24.0, -16.0, xf);
+            }
         }
     }
 
@@ -461,16 +658,41 @@ fn draw_sbar_inventory(
     }
 
     // Items: keys + powerups (sb_items[0..5]) for items bits 1<<(17+i), at
-    // Sbar_DrawPic(192 + i*16, -16, ...). Then sigils (sb_sigil[0..3]) for items
-    // bits 1<<(28+i) at Sbar_DrawPic(320-32 + i*8, -16, ...).
+    // Sbar_DrawPic(192 + i*16, -16, ...). Hipnotic moves its two keys to the
+    // main status strip (`draw_hud_into`'s "keys (hipnotic only)" block) and
+    // skips them here (`!hipnotic || (i>1)`); the four powerups still draw.
     for (i, name) in SB_ITEM_NAMES.iter().enumerate() {
+        if hud.mode == GameMode::Hipnotic && i <= 1 {
+            continue;
+        }
         if hud.items & (1 << (17 + i)) != 0 {
             blit_named(image, wad, name, 192.0 + (i as f32) * 16.0, -16.0, xf);
         }
     }
-    for (i, name) in SB_SIGIL_NAMES.iter().enumerate() {
-        if hud.items & (1 << (28 + i)) != 0 {
-            blit_named(image, wad, name, 320.0 - 32.0 + (i as f32) * 8.0, -16.0, xf);
+    // Hipnotic's two items (wetsuit, empathy shields), bits 1<<(24+i), at the
+    // same slot sigils/Rogue's items use below (`if (hipnotic) {...}`, its own
+    // `if`, independent of the rogue/sigil choice that follows).
+    if hud.mode == GameMode::Hipnotic {
+        for (i, name) in HIP_ITEM_NAMES.iter().enumerate() {
+            if hud.items & (1 << (24 + i)) != 0 {
+                blit_named(image, wad, name, 288.0 + (i as f32) * 16.0, -16.0, xf);
+            }
+        }
+    }
+    // Rogue's two items (shield, anti-grav belt), bits 1<<(29+i), at the same
+    // slot; every other mode (id1 and Hipnotic alike) draws the sigils instead
+    // (`if (rogue) {...} else { sigils }`).
+    if hud.mode == GameMode::Rogue {
+        for (i, name) in RSB_ITEM_NAMES.iter().enumerate() {
+            if hud.items & (1 << (RIT_SHIELD_BIT + i)) != 0 {
+                blit_named(image, wad, name, 288.0 + (i as f32) * 16.0, -16.0, xf);
+            }
+        }
+    } else {
+        for (i, name) in SB_SIGIL_NAMES.iter().enumerate() {
+            if hud.items & (1 << (28 + i)) != 0 {
+                blit_named(image, wad, name, 320.0 - 32.0 + (i as f32) * 8.0, -16.0, xf);
+            }
         }
     }
 }
@@ -550,20 +772,39 @@ pub fn draw_hud_into(image: &mut Image, hud: &Hud) {
     // 1. Background strip (sbar, 320x24) at virtual (0,0).
     blit_named(image, wad, "sbar", 0.0, 0.0, xf);
 
+    // Keys (Hipnotic only): Sbar_DrawInventory moved them off the inventory
+    // bar ("so they would not be overwritten") to two fixed spots on the main
+    // strip, drawn right after it, in id1's own `sb_items[0]`/`[1]` pics.
+    if hud.mode == GameMode::Hipnotic {
+        if hud.items & IT_KEY1 != 0 {
+            blit_named(image, wad, SB_ITEM_NAMES[0], 209.0, 3.0, xf);
+        }
+        if hud.items & IT_KEY2 != 0 {
+            blit_named(image, wad, SB_ITEM_NAMES[1], 209.0, 12.0, xf);
+        }
+    }
+
     // Armour field (Sbar_Draw, sbar.c:968-997). Under invulnerability the C draws a
     // gold "666" and the Pentagram-of-Protection disc over the armour slot and shows
     // NO real armour icon/number; otherwise the armour-type icon (Sbar_DrawPic(0, 0,
     // sb_armor[type])) keyed on IT_ARMOR3/2/1 plus the armour number at
-    // Sbar_DrawNum(24, ..) — right edge virtual x=96, gold when <=25.
+    // Sbar_DrawNum(24, ..) — right edge virtual x=96, gold when <=25. Rogue keys the
+    // icon off its own, differently-numbered RIT_ARMOR1/2/3 bits (standard's
+    // IT_ARMOR1/2/3 bit positions are Rogue's weapon-tier-2 bits instead).
     if hud.items & IT_INVULNERABILITY != 0 {
         draw_num(image, 666, 96.0, 0.0, xf, wad, true);
         blit_named(image, wad, "disc", 0.0, 0.0, xf);
     } else {
-        if hud.items & IT_ARMOR3 != 0 {
+        let (armor3, armor2, armor1) = if hud.mode == GameMode::Rogue {
+            (RIT_ARMOR3, RIT_ARMOR2, RIT_ARMOR1)
+        } else {
+            (IT_ARMOR3, IT_ARMOR2, IT_ARMOR1)
+        };
+        if hud.items & armor3 != 0 {
             blit_named(image, wad, ARMOR_ICON_NAMES[2], 0.0, 0.0, xf);
-        } else if hud.items & IT_ARMOR2 != 0 {
+        } else if hud.items & armor2 != 0 {
             blit_named(image, wad, ARMOR_ICON_NAMES[1], 0.0, 0.0, xf);
-        } else if hud.items & IT_ARMOR1 != 0 {
+        } else if hud.items & armor1 != 0 {
             blit_named(image, wad, ARMOR_ICON_NAMES[0], 0.0, 0.0, xf);
         }
         draw_num(image, hud.armor, 96.0, 0.0, xf, wad, hud.armor <= 25);
@@ -592,8 +833,27 @@ pub fn draw_hud_into(image: &mut Image, hud: &Hud) {
     draw_num(image, hud.health, 208.0, 0.0, xf, wad, hud.health <= 25);
 
     // Ammo-type icon (Sbar_DrawPic(224, 0, sb_ammo[type])) by the active weapon's
-    // ammo type, keyed on the items ammo bits IT_SHELLS/NAILS/ROCKETS/CELLS.
-    if hud.items & IT_SHELLS != 0 {
+    // ammo type, keyed on the items ammo bits IT_SHELLS/NAILS/ROCKETS/CELLS —
+    // Rogue keys the standard four off its own RIT_* bits (not the same
+    // numbers as standard's) and has three more of its own past them.
+    if hud.mode == GameMode::Rogue {
+        if hud.items & RIT_SHELLS != 0 {
+            blit_named(image, wad, AMMO_ICON_NAMES[0], 224.0, 0.0, xf);
+        } else if hud.items & RIT_NAILS != 0 {
+            blit_named(image, wad, AMMO_ICON_NAMES[1], 224.0, 0.0, xf);
+        } else if hud.items & RIT_ROCKETS != 0 {
+            blit_named(image, wad, AMMO_ICON_NAMES[2], 224.0, 0.0, xf);
+        } else if hud.items & RIT_CELLS != 0 {
+            blit_named(image, wad, AMMO_ICON_NAMES[3], 224.0, 0.0, xf);
+        } else {
+            for &(bit, name) in &RSB_AMMO_ICONS {
+                if hud.items & bit != 0 {
+                    blit_named(image, wad, name, 224.0, 0.0, xf);
+                    break;
+                }
+            }
+        }
+    } else if hud.items & IT_SHELLS != 0 {
         blit_named(image, wad, AMMO_ICON_NAMES[0], 224.0, 0.0, xf);
     } else if hud.items & IT_NAILS != 0 {
         blit_named(image, wad, AMMO_ICON_NAMES[1], 224.0, 0.0, xf);
@@ -838,7 +1098,13 @@ mod tests {
     /// and never transparent), `anum_0..anum_9` (24x24, index `120+d`), and the
     /// intermission `num_colon`/`num_slash`/`num_minus` (index 140/141/142).
     fn build_hud_wad() -> Wad2 {
-        // (name, payload) pairs.
+        wad_from_pics(base_hud_pics())
+    }
+
+    /// [`build_hud_wad`]'s own (name, payload) pairs, reusable by
+    /// [`build_hud_wad_with`] so a test can add mission-pack lumps without
+    /// re-deriving the base set.
+    fn base_hud_pics() -> Vec<(String, Vec<u8>)> {
         let mut pics: Vec<(String, Vec<u8>)> = Vec::new();
         pics.push(("sbar".to_string(), qpic_payload(320, 24, 1)));
         for d in 0..10u8 {
@@ -850,7 +1116,27 @@ mod tests {
         pics.push(("num_colon".to_string(), qpic_payload(16, 24, 140)));
         pics.push(("num_slash".to_string(), qpic_payload(16, 24, 141)));
         pics.push(("num_minus".to_string(), qpic_payload(16, 24, 142)));
+        pics
+    }
 
+    /// [`build_hud_wad`] plus `extra` named lumps (each `(name, fill)`, a
+    /// 24x16 pic filled with `fill` so "did this draw" is a one-value pixel
+    /// search) — for a test that exercises a lump the base set doesn't have
+    /// (a mission pack's own). A name also in the base set (`"ibar"`, a
+    /// mission pack's own background) replaces it.
+    fn build_hud_wad_with(extra: &[(&str, u8)]) -> Wad2 {
+        let mut pics = base_hud_pics();
+        for &(name, fill) in extra {
+            pics.retain(|(n, _)| n != name);
+            let (w, h) = if name == "ibar" || name.starts_with("r_invbar") { (320, 24) } else { (24, 16) };
+            pics.push((name.to_string(), qpic_payload(w, h, fill)));
+        }
+        wad_from_pics(pics)
+    }
+
+    /// Serialize `pics` as a minimal WAD2 and parse it back (the body both
+    /// [`build_hud_wad`] and [`build_hud_wad_with`] share).
+    fn wad_from_pics(pics: Vec<(String, Vec<u8>)>) -> Wad2 {
         // Lay payloads right after the 12-byte header; build the directory after.
         let mut payloads = Vec::new();
         let mut offsets = Vec::new();
@@ -1059,6 +1345,7 @@ mod tests {
         let mut img = Image::new(320, 200, fill);
         let hud = Hud {
             wad: &wad,
+            mode: GameMode::Id1,
             health: 100,
             ammo: 25,
             armor: 50,
@@ -1112,6 +1399,7 @@ mod tests {
         let mut img = Image::new(640, 400, fill);
         let hud = Hud {
             wad: &wad,
+            mode: GameMode::Id1,
             health: 99,
             ammo: 100,
             armor: 0,
@@ -1158,6 +1446,7 @@ mod tests {
         let mut img = Image::new(320, 200, fill);
         let hud = Hud {
             wad: &wad,
+            mode: GameMode::Id1,
             health: 100,
             ammo: 50,
             armor: 25,
@@ -1215,6 +1504,7 @@ mod tests {
         gettime[4] = 10.0; // the rocket launcher (bit 4), got at t=10
         let hud = |time: f32, gt: Option<&'static [f32; 32]>| Hud {
             wad: &wad,
+            mode: GameMode::Id1,
             health: 100,
             ammo: 0,
             armor: 0,
@@ -1408,6 +1698,7 @@ mod tests {
         let mut img = Image::new(320, 200, fill); // scale 1: bar = bottom 48 rows
         let hud = Hud {
             wad: &wad,
+            mode: GameMode::Id1,
             health: 100,   // -> face1 (bracket 4)
             ammo: 25,
             armor: 80,
@@ -1508,6 +1799,7 @@ mod tests {
         let mut img = Image::new(320, 200, 0u8);
         let hud = Hud {
             wad: &wad,
+            mode: GameMode::Id1,
             health: 100,
             ammo: 0,
             armor: 0,
@@ -1547,6 +1839,7 @@ mod tests {
             let mut img = Image::new(320, 200, 0u8);
             let hud = Hud {
                 wad: &wad,
+                mode: GameMode::Id1,
                 health: 45,
                 ammo: 0,
                 armor: 0,
@@ -1612,6 +1905,7 @@ mod tests {
             let mut img = Image::new(320, 200, fill);
             let hud = Hud {
                 wad: &wad,
+                mode: GameMode::Id1,
                 health,
                 ammo: 0,
                 armor: 0,
@@ -1653,4 +1947,201 @@ mod tests {
         let img = draw(48, 0);
         assert_eq!((img.pixels[ibar_row], img.pixels[sbar_row]), (2, 3));
     }
+
+    // -- Hipnotic / Rogue item bits -------------------------------------------
+
+    /// Every mission-pack constant against `quakedef.h`'s own numbers (not
+    /// id's bit-shift expressions, the literal values), since there is no C
+    /// oracle to catch a transcription slip here (the oracle's `-rogue` run
+    /// hangs on at least one map — the mission's report says why — so this
+    /// module's Rogue arms are proven only by these and the `draw_hud_into`
+    /// tests below, not pixel-for-pixel against id's C).
+    #[test]
+    fn mission_pack_item_bits_match_quakedef_h() {
+        assert_eq!(HIT_MJOLNIR_BIT, 7);
+        assert_eq!(HIT_PROXIMITY_GUN_BIT, 16);
+        assert_eq!(HIT_LASER_CANNON_BIT, 23);
+        assert_eq!(HIT_PROXIMITY_GUN, 65536);
+        assert_eq!(HIPWEAPONS, [23, 7, 4, 16]);
+        assert_eq!(RIT_LAVA_NAILGUN, 4096);
+        assert_eq!(RIT_SHELLS, 128);
+        assert_eq!(RIT_NAILS, 256);
+        assert_eq!(RIT_ROCKETS, 512);
+        assert_eq!(RIT_CELLS, 1024);
+        assert_eq!(RIT_ARMOR1, 8_388_608);
+        assert_eq!(RIT_ARMOR2, 16_777_216);
+        assert_eq!(RIT_ARMOR3, 33_554_432);
+        assert_eq!(RIT_LAVA_NAILS, 67_108_864);
+        assert_eq!(RIT_PLASMA_AMMO, 134_217_728);
+        assert_eq!(RIT_MULTI_ROCKETS, 268_435_456);
+        assert_eq!(1 << RIT_SHIELD_BIT, 536_870_912);
+        assert_eq!(1 << (RIT_SHIELD_BIT + 1), 1_073_741_824);
+        // The five tier-2 weapon icons are RIT_LAVA_NAILGUN<<0..4 exactly:
+        // lava nailgun, lava super nailgun, multi-grenade (pic "r_gren"),
+        // multi-rocket, plasma gun.
+        assert_eq!([RIT_LAVA_NAILGUN, RIT_LAVA_NAILGUN << 1, RIT_LAVA_NAILGUN << 2, RIT_LAVA_NAILGUN << 3, RIT_LAVA_NAILGUN << 4], [4096, 8192, 16384, 32768, 65536]);
+    }
+
+    /// [`flashon_for`] (Hipnotic's weapons) against the same formula
+    /// [`weapon_flashon`]'s own tests already prove for the standard ones —
+    /// settled-active, settled-inactive, and the `inva1..5` cycle in the
+    /// first second — just at Hipnotic's bit/slot (laser cannon, bit 23).
+    #[test]
+    fn flashon_for_cycles_like_weapon_flashon_at_a_different_bit_and_slot() {
+        let wad = build_hud_wad();
+        let laser = 1 << HIT_LASER_CANNON_BIT;
+        let mk = |time: f32, gettime: &'static [f32; 32], weapon: i32| Hud {
+            wad: &wad,
+            mode: GameMode::Hipnotic,
+            health: 100,
+            ammo: 0,
+            armor: 0,
+            items: laser,
+            weapon,
+            ammo_shells: 0,
+            ammo_nails: 0,
+            ammo_rockets: 0,
+            ammo_cells: 0,
+            time,
+            item_gettime: Some(gettime),
+            monsters: 0,
+            total_monsters: 0,
+            secrets: 0,
+            total_secrets: 0,
+            level_name: "",
+            show_scores: false,
+            face_pain: false,
+            sb_lines: SB_LINES_FULL,
+        };
+        static GT: [f32; 32] = {
+            let mut g = [0.0f32; 32];
+            g[HIT_LASER_CANNON_BIT] = 10.0; // got at t=10
+            g
+        };
+        // Just got it (t=10.3, 0.3s in -> raw 3, wrapped 3%5+2=5 -> inva4):
+        // neither settled value, so weapon-active doesn't matter yet.
+        assert_eq!(flashon_for(&mk(10.3, &GT, 0), laser, HIT_LASER_CANNON_BIT), 5);
+        // A full second on: settled. Active -> 1; not active -> 0.
+        assert_eq!(flashon_for(&mk(11.0, &GT, laser), laser, HIT_LASER_CANNON_BIT), 1);
+        assert_eq!(flashon_for(&mk(11.0, &GT, 0), laser, HIT_LASER_CANNON_BIT), 0);
+        // No get-times at all (a demo without them): always settled.
+        let no_gt = Hud { item_gettime: None, ..mk(11.0, &GT, laser) };
+        assert_eq!(flashon_for(&no_gt, laser, HIT_LASER_CANNON_BIT), 1);
+    }
+
+    /// `hsb_weapons`/`rsb_weapons`/`hsb_items`/`rsb_items` icon names resolve
+    /// to id's own lump names, and the mode gate actually changes what draws:
+    /// a Hipnotic Hud shows the laser cannon in its own slot and wetsuit/
+    /// shields in the sigil slot; the SAME items bits under `GameMode::Id1`
+    /// (where they mean nothing) draw neither.
+    #[test]
+    fn hipnotic_weapons_and_items_draw_only_in_hipnotic_mode() {
+        // Each lump this test touches gets a distinct fill, so "something
+        // drew here" is unambiguous.
+        let wad = build_hud_wad_with(&[
+            ("inv_laser", 250),
+            ("inv_mjolnir", 251),
+            ("sb_wsuit", 252),
+            ("sb_eshld", 253),
+            ("ibar", 254),
+        ]);
+
+        let laser = 1 << HIT_LASER_CANNON_BIT;
+        let mjolnir = 1 << HIT_MJOLNIR_BIT;
+        let wetsuit = 1 << 24; // sbar.c's own `1<<(24+i)`, not HIT_WETSUIT (see the comment above)
+        let shields = 1 << 25;
+        let items = laser | mjolnir | wetsuit | shields;
+        let base = |mode: GameMode| Hud {
+            wad: &wad,
+            mode,
+            health: 100,
+            ammo: 0,
+            armor: 0,
+            items,
+            weapon: 0,
+            ammo_shells: 0,
+            ammo_nails: 0,
+            ammo_rockets: 0,
+            ammo_cells: 0,
+            time: 0.0,
+            item_gettime: None,
+            monsters: 0,
+            total_monsters: 0,
+            secrets: 0,
+            total_secrets: 0,
+            level_name: "",
+            show_scores: false,
+            face_pain: false,
+            sb_lines: SB_LINES_FULL,
+        };
+
+        let drew = |mode: GameMode, fill: u8| {
+            let mut img = Image::new(320, 200, 0);
+            draw_hud_into(&mut img, &base(mode));
+            img.pixels.contains(&fill)
+        };
+        assert!(drew(GameMode::Hipnotic, 250), "laser cannon icon drew in Hipnotic mode");
+        assert!(drew(GameMode::Hipnotic, 251), "mjolnir icon drew in Hipnotic mode");
+        assert!(drew(GameMode::Hipnotic, 252), "wetsuit icon drew in Hipnotic mode");
+        assert!(drew(GameMode::Hipnotic, 253), "empathy shields icon drew in Hipnotic mode");
+        assert!(!drew(GameMode::Id1, 250), "the same items bits mean nothing to id1's own sbar path");
+        assert!(!drew(GameMode::Id1, 252), "id1 never draws Hipnotic's item icons");
+    }
+
+    /// Rogue's remapped armour bit and tier-2 weapon row: the standard
+    /// `IT_ARMOR1` bit (which Rogue repurposes for `RIT_LAVA_SUPER_NAILGUN`)
+    /// does NOT show an armour icon in Rogue mode, but `RIT_ARMOR1` does; the
+    /// active tier-2 weapon's own icon draws over the standard row's slot.
+    #[test]
+    fn rogue_remaps_the_armour_bits_and_draws_its_tier2_weapon_icon() {
+        let wad = build_hud_wad_with(&[
+            ("r_lava", 240),
+            ("sb_armor1", 241),
+            ("ibar", 242),
+            ("r_invbar1", 243),
+            ("r_invbar2", 244),
+        ]);
+
+        let base = |mode: GameMode, items: i32, weapon: i32| Hud {
+            wad: &wad,
+            mode,
+            health: 100,
+            ammo: 0,
+            armor: 10,
+            items,
+            weapon,
+            ammo_shells: 0,
+            ammo_nails: 0,
+            ammo_rockets: 0,
+            ammo_cells: 0,
+            time: 0.0,
+            item_gettime: None,
+            monsters: 0,
+            total_monsters: 0,
+            secrets: 0,
+            total_secrets: 0,
+            level_name: "",
+            show_scores: false,
+            face_pain: false,
+            sb_lines: SB_LINES_FULL,
+        };
+        let drew = |hud: &Hud, fill: u8| {
+            let mut img = Image::new(320, 200, 0);
+            draw_hud_into(&mut img, hud);
+            img.pixels.contains(&fill)
+        };
+
+        // Standard IT_ARMOR1 (8192): nothing, in Rogue mode (it's a weapon bit there).
+        assert!(!drew(&base(GameMode::Rogue, IT_ARMOR1, 0), 241), "IT_ARMOR1 means a weapon to Rogue, not armour");
+        // Rogue's own RIT_ARMOR1 (8388608): the armour icon.
+        assert!(drew(&base(GameMode::Rogue, RIT_ARMOR1, 0), 241), "RIT_ARMOR1 shows the armour icon in Rogue mode");
+        // The active tier-2 weapon (lava nailgun) draws its own icon.
+        assert!(drew(&base(GameMode::Rogue, 0, RIT_LAVA_NAILGUN), 240), "the active tier-2 weapon's own icon drew");
+        // The inventory background swaps once a tier-2 weapon is active: Rogue
+        // never draws the plain "ibar" at all, only its own r_invbar1/2.
+        assert!(drew(&base(GameMode::Rogue, 0, 0), 244), "r_invbar2 below RIT_LAVA_NAILGUN");
+        assert!(drew(&base(GameMode::Rogue, 0, RIT_LAVA_NAILGUN), 243), "r_invbar1 at or above RIT_LAVA_NAILGUN");
+        assert!(!drew(&base(GameMode::Rogue, 0, 0), 242), "Rogue never draws the plain ibar");
+    }
+
 }

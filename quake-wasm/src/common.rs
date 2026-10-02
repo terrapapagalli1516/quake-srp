@@ -32,11 +32,13 @@ thread_local! {
 /// `COM_InitFilesystem` and `COM_CheckRegistered`, then `PR_LoadProgs`'s
 /// checks of the game's `progs.dat`: the search path opened as `quaketool`
 /// opens a pak — each directory now, each file's bytes when it is read
-/// ([`Pak::open`]), so no copy of an archive lives in the program. Returns
-/// what id printed on the way (the packs, "Playing … version."); an `Err`
-/// is the `Sys_Error` the game stops with.
-pub(crate) fn init(basedir: &Path) -> Result<Vec<String>, String> {
-    let fs = init_filesystem(basedir)?;
+/// ([`Pak::open`]), so no copy of an archive lives in the program. `mod_dirs`
+/// and `force_modified` are `-rogue`/`-hipnotic`/`-game <dir>`, parsed by
+/// `main.rs` ([`init_filesystem`]'s doc has id's order). Returns what id
+/// printed on the way (the packs, "Playing … version."); an `Err` is the
+/// `Sys_Error` the game stops with.
+pub(crate) fn init(basedir: &Path, mod_dirs: &[&str], force_modified: bool) -> Result<Vec<String>, String> {
+    let fs = init_filesystem(basedir, mod_dirs, force_modified)?;
     check_progs(&fs.files)?;
     let log = fs.log.clone();
     GAMEDIR.with(|g| *g.borrow_mut() = Some(fs.gamedir.clone()));
@@ -140,7 +142,7 @@ mod tests {
         // An empty game directory: no pak0.pak, so no progs.dat on the path.
         let empty = gamedir().join("empty-base");
         std::fs::create_dir_all(empty.join(GAMENAME)).unwrap();
-        let err = init(&empty).unwrap_err();
+        let err = init(&empty, &[], false).unwrap_err();
         assert_eq!(err, "PR_LoadProgs: couldn't load progs.dat");
     }
 }

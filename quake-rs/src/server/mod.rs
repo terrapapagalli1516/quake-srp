@@ -578,10 +578,59 @@ impl Host for WorldModel {
 // The Server.
 // ---------------------------------------------------------------------------
 
+/// `standard_quake`/`rogue`/`hipnotic` (common.c): which game this `progs.dat`
+/// is. id's engine sets these from `-rogue`/`-hipnotic` on the command line
+/// (the search path, `common.rs`); the port instead detects the loaded
+/// `progs.dat` itself — [`GameMode::detect`] — so every caller that builds a
+/// [`Server`] (the browser's level loads, `quaketool`, the tests) gets the
+/// right mode for free, with no extra argument to thread through. The outcome
+/// is the same: a basedir laid out with `-hipnotic`'s directory always loads
+/// `hipnotic`'s own `progs.dat`, never id's or `rogue`'s.
+///
+/// Read by the status bar ([`crate::sbar::Hud::mode`]) to draw the mission
+/// packs' own weapons/items and remapped armour/ammo-type bits
+/// (`Sbar_DrawInventory`/`Sbar_Draw`, sbar.c) the way `hipnotic`/`rogue` make
+/// id's C draw them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GameMode {
+    /// id's 1996 game (or any progs that isn't recognised as one of the two
+    /// mission packs below): `standard_quake = true`.
+    #[default]
+    Id1,
+    /// Scourge of Armagon (`-hipnotic`).
+    Hipnotic,
+    /// Dissolution of Eternity (`-rogue`).
+    Rogue,
+}
+
+impl GameMode {
+    /// Detect which game `progs` is from content only it declares — never id's
+    /// 1996 `progs.dat`, and the two mission packs don't declare each other's:
+    /// Rogue's `give` cheat reads/writes the field `ammo_lava_nails`
+    /// (`host_cmd.c`'s `Host_Give_f`, the `rogue` arm); Hipnotic's empathy
+    /// shields cheat is the function `EmpathyShieldsCheat` (`weapons.qc`, dead
+    /// code in the shipped game but still declared). Checked against the 2021
+    /// re-release's `hipnotic`/`rogue` `progs.dat` (`quaketool dis`); id's
+    /// shareware `progs.dat` has neither.
+    pub fn detect(progs: &crate::progs::Progs) -> GameMode {
+        if progs.find_field("ammo_lava_nails").is_some() {
+            GameMode::Rogue
+        } else if progs.find_function("EmpathyShieldsCheat").is_some() {
+            GameMode::Hipnotic
+        } else {
+            GameMode::Id1
+        }
+    }
+}
+
 /// The headless Quake server: a QuakeC VM with the engine builtins installed and
 /// a [`WorldModel`] host. Drives entity spawning and a minimal physics frame.
 pub struct Server {
     pub vm: Vm,
+    /// `standard_quake`/`rogue`/`hipnotic`, detected once at construction from
+    /// the loaded `progs.dat` ([`GameMode::detect`]); never changes across a
+    /// changelevel (a mission pack's levels all share its `progs.dat`).
+    pub mode: GameMode,
     /// The map's entity description text (`bsp.entities`), captured before the
     /// BSP is moved into the host. `spawn_entities` tokenizes this. (The
     /// [`Host`] trait has no entity-text accessor and we never `unsafe`-downcast,
@@ -805,6 +854,27 @@ impl Server {
 mod tests {
     use super::*;
     use super::testutil::*;
+    use crate::progs::Progs;
+
+    /// [`GameMode::detect`] on synthetic progs shaped like each game's real
+    /// `progs.dat` (built once from the actual files, `quaketool dis`):
+    /// id's has neither marker; Rogue's declares the field `ammo_lava_nails`
+    /// (its `give` cheat); Hipnotic's declares the function
+    /// `EmpathyShieldsCheat` (dead in the shipped game, but still there).
+    #[test]
+    fn game_mode_detects_from_the_progs_the_mission_packs_actually_declare() {
+        let mut id1 = Builder::new();
+        id1.add_field("health", 1, 0);
+        assert_eq!(GameMode::detect(&Progs::parse(&id1.build()).unwrap()), GameMode::Id1);
+
+        let mut rogue = Builder::new();
+        rogue.add_field("ammo_lava_nails", 1, 0);
+        assert_eq!(GameMode::detect(&Progs::parse(&rogue.build()).unwrap()), GameMode::Rogue);
+
+        let mut hipnotic = Builder::new();
+        hipnotic.add_function("EmpathyShieldsCheat", vec![]);
+        assert_eq!(GameMode::detect(&Progs::parse(&hipnotic.build()).unwrap()), GameMode::Hipnotic);
+    }
 
     // The explosive-box fix: external brush models (the `maps/b_*.bsp` item
     // boxes) must resolve real collision bounds at setmodel time, or a hitscan

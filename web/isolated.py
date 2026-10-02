@@ -17,6 +17,7 @@ import functools
 import http.server
 import json
 import os
+import re
 import shutil
 import socketserver
 import sys
@@ -63,23 +64,40 @@ def copy_page(dest):
         shutil.copy(os.path.join(here, f), os.path.join(dest, f))
 
 
+# The port's own game directories (quake-rs's common.rs: `mod_dirs`) a
+# deploy or a drop can offer beyond the engine's own baseline id1/pak0.pak —
+# id1 for its registered pak1 (and music), hipnotic/rogue for their own
+# pak0 (and music), each only ever fetched when that game is the one
+# starting (index.html's planServerFiles).
+GAME_DIRS = ("id1", "hipnotic", "rogue")
+
+
 def write_manifest(dest):
     """Write `dest`/files.json, the manifest a deploy uses to offer its own
-    id1/pak1.pak and CD tracks (web/PLATFORM.md, "A server's own files"):
-    one entry per file actually found at dest/id1/pak1.pak and
-    dest/id1/music/*, each with its size. Call this after those files are in
+    extra game files beyond the engine's own id1/pak0.pak
+    (web/PLATFORM.md, "A server's own files"): one entry per pak and music
+    file actually found under `dest`/id1, `dest`/hipnotic and `dest`/rogue —
+    id1/pak0.pak itself excepted, since that one is always the deploy's own
+    baseline fetch, never the manifest's. Call this after those files are in
     place; skip it (or leave it unwritten) for a pak0-only deploy — its
     absence is exactly what tells the page to ask for nothing else."""
     files = []
-    pak1 = os.path.join(dest, "id1", "pak1.pak")
-    if os.path.isfile(pak1):
-        files.append({"path": "id1/pak1.pak", "size": os.path.getsize(pak1)})
-    music_dir = os.path.join(dest, "id1", "music")
-    if os.path.isdir(music_dir):
-        for name in sorted(os.listdir(music_dir)):
-            path = os.path.join(music_dir, name)
-            if os.path.isfile(path):
-                files.append({"path": f"id1/music/{name}", "size": os.path.getsize(path)})
+    for game in GAME_DIRS:
+        game_dir = os.path.join(dest, game)
+        if os.path.isdir(game_dir):
+            for name in sorted(os.listdir(game_dir)):
+                path = os.path.join(game_dir, name)
+                if not os.path.isfile(path) or not re.fullmatch(r"pak\d+\.pak", name):
+                    continue
+                if game == "id1" and name == "pak0.pak":
+                    continue   # the engine's own baseline fetch, not the manifest's
+                files.append({"path": f"{game}/{name}", "size": os.path.getsize(path)})
+        music_dir = os.path.join(game_dir, "music")
+        if os.path.isdir(music_dir):
+            for name in sorted(os.listdir(music_dir)):
+                path = os.path.join(music_dir, name)
+                if os.path.isfile(path):
+                    files.append({"path": f"{game}/music/{name}", "size": os.path.getsize(path)})
     with open(os.path.join(dest, "files.json"), "w") as f:
         json.dump({"files": files}, f)
 
