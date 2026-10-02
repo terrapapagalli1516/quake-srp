@@ -791,8 +791,24 @@ fn census_map(pak: &Pak, progs_bytes: &[u8], map: &str, rand: &Rc<QRand>, o: &mu
     Ok(())
 }
 
+/// The `<pak>` argument of both census commands: one pak, or a
+/// comma-separated list layered the way a game directory layers over `id1`
+/// (`common.rs`'s `init_filesystem`): each over the ones before it, so the
+/// last one listed is searched first. A mission pack's maps need its own pak
+/// (its bsps, its `progs.dat`) over id1's two:
+/// `id1/pak0.pak,id1/pak1.pak,hipnotic/pak0.pak` is what `-hipnotic` searches.
+fn open_layered(pak_path: &str) -> Result<Pak, String> {
+    pak_path
+        .split(',')
+        .map(|p| Pak::open(p).map_err(|e| format!("{p}: {e}")))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .reduce(|under, over| over.over(under))
+        .ok_or_else(|| format!("{pak_path}: no pak"))
+}
+
 pub fn cmd_census(pak_path: &str, maps: &[String]) -> Result<String, String> {
-    let pak = Pak::open(pak_path).map_err(|e| e.to_string())?;
+    let pak = open_layered(pak_path)?;
     let progs = pak.read_file("progs.dat").map_err(|e| e.to_string())?.ok_or("no progs.dat")?;
     let default: Vec<String> =
         ["start", "e1m1", "e1m2", "e1m3", "e1m4", "e1m5", "e1m6", "e1m7", "e1m8"].iter().map(|s| s.to_string()).collect();
@@ -816,7 +832,7 @@ pub fn cmd_census(pak_path: &str, maps: &[String]) -> Result<String, String> {
 /// `oracle_edicts` format, so `census/edict_diff.py` can diff the port's
 /// simulation against id's.
 pub fn cmd_census_edicts(pak_path: &str, map: &str, times: &str) -> Result<String, String> {
-    let pak = Pak::open(pak_path).map_err(|e| e.to_string())?;
+    let pak = open_layered(pak_path)?;
     let progs_bytes = pak.read_file("progs.dat").map_err(|e| e.to_string())?.ok_or("no progs.dat")?;
     let path = format!("maps/{map}.bsp");
     let bytes = pak.read_file(&path).map_err(|e| e.to_string())?.ok_or(format!("{path} not in pak"))?;

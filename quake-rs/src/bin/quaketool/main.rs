@@ -222,13 +222,13 @@ const COMMANDS: &[Command] = &[
     Command {
         name: "census",
         usage: "<pak> [map ...]",
-        about: "headless faithfulness playthrough (start, e1m1..e1m8 by default)",
+        about: "headless faithfulness playthrough (start, e1m1..e1m8 by default); <pak> may be a,b,c (the last searched first)",
         run: |a| Ok(Out::Text(census::cmd_census(&a[0], &a[1..])?)),
     },
     Command {
         name: "census-edicts",
         usage: "<pak> <map> <t1,t2,..>",
-        about: "dump live edicts at server times (oracle_edicts format)",
+        about: "dump live edicts at server times (oracle_edicts format); <pak> may be a,b,c (the last searched first)",
         run: |a| Ok(Out::Text(census::cmd_census_edicts(&a[0], &a[1], &a[2])?)),
     },
     // play.rs, timedemo.rs
