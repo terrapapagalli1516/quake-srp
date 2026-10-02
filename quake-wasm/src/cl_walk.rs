@@ -470,8 +470,14 @@ mod tests {
 
         let text = w.server.write_savegame();
         let rand = std::rc::Rc::clone(w.server.rand());
-        let mut l = quake_rs::client::host_cmd::build_walk_savegame(w.pak.clone(), &text, &rand, &mut Vec::new())
-            .expect("the save loads");
+        let mut l = quake_rs::client::host_cmd::build_walk_savegame(
+            w.pak.clone(),
+            &text,
+            &rand,
+            &mut Vec::new(),
+            quake_rs::vm::MAX_EDICTS,
+        )
+        .expect("the save loads");
         assert!(unflashed(&l), "load");
         step_walk(&mut l, 0.05, false, &crate::vid::mode_vid(320, 200));
         assert!(unflashed(&l));

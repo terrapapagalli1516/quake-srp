@@ -45,6 +45,7 @@ the volumes, the mouse).
 | Rumble on damage and on the big guns (the pad, or a phone's vibration) | `joy_rumble` (Rumble) | on | |
 | QuakeWorld's frame-rate readout | `wasm_showfps` (Show FPS) | off | Clutter. |
 | Exact perspective at every pixel | `wasm_exactpersp` (Exact perspective) | off | id's 16-pixel spans are part of the look. |
+| The `ED_Alloc` edict ceiling past id's 600 (`Vm::max_edicts`) | `sv_max_edicts` (console only, no settings row — nothing to choose until a map needs it) | on, 8192 | id's own number, kept for Classic; Rogue's `r2m6` needs more ("Files and the command line"). |
 
 **The same in both profiles** (id's behaviour, or the platform's, not a departure):
 - Raw mouse (`unadjustedMovement`): id's `IN_StartupMouse` switched pointer acceleration
@@ -302,13 +303,38 @@ marked *(2026-06)* were not re-checked since. Struck items were closed on 2026-0
   for id's letter+digit scheme, not a literal port of it, even for id1; items are still
   obtainable by picking them up in-level. `menu.c`'s ~75 hipnotic/rogue references are
   all the multiplayer game-options screen (episode/level lists, team-colour border),
-  which the port has no menu for; checked against the C, nothing applies. Rogue's `r2m6`
-  overflows the port's `MAX_EDICTS` (600, id's own number too) during plain entity spawn
-  — real, reproduced with the full registered `id1` merged in too, not a missing-asset
-  artifact — and could not be checked against id's C: `-rogue` hangs the oracle on this
-  map (never terminates in 60s, 20,000+ `Cvar_Set: variable campaign not found` lines),
-  because Rogue's real engine registered a `campaign` cvar this GPL WinQuake tree never
-  did. Rogue's demo wire format for a weapon past the standard 7 (the `1<<i`
+  which the port has no menu for; checked against the C, nothing applies.
+- ~~Rogue's `r2m6` overflows the port's `MAX_EDICTS` (600, id's own number too) during
+  plain entity spawn~~ (`fleet/edicts`): the ceiling is `Vm::max_edicts`, a field
+  defaulting to id's 600 ([`MAX_EDICTS`]), raised by the console-only `sv_max_edicts`
+  cvar (a departure: 600 in Classic, 8192 in 2026 — QuakeSpasm's own `max_edicts`
+  default; no settings-page row, see `menu.rs`'s
+  `the_settings_page_lists_every_departure_once_in_the_page_idiom` test, since there is
+  nothing to choose until a map needs it). Every edict array in both crates was already
+  a growing `Vec` (not a fixed `[T; 600]`); the 600 figure was only ever this one
+  ceiling check in `Vm::spawn_checked` (`PF_Spawn`) and a matching bound in savegame
+  loading — grepped every other `MAX_EDICTS`/`600` in `quake-rs/src` and
+  `quake-wasm/src` and none of the rest meant an edict count (test fixture screen
+  sizes, an unrelated frame-count default, the *demo file's* own independent and far
+  larger entity cap). With the extra off, `ED_Alloc`/`ED_Free`, the numbering and the
+  `"ED_Alloc: no free edicts"` wording are untouched — `classic_check` stays ALL PASS —
+  and `r2m6` fails exactly as before (`plat2_spawn_inside_trigger`,
+  `pr_edict::tests::r2m6_needs_more_than_ids_600_edicts`, `#[ignore]`d: needs the
+  mission pack's own `progs.dat`/`r2m6.bsp`, not in this repo). With it on, `r2m6`
+  spawns clean at 632 live edicts (`889` entity blocks, `821` spawned) — same test,
+  `QUAKE_R2M6_DIR=<dir> cargo test --release r2m6 -- --ignored`. Memory: an edict is
+  `entityfields` (per-progs; 195 for id1, 257 for Rogue's) `u32` cells plus ~40 bytes of
+  the port's own per-edict bookkeeping (free flag, freetime, touched-leaf list, static
+  flag) — about 0.8–1.1 KB each — so 600→8192 costs a few more MB, against the threads
+  build's already-fixed 1 GiB shared memory reservation (`web/PLATFORM.md` "Memory");
+  the page does not notice either build. Rogue's real,
+  never-open-sourced engine's own number is unknown either way (below): this port's
+  600→8192 is QuakeSpasm's convention, not a recovered Rogue constant. Still not
+  checked against id's C: `-rogue` hangs the oracle on this map (never terminates in
+  60s, 20,000+ `Cvar_Set: variable campaign not found` lines), because Rogue's real
+  engine registered a `campaign` cvar this GPL WinQuake tree never did — so whether the
+  real Rogue engine also needed more than 600 edicts for this map is still open.
+- Rogue's demo wire format for a weapon past the standard 7 (the `1<<i`
   re-expansion `demo.rs` already documents as not modelled, for any non-standard progs)
   applies to the mission packs too, if a demo of theirs is ever added — none is in scope
   here.

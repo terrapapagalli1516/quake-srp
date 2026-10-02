@@ -154,7 +154,13 @@ pub(crate) fn do_load_command(name: Option<&str>) {
 fn build_walk_savegame(text: &str) -> Result<Walk, String> {
     let pak = pak().ok_or_else(|| "Couldn't load map".to_string())?;
     let mut sound = Vec::new();
-    let walk = host_cmd::build_walk_savegame(pak.clone(), text, &crate::app::session_rand(), &mut sound);
+    // See build_walk_map: the live sv_max_edicts cvar, so a save written
+    // with the extra on loads back with the same (or the session's current)
+    // ceiling.
+    let mut max_edicts = quake_rs::vm::MAX_EDICTS;
+    crate::app::ensure_app(|a| max_edicts = a.settings.cvars.max_edicts as usize);
+    let walk =
+        host_cmd::build_walk_savegame(pak.clone(), text, &crate::app::session_rand(), &mut sound, max_edicts);
     snd_dma::play(&pak, sound);
     walk
 }

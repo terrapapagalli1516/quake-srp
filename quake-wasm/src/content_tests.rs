@@ -26,7 +26,7 @@ fn registered_path() -> Pak {
 /// A walk on `map` through `path`, and the sound calls its load made.
 fn walk(path: Pak, map: &str) -> (Option<Walk>, Vec<SoundCall>) {
     let mut sound = Vec::new();
-    let w = host_cmd::build_walk_map(path, map, &Rc::new(QRand::new()), &mut sound);
+    let w = host_cmd::build_walk_map(path, map, &Rc::new(QRand::new()), &mut sound, quake_rs::vm::MAX_EDICTS);
     (w, sound)
 }
 

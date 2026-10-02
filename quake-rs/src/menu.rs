@@ -4160,12 +4160,19 @@ mod tests {
             }
         }
         // Every departure has its row, but Always Run's two speeds (id's own
-        // Options row) and the pad's layout under the Gamepad row (id's
+        // Options row), the pad's layout under the Gamepad row (id's
         // advanced configuration and the port's stick shaping and menu keys,
-        // tuned on the console as id's joy* were).
+        // tuned on the console as id's joy* were), and sv_max_edicts: there
+        // is nothing to CHOOSE (raising the edict pool changes nothing a
+        // player can see or feel on any shareware/registered map, only
+        // whether a map past id's 600-edict ceiling — Rogue's r2m6 —
+        // spawns at all; AUDIT.md "the mission packs"), so a console cvar
+        // (like id's own `sv_gravity`, which also has no menu row) is the
+        // whole interface.
         let pad_layout = |n: &str| n.starts_with("joy") && n != "joystick" && n != "joy_rumble";
         let listed = |c: &&cvar::Cvar| {
-            c.departure && !c.name.starts_with("cl_") && !pad_layout(c.name) || c.name == "cl_jumpswim"
+            (c.departure && !c.name.starts_with("cl_") && !pad_layout(c.name) || c.name == "cl_jumpswim")
+                && c.name != "sv_max_edicts"
         };
         for c in cvar::CVARS.iter().filter(listed) {
             assert_eq!(SETTING_ROWS.iter().filter(|r| r.cvar == c.name).count(), 1, "{}: one row", c.name);
