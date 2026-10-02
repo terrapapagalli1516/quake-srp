@@ -52,6 +52,8 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 //                                      clocks, the view angles, the view entity's origin,
 //                                      cl.velocity and every relinked entity (demo_lerp.py
 //                                      compares demo playback); quit after `frames` records
+//   oracle_walk path / oracle_sndlog path   a scripted walk, and a log of every call into
+//                                      the sound layer (walk_oracle.c, oracle/sound_walk.py)
 //
 // The 2-D layer (oracle/screen2d.py drives these; see oracle/README.md):
 //   oracle_blank idx                   (a cvar, default -1 = off) fill the 3-D view rectangle
@@ -427,8 +429,11 @@ static void Oracle_Trace_f (void)
 	trace_left = Cmd_Argc () > 2 ? Q_atoi (Cmd_Argv (2)) : -1;
 }
 
+void Oracle_Walk_Init (void);
+
 void Oracle_Init (void)
 {
+	Oracle_Walk_Init ();
 	Cmd_AddCommand ("oracle_trace", Oracle_Trace_f);
 	Cmd_AddCommand ("oracle_field", Oracle_Field_f);
 	Cmd_AddCommand ("oracle_global", Oracle_Global_f);
