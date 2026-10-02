@@ -1,6 +1,6 @@
 # Quake-RS — status and hand-off
 
-Last updated 2026-10-02, after the phone round (`main` @ 2fd0ea4). The first section is
+Last updated 2026-10-02, after the polish round (`main` @ 966b8fd). The first section is
 where things stand. Then the rounds, newest first, branch by branch; how to work here; and
 the older history, kept as evidence, with superseded items marked.
 
@@ -51,10 +51,11 @@ the older history, kept as evidence, with superseded items marked.
     timedemo counts, the census and id's edicts on nine maps, the eight 3-D oracle rows
     at 100.00%, 146 2-D shots at their recorded match, demo playback against id's client
     over 17,500 frames, and the mixer against id's C in 28 of 28 cases.
-  - **Tests:** `cargo test --release` gives 732 in quake-rs and 185 in quake-wasm (1
+  - **Tests:** `cargo test --release` gives 752 in quake-rs (1 ignored: the r2m6 spawn,
+    which needs Rogue's data in `QUAKE_R2M6_DIR`) and 192 in quake-wasm (1
     ignored: the 2-D oracle's harness).
   - **Clippy:** 0 warnings in both crates.
-  - **Browser checks:** the 17 `web/verify_*.py` checks pass in headless Chromium
+  - **Browser checks:** the 18 `web/verify_*.py` checks pass in headless Chromium
     (2026-10-02). `verify_threads` builds its own program and
     `verify_audio_resilience` needs a `--features bench` build; the rest run on a
     deploy dir of either build. Earlier branches also ran most checks in headless
@@ -91,10 +92,67 @@ the older history, kept as evidence, with superseded items marked.
   5. ~~on a phone, the touch buttons overlap the ammo count~~ (fixed 2026-09-30);
   6. ~~in 2026, Video Options shows 960x600 as current and a pick silently turns Native
      resolution off~~ (fixed 2026-09-30; the fade dither was already fixed);
-  7. no `version` command, and `disconnect` does not end the game.
+  7. ~~no `version` command, and `disconnect` does not end the game~~ (fixed 2026-10-02,
+     with id's F-key binds).
 
   The structural work is `CODE_PLAN.md`'s menu:
   W0a/W0b, R1, R6, R8, R9, R11, and the engine-owned `Host` session (§7).
+
+---
+
+## 2026-10-02: the polish round
+
+The user asked for a look at what would improve
+this project, the one complaint being Options on a phone. Four items were chosen and
+done, each by a Sonnet agent on a `fleet/*` branch, the two engine ones reviewed by a second
+agent before the chair merged them; `main` and both pages were updated after each.
+
+- **The menus on a phone** (`fleet/menupad`). A text row of id's menus is 8 lines — about
+  12 CSS px on a phone, a third of a fingertip — so taps missed and sliders took
+  a tap a notch. While the menu is up the touch layer now shows a key pad (▲ ▼ ◀ ▶ OK) in
+  the free margin right of the menu's centred layout; held arrows repeat at a keyboard's
+  cadence; it hides while the menu asks y/n or waits for a key to bind. Keys only, so the
+  engine is untouched. `verify_touch` has 81 checks.
+- **id's function keys** (`fleet/fkeys`). `default.cfg`'s F1–F4, F6, F9, F10 and F12 are
+  bound as id's are (`keys.rs`), with the commands behind them: `menu_save`/`menu_load`/
+  `menu_options`, `save quick`/`load quick` through `wait` (the rest of a bound line runs
+  next host frame, where `Cbuf_Execute` would), `quit`, `version`, `disconnect` (ends the
+  game), and `screenshot` (id's PCX into the game directory; not a download yet). The page
+  keeps those keys from the browser and locks F12 with Escape in fullscreen.
+  `verify_fkeys.py`.
+- **Animation frames blended** (`fleet/lerpframes`, reviewed). `r_lerpmodels`, on in 2026:
+  an alias model is drawn between its previous and current frame over id1's 0.1 s tick
+  (`client/lerpmodels.rs`, after `lerpmove.rs`), light averaged from both poses, the view
+  weapon too; group frames and the usual snaps excepted. "Smooth animations" on the
+  settings page, whose help lines now adapt to the row count. Cost: noise-level on 8
+  threads. The review's two fixes: the view weapon's identity is its precache index
+  (`Host::find_model`, `SV_ModelIndex`'s lookup), and a change away from a group frame
+  snaps as the doc said.
+- **The mission packs** (`fleet/mission`, reviewed; `fleet/mission-page`). Scourge of
+  Armagon and Dissolution of Eternity as WinQuake plays them with `-hipnotic`/`-rogue`
+  (`-game <dir>` too): a game directory layered over `id1`, the progs' unknown builtins
+  failing at the call as id's do, `GameMode` read from the loaded progs, each pack's own
+  status bar (`sbar.rs`'s `if (hipnotic)`/`if (rogue)` arms; pixel-exact against id's C on
+  hip1m2 and r1m1 in the review). On the page: `?game=hipnotic|rogue`, a server's
+  `files.json` may offer `<game>/pak0.pak` and `<game>/music/`, fetched only for the game
+  asked; dropped packs; CD tracks keyed per game; a start-screen picker when a pack is
+  there. The registered deploy serves both packs (built from the 2021 re-release with
+  English messages; `maps/b_exbox2.bsp`, which the re-release moved into `id1`, put back
+  in hipnotic's pak) and a `pak1.pak` without e4m5's stray teleporter (id's own map bug:
+  "couldn't find target" ended the game).
+- **The edict pool** (`fleet/edicts`). Rogue's `r2m6` needs 632 edicts; id's `MAX_EDICTS`
+  is 600. `sv_max_edicts` (console only): 600 in Classic, 8192 in 2026, sized where
+  `SV_SpawnServer` sizes `sv.edicts`, carried across changelevel and restart, saves load
+  under the live ceiling, at most 32000. With it off, id's "ED_Alloc: no free edicts".
+- **Found on the way:** the e4m5 teleporter above (verified reachable: open space; the
+  e4m8 one is inside solid); `verify_loops`'s audio-underrun count fails when run
+  under load 7–15 on any build (it passes in a quiet window); Chrome's main-thread rAF
+  cap (last round) is unchanged.
+- **Not done, noted:** the user's side note that the sky could be more fluid in places
+  for 2026 — likely `R_MakeSky`'s whole-texel scroll steps; a `screenshot` download;
+  mission-pack cases in `oracle/screen2d.py` (the review's comparison was ad hoc); whether
+  Rogue's own engine raised `MAX_EDICTS` (its source was never released, and id's C can't
+  run `-rogue` on r2m6 for a missing `campaign` cvar).
 
 ---
 

@@ -102,6 +102,7 @@ In the 2026 profile you play with WASD and the mouse (click the game to capture 
 | Esc | the menu |
 | `~` | the console |
 | F | fullscreen |
+| F6 / F9 | quicksave / quickload (id's F-keys: F1 help, F2/F3 save/load, F4 options, F10 quit) |
 
 A gamepad or a touch screen also works. Classic uses id's own `default.cfg` keys. The
 page's **keys** button lists them all.
@@ -116,7 +117,7 @@ default, turns most of them on.
 | frame rate | id's 72 fps cap | a frame every display refresh; jumps, lifts, flashes and trails are stepped to match 72 Hz ([FRAMERATE.md](FRAMERATE.md)) |
 | picture | a fixed mode (960x600 by default) in a 4:3 frame, id's 90° field of view | the window's own size and shape in whole pixels (pixel size Auto or 1–4), a wider view on wide screens |
 | status bar, menus, console | 1:1, as id drew them | scaled up by a whole number |
-| monsters | move in id's 0.1 s steps | glide between the steps; their animation frames are not blended |
+| monsters | move in id's 0.1 s steps, and change pose ten times a second | glide between the steps, and blend between poses (the gun too) |
 | controls | id's `default.cfg` | WASD, mouse look, Always Run, a crosshair, a twin-stick gamepad with rumble, touch controls |
 | sound | id's mixer at 11025 Hz | id's mixer at the device's rate, with four of id's bugs fixed |
 
@@ -204,7 +205,7 @@ Beyond Classic:
 - `cargo test` passes in both crates, and clippy shows zero warnings.
 - `quake-rs/target/release/quaketool framerate quake-data/ID1/PAK0.PAK --check` runs 22
   gameplay scenarios at high frame rates and compares them with id's 72 Hz.
-- 17 headless-browser checks (`web/verify_*.py`) cover everything from walking and the
+- 18 headless-browser checks (`web/verify_*.py`) cover everything from walking and the
   menus to the gamepad, touch, quitting, sound through late frames, and reading back the
   canvas.
 
