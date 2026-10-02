@@ -3,6 +3,7 @@
 # screen2d re-recorded on q26/settings: the port side runs the Classic profile and id's side its own defaults; Options' port row is "Classic / 2026" with the profile at x=220 (531 px at 320x200 and 640x400, was 291 as "Web extras"; the disconnected Options 919 / 2108, was 686 / 1875); every other shot unchanged
 # server R2 (d5db64a): error/objerror as id's (CENSUS L16) — objerror frees self, so start.bsp's forced teleporter touch faults 1x not 3x and the shared random stream shifts for later maps; edicts vs id's C still 9/9
 # play: demo1..3's frame hashes re-recorded on q26/settings after merging q26/lerp, whose Classic demo playback draws between the recorded messages as id's CL_ReadFromServer/CL_LerpPoint do (it had shown each message's frame as it came); demo_lerp.py matches id's client over the whole loop (17,500 frames, clock identical, camera and entities within 2.5e-4); the demos' sound tallies and every walk/fire/quad hash unchanged
+# packclass 2026-10-02: world.rs sums a slanted plane's distance in f64 (id's x87 registers), so a point on a 45-degree clip plane lands on id's side (hip1m1/hip2m6/hip3m1's items, census/packs.py); fire_e1m1 moves (a muzzle-lit wall patch in frame 418, two pixels at 440; no f32/f64 sign flip in any walk/fire/quad/demo workload, instrumented, so this is trace magnitudes by ulps); every id-anchored check (edicts, demolerp, oracle, census) unchanged
 census.report 855daa19919aff01
 edicts.e1m1 fea55149a7ee4427
 edicts.e1m2 5ff403cb869b3f72
@@ -42,11 +43,11 @@ play.demo3.640x400.hashes 183797e96555eec9
 play.demo3.640x400.sound 82fd6ee15ef688da
 play.demo3.960x600.hashes 500e4b5645e55a97
 play.demo3.960x600.sound e2d0702c9af85aba
-play.fire_e1m1.320x200.hashes 8bb046aa7c207ecc
+play.fire_e1m1.320x200.hashes 28ffba51fb4f1b34
 play.fire_e1m1.320x200.sound d46a4e735a2b466e
-play.fire_e1m1.640x400.hashes 9bdde8e35f01c66d
+play.fire_e1m1.640x400.hashes 8ac45977173303cb
 play.fire_e1m1.640x400.sound 5c339b5c76131d86
-play.fire_e1m1.960x600.hashes b03661574fd5abb2
+play.fire_e1m1.960x600.hashes 6af712916725dad8
 play.fire_e1m1.960x600.sound f43dcb92d0c73a50
 play.quad_e1m1.320x200.hashes 11e417ebd41a1666
 play.quad_e1m1.320x200.sound 4e1860136ed55c37
