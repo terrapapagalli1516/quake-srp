@@ -385,6 +385,11 @@ const SVC_FINALE: u8 = 31;
 const SVC_CDTRACK: u8 = 32;
 const SVC_SELLSCREEN: u8 = 33;
 const SVC_CUTSCENE: u8 = 34;
+/// The 2021 re-release's `svc_achievement` (not in protocol.h): a string
+/// naming a Steam/console achievement. The mission packs' re-release progs
+/// write it when a monster kills another (`Killed`), at a secret
+/// (`multi_trigger`), at a pack's last level.
+const SVC_ACHIEVEMENT: u8 = 52;
 
 // TE_* type bytes (protocol.h), as written after the svc_temp_entity byte.
 const TE_SPIKE: u8 = 0;
@@ -676,6 +681,13 @@ impl Outbox {
             // the QuakeC globals (like the Tab scoreboard), so these single-byte
             // commands need no event.
             SVC_KILLEDMONSTER | SVC_FOUNDSECRET => MsgParse::Command,
+            // id's client knows no 52: CL_ParseServerMessage's `default`
+            // Host_Errors ("Illegible server message"), so WinQuake cannot
+            // play the re-release's mission packs past their first secret.
+            // The re-release's own engine records the achievement; here the
+            // command and its string drop out of the parse, as any unknown
+            // command does, and the game goes on.
+            SVC_ACHIEVEMENT => MsgParse::Command,
             _ => MsgParse::Command,
         }
     }
@@ -1286,6 +1298,19 @@ mod tests {
             server.drain_svc_events(),
             vec![SvcEvent::Finale("the Rune of Earth Magic".into())]
         );
+    }
+
+    /// The re-release progs' `svc_achievement` (`Killed`: WriteByte(MSG_ALL,
+    /// 52), WriteString(MSG_ALL, "ACH_FRIENDLY_FIRE")) between two of id's
+    /// commands: nothing comes of it, and the stream stays in step.
+    #[test]
+    fn svc_achievement_and_its_string_are_skipped() {
+        let mut server = svc_server();
+        write_byte(&mut server, MSG_ALL, SVC_KILLEDMONSTER as f32);
+        write_byte(&mut server, MSG_ALL, SVC_ACHIEVEMENT as f32);
+        write_string(&mut server, MSG_ALL, "ACH_FRIENDLY_FIRE");
+        write_byte(&mut server, MSG_ALL, SVC_INTERMISSION as f32);
+        assert_eq!(server.drain_svc_events(), vec![SvcEvent::Intermission]);
     }
 
     #[test]
