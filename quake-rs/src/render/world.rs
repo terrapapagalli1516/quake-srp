@@ -7,7 +7,7 @@
 //! `D_CalcGradients`' planes for a face ([`face_grads`]).
 
 use crate::bsp::Bsp;
-use crate::math::Vec3;
+use crate::math::{concat_rotations, dot, Vec3, PITCH, ROLL, YAW};
 use super::raster::{PolyGrads, ScreenProj};
 
 /// A face's [`PolyGrads`] from its plane (`bsp.planes[face.planenum]`, not
@@ -41,6 +41,91 @@ pub struct BModelInstance {
     /// ALTERNATE animated-texture cycle (`R_TextureAnimation`), so e.g. a pressed
     /// button shows its lit/green face. 0 = the primary `+0..+9` cycle.
     pub frame: i32,
+    /// The entity's `angles` field (`[PITCH, YAW, ROLL]`, degrees), as id's
+    /// `currententity->angles`. `[0.0; 3]` for the shareware's doors/plats/
+    /// buttons, which never rotate; the mission packs drive this from
+    /// `func_rotate_door`/`func_rotate_train`/`func_rotate_entity` (Hipnotic)
+    /// turning the edict's `angles` over time (their collision is faked with
+    /// `func_movewall`s, so the engine only has to *draw* the rotation).
+    /// [`EdgeState::draw_bentities`](super::edge::EdgeState) ports
+    /// `R_RotateBmodel` from this: identity when it is `[0.0; 3]` (so Classic,
+    /// where it always is, is unaffected byte-for-byte).
+    pub angles: Vec3,
+}
+
+/// Identity: the "entity hasn't rotated" matrix (`R_RotateBmodel` builds this
+/// exact matrix at `angles = [0, 0, 0]` — `sin(0) = 0`, `cos(0) = 1` exactly in
+/// IEEE float, so [`entity_rotate`] through it reproduces its input bit for
+/// bit). The world entity and the external `b_*.bsp` item boxes (which never
+/// rotate; id's own box items never set `angles` either) use this directly.
+pub(super) const IDENTITY_ROTATION: [[f32; 3]; 3] =
+    [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+
+/// `R_RotateBmodel`'s matrix build: `entity_rotation = Roll * Pitch * Yaw`
+/// (`R_ConcatRotations` in that order), each an axis rotation of `angles`'
+/// component in degrees. Applying it to a *world*-frame vector
+/// ([`entity_rotate`]) gives that vector in the entity's unrotated *rest*
+/// frame — the frame its own BSP geometry (vertices, plane equations,
+/// texinfo axes) is stored in — which is what lets the renderer clip and
+/// texture a rotated bmodel's own faces without ever rotating those
+/// vertices: it rotates the view (`modelorg`, `vpn`/`vright`/`vup`) into the
+/// model's frame instead (`EdgeState::draw_bentities`), id's own trick (half
+/// the cost of transforming the geometry, and exact: a rotation matrix is
+/// orthogonal, so `dot(Rv, Rw) = dot(v, w)` for any `v`, `w` — the same
+/// projection and clip math the unrotated path already does keeps working
+/// once both the eye and the view axes have made the same trip).
+///
+/// Trig in `f64` (as [`crate::math::angle_vectors`] already does for the same
+/// per-axis sines and cosines) then cast to `f32` for the matrix, matching
+/// id's `double` promotion of `M_PI` through the angle-to-radians multiply.
+#[must_use]
+pub(super) fn entity_rotation_matrix(angles: Vec3) -> [[f32; 3]; 3] {
+    let factor = std::f64::consts::PI * 2.0 / 360.0;
+
+    // yaw: rotation about Z.
+    let angle = f64::from(angles[YAW]) * factor;
+    let (s, c) = (angle.sin() as f32, angle.cos() as f32);
+    let temp1 = [[c, s, 0.0], [-s, c, 0.0], [0.0, 0.0, 1.0]];
+
+    // pitch: rotation about Y.
+    let angle = f64::from(angles[PITCH]) * factor;
+    let (s, c) = (angle.sin() as f32, angle.cos() as f32);
+    let temp2 = [[c, 0.0, -s], [0.0, 1.0, 0.0], [s, 0.0, c]];
+
+    let temp3 = concat_rotations(&temp2, &temp1);
+
+    // roll: rotation about X.
+    let angle = f64::from(angles[ROLL]) * factor;
+    let (s, c) = (angle.sin() as f32, angle.cos() as f32);
+    let temp1 = [[1.0, 0.0, 0.0], [0.0, c, s], [0.0, -s, c]];
+
+    concat_rotations(&temp1, &temp3)
+}
+
+/// `R_EntityRotate`: `vec` (a world-frame vector: the eye, or a camera axis)
+/// rotated by `m` (an [`entity_rotation_matrix`]) into the entity's rest
+/// frame — row `i` of `m` dotted with `vec`.
+#[must_use]
+pub(super) fn entity_rotate(m: &[[f32; 3]; 3], vec: Vec3) -> Vec3 {
+    [dot(m[0], vec), dot(m[1], vec), dot(m[2], vec)]
+}
+
+/// The inverse of [`entity_rotate`] — `m`'s *transpose* applied to a rest-frame
+/// vector, bringing it back to world space. `m` is a pure rotation (its rows
+/// are an orthonormal basis), so the transpose is the inverse; used for the
+/// one piece of rest-frame data this renderer carries past the eye and the
+/// view axes into world space: a lightmap-less face's flat-shading normal
+/// (`super::edge::prepare_face`'s `light_dir` is a world-space constant, not
+/// itself rotated per entity — the port's own extra, not part of
+/// `R_RotateBmodel`, since id's software renderer has no flat-shading
+/// fallback to get right).
+#[must_use]
+pub(super) fn entity_rotate_transpose(m: &[[f32; 3]; 3], vec: Vec3) -> Vec3 {
+    [
+        m[0][0] * vec[0] + m[1][0] * vec[1] + m[2][0] * vec[2],
+        m[0][1] * vec[0] + m[1][1] * vec[1] + m[2][1] * vec[2],
+        m[0][2] * vec[0] + m[1][2] * vec[1] + m[2][2] * vec[2],
+    ]
 }
 
 /// One *external* brush model placed in the world: an entire standalone BSP
@@ -162,7 +247,7 @@ mod tests {
 
         let without = render_once(&Scene::new(&bsp, cam, 160, 120, &pal));
         // Place the quad between the camera (-200) and the centre, facing it.
-        let bmodels = [BModelInstance { model_index: 1, origin: [-120.0, 0.0, 0.0], frame: 0 }];
+        let bmodels = [BModelInstance { model_index: 1, origin: [-120.0, 0.0, 0.0], frame: 0, angles: [0.0; 3] }];
         let with = render_once(&Scene { bmodels: &bmodels, ..Scene::new(&bsp, cam, 160, 120, &pal) });
 
         let drawn_without = without.pixels.iter().filter(|&&p| p != bg).count();
@@ -199,7 +284,7 @@ mod tests {
         let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
 
         let empty = render_once(&Scene::new(&bsp, cam, 160, 120, &pal));
-        let oob = render_once(&Scene { bmodels: &[BModelInstance { model_index: 999, origin: [-120.0, 0.0, 0.0], frame: 0 }], ..Scene::new(&bsp, cam, 160, 120, &pal) });
+        let oob = render_once(&Scene { bmodels: &[BModelInstance { model_index: 999, origin: [-120.0, 0.0, 0.0], frame: 0, angles: [0.0; 3] }], ..Scene::new(&bsp, cam, 160, 120, &pal) });
         assert_eq!(
             empty.pixels, oob.pixels,
             "out-of-range submodel index must be a no-op"
@@ -215,9 +300,9 @@ mod tests {
         let pal = crate::render::fixtures::ramp_palette();
         let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
 
-        let centered = render_once(&Scene { bmodels: &[BModelInstance { model_index: 1, origin: [-120.0, 0.0, 0.0], frame: 0 }], ..Scene::new(&bsp, cam, 160, 120, &pal) });
+        let centered = render_once(&Scene { bmodels: &[BModelInstance { model_index: 1, origin: [-120.0, 0.0, 0.0], frame: 0, angles: [0.0; 3] }], ..Scene::new(&bsp, cam, 160, 120, &pal) });
         // Shift the quad well off to one side (+Y) so it projects elsewhere.
-        let shifted = render_once(&Scene { bmodels: &[BModelInstance { model_index: 1, origin: [-120.0, 120.0, 0.0], frame: 0 }], ..Scene::new(&bsp, cam, 160, 120, &pal) });
+        let shifted = render_once(&Scene { bmodels: &[BModelInstance { model_index: 1, origin: [-120.0, 120.0, 0.0], frame: 0, angles: [0.0; 3] }], ..Scene::new(&bsp, cam, 160, 120, &pal) });
         let changed = centered
             .pixels
             .iter()
@@ -242,7 +327,82 @@ mod tests {
         let pal = crate::render::fixtures::ramp_palette();
         let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
         // Must not panic; the corrupt face is simply skipped.
-        let _img = render_once(&Scene { bmodels: &[BModelInstance { model_index: 1, origin: [-120.0, 0.0, 0.0], frame: 0 }], ..Scene::new(&bsp, cam, 80, 60, &pal) });
+        let _img = render_once(&Scene { bmodels: &[BModelInstance { model_index: 1, origin: [-120.0, 0.0, 0.0], frame: 0, angles: [0.0; 3] }], ..Scene::new(&bsp, cam, 80, 60, &pal) });
+    }
+
+    // -- Rotation (R_RotateBmodel: mission-pack func_rotate_* doors/trains) ----
+
+    #[test]
+    fn entity_rotation_matrix_is_identity_at_zero_angles() {
+        // sin(0) = 0, cos(0) = 1 exactly in IEEE float, so the three concatenated
+        // axis rotations collapse to the identity bit for bit — the reason an
+        // unrotated brush entity (every one in the shareware) takes this code
+        // path with no change to its output: Classic stays byte-identical.
+        assert_eq!(entity_rotation_matrix([0.0, 0.0, 0.0]), IDENTITY_ROTATION);
+    }
+
+    #[test]
+    fn entity_rotate_through_identity_is_a_noop() {
+        let v: Vec3 = [1.0, -2.5, 3.25];
+        assert_eq!(entity_rotate(&IDENTITY_ROTATION, v), v);
+    }
+
+    #[test]
+    fn entity_rotation_matrix_matches_a_hand_computed_yaw_90_case() {
+        // angles = [pitch=0, yaw=90, roll=0]: R_RotateBmodel's yaw matrix alone
+        // (pitch and roll are both the identity at 0 degrees, so concatenating
+        // them changes nothing). By hand: sin(90) = 1, cos(90) = 0, so
+        //   temp1 (yaw)   = [[0, 1, 0], [-1, 0, 0], [0, 0, 1]]
+        // and entity_rotation = Roll(I) * Pitch(I) * temp1 = temp1, i.e.
+        //   entity_rotate(m, v) = [v.y, -v.x, v.z]
+        // — the world's +X axis (id's "forward") rotates into the model's
+        // frame as -Y, and +Y rotates into +X; this is the *inverse* of the
+        // entity's own +90-degree yaw (it undoes the rotation to bring a
+        // world vector into the model's unrotated rest frame).
+        let m = entity_rotation_matrix([0.0, 90.0, 0.0]);
+        let close = |a: Vec3, b: Vec3| (0..3).all(|i| (a[i] - b[i]).abs() < 1e-5);
+
+        assert!(close(entity_rotate(&m, [1.0, 0.0, 0.0]), [0.0, -1.0, 0.0]));
+        assert!(close(entity_rotate(&m, [0.0, 1.0, 0.0]), [1.0, 0.0, 0.0]));
+        assert!(close(entity_rotate(&m, [0.0, 0.0, 1.0]), [0.0, 0.0, 1.0])); // yaw spares Z
+    }
+
+    #[test]
+    fn entity_rotate_transpose_undoes_entity_rotate() {
+        // The matrix is a pure rotation (orthonormal rows), so its transpose
+        // is its inverse: rotating into the rest frame and back must return
+        // the original vector, for a non-axis-aligned angle triple too.
+        let m = entity_rotation_matrix([17.0, -43.0, 65.0]);
+        let v: Vec3 = [3.0, -5.0, 7.0];
+        let back = entity_rotate_transpose(&m, entity_rotate(&m, v));
+        for i in 0..3 {
+            assert!((back[i] - v[i]).abs() < 1e-4, "{back:?} != {v:?}");
+        }
+    }
+
+    #[test]
+    fn a_rotated_submodel_draws_differently_from_an_unrotated_one() {
+        // The submodel quad is a flat wall facing -X (id's convention: it
+        // directly faces a camera looking down +X at it, as the earlier
+        // tests use it). A yaw turns that wall away from the camera, so the
+        // same view must see different pixels once `angles` is non-zero —
+        // proof that `R_RotateBmodel` is wired in, not a dead field. Angles
+        // mirror the brief's oracle sweep (0, 30, 90 degrees of yaw).
+        let bsp = demo_room_with_submodel();
+        let pal = crate::render::fixtures::ramp_palette();
+        let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
+        let at = |yaw: f32| {
+            render_once(&Scene {
+                bmodels: &[BModelInstance { model_index: 1, origin: [-120.0, 0.0, 0.0], frame: 0, angles: [0.0, yaw, 0.0] }],
+                ..Scene::new(&bsp, cam, 160, 120, &pal)
+            })
+        };
+        let still = at(0.0);
+        for yaw in [30.0, 90.0] {
+            let turned = at(yaw);
+            let changed = still.pixels.iter().zip(turned.pixels.iter()).filter(|(a, b)| a != b).count();
+            assert!(changed > 0, "a {yaw}-degree yaw must change the drawn pixels");
+        }
     }
 
     // -- External brush models (standalone b_*.bsp item boxes) -----------------

@@ -1828,7 +1828,7 @@ mod tests {
             numfaces: 1,
         };
         bsp.models = vec![model(1, 2), model(0, 1)];
-        let lift = [crate::render::BModelInstance { model_index: 1, origin: [0.0, 0.0, -64.0], frame: 0 }];
+        let lift = [crate::render::BModelInstance { model_index: 1, origin: [0.0, 0.0, -64.0], frame: 0, angles: [0.0; 3] }];
         let pal = crate::render::fixtures::ramp_palette();
         let cam = Camera::looking_at([128.0, -200.0, 200.0], [128.0, 0.0, -64.0], 90.0);
         let (w, h) = (200usize, 150usize);

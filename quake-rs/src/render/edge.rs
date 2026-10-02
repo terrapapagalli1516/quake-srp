@@ -48,7 +48,7 @@ use super::surf::{
     SurfaceRequest,
 };
 use super::vis::point_in_leaf;
-use super::world::face_grads;
+use super::world::{self, face_grads};
 use super::band::Band;
 use super::raster::PolyGrads;
 use super::{Frame, Projection};
@@ -205,6 +205,11 @@ struct Ent<'a> {
     /// the model's own planes); none for the external boxes, which id never
     /// marks.
     dlights: &'a [crate::dlight::DynamicLight],
+    /// `entity_rotation` for this entity (`world::entity_rotation_matrix` of
+    /// its `angles`): [`world::IDENTITY_ROTATION`] for the world and the
+    /// external boxes (neither ever rotates), the inline bmodel's own matrix
+    /// for a brush entity (identity too, unless the mission packs turned it).
+    rotation: [[f32; 3]; 3],
 }
 
 /// The edge renderer's state, the [`Renderer`](super::Renderer)'s: what id
@@ -451,7 +456,10 @@ impl EdgeState {
         // The frame's models: the world, then the brush entities in list order
         // (inline submodels, then the external boxes).
         let mut ents: Vec<Ent> = Vec::with_capacity(1 + scene.bmodels.len() + scene.external.len());
-        ents.push(Ent { bsp, model: 0, origin: [0.0; 3], frame: 0, world_bsp: true, dlights });
+        ents.push(Ent {
+            bsp, model: 0, origin: [0.0; 3], frame: 0, world_bsp: true, dlights,
+            rotation: world::IDENTITY_ROTATION,
+        });
         for bm in scene.bmodels {
             if bm.model_index == 0 || bm.model_index >= bsp.models.len() {
                 continue;
@@ -462,13 +470,23 @@ impl EdgeState {
             // texinfo, which are the model's own (a door's faces where the
             // map put it): a light is not moved into a moved model's frame,
             // so a moved door or lift is lit as if it had not moved, as in id.
-            ents.push(Ent { bsp, model: bm.model_index, origin: bm.origin, frame: bm.frame, world_bsp: true, dlights });
+            // Its *rotation* is the same story (R_MarkLights never saw
+            // `entity_rotation` either): unaffected by this round.
+            ents.push(Ent {
+                bsp, model: bm.model_index, origin: bm.origin, frame: bm.frame, world_bsp: true, dlights,
+                rotation: world::entity_rotation_matrix(bm.angles),
+            });
         }
         for ext in scene.external {
             if ext.bsp.models.is_empty() {
                 continue;
             }
-            ents.push(Ent { bsp: ext.bsp, model: 0, origin: ext.origin, frame: 0, world_bsp: false, dlights: &[] });
+            // Instanced item boxes (`maps/b_*.bsp`) never rotate in id either
+            // (out of this round's scope: see `BModelInstance::angles`).
+            ents.push(Ent {
+                bsp: ext.bsp, model: 0, origin: ext.origin, frame: 0, world_bsp: false, dlights: &[],
+                rotation: world::IDENTITY_ROTATION,
+            });
         }
 
         // `R_PushDlights` over the world, and `R_MarkLights` over each inline
@@ -1275,10 +1293,16 @@ impl EdgeState {
     /// the edge list, clipped to the world's leaves when it spans several.
     fn draw_bentities(&mut self, world: &Bsp, ents: &[Ent]) {
         let oldorigin = self.modelorg;
+        let (base_vpn, base_vright, base_vup) = (self.vpn, self.vright, self.vup);
         let world_root = world.models.first().and_then(|m| m.headnode.first().copied()).unwrap_or(0);
         self.insubmodel = true;
         for (ei, e) in ents.iter().enumerate().skip(1) {
             let m = &e.bsp.models[e.model];
+            // R_BmodelCheckBBox / R_SplitEntityOnNode2 both use the model's
+            // own (unrotated) bounding box translated by `origin`, exactly as
+            // id does even for a rotated bmodel (a known looseness of id's
+            // own check, not something to tighten here: see R_RotateBmodel's
+            // call site in `r_main.c`, which rotates *after* this box test).
             let emins = [e.origin[0] + m.mins[0], e.origin[1] + m.mins[1], e.origin[2] + m.mins[2]];
             let emaxs = [e.origin[0] + m.maxs[0], e.origin[1] + m.maxs[1], e.origin[2] + m.maxs[2]];
             let minmaxs = [emins[0], emins[1], emins[2], emaxs[0], emaxs[1], emaxs[2]];
@@ -1288,7 +1312,14 @@ impl EdgeState {
             }
             self.currententity = ei as u32;
             self.modelorg = sub(self.r_origin, e.origin);
-            // R_RotateBmodel (no rotation): the view's sides in the model's frame.
+            // R_RotateBmodel: rotate modelorg and the view axes into the
+            // entity's rest frame (identity when `e.rotation` is — every
+            // entity in the shareware, so Classic takes the exact bytes the
+            // pre-rotation code did).
+            self.modelorg = world::entity_rotate(&e.rotation, self.modelorg);
+            self.vpn = world::entity_rotate(&e.rotation, base_vpn);
+            self.vright = world::entity_rotate(&e.rotation, base_vright);
+            self.vup = world::entity_rotate(&e.rotation, base_vup);
             self.transform_frustum();
             let top = if !has_tree(world) {
                 None
@@ -1308,8 +1339,11 @@ impl EdgeState {
                 None if !has_tree(world) => self.draw_submodel_polygons(e, clipflags, 0),
                 None => {}
             }
-            // put back world frustum clipping
+            // put back world rotation and frustum clipping
             self.modelorg = oldorigin;
+            self.vpn = base_vpn;
+            self.vright = base_vright;
+            self.vup = base_vup;
             self.transform_frustum();
         }
         self.insubmodel = false;
@@ -1373,7 +1407,7 @@ impl EdgeState {
                 self.bedges.push(BEdge { v: [v0, v1], pnext: next });
             }
             if ok {
-                self.recursive_clip_bpoly(world, e.bsp, e.origin, 0, topnode, fi, 0);
+                self.recursive_clip_bpoly(world, e.bsp, e.origin, e.rotation, 0, topnode, fi, 0);
             }
         }
     }
@@ -1383,7 +1417,17 @@ impl EdgeState {
     /// side down its child — to `R_RenderBmodelFace` at a non-solid leaf in the
     /// PVS, keyed as that leaf.
     #[allow(clippy::too_many_arguments)]
-    fn recursive_clip_bpoly(&mut self, world: &Bsp, model: &Bsp, entorigin: Vec3, pedges: u32, node: i32, fi: usize, depth: u32) {
+    fn recursive_clip_bpoly(
+        &mut self,
+        world: &Bsp,
+        model: &Bsp,
+        entorigin: Vec3,
+        rotation: [[f32; 3]; 3],
+        pedges: u32,
+        node: i32,
+        fi: usize,
+        depth: u32,
+    ) {
         if depth > MAX_DEPTH {
             return;
         }
@@ -1391,9 +1435,14 @@ impl EdgeState {
         let Some(splitplane) = usize::try_from(n.planenum).ok().and_then(|p| world.planes.get(p)) else { return };
         let mut psideedges = [NONE, NONE];
         let mut makeclippededge = false;
-        // transform the BSP plane into model space
+        // transform the BSP plane into model space: the world-space split
+        // plane's normal rotates the same way `modelorg` and the view axes
+        // did (R_RotateBmodel); its distance only needs the translation
+        // (`entorigin`), since that's taken before the rotation (a plane's
+        // distance from the entity's own origin doesn't change by turning
+        // the entity in place around that same origin).
         let tdist = splitplane.dist - dot(entorigin, splitplane.normal);
-        let tnormal = splitplane.normal;
+        let tnormal = world::entity_rotate(&rotation, splitplane.normal);
         // clip edges to BSP plane
         let mut p = pedges;
         while p != NONE {
@@ -1456,7 +1505,7 @@ impl EdgeState {
                     self.render_bmodel_face(model, edges, fi);
                 }
             } else {
-                self.recursive_clip_bpoly(world, model, entorigin, edges, pn, fi, depth + 1);
+                self.recursive_clip_bpoly(world, model, entorigin, rotation, edges, pn, fi, depth + 1);
             }
         }
     }
@@ -1864,12 +1913,30 @@ impl EdgeState {
             let anim_mi = texture_animation(bsp, mi, e.frame, time);
             bsp.textures.get(anim_mi).and_then(|o| o.as_ref()).map(|mt| (anim_mi, mt))
         });
-        // The face's gradients from the eye in the model's frame.
-        let Some(grads) = face_grads(bsp, face, sview, sub(frame.cam.pos, e.origin), ti) else {
+        // The face's gradients from the eye in the model's frame: `D_CalcGradients`'
+        // own R_RotateBmodel re-do, by rotating the eye and the (shared, world)
+        // view axes into this entity's rest frame together — identity for the
+        // world and for an unrotated bmodel (`e.rotation` is then exactly
+        // `IDENTITY_ROTATION`, so this is byte-for-byte the plain translation
+        // below it used to be), id's own rotated-door math otherwise.
+        let eye = world::entity_rotate(&e.rotation, sub(frame.cam.pos, e.origin));
+        let local_sview = ScreenProj {
+            forward: world::entity_rotate(&e.rotation, sview.forward),
+            right: world::entity_rotate(&e.rotation, sview.right),
+            up: world::entity_rotate(&e.rotation, sview.up),
+            ..*sview
+        };
+        let Some(grads) = face_grads(bsp, face, &local_sview, eye, ti) else {
             return Paint::Fill(clear);
         };
         let face_bits = if e.world_bsp { bits.get(fi).copied().unwrap_or(0) } else { 0 };
+        // The port's own flat-shading fallback (id has none: an unlit face is
+        // simply fullbright). `light_dir` is a world-space constant, so a
+        // rotated entity's rest-frame normal has to make the same trip back
+        // out to world space the eye and the view axes made in — the inverse
+        // rotation (identity for the world/an unrotated bmodel, same as above).
         let normal = super::surf::face_normal(bsp, face).unwrap_or([0.0, 0.0, 1.0]);
+        let normal = world::entity_rotate_transpose(&e.rotation, normal);
         let shade = (0.5 + 0.5 * dot(normal, light_dir).max(0.0)).min(1.0);
         let turbulent = s.flags & SURF_DRAWTURB != 0;
         // Only walls are lightmapped (sky and liquids are TEX_SPECIAL).

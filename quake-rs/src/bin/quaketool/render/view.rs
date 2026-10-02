@@ -207,7 +207,10 @@ pub fn cmd_view(args: &[String]) -> CmdResult {
             let (model, org, ang) = (model.to_string(), [ox, oy, oz], [ap, ay, ar]);
             if let Some(n) = model.strip_prefix('*') {
                 let model_index = n.parse().map_err(|_| format!("{p}: bad submodel {model:?}"))?;
-                bmodels.push(render::BModelInstance { model_index, origin: org, frame: fr as i32 });
+                // The `.ents` line carries this entity's angles too (oracle.c
+                // writes every entity's, bmodel or not): a mission-pack door
+                // caught mid-turn in id's own frame turns the same way here.
+                bmodels.push(render::BModelInstance { model_index, origin: org, frame: fr as i32, angles: ang });
             } else if model.ends_with(".bsp") {
                 ext.entry(model.clone()).or_insert_with(|| read_pak(&model).ok().and_then(|b| Bsp::parse(&b).ok()));
                 ext_descs.push((model, org));

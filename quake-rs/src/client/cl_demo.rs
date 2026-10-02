@@ -677,6 +677,10 @@ fn render_demo_frame(
                 model_index: num,
                 origin: e.origin,
                 frame: e.frame.max(0),
+                // Demo entities carry full angles (used above for alias
+                // models too): a recorded mission-pack door/train rotates in
+                // playback exactly as it did live.
+                angles: e.angles,
             });
         } else if let Some(Some(spr)) = d.sprites.get(e.modelindex) {
             // Sprite-model entity (the boot demo's s_explod.spr explosion flashes).
