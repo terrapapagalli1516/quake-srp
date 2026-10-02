@@ -119,9 +119,13 @@ pub struct Cvars {
     /// `cl_jumpswim`: `+jump` also swims up (`upmove`) in water and flight,
     /// on top of QuakeC's own swim-up.
     pub jumpswim: bool,
-    /// `vid_fkey`: `f` toggles fullscreen (the page's; `default.cfg` leaves
-    /// `f` unbound).
-    pub fkey: bool,
+    /// `vid_altenter`: Alt+Enter toggles fullscreen — the page's, taken
+    /// before the game sees either key, whatever has the keyboard (the game,
+    /// the menu, the console); QuakeSpasm's `VID_Toggle` chord. Off, the
+    /// chord is the game's, as in WinQuake, where `default.cfg` binds ALT
+    /// `+strafe` and ENTER `+jump`. Its old name, `vid_fkey` (when the key
+    /// was F), still sets it ([`OLD_NAMES`]).
+    pub alt_enter: bool,
     /// `r_lerpmove` (QuakeSpasm's name): monsters glide between their steps
     /// ([`LerpMove::Smooth`]) instead of being drawn where each 0.1 s step put
     /// them, as id's client does.
@@ -196,7 +200,7 @@ impl Cvars {
             fov_adapt: false,
             freelook: false,
             jumpswim: false,
-            fkey: false,
+            alt_enter: false,
             lerpmove: LerpMove::Classic,
             lerpmodels: LerpModels::Classic,
             sound: SoundMode::Classic,
@@ -213,7 +217,7 @@ impl Cvars {
     /// resolution in whole chunky pixels with a Hor+ field of view, the 2-D
     /// layer at id's proportions, the crosshair, monsters that glide between
     /// their steps and whose animation blends between frames, Always Run,
-    /// mouse look, Space to swim up, `f` for fullscreen and touch controls
+    /// mouse look, Space to swim up, Alt+Enter for fullscreen and touch controls
     /// on a phone. Show FPS and exact perspective stay off: the readout is
     /// clutter, and id's 16-pixel spans are part of the look. A gamepad
     /// works as a modern twin-stick pad ([`JoyCvars::modern`]). The edict
@@ -230,7 +234,7 @@ impl Cvars {
             fov_adapt: true,
             freelook: true,
             jumpswim: true,
-            fkey: true,
+            alt_enter: true,
             joy: JoyCvars::modern(),
             lerpmove: LerpMove::Smooth,
             lerpmodels: LerpModels::Smooth,
@@ -459,8 +463,8 @@ pub const CVARS: &[Cvar] = &[
         get: |c| flag(c.freelook), set: |c, v| c.freelook = on(v) },
     Cvar { name: "cl_jumpswim", archive: true, departure: true, help: "+jump also swims up",
         get: |c| flag(c.jumpswim), set: |c, v| c.jumpswim = on(v) },
-    Cvar { name: "vid_fkey", archive: true, departure: true, help: "F toggles fullscreen",
-        get: |c| flag(c.fkey), set: |c, v| c.fkey = on(v) },
+    Cvar { name: "vid_altenter", archive: true, departure: true, help: "Alt+Enter toggles fullscreen",
+        get: |c| flag(c.alt_enter), set: |c, v| c.alt_enter = on(v) },
     Cvar { name: "r_lerpmove", archive: true, departure: true, help: "monsters glide between steps",
         get: |c| flag(c.lerpmove == LerpMove::Smooth),
         set: |c, v| c.lerpmove = if on(v) { LerpMove::Smooth } else { LerpMove::Classic } },
@@ -489,9 +493,21 @@ pub const CVARS: &[Cvar] = &[
         get: |c| number_string(c.joy.rumble), set: |c, v| c.joy.rumble = atof(v) },
 ];
 
+/// A renamed cvar's old name, and the name it has now. A `config.cfg` saved
+/// before the rename still sets the setting: the file is exec'd through the
+/// console, whose [`find`] reads an old name as the new one; the next save
+/// writes the new name ([`write_changes`] knows only [`CVARS`]). Tab
+/// completion and the lists offer only the new names.
+const OLD_NAMES: &[(&str, &str)] = &[
+    // The page's fullscreen key was F until 2026-10-02: a letter can't work
+    // whatever has the keyboard (the console types it, a bind takes it).
+    ("vid_fkey", "vid_altenter"),
+];
+
 /// `Cvar_FindVar`: the cvar called `name` (any case, as the port's console
-/// matches names).
+/// matches names), or called that before it was renamed ([`OLD_NAMES`]).
 pub fn find(name: &str) -> Option<&'static Cvar> {
+    let name = OLD_NAMES.iter().find(|(old, _)| old.eq_ignore_ascii_case(name)).map_or(name, |&(_, new)| new);
     CVARS.iter().find(|c| c.name.eq_ignore_ascii_case(name))
 }
 
@@ -574,5 +590,22 @@ mod tests {
         let mut out = String::new();
         write_changes(&c, &Cvars::classic(), &mut out);
         assert_eq!(out, "cl_forwardspeed \"400\"\ncl_backspeed \"400\"\nm_pitch \"-0.022\"\n");
+    }
+
+    #[test]
+    fn an_old_name_sets_the_renamed_cvar_and_only_the_new_one_is_written() {
+        let v = find("VID_FKEY").expect("a config.cfg from before the rename still finds it");
+        assert_eq!(v.name, "vid_altenter");
+        let mut c = Cvars::modern();
+        v.set(&mut c, "0");
+        assert!(!c.alt_enter);
+        let mut out = String::new();
+        write_changes(&c, &Cvars::modern(), &mut out);
+        assert_eq!(out, "vid_altenter \"0\"\n", "the next save writes the new name");
+        assert_eq!(complete("vid_f"), None, "completion offers only the names in use");
+        for (old, new) in OLD_NAMES {
+            assert!(CVARS.iter().all(|c| !c.name.eq_ignore_ascii_case(old)), "{old} is not a name in use");
+            assert!(CVARS.iter().any(|c| c.name == *new), "{old} leads to a cvar");
+        }
     }
 }

@@ -183,9 +183,9 @@ pub const SETTING_ROWS: [SettingRow; 18] = [
         kind: RowKind::Toggle,
     },
     SettingRow {
-        cvar: "vid_fkey",
-        label: "      F for fullscreen",
-        help: ["The F key toggles fullscreen;", "id's Quake leaves F unbound"],
+        cvar: "vid_altenter",
+        label: "        Fullscreen key",
+        help: ["Alt+Enter toggles fullscreen;", "id's: Alt strafes, Enter jumps"],
         kind: RowKind::Toggle,
     },
     SettingRow {

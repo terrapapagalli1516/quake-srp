@@ -34,7 +34,7 @@ use crate::host::step;
 use crate::input::{gamepad, key_clear_states, key_event, mouse_move, pointer_unlocked};
 use crate::proto::{
     read_event, AudioCounts, Event, Msg, PCM_CLEAR, STATE_ASK, STATE_BIND_GRAB, STATE_CONSOLE,
-    STATE_FKEY, STATE_MENU, STATE_NATIVE, STATE_PAUSED, STATE_TIMEDEMO, STATE_TOUCH, STATE_WALK,
+    STATE_ALT_ENTER, STATE_MENU, STATE_NATIVE, STATE_PAUSED, STATE_TIMEDEMO, STATE_TOUCH, STATE_WALK,
 };
 use crate::savegame::scan_saves;
 use crate::snd_dma::Audio;
@@ -323,12 +323,12 @@ type UiState = (u32, i32, u32);
 
 /// The [`UiState`] now.
 fn ui_state() -> UiState {
-    let (native, fkey, pixel_size) = APP.with(|c| {
+    let (native, alt_enter, pixel_size) = APP.with(|c| {
         c.borrow().as_ref().map_or((false, false, 0), |a| {
             let native = crate::vid::native(a);
             let threads = crate::vid::render_threads(a);
             let pixel = a.window.filter(|_| native).map_or(0, |w| crate::vid::pixel_size(&a.settings.cvars, w, a.dpr, threads));
-            (native, a.settings.cvars.fkey, pixel)
+            (native, a.settings.cvars.alt_enter, pixel)
         })
     });
     let (touch, ask, paused) = APP.with(|c| {
@@ -344,7 +344,7 @@ fn ui_state() -> UiState {
         (crate::menu::menu_bind_grabbing() != 0, STATE_BIND_GRAB),
         (timedemo_running() != 0, STATE_TIMEDEMO),
         (native, STATE_NATIVE),
-        (fkey, STATE_FKEY),
+        (alt_enter, STATE_ALT_ENTER),
         (touch, STATE_TOUCH),
         (ask, STATE_ASK),
         (paused, STATE_PAUSED),
@@ -358,7 +358,7 @@ fn ui_state() -> UiState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proto::{encode, Record, STATE_ASK, STATE_FKEY, STATE_NATIVE, STATE_PAUSED, STATE_TOUCH};
+    use crate::proto::{encode, Record, STATE_ASK, STATE_ALT_ENTER, STATE_NATIVE, STATE_PAUSED, STATE_TOUCH};
 
     /// quake.rc's `stuffcmds`: the command line's `+profile 2026` (the
     /// page's `?2026`; the tests start in Classic) runs after `config.cfg`,
@@ -486,12 +486,12 @@ mod tests {
             let frame = recs.iter().rev().find(|r| r.kind == Record::FRAME).expect("a frame");
             let (w, h) = (u16::from_le_bytes([frame.payload[0], frame.payload[1]]), u16::from_le_bytes([frame.payload[2], frame.payload[3]]));
             let state = recs.iter().rev().find(|r| r.kind == Record::STATE).unwrap();
-            (w, h, state.u32_at(0) & (STATE_NATIVE | STATE_FKEY), state.u32_at(8))
+            (w, h, state.u32_at(0) & (STATE_NATIVE | STATE_ALT_ENTER), state.u32_at(8))
         };
-        assert_eq!(frame_and_state("2026", (1920, 1080)), (1920, 1080, STATE_NATIVE | STATE_FKEY, 1));
-        assert_eq!(frame_and_state("2026", (3840, 2160)), (1920, 1080, STATE_NATIVE | STATE_FKEY, 2), "4K: 2x2 pixels");
-        assert_eq!(frame_and_state("2026", (5120, 2880)), (1706, 960, STATE_NATIVE | STATE_FKEY, 3), "5K: 3x3");
-        assert_eq!(frame_and_state("2026", (1300, 700)), (1300, 700, STATE_NATIVE | STATE_FKEY, 1), "any aspect");
+        assert_eq!(frame_and_state("2026", (1920, 1080)), (1920, 1080, STATE_NATIVE | STATE_ALT_ENTER, 1));
+        assert_eq!(frame_and_state("2026", (3840, 2160)), (1920, 1080, STATE_NATIVE | STATE_ALT_ENTER, 2), "4K: 2x2 pixels");
+        assert_eq!(frame_and_state("2026", (5120, 2880)), (1706, 960, STATE_NATIVE | STATE_ALT_ENTER, 3), "5K: 3x3");
+        assert_eq!(frame_and_state("2026", (1300, 700)), (1300, 700, STATE_NATIVE | STATE_ALT_ENTER, 1), "any aspect");
         assert_eq!(frame_and_state("classic", (1920, 1080)), (960, 600, 0, 0), "the mode, in the 4:3 box");
     }
 
