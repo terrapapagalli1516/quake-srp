@@ -60,6 +60,16 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 //                                      layer alone (sbar, menus, console, text, backtile, fade)
 //   oracle_field name value...         set a field of the player's edict (ED_ParseEpair):
 //                                      health, items, weapon, ammo_shells, ...
+//   oracle_entfield num name value...  oracle_field for any edict (num as oracle_edicts
+//                                      prints it): poses a rotate_object/func_rotate_train
+//                                      mid-turn (angles) for a shot, without scripting its
+//                                      trigger. Setting the player's own `origin` this way
+//                                      (num 1, or oracle_field) is undone by the very next
+//                                      tick's player physics unless `noclip` is on first --
+//                                      PlayerMove's own stuck-fixup, which snaps back to the
+//                                      spawn point when the new spot isn't valid; a non-player
+//                                      edict (a door, a train) has no such physics and keeps
+//                                      whatever this sets.
 //   oracle_global name value...        set a QuakeC global the same way (serverflags, ...)
 //   oracle_centerprint text...         SCR_CenterPrint; a literal \n is a newline
 //   oracle_intermission n t [text...]  what svc_intermission (n 1), svc_finale (2) and
@@ -330,6 +340,40 @@ static void Oracle_Field_f (void)
 	ED_ParseEpair ((void *)&svs.clients[0].edict->v, def, Oracle_ArgsFrom (2));
 }
 
+// oracle_entfield num name value... -- oracle_field generalised to any edict
+// (oracle_field is always the player's, svs.clients[0].edict): poses a
+// non-player entity for a shot -- a mission-pack rotate_object mid-turn, a
+// func_rotate_train at some point of its path -- without scripting the
+// trigger that would move it there live. `num` is an edict index as
+// `oracle_edicts` prints it. Takes effect next frame like oracle_field: the
+// renderer reads the *client's* `cl_entities`, which only sees the edict's
+// new field value once the server has sent an update for it, so a `wait`
+// (or `oracle_settle`) belongs between this and the shot.
+static void Oracle_EntField_f (void)
+{
+	ddef_t	*def;
+	int		num;
+
+	if (Cmd_Argc () < 4 || !sv.active)
+	{
+		Con_Printf ("oracle_entfield num name value (needs a running server)\n");
+		return;
+	}
+	num = Q_atoi (Cmd_Argv (1));
+	if (num < 0 || num >= sv.num_edicts)
+	{
+		Con_Printf ("oracle_entfield: edict %d out of range (0..%d)\n", num, sv.num_edicts - 1);
+		return;
+	}
+	def = ED_FindField (Cmd_Argv (2));
+	if (!def)
+	{
+		Con_Printf ("oracle_entfield: no field %s\n", Cmd_Argv (2));
+		return;
+	}
+	ED_ParseEpair ((void *)&EDICT_NUM(num)->v, def, Oracle_ArgsFrom (3));
+}
+
 // oracle_global name value... -- set a QuakeC global
 static void Oracle_Global_f (void)
 {
@@ -431,6 +475,7 @@ void Oracle_Init (void)
 {
 	Cmd_AddCommand ("oracle_trace", Oracle_Trace_f);
 	Cmd_AddCommand ("oracle_field", Oracle_Field_f);
+	Cmd_AddCommand ("oracle_entfield", Oracle_EntField_f);
 	Cmd_AddCommand ("oracle_global", Oracle_Global_f);
 	Cmd_AddCommand ("oracle_centerprint", Oracle_CenterPrint_f);
 	Cmd_AddCommand ("oracle_intermission", Oracle_Intermission_f);

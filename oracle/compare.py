@@ -69,6 +69,38 @@ def read_pak_file(pak: Path, name: str) -> bytes:
     sys.exit(f"{name} not in {pak}")
 
 
+def pak_has_file(pak: Path, name: str) -> bool:
+    """Like [read_pak_file] but a yes/no, for picking which pak a map lives in."""
+    data = pak.read_bytes()
+    magic, dirofs, dirlen = struct.unpack_from("<4sii", data, 0)
+    if magic != b"PACK":
+        return False
+    for i in range(dirlen // 64):
+        (fname,) = struct.unpack_from("<56s", data, dirofs + 64 * i)
+        if fname.split(b"\0", 1)[0].decode("latin-1") == name:
+            return True
+    return False
+
+
+def pak_for_map(args, mapname: str) -> str:
+    """The `quaketool view` pak argument for `mapname`: `--pak` (plus `--pak1`)
+    alone when it has the map, unchanged from before `--game-dir` existed;
+    otherwise that layered under the first `--game-dir` pack that has it
+    instead (a mission pack's own map, e.g. hip1m1 in hipnotic/pak0.pak),
+    comma-joined the way `quaketool view`'s layered pak list reads (the last
+    one searched first) — the mission pack's own bsp/progs over id1's shared
+    palette."""
+    want = f"maps/{mapname}.bsp"
+    if pak_has_file(args.pak, want):
+        return str(args.pak)
+    base = [str(args.pak)] + ([str(args.pak1)] if args.pak1 else [])
+    for _name, path in args.game_dir:
+        pak = Path(path) / "pak0.pak"
+        if pak.exists() and pak_has_file(pak, want):
+            return ",".join(base + [str(pak)])
+    sys.exit(f"{want} not found in --pak, --pak1 or any --game-dir")
+
+
 def read_pnm(path: Path) -> np.ndarray:
     """P5 (H,W) or P6 (H,W,3) with maxval 255, as written by oracle.c / quaketool."""
     raw = path.read_bytes()
@@ -116,6 +148,21 @@ def run_c(args, case: str, mapname: str, ents: bool, out: Path) -> dict:
         base = Path(tmp)
         (base / "id1").mkdir()
         (base / "id1" / "pak0.pak").symlink_to(args.pak.resolve())
+        if args.pak1:
+            # id's own gate (COM_CheckRegistered): -game/-hipnotic/-rogue
+            # refuse to run against the shareware id1 ("You must have the
+            # registered version to use modified games"), so a --game-dir
+            # needs id1's registered pak1.pak alongside pak0.pak too.
+            (base / "id1" / "pak1.pak").symlink_to(Path(args.pak1).resolve())
+        extra_flags = []
+        for name, path in args.game_dir:
+            gdir = base / name
+            gdir.mkdir()
+            for pak_name in ("pak0.pak", "pak1.pak"):
+                src = Path(path) / pak_name
+                if src.exists():
+                    (gdir / pak_name).symlink_to(src.resolve())
+            extra_flags.append(f"-{name}")
         cmds = [
             f"viewsize {args.viewsize}",
             f"r_drawentities {1 if ents else 0}",
@@ -133,6 +180,7 @@ def run_c(args, case: str, mapname: str, ents: bool, out: Path) -> dict:
         cmds += [f'oracle_shot "{out / case}.c"', f"map {mapname}"]
         (base / "id1" / "oracle.cfg").write_text("\n".join(cmds) + "\n")
         cmd = [str(ensure_oracle(args.oracle)), "-basedir", str(base), "-width", str(w), "-height", str(h)]
+        cmd += extra_flags
         if args.aspect is not None:
             cmd += ["-oracle_aspect", str(args.aspect)]
         cmd += ["+exec", "oracle.cfg"]
@@ -147,7 +195,7 @@ def run_port(args, qt: Path, case: str, mapname: str, meta: dict, ents: bool, ou
     w, h = args.res
     org, ang = meta["vieworg"], meta["viewangles"]
     cmd = [
-        str(qt), "view", str(args.pak), f"maps/{mapname}.bsp", str(out / f"{case}.port.ppm"),
+        str(qt), "view", str(pak_for_map(args, mapname)), f"maps/{mapname}.bsp", str(out / f"{case}.port.ppm"),
         "--res", f"{w}x{h}",
         "--origin", ",".join(repr(v) for v in org),
         "--angles", ",".join(repr(v) for v in ang),
@@ -286,6 +334,14 @@ def main() -> None:
                          "16:10 modes on a 4:3 monitor, what the browser page shows)")
     ap.add_argument("--crop", action="append", default=[], help="name:x,y,w,h — zoomed crop per case")
     ap.add_argument("--pak", type=Path, default=DEFAULT_PAK)
+    ap.add_argument("--pak1", type=Path,
+                    help="id1's registered pak1.pak, alongside --pak in the C's basedir: needed with "
+                         "--game-dir, since id's own -game/-hipnotic/-rogue refuse the shareware id1")
+    ap.add_argument("--game-dir", nargs=2, metavar=("NAME", "DIR"), action="append", default=[],
+                    help="a mission pack's own game directory (repeatable), e.g. "
+                         "--game-dir hipnotic /path/to/hipnotic (DIR holds pak0.pak, optionally pak1.pak): "
+                         "layered into the C oracle's basedir id1-style and passed as its own -NAME flag "
+                         "(id's -hipnotic/-rogue/-game convention), and tried for a --maps entry id1 doesn't have")
     ap.add_argument("--quaketool", help="use this quaketool binary instead of building quake-rs")
     ap.add_argument("--oracle", help="use this C oracle binary (default oracle/build/quake-oracle)")
     ap.add_argument("--full", action="store_true",
