@@ -1149,6 +1149,7 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
         let level_name = vm.ent_str(0, fo.message).to_string();
         let hud = render::Hud {
             wad,
+            mode: w.server.mode,
             health: stat(fo.health),
             // The active weapon's ammo (W_SetCurrentAmmo keeps `currentammo` in
             // sync with the weapon), not always shells — sbar.c draws currentammo.

@@ -515,6 +515,7 @@ pub fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> CmdRes
             let stat = |f: &str| server.vm.ent_get_float(player, f) as i32;
             let hud = render::Hud {
                 wad,
+                mode: server.mode,
                 health: stat("health"),
                 ammo: stat("currentammo"),
                 armor: stat("armorvalue"),
