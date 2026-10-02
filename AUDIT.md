@@ -212,6 +212,14 @@ marked *(2026-06)* were not re-checked since. Struck items were closed on 2026-0
 - ~~CD audio is not modelled~~: `cd_win.c` with the player's own tracks (content).
 
 **Game and client**
+- `angle_vectors` (`math.rs`) keeps the angle in f64 where id's `AngleVectors` works in float:
+  facing exactly perpendicular to a trigger, the port's facing test can flip (the start map's
+  "Walk into the Slipgate" message showed 9 frames before id's at yaw 180; the sound walk
+  approaches diagonally) (telesound, 2026-10-02).
+- Movement angles reach the server unrounded (`sv_user.rs`); id's client sends them as a byte
+  in 1.40625° steps, so 180 arrives as −180 (telesound).
+- Explosion and impact particles start at the server's exact positions; id's client gets them
+  rounded to 1/8 unit (sounds are rounded since telesound's `wire_coord`) (telesound).
 - ~~Missing `default.cfg` binds: F1–F4, F6, F9, F10, F12~~ — ✅ fkeys: `keys.rs`'s
   `default_cfg` binds all eight to id's console lines (F5/F7/F8/F11 stay
   unbound, as id's own file leaves them). `t` `messagemode` and the
