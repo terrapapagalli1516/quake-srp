@@ -228,6 +228,37 @@ mod tests {
     }
 
     #[test]
+    fn a_moved_submodel_redraws_on_a_renderer_reused_across_frames() {
+        // INVESTIGATION (startdoor brief): submodel_origin_shifts_geometry
+        // above renders each scene on a FRESH `Renderer::new()` (render_once),
+        // which can never catch a bug that only shows up when the SAME
+        // Renderer (the real app's one persistent `Walk::renderer`, reused
+        // every frame) draws the SAME camera twice in a row while a brush
+        // entity's origin changes between the two calls — exactly a stationary
+        // player watching a door open. Here the renderer and its begin_map are
+        // both reused, as the real client does.
+        let bsp = demo_room_with_submodel();
+        let pal = crate::render::fixtures::ramp_palette();
+        let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
+
+        let mut renderer = crate::render::Renderer::new();
+        renderer.begin_map(&bsp);
+        let closed = [BModelInstance { model_index: 1, origin: [-120.0, 0.0, 0.0], frame: 0 }];
+        let frame1 = renderer.render(&Scene { bmodels: &closed, ..Scene::new(&bsp, cam, 160, 120, &pal) });
+        // Same renderer, same camera, same map: only the submodel's origin
+        // moves (a door opening), exactly as cl_main.rs's per-frame origin
+        // read would hand the renderer on the next frame.
+        let opened = [BModelInstance { model_index: 1, origin: [-120.0, 120.0, 0.0], frame: 0 }];
+        let frame2 = renderer.render(&Scene { bmodels: &opened, ..Scene::new(&bsp, cam, 160, 120, &pal) });
+
+        let changed = frame1.pixels.iter().zip(frame2.pixels.iter()).filter(|(a, b)| a != b).count();
+        assert!(
+            changed > 0,
+            "a submodel that moved between two frames on the SAME renderer, same stationary camera, must redraw"
+        );
+    }
+
+    #[test]
     fn submodel_tolerates_malformed_faces() {
         // A submodel whose faces reference out-of-range edges/planes/texinfo must
         // be skipped without panicking (mirrors render_tolerates_malformed_faces

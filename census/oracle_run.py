@@ -40,6 +40,19 @@ def main():
     ap.add_argument("--dev", action="store_true", help="developer 1 (shows dprint)")
     ap.add_argument("--out", default=None)
     ap.add_argument("--skill", type=int, default=1)
+    # A mission pack's own game directory: id's COM_InitFilesystem already
+    # knows `-hipnotic`/`-rogue` (stock WinQuake, no oracle.c change needed) —
+    # this harness just didn't set up the directory or pass the flag yet
+    # (startdoor brief, AUDIT.md "the mission packs"). Point `--hipnotic-pak`/
+    # `--rogue-pak` at that pack's own `pak0.pak` (e.g. a deploy's
+    # `hipnotic/pak0.pak`, built by `mission_paks.py`); id1's shareware
+    # pak0 is always included too, since the search path layers over it.
+    ap.add_argument("--hipnotic-pak", default=None, help="path to hipnotic's own pak0.pak; implies -hipnotic")
+    ap.add_argument("--rogue-pak", default=None, help="path to rogue's own pak0.pak; implies -rogue")
+    # id's COM_CheckRegistered gates -hipnotic/-rogue on gfx/pop.lmp, which
+    # only the registered id1/pak1.pak carries: a mission pack run needs it
+    # alongside the shareware pak0.
+    ap.add_argument("--id1-pak1", default=None, help="path to id1's registered pak1.pak (needed for --hipnotic-pak/--rogue-pak)")
     ap.add_argument("cmds", nargs="+")
     a = ap.parse_args()
     out = Path(a.out or tempfile.mkdtemp(prefix="oracle-census-")).resolve()
@@ -61,9 +74,22 @@ def main():
         base = Path(tmp)
         (base / "id1").mkdir()
         (base / "id1" / "pak0.pak").symlink_to(PAK.resolve())
+        if a.id1_pak1:
+            (base / "id1" / "pak1.pak").symlink_to(Path(a.id1_pak1).resolve())
         (base / "id1" / "census.cfg").write_text("\n".join(lines) + "\n")
-        res = subprocess.run([str(ORACLE), "-basedir", str(base), "-width", "320", "-height", "200",
-                              "+exec", "census.cfg"], cwd=base, capture_output=True, text=True, timeout=300)
+        argv = [str(ORACLE), "-basedir", str(base), "-width", "320", "-height", "200"]
+        if a.hipnotic_pak:
+            hdir = base / "hipnotic"
+            hdir.mkdir()
+            (hdir / "pak0.pak").symlink_to(Path(a.hipnotic_pak).resolve())
+            argv.append("-hipnotic")
+        if a.rogue_pak:
+            rdir = base / "rogue"
+            rdir.mkdir()
+            (rdir / "pak0.pak").symlink_to(Path(a.rogue_pak).resolve())
+            argv.append("-rogue")
+        argv += ["+exec", "census.cfg"]
+        res = subprocess.run(argv, cwd=base, capture_output=True, text=True, timeout=300)
         sys.stdout.write(res.stdout)
         sys.stderr.write(res.stderr[-2000:])
         print(f"[oracle rc={res.returncode} out={out}]")
