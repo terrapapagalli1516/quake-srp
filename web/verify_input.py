@@ -26,7 +26,7 @@
   7. KEYS BY THEIR PLACE — an AZERTY key event (code KeyW, key 'z') is
      keynum 'w' in the game (id's scancodes), and types 'z' in the console.
 
-Headless fullscreen is approximate: the F/fullscreen checks are best-effort
+Headless fullscreen is approximate: the Alt+Enter/fullscreen checks are best-effort
 here (skipped with a note when the headless browser refuses) — see the manual
 test script in the session notes for the real-monitor pass.
 
@@ -306,15 +306,17 @@ with sync_playwright() as p:
           not s["chip"] and not s["scrim"] and not s["locked"] and s["walk"] == 0,
           str(s))
 
-    # Fullscreen is approximate under headless: try F and report, don't insist.
-    pg.keyboard.press("f")
+    # Fullscreen is approximate under headless: try Alt+Enter (in demo
+    # playback: the key works whatever has the keyboard) and report, don't
+    # insist.
+    pg.keyboard.press("Alt+Enter")
     time.sleep(0.5)
     if pg.evaluate("document.fullscreenElement !== null"):
-        check("F enters fullscreen; transient hint shows",
+        check("Alt+Enter enters fullscreen; transient hint shows",
               pg.evaluate("fsHint.classList.contains('show')"))
-        pg.keyboard.press("f")
+        pg.keyboard.press("Alt+Enter")
         time.sleep(0.5)
-        check("F leaves fullscreen; hint hides",
+        check("Alt+Enter leaves fullscreen; hint hides",
               pg.evaluate("document.fullscreenElement === null"
                           " && !fsHint.classList.contains('show')"))
     else:

@@ -222,7 +222,7 @@
         <div id="gamePicker" class="hidden"></div>
       </div>
       <div id="lockChip" class="chip">click to capture mouse</div>
-      <div id="fsHint" class="chip">Esc = menu &nbsp;·&nbsp; F = leave fullscreen</div>
+      <div id="fsHint" class="chip"></div>
     </div>
     <div id="bar">
       <span id="mark">QUAKE<span class="sep">·</span>RS</span>
@@ -230,7 +230,7 @@
       <span id="barBtns">
         <span id="gameCtl" hidden><button id="gameBtn" class="link" aria-expanded="false" aria-controls="gameMenu"
           title="play Quake or a mission pack (a reload)">game</button><div id="gameMenu" hidden></div></span>
-        <button id="fs" class="link" title="fullscreen (F)">fullscreen</button>
+        <button id="fs" class="link" title="fullscreen">fullscreen</button>
         <button id="sndBtn" class="link" title="play a test sound — in-game audio unlocks on your first click">sound off</button>
         <button id="keysBtn" class="link" aria-expanded="false" aria-controls="drawer">keys</button>
       </span>
@@ -267,7 +267,7 @@
           <span class="k"><kbd>↑</kbd><kbd>↓</kbd></span><span>menu: navigate · <kbd>←</kbd><kbd>→</kbd> adjust · <kbd>Enter</kbd> select</span>
           <span class="k">Options</span><span>screen size, brightness, mouse, always run — Customize controls to rebind keys, Video Options for id's 4:3 modes, and <em>Classic / 2026</em>: ←/→ switches between id's WinQuake exactly and this port's 2026 settings, Enter lists each one (or open the page as <code>?classic</code> / <code>?2026</code>)</span>
           <span class="k"><kbd>-</kbd><kbd>=</kbd></span><span>screen size down / up</span>
-          <span class="k"><kbd>F</kbd></span><span>fullscreen (2026; Classic leaves F unbound, as id's)</span>
+          <span class="k"><kbd>Alt</kbd>+<kbd>Enter</kbd></span><span>fullscreen on and off, whatever has the keyboard: the game, the menu, the console (2026; Option+Return on a Mac). Classic leaves the chord to id's strafe and jump: use the <em>fullscreen</em> button. <kbd>F11</kbd> is the browser's own, the whole window</span>
           <span class="k"><kbd>F6</kbd> / <kbd>F9</kbd></span><span>quicksave / quickload (id's own binds — also <kbd>F1</kbd> help, <kbd>F2</kbd>/<kbd>F3</kbd> the Save/Load screen, <kbd>F4</kbd> Options, <kbd>F10</kbd> quit, <kbd>F12</kbd> a screenshot — a <code>.pcx</code> file in this page's storage, not a download yet; F12 only reaches the game in fullscreen, where the browser keeps it for devtools otherwise)</span>
           <span class="k"><kbd>~</kbd></span><span>console (see below)</span>
           <span class="k">game</span><span>with a mission pack on this page (the server's or your own): Quake, Scourge of Armagon or Dissolution of Eternity — on the start screen, under the view, or GAME in a phone's menu. A choice reloads the page as <code>?game=hipnotic</code> / <code>?game=rogue</code> (none for Quake): bookmark one to start there. Saves stay; an unsaved game ends</span>
@@ -459,7 +459,7 @@ const IN = { TICK: 1, KEY: 2, MOUSE: 3, CLEAR_KEYS: 4, POINTER_UNLOCKED: 5, AUDI
 const FORMAT = { RGBA8: 0, INDEXED8: 1 };
 const OUT = { FRAME: 1, SYNC: 2, STATE: 3, REPLY: 12, BENCH: 13, AUDIO: 15, CD: 16, RUMBLE: 20, QUIT: 18 };
 // State flags (the STATE record).
-const ST = { MENU: 1, CONSOLE: 2, WALK: 4, BIND_GRAB: 8, TIMEDEMO: 16, NATIVE: 32, FKEY: 64,
+const ST = { MENU: 1, CONSOLE: 2, WALK: 4, BIND_GRAB: 8, TIMEDEMO: 16, NATIVE: 32, ALT_ENTER: 64,
              TOUCH: 128, ASK: 256, PAUSED: 512 };
 
 let worker = null, ctl = null, ring = null;
@@ -484,8 +484,10 @@ function bindGrabbing() { return !!(gameState.flags & ST.BIND_GRAB); }
 // Native resolution (vid_native): device pixels per picture pixel, 0 when the
 // picture is a video mode shown in the 4:3 box.
 function nativePixel() { return (gameState.flags & ST.NATIVE) ? gameState.pixelSize : 0; }
-// Does F toggle fullscreen (vid_fkey; id's Quake leaves F unbound)?
-function fkeyFullscreen() { return !!(gameState.flags & ST.FKEY); }
+// Is Alt+Enter the page's fullscreen key (vid_altenter: 2026; in Classic the
+// chord is the game's, id's ALT +strafe and ENTER +jump)? See "Fullscreen",
+// below.
+function altEnterFullscreen() { return !!(gameState.flags & ST.ALT_ENTER); }
 
 // --- Events into the input ring ------------------------------------------------
 // One record: [kind u8][0][len u16] then the payload. The ring only ever
@@ -567,6 +569,7 @@ function handleOutput(b) {
         if (nativePixel() !== native) fitCanvas();
         if (inWalkMode() !== walk) syncStatus();
         syncLockChip();
+        syncFullscreenTitle();
         if (touch) touch.state();
         break;
       }
@@ -643,7 +646,7 @@ let readyToPlay = false;        // the game is running (the prompt is up)
 function unlockAudio() {
   // Create/resume the AudioContext inside a user-gesture handler (required by
   // autoplay policy). Idempotent — every gesture path routes through here so
-  // whichever comes first (overlay, button, canvas, F key) unlocks sound. The
+  // whichever comes first (overlay, button, canvas, Alt+Enter) unlocks sound. The
   // catch() absorbs a policy rejection (e.g. a programmatic click): the next
   // real gesture simply tries again.
   if (!audioCtx) { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); }
@@ -763,16 +766,8 @@ addEventListener('keydown', e => {
     return;
   }
 
-  // --- F: the page's fullscreen toggle, with vid_fkey (the 2026 profile; id's
-  //     default.cfg leaves F unbound), while the game has the keyboard. In the
-  //     live game the key still reaches the engine for a player who bound it;
-  //     during demo playback it does not, where any key raises the menu.
   const gameHasKeys = !menuVisible() && !consoleVisible();
   const qk = quakeKey(e);
-  if (qk === 102 && gameHasKeys && fkeyFullscreen()) {   // the F key's place
-    toggleFullscreen();
-    if (!inWalkMode()) { e.preventDefault(); return; }
-  }
 
   // --- Every key by Quake keynum, autorepeats included (Key_Event ignores
   //     them but for Backspace), with the character it typed: the menu
@@ -818,11 +813,11 @@ document.addEventListener('click', e => {
 });
 
 // Set when the page itself is about to perform an action the browser answers
-// by releasing the pointer lock (fullscreen transitions via F/⛶). The
-// pointerlockchange handler consumes it to tell "we asked for this" apart from
-// "the player pressed Esc" — only the latter opens the in-game menu. The
-// timeout self-clears in case the browser kept the lock (then the flag must
-// not swallow a later real Esc).
+// by releasing the pointer lock (a fullscreen transition: Alt+Enter, the
+// bar's button). The pointerlockchange handler consumes it to tell "we asked
+// for this" apart from "the player pressed Esc" — only the latter opens the
+// in-game menu. The timeout self-clears in case the browser kept the lock
+// (then the flag must not swallow a later real Esc).
 let expectUnlock = false, expectUnlockTimer = 0;
 function pageWillDropLock() {
   if (!locked()) return;
@@ -831,16 +826,63 @@ function pageWillDropLock() {
   expectUnlockTimer = setTimeout(() => { expectUnlock = false; }, 1000);
 }
 
+// --- Fullscreen (web/PLATFORM.md, "Fullscreen") --------------------------------
+// The way in and out is the bar's button, in every profile, and the
+// fullscreen key: Alt+Enter, whatever has the keyboard — the game, the menu,
+// the console, a demo, the mouse captured or not. A shortcut has to work in
+// every state or the player stops trusting it: F used to be the key, in the
+// live game only, so after Esc held to leave fullscreen (its first press is a
+// tap the page gets: the menu opens, and stays open) F did nothing at all.
+// A letter can't be a key for every state (the console types it, a bind
+// takes it); Alt+Enter is the native-game convention and QuakeSpasm's own
+// VID_Toggle chord, and browsers leave it to the page. It is taken here, in
+// the capture phase, before any other listener: the game never sees the
+// Enter (the Alt reaches it, +strafe for a moment), and what it toggles is
+// the browser's own state, document.fullscreenElement, never a copy.
+// vid_altenter switches it (2026). In Classic the chord stays the game's:
+// default.cfg binds ALT +strafe and ENTER +jump, a strafe-jump, as in
+// WinQuake. The browser's own F11 fills the screen with the whole window.
+addEventListener('keydown', e => {
+  if (e.key !== 'Enter' || !e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+  if (!readyToPlay || !altEnterFullscreen()) return;
+  e.preventDefault();
+  e.stopImmediatePropagation();
+  if (!e.repeat) toggleFullscreen();
+}, true);
+
 function toggleFullscreen() {
-  // The F key / ⛶ button is a user gesture — take it for audio too.
+  // Alt+Enter and the button are user gestures — take them for audio too.
   unlockAudio();
   // Browsers drop an active pointer lock on fullscreen transitions (both
   // directions); that loss is OUR doing here, not an Esc — don't open the menu.
   pageWillDropLock();
-  if (document.fullscreenElement) document.exitFullscreen();
-  else wrap.requestFullscreen?.();
+  if (document.fullscreenElement) document.exitFullscreen().catch(err => fullscreenRefused('leave', err));
+  else if (!document.fullscreenEnabled || !wrap.requestFullscreen) fullscreenRefused('enter', null);
+  else wrap.requestFullscreen().catch(err => fullscreenRefused('enter', err));
+}
+// The browser said no: no user activation (a script's call, not a key or a
+// click), a frame embedding the page without allow="fullscreen"
+// (document.fullscreenEnabled is false), no element fullscreen at all
+// (an iPhone's Safari), or a request racing the one before. Nothing to retry
+// — the next press is a fresh gesture — but it is said, in the console with
+// the browser's reason and on the view, instead of the key seeming dead.
+function fullscreenRefused(what, err) {
+  expectUnlock = false;   // no transition, so a lock loss now is the player's
+  const why = err ? `${err.name}: ${err.message}`
+    : !wrap.requestFullscreen ? 'this browser has no fullscreen for a page element'
+    : 'fullscreen is not allowed here (a frame without allow="fullscreen")';
+  console.warn(`[quake] the browser refused to ${what} fullscreen: ${why}`);
+  showFsHint(`the browser refused fullscreen &nbsp;·&nbsp; ${err ? 'the console says why' : 'not allowed here'}`);
 }
 fsBtn.addEventListener('click', toggleFullscreen);
+// The button's tooltip names the key while there is one (2026).
+let fsTitleKey = null;
+function syncFullscreenTitle() {
+  const key = altEnterFullscreen();
+  if (key === fsTitleKey) return;
+  fsTitleKey = key;
+  fsBtn.title = key ? 'fullscreen (Alt+Enter)' : 'fullscreen';
+}
 // "keys" opens the drawer under the view: the controls, the console
 // commands, two shortcuts and the credit.
 const keysBtn = document.getElementById('keysBtn');
@@ -868,11 +910,14 @@ document.addEventListener('click', e => { if (!gameMenuEl.hidden && !gameCtl.con
 // the only way to the menu. Where the Keyboard Lock API exists (Chromium:
 // Chrome, Edge, Opera), locking Escape while fullscreen hands a TAPPED Esc to
 // the page like any key, so it toggles the menu and the mouse stays captured;
-// HOLDING Esc (about 2 s) still leaves fullscreen, the browser's own way out,
-// and F toggles fullscreen as before. Elsewhere the two-step flow above stands.
-// Headless Chromium resolves the lock but has no browser-side Esc handling, so
-// what a real browser does with a locked Esc is unverified; the page logic is
-// covered by verify_extras.py.
+// HOLDING Esc still leaves fullscreen, the browser's own way out, and
+// Alt+Enter toggles fullscreen as before. Elsewhere the two-step flow above
+// stands. In a headed Chromium 146 (2026-10-02, X11, keys typed through
+// XTEST): a tap reaches the page; a hold's first press does too (the menu
+// opens), and 1.5 s later the browser drops the pointer lock, then leaves
+// fullscreen, the menu still open — Alt+Enter works there, as everywhere.
+// Headless Chromium resolves the lock but has no browser-side Esc handling;
+// verify_extras.py covers the page's side of it there.
 //
 // F12 rides the same lock (`lockEscape`'s call locks both): outside
 // fullscreen F12 is browser-reserved everywhere and nothing can get it back
@@ -901,23 +946,30 @@ function unlockEscape() {
   escLocked = false;
   try { navigator.keyboard?.unlock?.(); } catch (e) { /* not supported */ }
 }
+// The ways out of fullscreen, as the hint on entering says them: a held Esc
+// where Esc is locked, Alt+Enter where it is the fullscreen key (2026),
+// else the browser's second Esc.
 function fsHintHtml(locked) {
-  return locked
-    ? 'Esc = menu &nbsp;·&nbsp; hold Esc or F = leave fullscreen'
-    : 'Esc = menu &nbsp;·&nbsp; F = leave fullscreen';
+  const out = [locked && 'hold Esc', altEnterFullscreen() && 'Alt+Enter'].filter(Boolean);
+  return out.length ? `Esc = menu &nbsp;·&nbsp; ${out.join(' or ')} = leave fullscreen`
+    : 'Esc = menu &nbsp;·&nbsp; a second Esc = leave fullscreen';
+}
+// The chip over the view, for a few seconds.
+let fsHintTimer = 0;
+function showFsHint(html) {
+  fsHint.innerHTML = html;
+  fsHint.classList.add('show');
+  clearTimeout(fsHintTimer);
+  fsHintTimer = setTimeout(() => fsHint.classList.remove('show'), 3000);
 }
 // Entering fullscreen: lock Esc (and F12 with it), then surface the contract
 // for a moment.
-let fsHintTimer = 0;
 document.addEventListener('fullscreenchange', () => {
   if (!document.fullscreenElement) { unlockEscape(); fsHint.classList.remove('show'); return; }
   lockEscape().then(ok => {
     if (!document.fullscreenElement) return;   // left again before the lock settled
     escLocked = ok;
-    fsHint.innerHTML = fsHintHtml(ok);
-    fsHint.classList.add('show');
-    clearTimeout(fsHintTimer);
-    fsHintTimer = setTimeout(() => fsHint.classList.remove('show'), 3000);
+    showFsHint(fsHintHtml(ok));
   });
 });
 

@@ -19,17 +19,25 @@ Chromium. The page opens as `?classic` (every departure off, id's keys):
   4. Persistence: config.cfg keeps the profile and what differs from it
      (`wasm_showfps "1"`, `viewsize "80"`, ...), and a plain reload (no
      `?classic`) comes back Classic with them.
-  5. Esc in fullscreen (with vid_fkey on: F is the page's fullscreen key in
-     2026 only): F locks Escape, and F12 alongside it
-     (navigator.keyboard.lock(['Escape', 'F12']), spied — F12 is
-     default.cfg's `screenshot` bind, PLATFORM.md's "The F-keys") and the
-     hint says to hold Esc; a tapped Esc toggles the menu, a
-     held one (autorepeat) toggles it once; a locked Esc that the browser
-     also reports as a pointer-lock loss counts once, in either order;
-     leaving fullscreen unlocks; without the Keyboard Lock API the old hint
-     and two-step flow stand. Headless Chromium resolves the lock but has no
-     browser Esc handling, so what a real browser does with a locked Esc
-     (tap reaches the page, hold leaves fullscreen) is NOT verified here.
+  5. The fullscreen key and Esc in fullscreen (PLATFORM.md, "Fullscreen").
+     Classic leaves Alt+Enter to the game (id's strafe and jump);
+     `vid_fkey 1`, the setting's old name, switches on vid_altenter, and the
+     button's title names the key. Alt+Enter enters fullscreen and locks
+     Escape, and F12 alongside it (navigator.keyboard.lock(['Escape',
+     'F12']), spied — F12 is default.cfg's `screenshot` bind, PLATFORM.md's
+     "The F-keys"), and the hint says hold Esc or Alt+Enter; a tapped Esc
+     toggles the menu; Alt+Enter leaves and re-enters with the menu up (the
+     user's case: a held Esc leaves the menu up) and with the console up
+     (whose line it never runs); F is the game's; a held Esc (autorepeat)
+     toggles once; a locked Esc that the browser also reports as a
+     pointer-lock loss counts once, in either order; leaving fullscreen
+     unlocks; without the Keyboard Lock API the old hint and two-step flow
+     stand; a refused request (rejected, or not allowed in a frame) is a
+     console warning with the reason and a note on the view, not an error.
+     Headless Chromium resolves the lock but has no browser Esc handling:
+     what a real browser does with a locked Esc (a tap reaches the page, a
+     hold leaves fullscreen) was walked in a headed Chromium instead
+     (PLATFORM.md, "Fullscreen").
 
 Usage: verify_extras.py [webdir]   (defaults to this script's directory; pass
 a deploy dir — PLATFORM.md.)
@@ -253,15 +261,24 @@ with sync_playwright() as p:
     pg.evaluate("exp.set_extras(0); exp.set_viewsize(100)")
     frames(pg)
 
-    # 5. Esc in fullscreen with Escape keyboard-locked (vid_fkey: the page's
-    #    F, on in 2026, off in Classic as id's).
-    pg.evaluate("quake.callLine('exec vid_fkey 1')")
-    pg.wait_for_function("quake.state.flags & 64", timeout=5000)
+    # 5. The fullscreen key, and Esc in fullscreen with Escape keyboard-locked.
+    #    Classic: Alt+Enter is the game's (id's ALT +strafe, ENTER +jump).
+    fs_on = lambda: pg.evaluate("!!document.fullscreenElement")
     pg.evaluate("document.getElementById('walkBtn').click()")
     time.sleep(1.0)
     key("Escape")
     pg.wait_for_function("exp.menu_visible().then(v => !v)", timeout=5000)
-    key("f")
+    key("Alt+Enter")
+    time.sleep(0.3)
+    check("Classic: Alt+Enter is the game's, no fullscreen", not fs_on())
+    # vid_altenter switches it, and a config.cfg's old name for it, vid_fkey
+    # (when the key was F), still does.
+    pg.evaluate("quake.callLine('exec vid_fkey 1')")
+    pg.wait_for_function("quake.state.flags & 64", timeout=5000)
+    check("the old name vid_fkey sets vid_altenter",
+          pg.evaluate("quake.text('cvar', 'vid_altenter')") == "1")
+    check("the button's title names the key", pg.evaluate("fsBtn.title") == "fullscreen (Alt+Enter)")
+    key("Alt+Enter")
     has_kb = pg.evaluate("!!(navigator.keyboard && navigator.keyboard.lock)")
     try:
         pg.wait_for_function("!!document.fullscreenElement && escLocked", timeout=5000)
@@ -269,23 +286,36 @@ with sync_playwright() as p:
     except Exception:
         fs = False
     if has_kb:
-        check("F enters fullscreen and locks Esc", fs,
+        check("Alt+Enter enters fullscreen and locks Esc", fs,
               str(pg.evaluate("[!!document.fullscreenElement, escLocked, window.__kb]")))
     else:
         print("SKIP keyboard-lock checks (this browser has no Keyboard Lock API; "
               "the fallback below is its flow)")
-        if pg.evaluate("!!document.fullscreenElement"):
-            key("f")
+        if fs_on():
+            key("Alt+Enter")
     if fs:
         check("the lock asks for Escape and F12",
               pg.evaluate("JSON.stringify(window.__kb.locks)") == '[["Escape","F12"]]')
-        check("the hint says hold Esc to leave",
-              "hold Esc" in pg.evaluate("fsHint.textContent")
+        check("the hint says hold Esc or Alt+Enter to leave",
+              "hold Esc or Alt+Enter = leave" in pg.evaluate("fsHint.textContent")
               and pg.evaluate("fsHint.classList.contains('show')"))
         key("Escape")
         check("a tapped Esc opens the menu", vis() == 1)
+        # The user's case: the menu is up when fullscreen ends — a real
+        # browser's held Esc does exactly that (its first press is a tap the
+        # page gets, then the browser leaves) — and the key must still work.
+        # F, the key until 2026-10-02, worked only with the menu down.
+        key("Alt+Enter")
+        pg.wait_for_function("!document.fullscreenElement", timeout=5000)
+        check("Alt+Enter leaves fullscreen with the menu up", vis() == 1)
+        key("Alt+Enter")
+        pg.wait_for_function("!!document.fullscreenElement && escLocked", timeout=5000)
+        check("...and enters it again, the menu still up", vis() == 1 and fs_on())
         key("Escape")
-        check("...and the next closes it (id's togglemenu)", vis() == 0)
+        check("...and the next Esc closes it (id's togglemenu)", vis() == 0)
+        key("f")
+        time.sleep(0.3)
+        check("F is the game's now: fullscreen stays", fs_on())
         pg.keyboard.down("Escape")
         for _ in range(5):
             time.sleep(0.05); pg.keyboard.down("Escape")    # autorepeat
@@ -323,12 +353,24 @@ with sync_playwright() as p:
         time.sleep(0.4)
         key("Escape")
         check("a later Esc is a new toggle", vis() == 0)
-        key("f")
+        # The console has the keyboard: Alt+Enter still toggles, and its
+        # Enter never reaches the console (the line typed is not run).
+        key("`")
+        pg.wait_for_function("exp.console_visible().then(v => !!v)", timeout=5000)
+        pg.keyboard.type("echo zqzq")
+        key("Alt+Enter")
         pg.wait_for_function("!document.fullscreenElement", timeout=5000)
         check("leaving fullscreen unlocks Esc",
               pg.evaluate("window.__kb.unlocks >= 1 && !escLocked"))
-        # Windowed again: the old flow (lock loss opens the menu, an Esc right
-        # after it is a real second press).
+        ran = lambda: "zqzq" in pg.evaluate("quake.text('console_text')")
+        check("Alt+Enter leaves fullscreen from the console, the line not run", not ran())
+        key("Enter")
+        time.sleep(0.2)
+        check("...the line is still there for Enter", ran())
+        key("`")
+        pg.wait_for_function("exp.console_visible().then(v => !v)", timeout=5000)
+        # Windowed again: the old flow (lock loss opens, an Esc right after it
+        # is a real second press).
         pg.locator("#c").click()
         pg.wait_for_function("document.pointerLockElement === document.getElementById('c')",
                              timeout=5000)
@@ -343,26 +385,52 @@ with sync_playwright() as p:
     ctx2 = br.new_context(viewport={"width": 820, "height": 560})
     ctx2.add_init_script(NO_KB)
     pg2 = ctx2.new_page()
-    pg2.on("console", lambda m: errs.append(m.text) if m.type == "error" else None)
+    warns = []
+    pg2.on("console", lambda m: errs.append(m.text) if m.type == "error"
+           else warns.append(m.text) if m.type == "warning" else None)
     pg2.on("pageerror", lambda e: errs.append("PAGEERROR: " + str(e)))
-    boot_page(pg2, "")   # the default, 2026: F is the fullscreen key
+    boot_page(pg2, "")   # the default, 2026: Alt+Enter is the fullscreen key
     pg2.evaluate("document.getElementById('walkBtn').click()")
     time.sleep(1.0)
     pg2.keyboard.press("Escape")
-    # The page decides what F does from the game's state as the program last
-    # reported it: the Escape's own turn, a millisecond or two later (no
-    # player presses Esc and F closer than that; a script does).
     time.sleep(0.1)
-    pg2.keyboard.press("f")
+    pg2.keyboard.press("Alt+Enter")
     try:
         pg2.wait_for_function("!!document.fullscreenElement && fsHint.classList.contains('show')",
                               timeout=5000)
         check("no Keyboard Lock API: no lock, the old hint",
               not pg2.evaluate("escLocked")
               and "hold" not in pg2.evaluate("fsHint.textContent")
-              and "F = leave fullscreen" in pg2.evaluate("fsHint.textContent"))
+              and "Alt+Enter = leave fullscreen" in pg2.evaluate("fsHint.textContent"))
+        pg2.keyboard.press("Alt+Enter")
+        pg2.wait_for_function("!document.fullscreenElement", timeout=5000)
     except Exception:
         print("SKIP fallback fullscreen check (headless refused fullscreen)")
+
+    # The browser refuses (no user activation, a frame's policy): said in the
+    # console with the browser's reason and on the view, never an uncaught
+    # rejection; the next press is a fresh try.
+    pg2.evaluate("""() => {
+        window.__rf = Element.prototype.requestFullscreen;
+        Element.prototype.requestFullscreen = function () {
+            return Promise.reject(new TypeError('Permissions check failed'));
+        };
+    }""")
+    pg2.keyboard.press("Alt+Enter")
+    time.sleep(0.3)
+    check("a refused request: a console warning with the reason, a note on the view",
+          any("refused to enter fullscreen: TypeError: Permissions check failed" in w for w in warns)
+          and "refused" in pg2.evaluate("fsHint.textContent")
+          and pg2.evaluate("fsHint.classList.contains('show') && !document.fullscreenElement"), str(warns))
+    pg2.evaluate("""() => {
+        Element.prototype.requestFullscreen = window.__rf;
+        Object.defineProperty(Document.prototype, 'fullscreenEnabled', { get: () => false, configurable: true });
+    }""")
+    pg2.locator("#fs").click()
+    time.sleep(0.3)
+    check("fullscreen not allowed here (a frame's policy): the button says so",
+          any("not allowed here" in w for w in warns) and "not allowed here" in pg2.evaluate("fsHint.textContent"),
+          str(warns[-1:]))
 
     print("errors:", errs[-5:])
     check("no console errors", not errs)
