@@ -24,8 +24,12 @@
 //                                   left without a way to the menu)
 //   a demo (the attract loop)       MENU; a tap anywhere is Escape, as any
 //                                   key is in id's demo playback
-//   the menu                        taps and drags on the menu; BACK is
-//                                   Escape; YES / NO when it asks
+//   the menu                        taps and drags on the menu; a pad
+//                                   (▲▼◀▶, OK) driving it by key, held
+//                                   arrows repeating; BACK is Escape; YES /
+//                                   NO when it asks (the pad hides then,
+//                                   and while Customize controls waits for
+//                                   a key to bind)
 //   the console                     KEYBOARD (the phone's own, through a
 //                                   hidden text field; a tap on the console
 //                                   too), TAB, the previous line; BACK
@@ -61,7 +65,11 @@
   // The console: a key press per this much vertical drag (PgUp / PgDn).
   const SCROLL_STEP = 24;
   // Quake keynums (keys.h).
-  const K = { TAB: 9, ENTER: 13, ESCAPE: 27, BACKSPACE: 127, UP: 128, PGDN: 149, PGUP: 150 };
+  const K = { TAB: 9, ENTER: 13, ESCAPE: 27, BACKSPACE: 127, UP: 128, DOWN: 129, LEFT: 130, RIGHT: 131, PGDN: 149, PGUP: 150 };
+  // The pad's hold-to-repeat (a keyboard's autorepeat): once at the delay,
+  // then at the rate, so a ten-notch slider doesn't take ten taps.
+  const PAD_REPEAT_DELAY_MS = 350;
+  const PAD_REPEAT_RATE_MS = Math.round(1000 / 12);
   // The text field's content between keystrokes: a zero-width space whose
   // deletion is a Backspace (a field left empty sends none).
   const SENTINEL = '\u200b';
@@ -77,6 +85,7 @@
   let autoPaused = false;         // hidden while playing: paused under the menu
   let wakeLock = null;
   let barRows = 0;                // sbar_height's last answer: frame pixels, bottom-anchored
+  let padTimer = null;            // the held pad arrow's repeat (setTimeout chain)
 
   // --- The page's state -------------------------------------------------------
   function flags() { return host.state.flags; }
@@ -101,6 +110,7 @@
       mode = next;
       layer.dataset.mode = mode;
       if (was === 'play') releaseAll();
+      if (was === 'menu') padHoldStop();
       if (was === 'menu' || was === 'console' || was === 'boot') readSettings();
       // Back in the game after the page was hidden: the pause ends.
       if ((next === 'play' || next === 'game') && autoPaused) {
@@ -111,6 +121,10 @@
     if (next !== 'console' && !naming) closeKeyboard();
     // Multiplayer > Setup's name fields want the keyboard too.
     if (ui.menuKeys.hidden === naming) ui.menuKeys.hidden = !naming;
+    // Customize controls waiting for a key to bind (STATE 8): a pad key
+    // would be bound, so hide it (`menuonly` still shows it any other time
+    // the menu is up).
+    ui.menuPad.hidden = has(host.ST.BIND_GRAB);
     keepAwake(has(host.ST.WALK));
   }
   // menu_screen_id's Multiplayer > Setup (quake-wasm menu.rs).
@@ -148,6 +162,21 @@
   // running (a finger does not care).
   function call(line) { return host.call(line).catch(() => ({ value: NaN, text: '' })); }
   function press(keynum, ch) { host.key(keynum, true, ch || 0); host.key(keynum, false, 0); }
+  // Holding a pad arrow repeats the press (Key_Event ignores a held key's
+  // own autorepeat but for Backspace/Pause, input.rs's `key_repeats` — so
+  // this sends a fresh down+up each tick, exactly as a second real tap
+  // would) at a keyboard's cadence: once at the delay, then at the rate.
+  function padHoldStart(keynum) {
+    press(keynum);
+    padTimer = setTimeout(function tick() {
+      press(keynum);
+      padTimer = setTimeout(tick, PAD_REPEAT_RATE_MS);
+    }, PAD_REPEAT_DELAY_MS);
+  }
+  function padHoldStop() {
+    clearTimeout(padTimer);
+    padTimer = null;
+  }
   // The stick and a menu drag go out once a display frame, the newest only.
   function queueFlush() {
     if (flushQueued) return;
@@ -456,6 +485,18 @@
   #tConsole { bottom:calc(16px + env(safe-area-inset-bottom)); }
   #tConsole .tb, #tMenuKeys .tb { position:static; }
   #tMenuKeys { bottom:calc(16px + env(safe-area-inset-bottom)); }
+  /* The menu pad: ▲▼◀▶ and OK, off the menu's own centred 320-wide layout
+     (PLATFORM.md "The menu by tapping": on a phone that leaves the right
+     quarter of the screen free at any size this was checked at, with room
+     to spare — web/verify_touch.py's menu-pad safe-zone check). Sized and
+     spaced like JUMP/WEAPON, not the pill buttons. */
+  #tMenuPad { position:absolute; width:120px; height:254px; right:calc(14px + env(safe-area-inset-right)); top:50%; transform:translateY(-50%); }
+  #tMenuPad .tb { width:56px; height:56px; font-size:20px; }
+  #tPadUp { left:32px; top:0; }
+  #tPadLeft { left:0; top:64px; }
+  #tPadRight { left:64px; top:64px; }
+  #tPadDown { left:32px; top:128px; }
+  #tPadOk { left:29px; top:192px; width:62px; height:62px; font-size:14px; font-weight:700; }
   #tType { position:absolute; left:0; top:0; width:1px; height:1px; opacity:0; border:0; padding:0;
     font-size:16px; /* iOS zooms into a smaller field */ }
   /* Held upright: turn the phone. A tap dismisses it for the session. */
@@ -495,10 +536,17 @@
         <div id="tPrev" class="tb pill" role="button" aria-label="previous line">&#9650;</div>
       </div>
       <div id="tMenuKeys" class="row menuonly"><div id="tNameKeys" class="tb pill" role="button">KEYBOARD</div></div>
+      <div id="tMenuPad" class="menuonly" role="group" aria-label="menu pad">
+        <div id="tPadUp" class="tb" role="button" aria-label="up">&#9650;</div>
+        <div id="tPadLeft" class="tb" role="button" aria-label="left">&#9664;</div>
+        <div id="tPadRight" class="tb" role="button" aria-label="right">&#9654;</div>
+        <div id="tPadDown" class="tb" role="button" aria-label="down">&#9660;</div>
+        <div id="tPadOk" class="tb" role="button" aria-label="OK">OK</div>
+      </div>
       <input id="tType" type="text" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" enterkeyhint="send" aria-label="type">`;
     host.wrap.appendChild(layer);
     const $ = (id) => layer.querySelector('#' + id);
-    ui = { stick: $('tStick'), knob: $('tKnob'), full: $('tFull'), type: $('tType'), menuKeys: $('tMenuKeys') };
+    ui = { stick: $('tStick'), knob: $('tKnob'), full: $('tFull'), type: $('tType'), menuKeys: $('tMenuKeys'), menuPad: $('tMenuPad') };
 
     layer.addEventListener('pointerdown', onDown);
     layer.addEventListener('pointermove', onMove);
@@ -519,6 +567,13 @@
     button($('tNameKeys'), { up: openKeyboard });
     button($('tTab'), { up: () => press(K.TAB) });
     button($('tPrev'), { up: () => press(K.UP) });
+    // The menu pad: held, an arrow repeats (padHoldStart/Stop); OK acts on
+    // release, like BACK/MENU, so sliding off first cancels it.
+    button($('tPadUp'), { down: () => padHoldStart(K.UP), up: padHoldStop });
+    button($('tPadDown'), { down: () => padHoldStart(K.DOWN), up: padHoldStop });
+    button($('tPadLeft'), { down: () => padHoldStart(K.LEFT), up: padHoldStop });
+    button($('tPadRight'), { down: () => padHoldStart(K.RIGHT), up: padHoldStop });
+    button($('tPadOk'), { up: () => press(K.ENTER) });
     ui.type.addEventListener('input', onType);
     ui.type.addEventListener('compositionend', onType);
     ui.type.addEventListener('keydown', onTypeKey);

@@ -12,7 +12,11 @@ check is Chromium's only.
   2. The menu by tapping (the engine's own item layout: menu_tap): a tap on
      the demo brings the menu, Single Player > New Game starts the game;
      Options' Always Run takes a tap to point and one to flip; Quit asks,
-     with YES / NO buttons; BACK backs out.
+     with YES / NO buttons; BACK backs out. The menu pad (▲▼◀▶, OK): shown
+     only in menu mode, clear of the menu's own layout at three phone
+     sizes; the arrows move the cursor and step a slider (held, several
+     notches), OK enters a submenu, Help's pages turn; hidden while the
+     menu asks y/n and while Customize controls grabs a key.
   3. Play: the left stick walks (the player moves), a drag on the right
      turns the view, FIRE shoots (a shell spent), JUMP jumps, WEAPON cycles
      (shotgun to axe), MENU opens the menu.
@@ -129,6 +133,7 @@ def main():
         mode = lambda pg_=None: (pg_ or pg).evaluate("document.getElementById('touch') && document.getElementById('touch').dataset.mode")
         flags = lambda: pg.evaluate("quake.state.flags")
         screen_id = lambda: pg.evaluate("exp.menu_screen_id()")
+        cursor = lambda: pg.evaluate("exp.menu_cursor()")
         make_call = lambda pg_: (lambda line: pg_.evaluate(f"quake.call({json.dumps(line.split()[0])}, ...{json.dumps(line.split()[1:])})"))
         call = make_call(pg)
         field = lambda name: pg.evaluate(f"quake.callLine('player_field {name}').then(r => r.value)")
@@ -151,6 +156,24 @@ def main():
                 return False
         def listener():
             return pg.evaluate("Promise.all(['listener_x','listener_y','listener_z','listener_fwd_x','listener_fwd_y'].map(n => quake.call(n)))")
+        # The menu pad's buttons (PLATFORM.md "The menu pad"): a quick tap,
+        # or held for `seconds` (touchStart/wait/touchEnd, as a real hold),
+        # to drive the repeat (touch.js padHoldStart/Stop).
+        def pad_tap(sel, seconds=0.0):
+            box = pg.locator(sel).bounding_box()
+            pt = (box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+            touches("touchStart", [(77, pt)])
+            if seconds:
+                time.sleep(seconds)
+            touches("touchEnd", [])
+            time.sleep(0.15)
+        def goto_row(target):
+            """Step the pad's UP/DOWN until the menu's cursor is on `target`."""
+            for _ in range(50):
+                if cursor() == target:
+                    return
+                pad_tap("#tPadUp" if cursor() > target else "#tPadDown")
+            raise AssertionError(f"goto_row({target}): stuck on {cursor()}")
 
         # --- 1. The page -------------------------------------------------------
         pg.goto(f"http://127.0.0.1:{PORT}/index.html?2026", wait_until="load")
@@ -186,8 +209,10 @@ def main():
         pg.touchscreen.tap(422, 195)                      # tap to start
         check("started: the attract demo, the MENU button", wait("document.getElementById('touch').dataset.mode === 'demo'")
               and shown("#tMenu"), mode())
+        check("menu pad hidden in demo mode", not shown("#tMenuPad"))
         pg.touchscreen.tap(500, 200)                      # any tap: the menu
         check("a tap on the demo opens the menu", wait("quake.state.flags & 1") and mode() == "menu" and shown("#tBack"))
+        check("menu pad shown in menu mode", shown("#tMenuPad"))
         pg.screenshot(path=os.path.join(WEB, "verify_touch_menu.png"))
         tap_menu(160, 42)                                 # Main > Single Player
         check("Single Player by a tap", wait("quake.state.menuScreen === 1"), str(screen_id()))
@@ -195,6 +220,7 @@ def main():
         check("New Game by a tap: the game starts, the controls show",
               wait("document.getElementById('touch').dataset.mode === 'play'", 20000)
               and all(shown(s) for s in ["#tFire", "#tJump", "#tWeapon", "#tMenu"]), mode())
+        check("menu pad hidden in play mode", not shown("#tMenuPad"))
         time.sleep(1.0)
 
         # --- 3. Play -------------------------------------------------------------
@@ -258,6 +284,51 @@ def main():
         tap_menu(100, 32 + 8.5 * 8)                       # back as it was
         pg.screenshot(path=os.path.join(WEB, "verify_touch_options.png"))
 
+        # --- 2b. The menu pad ----------------------------------------------------
+        # PLATFORM.md "The menu pad": ▲▼◀▶ and OK drive the menu by key, off
+        # to the right of its own centred layout; holding an arrow repeats
+        # it (touch.js padHoldStart/Stop). Still on Options (screen_id() 5)
+        # from the Always Run test above.
+        c0 = cursor()
+        pad_tap("#tPadUp")
+        check("the pad's UP moves the cursor", cursor() == c0 - 1, f"{c0} -> {cursor()}")
+        goto_row(4)                                       # Brightness (gamma): a slider row
+        gamma = lambda: pg.evaluate("quake.callLine('cvar gamma').then(r => r.value)")
+        g0 = gamma()
+        pad_tap("#tPadRight")
+        check("the pad's RIGHT steps a slider's cvar", gamma() != g0, f"{g0} -> {gamma()}")
+        g1 = gamma()
+        pad_tap("#tPadRight", seconds=1.2)                 # held: the repeat
+        moved = abs(gamma() - g1)
+        check("holding RIGHT moves several notches", moved >= 0.1, f"{g1} -> {gamma()} ({moved / 0.05:.1f} notches)")
+        call("exec gamma 1")                               # back to default
+
+        goto_row(0)                                        # Customize controls
+        pad_tap("#tPadOk")
+        check("OK enters a submenu", wait("quake.state.menuScreen === 6"), str(screen_id()))   # Keys
+        pad_tap("#tPadOk")                                  # Enter on a bind row: grabs the key
+        check("bind grab hides the pad (STATE 8, BIND_GRAB)",
+              wait("quake.state.flags & 8") and not shown("#tMenuPad"), str(flags()))
+        pg.keyboard.press("Escape")                         # cancel the grab
+        check("cancelled: the pad is back", wait("!(quake.state.flags & 8)") and shown("#tMenuPad"))
+        pg.keyboard.press("Escape")                         # back to Options
+        check("back on Options", wait("quake.state.menuScreen === 5"), str(screen_id()))
+
+        # Help pages (id's M_Help_Key) take the pad's ◀▶ too.
+        pg.keyboard.press("Escape")                         # back to Main
+        check("back on Main", wait("quake.state.menuScreen === 0"), str(screen_id()))
+        goto_row(3)                                         # Help/Ordering
+        pad_tap("#tPadOk")
+        check("OK opens Help", wait("quake.state.menuScreen === 8"), str(screen_id()))
+        h0 = call("frame_hash")
+        pad_tap("#tPadRight")
+        time.sleep(0.3)
+        h1 = call("frame_hash")
+        check("the pad's RIGHT pages Help forward", h1 != h0, f"{h0} -> {h1}")
+        pg.keyboard.press("Escape")                         # back to Main
+        tap_menu(160, 82)                                   # Main > Options, for what follows
+        check("back on Options for the console test", wait("quake.state.menuScreen === 5"), str(screen_id()))
+
         # --- 4. The console ----------------------------------------------------
         tap_menu(100, 32 + 1.5 * 8)
         tap_menu(100, 32 + 1.5 * 8)                       # Go to console
@@ -284,6 +355,7 @@ def main():
         wait("quake.state.flags & 1")
         tap_menu(160, 122)                                # Main > Quit
         check("Quit asks: YES and NO", wait("quake.state.flags & 256") and shown("#tYes") and shown("#tNo"))
+        check("menu pad hidden while it asks (STATE 256)", not shown("#tMenuPad"))
         tap_el("#tNo")
         check("NO answers", wait("!(quake.state.flags & 256)") and screen_id() == MAIN)
         tap_el("#tBack")
@@ -309,7 +381,42 @@ def main():
         tap_menu(160, 82)
         check("Classic: its menu taps", wait("quake.state.menuScreen === 5"))
         call("exec profile 2026")
-        wait("document.getElementById('touch').dataset.mode === 'play'")
+
+        # --- 6b. The menu pad clears the menu's own layout ------------------------
+        # PLATFORM.md "The menu pad": off to the right of the menu's centred
+        # 320-wide layout (menu_layout_point run the other way, as
+        # MENU_POINT above does): the left edge of `#tMenuPad`'s box must
+        # never land inside it, at any of the three phone sizes checked.
+        # (Classic's own menu tap above left the menu open, on Options, and
+        # switching profile does not close it — still true here.)
+        check("2026 again, the menu is still open on Options", wait("quake.state.menuScreen === 5"), str(screen_id()))
+        MENU_EDGE_JS = """async () => {
+          const [W, H] = quake.size();
+          const scaled = await exp.scaled_2d();
+          let s = Math.floor(Math.min(W / 320, H / 200)), sw = W;
+          if (scaled && s > 1) sw = Math.max(Math.round(W / s), 320); else s = 1;
+          const ox = ((sw - 320) >> 1) * s;
+          const c = document.getElementById('c'), r = c.getBoundingClientRect();
+          return r.left + (ox + 320 * s) * r.width / W;
+        }"""
+        def menu_pad_clear_check(label, pg_=None):
+            pg_ = pg_ or pg
+            menu_right = pg_.evaluate(MENU_EDGE_JS)
+            pad = pg_.locator("#tMenuPad").bounding_box()
+            check(f"{label}: the menu pad clears the menu's own text", pad["x"] >= menu_right,
+                  f"menu's right edge {menu_right:.0f}px, pad's left {pad['x']:.0f}px")
+
+        for w, h in [(844, 390), (1012, 412), (748, 360)]:
+            pg.set_viewport_size({"width": w, "height": h})
+            pg.evaluate("window.dispatchEvent(new Event('resize'))")
+            time.sleep(0.3)
+            menu_pad_clear_check(f"{w}x{h}@3")
+        pg.set_viewport_size({"width": 844, "height": 390})
+        pg.evaluate("window.dispatchEvent(new Event('resize'))")
+        time.sleep(0.3)
+        tap_el("#tBack")                                  # Options -> Main
+        tap_el("#tBack")                                  # Main -> closed
+        check("menu closes, back to play", wait("!(quake.state.flags & 1)") and mode() == "play")
 
         # --- 9. Clear of the status bar -------------------------------------------
         # FIRE, JUMP, WEAPON and the stick's resting hint must never cover the
@@ -394,6 +501,25 @@ def main():
             set_viewsize(pg3, call3, vs)
             safe_zone_check(pg3, f"1012x412@2.6 viewsize {vs}")
         pg3.screenshot(path=os.path.join(WEB, "verify_touch_safezone_1012x412.png"))
+
+        # The menu pad, at the phone profile's size (PHONE_26 — web/PLATFORM.md
+        # "The menu pad"): Options, with the pad showing and clear of it.
+        def tap_el3(sel):
+            box = pg3.locator(sel).bounding_box()
+            pg3.touchscreen.tap(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+            time.sleep(0.25)
+        tap_el3("#tMenu")
+        wait("quake.state.flags & 1", pg_=pg3)
+        x, y = pg3.evaluate(MENU_POINT, [160, 82])        # Main > Options
+        pg3.touchscreen.tap(x, y)
+        time.sleep(0.25)
+        check("1012x412@2.6: Options by a tap", wait("quake.state.menuScreen === 5", pg_=pg3), mode(pg3))
+        check("1012x412@2.6: the menu pad shows over Options", shown("#tMenuPad", pg3))
+        menu_pad_clear_check("1012x412@2.6", pg3)
+        pg3.screenshot(path=os.path.join(WEB, "verify_touch_menupad_1012x412.png"))
+        tap_el3("#tBack")                                  # Options -> Main
+        tap_el3("#tBack")                                  # Main -> closed
+        check("1012x412@2.6: back to play", wait("!(quake.state.flags & 1)", pg_=pg3) and mode(pg3) == "play")
 
         pg3.set_viewport_size({"width": 915, "height": 412})
         pg3.evaluate("window.dispatchEvent(new Event('resize'))")

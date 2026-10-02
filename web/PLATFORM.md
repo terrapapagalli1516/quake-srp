@@ -1026,7 +1026,7 @@ what the game's State calls for:
 | the live game, `in_touch` on (2026) | a stick wherever the left thumb lands (the left 45%); look by dragging anywhere else; FIRE (hold; dragging it aims too), JUMP, WEAPON (`impulse 10`, the next weapon owned), MENU |
 | the live game, `in_touch` off (Classic) | MENU only: id's game has no touch controls, but a phone must never be left without a way back to the menu |
 | a demo (the attract loop) | MENU; a tap anywhere is Escape, as any key is during id's demo playback |
-| the menu | taps on the menu itself; BACK (Escape); YES / NO when it asks (STATE 256) |
+| the menu | taps on the menu itself; a pad (▲▼◀▶, OK), keys like a keyboard's, held arrows repeating; BACK (Escape); YES / NO when it asks (STATE 256; the pad hides then, and while Customize controls waits for a key to bind) |
 | the console (Options > Go to console) | KEYBOARD (a tap on the console too), TAB, ▲ (the previous line); BACK closes it; a drag scrolls (PgUp/PgDn) |
 
 **Clear of the status bar.** FIRE, JUMP, WEAPON and the stick's resting
@@ -1077,6 +1077,29 @@ list (8-line rows: 10–13 CSS px on a phone) a first tap moves the cursor
 and a second on the highlighted row acts — Enter, or left/right of an
 Options slider's knob; Help pages by halves. A drag moves the cursor with
 the finger without acting, which is the easy way onto a small row.
+
+**The menu pad.** A text list's 8-line rows (10–13 CSS px on a phone, a
+third of a fingertip) are a fight to tap, and a slider's ten notches each
+take one; so while the menu is up the touch layer also shows ▲▼◀▶ and OK,
+off to the right of the menu's own centred 320-wide layout — at every size
+this was checked at (`web/verify_touch.py`'s `PHONE`, `PHONE_26`, and its
+748×360 case) that right margin is well past what the pad needs; a much
+narrower window has not been checked and could start to crowd it. Each
+sends the key id's own menu already reads (`Menu::keydown`, quake-rs
+`menu.rs`) exactly as BACK sends Escape — the engine drives as a keyboard
+always drove it, nothing menu-pad-specific added there. Holding an arrow
+repeats it (touch.js's own timer, a keyboard's autorepeat: once at ~350 ms,
+then ~12 a second); each repeat is a fresh key down *and* up, because
+`Key_Event` ignores a key held down without an up between but for
+Backspace and Pause (`input.rs`'s `key_repeats`). OK is Enter, sent on
+release like BACK (so sliding off first cancels it); the arrows act on
+touch, so the first step and the first repeat both land without waiting
+for a release. Hidden where a pad key would be wrong: while the menu asks
+y or n (STATE 256) and while Customize controls waits for a key to bind
+(STATE 8, `BIND_GRAB`) — every other mode, and Classic too (a phone still
+has no keys). Help pages already take ◀▶ (id's `M_Help_Key`); the pad's
+presses reach them the same way. Taps and drags on the menu are unchanged;
+the pad is in addition.
 
 **The phone's keyboard.** KEYBOARD focuses a hidden text field (in the
 tap's own handler, the only way iOS shows its keyboard); what the field
