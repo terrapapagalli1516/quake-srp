@@ -85,7 +85,7 @@
   let autoPaused = false;         // hidden while playing: paused under the menu
   let wakeLock = null;
   let barRows = 0;                // sbar_height's last answer: frame pixels, bottom-anchored
-  let padTimer = null;            // the held pad arrow's repeat (setTimeout chain)
+  const padTimers = new Map();    // each held pad arrow's repeat (a setTimeout chain), by keynum
 
   // --- The page's state -------------------------------------------------------
   function flags() { return host.state.flags; }
@@ -110,7 +110,7 @@
       mode = next;
       layer.dataset.mode = mode;
       if (was === 'play') releaseAll();
-      if (was === 'menu') padHoldStop();
+      if (was === 'menu') padHoldStopAll();
       if (was === 'menu' || was === 'console' || was === 'boot') readSettings();
       // Back in the game after the page was hidden: the pause ends.
       if ((next === 'play' || next === 'game') && autoPaused) {
@@ -167,15 +167,19 @@
   // this sends a fresh down+up each tick, exactly as a second real tap
   // would) at a keyboard's cadence: once at the delay, then at the rate.
   function padHoldStart(keynum) {
+    padHoldStop(keynum);
     press(keynum);
-    padTimer = setTimeout(function tick() {
+    padTimers.set(keynum, setTimeout(function tick() {
       press(keynum);
-      padTimer = setTimeout(tick, PAD_REPEAT_RATE_MS);
-    }, PAD_REPEAT_DELAY_MS);
+      padTimers.set(keynum, setTimeout(tick, PAD_REPEAT_RATE_MS));
+    }, PAD_REPEAT_DELAY_MS));
   }
-  function padHoldStop() {
-    clearTimeout(padTimer);
-    padTimer = null;
+  function padHoldStop(keynum) {
+    clearTimeout(padTimers.get(keynum));
+    padTimers.delete(keynum);
+  }
+  function padHoldStopAll() {
+    for (const keynum of [...padTimers.keys()]) padHoldStop(keynum);
   }
   // The stick and a menu drag go out once a display frame, the newest only.
   function queueFlush() {
@@ -569,10 +573,10 @@
     button($('tPrev'), { up: () => press(K.UP) });
     // The menu pad: held, an arrow repeats (padHoldStart/Stop); OK acts on
     // release, like BACK/MENU, so sliding off first cancels it.
-    button($('tPadUp'), { down: () => padHoldStart(K.UP), up: padHoldStop });
-    button($('tPadDown'), { down: () => padHoldStart(K.DOWN), up: padHoldStop });
-    button($('tPadLeft'), { down: () => padHoldStart(K.LEFT), up: padHoldStop });
-    button($('tPadRight'), { down: () => padHoldStart(K.RIGHT), up: padHoldStop });
+    button($('tPadUp'), { down: () => padHoldStart(K.UP), up: () => padHoldStop(K.UP) });
+    button($('tPadDown'), { down: () => padHoldStart(K.DOWN), up: () => padHoldStop(K.DOWN) });
+    button($('tPadLeft'), { down: () => padHoldStart(K.LEFT), up: () => padHoldStop(K.LEFT) });
+    button($('tPadRight'), { down: () => padHoldStart(K.RIGHT), up: () => padHoldStop(K.RIGHT) });
     button($('tPadOk'), { up: () => press(K.ENTER) });
     ui.type.addEventListener('input', onType);
     ui.type.addEventListener('compositionend', onType);
