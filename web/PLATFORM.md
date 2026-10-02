@@ -538,6 +538,19 @@ bindings, and the port's departures, which the profiles **Classic** and
   classic` / `+profile 2026` to the program's command line (`wasi.js` hands
   it `args`), which quake.rc's `stuffcmds` runs after `config.cfg`: the same
   switch as the menu's, so it sticks.
+- **A mission pack from the address.** `?game=hipnotic` / `?game=rogue` add
+  `-hipnotic` / `-rogue` to the command line — `COM_InitFilesystem`'s own
+  flags (`quake-rs`'s `common.rs`): the program layers that pack's own game
+  directory over `id1`'s on its search path, exactly as `-basedir` always
+  worked, so `hipnotic/pak0.pak` or `rogue/pak0.pak` beside `id1/pak0.pak`
+  is all it needs. This is only the argument: whether the page actually has
+  that file to send at all — a drop, or a server's own `files.json` — is a
+  separate question ("A server's own files", below, is `id1`-only today;
+  teaching it about a mission pack's own directory, and its `music/`, is
+  this round's open item, `AUDIT.md` says where). Without the file, the
+  program starts anyway and just plays plain `id1` (an empty `hipnotic`/
+  `rogue` directory contributes nothing to the search path), the same as
+  id's own engine would.
 
 `verify_settings.py` checks all of it in the browser (the window filled
 with whole pixels at devicePixelRatio 1 and 2, `?classic`, the switch, the

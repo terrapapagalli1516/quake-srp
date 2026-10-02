@@ -280,10 +280,30 @@ marked *(2026-06)* were not re-checked since. Struck items were closed on 2026-0
   64-bit), `snd_show`, `soundlist`/`soundinfo` or `playvol` (audio).
 
 **Files and the command line**
-- Not modelled: `-game`, `-rogue`/`-hipnotic`, `-path`, `-cachedir`, `proghack`,
-  `cmdline`, the CD's eject and `MCI_NOTIFY_FAILURE`. A `progs.dat` with builtins id's
-  engine never had (the 2021 re-release's) is refused at startup, where id's would run
-  until the first call (content).
+- ~~`-rogue`/`-hipnotic`/`-game`, and a `progs.dat` with builtins id's engine never had
+  refused at startup instead of at the call~~: `-rogue`/`-hipnotic`/`-game <dir>` each
+  layer a game directory over `id1`, in id's order, and `com_gamedir` follows the last
+  one added; the eager builtins scan is gone, so a progs that only *declares* a foreign
+  builtin (the mission packs' `finaleFinished`/`localsound`) loads, and only an actual
+  call to one fails, lazily, as id's own `PR_RunError` does (mission, "The mission packs'
+  own file layout and progs", below).
+- Not modelled: `-path` (fully replaces the generated search path), `-cachedir` (a
+  CD-ROM cache), `proghack`, `cmdline`, the CD's eject and `MCI_NOTIFY_FAILURE`.
+- Mission packs: `Host_Give_f`'s hipnotic/rogue arms (new weapon letters, Rogue's split
+  ammo fields) are not ported — the port's own `give` was already a simplified stand-in
+  for id's letter+digit scheme, not a literal port of it, even for id1; items are still
+  obtainable by picking them up in-level. `menu.c`'s ~75 hipnotic/rogue references are
+  all the multiplayer game-options screen (episode/level lists, team-colour border),
+  which the port has no menu for; checked against the C, nothing applies. Rogue's `r2m6`
+  overflows the port's `MAX_EDICTS` (600, id's own number too) during plain entity spawn
+  — real, reproduced with the full registered `id1` merged in too, not a missing-asset
+  artifact — and could not be checked against id's C: `-rogue` hangs the oracle on this
+  map (never terminates in 60s, 20,000+ `Cvar_Set: variable campaign not found` lines),
+  because Rogue's real engine registered a `campaign` cvar this GPL WinQuake tree never
+  did. Rogue's demo wire format for a weapon past the standard 7 (the `1<<i`
+  re-expansion `demo.rs` already documents as not modelled, for any non-standard progs)
+  applies to the mission packs too, if a demo of theirs is ever added — none is in scope
+  here.
 
 **Older LOW tail** *(2026-05/06, not re-checked)*: `PF_particle`'s byte count and
 direction quantising; `clip_box`'s inopen/plane-distance coordinates; `SV_NewChaseDir`'s
@@ -2832,11 +2852,12 @@ player's track files (`web/PLATFORM.md`, "Your files" and "CD music").
   through the path (a `pak1.pak` lump overrides `pak0.pak`'s). `menu.c`'s other
   `registered` use is the multiplayer game options' episode count (7 vs 2),
   a menu the port does not have.
-- **Not modelled:** `-game`, `-rogue`/`-hipnotic`, `-path`, `-cachedir`,
-  `proghack`; `cmdline` (set to `com_cmdline` when registered); the CD's
-  `MCI_NOTIFY_FAILURE`/eject door; `CDAudio_Play`'s "Bad track number" (a
-  developer print). A track the player has no file for, within the disc's
-  range, is to the game a data track ("CDAudio: track N is not audio").
+- **Not modelled:** `-path`, `-cachedir`, `proghack`; `cmdline` (set to
+  `com_cmdline` when registered); the CD's `MCI_NOTIFY_FAILURE`/eject door;
+  `CDAudio_Play`'s "Bad track number" (a developer print). A track the player
+  has no file for, within the disc's range, is to the game a data track
+  ("CDAudio: track N is not audio"). `-game`/`-rogue`/`-hipnotic` are now
+  ported — see "The mission packs' own file layout and progs" below.
 
 ## Video Options honesty, and the menu fade dither at a big 2-D scale (branch `fleet/video`)
 
@@ -2899,3 +2920,109 @@ Screenshots (this branch's scratch dir, named in its report): Video Options
 in 2026 and Classic, before (native 1108c3e) and after this branch; a menu
 over the game at a 4-6x 2-D scale, before and after (unchanged, proving the
 dither was never touched).
+
+## The mission packs' own file layout and progs (2026-10-02, branch `fleet/mission`)
+
+Scourge of Armagon (`hipnotic`) and Dissolution of Eternity (`rogue`) playable the way
+WinQuake plays them with `-hipnotic`/`-rogue`: their own game directory beside `id1`,
+their own re-release `progs.dat` allowed to load, and the status bar drawing their own
+weapons and items. `mission_paks.py` (in a work directory) builds each pack's
+own `pak0.pak` from the 2021 re-release with English map messages (`unlocalize_bsp`, the
+same trick `make_paks.py` used for id1's registered `pak1.pak`).
+
+- ✅ **The search path** (`quake-rs` `common.rs`): `init_filesystem` takes `mod_dirs`
+  (id's order — `-rogue`'s `rogue`, then `-hipnotic`'s `hipnotic`, then `-game`'s own
+  directory) and `force_modified` (`-game`'s own `com_modified = true`, unconditional);
+  each directory layers over the ones before it with the same `Pak::over` chain id1
+  alone always used, so `com_gamedir` (saves, `config.cfg`) becomes whichever was added
+  last. `quake-wasm`'s `main.rs` parses `-rogue`/`-hipnotic`/`-game <dir>` from `argv`
+  exactly where it already parsed `-basedir`; `index.html`'s `commandLine()` turns
+  `?game=hipnotic`/`?game=rogue` into them. Tested in `quake-rs/src/common.rs`
+  (`mod_dirs_layer_over_id1_in_ids_order_and_the_last_becomes_com_gamedir`, a synthetic
+  id1 + rogue + a plain `-game` directory, checked against `path_lines`).
+- ✅ **The eager builtins refusal is gone; the lazy one (already there) is now the
+  only one.** `check_progs` no longer scans every declared function for a builtin
+  number past the port's table — id's own engine never did either; it only notices at
+  the actual call (`PR_RunError`), which `vm.rs`'s `OP_CALLn` dispatch already
+  implements correctly and unchanged. The mission packs' re-release `progs.dat` declare
+  `finaleFinished` (#79) and `localsound` (#80), past the port's 79-entry table, but
+  never call either (`quaketool dis`, grepped for both names outside their own
+  declaration line) — that eager scan was refusing a game id's own engine would have
+  run without incident. Tested: `common.rs`'s
+  `a_progs_that_only_declares_foreign_builtins_is_not_refused_at_startup`; `vm.rs`'s
+  `calling_an_unknown_builtin_errors_at_the_call_not_at_load` proves the lazy path a
+  progs that *does* call one would hit.
+- ✅ **The status bar** (`sbar.rs`): `Server::mode` (`GameMode::Id1`/`Hipnotic`/`Rogue`)
+  is detected once at construction from the loaded `progs.dat` itself — Rogue declares
+  the field `ammo_lava_nails` (its `give` cheat), Hipnotic the function
+  `EmpathyShieldsCheat` (dead in the shipped game, but still declared) — rather than
+  threaded from the command line through every `map`/`changelevel`/`restart`, so every
+  caller that builds a `Server` (the browser, `quaketool`, the tests) gets it for free.
+  `Hud::mode` draws what `sbar.c` draws under `hipnotic`/`rogue`: Hipnotic's four
+  weapons (laser cannon, mjolnir, the grenade-launcher/proximity-gun combo slot) and two
+  items (wetsuit, empathy shields, which displace its two keys to the main strip);
+  Rogue's inventory-bar background swap, five tier-2 weapon icons (drawn over the
+  standard loop's slot when active), two items (shield, anti-grav belt, at the same slot
+  Hipnotic's use and id1's sigils otherwise occupy), and its remapped armour-type and
+  ammo-type bits (standard's armour-bit positions are Rogue's own tier-2-weapon bits).
+  One faithfully-kept oddity: `sbar.c`'s wetsuit/shields check (`1<<(24+i)`) does not
+  match `quakedef.h`'s own `HIT_WETSUIT`/`HIT_EMPATHY_SHIELDS` (`1<<25`/`1<<26`, one bit
+  higher) — id's own mismatch between the `#define` and the code that was supposed to
+  use it, ported as the engine (what this module ports) actually checks it. Tested:
+  `sbar.rs`'s `mission_pack_item_bits_match_quakedef_h`,
+  `flashon_for_cycles_like_weapon_flashon_at_a_different_bit_and_slot`,
+  `hipnotic_weapons_and_items_draw_only_in_hipnotic_mode`,
+  `rogue_remaps_the_armour_bits_and_draws_its_tier2_weapon_icon`.
+- **`menu.c`'s ~75 hipnotic/rogue references**: read every one. All are the
+  multiplayer game-options screen (`M_GameOptions_Draw`/`M_NetStart_Change`: episode and
+  level lists, the teamplay mode count, a CTF team-colour border) — a menu the port does
+  not have (no multiplayer). Nothing applies; nothing ported.
+- **`host_cmd.c`'s nine references (`Host_Give_f`)**: not ported. The port's own `give`
+  console command was already a simplified stand-in for id's letter+digit scheme even
+  for id1 (a plain digit 1-8 selects a weapon, not id's letters for ammo plus a digit for
+  weapons) — extending it to Rogue's per-letter field remapping (new fields
+  `ammo_shells1`/`ammo_nails1`/`ammo_lava_nails`/`ammo_rockets1`/`ammo_multi_rockets`/
+  `ammo_cells1`/`ammo_plasma`) and Hipnotic's digit branch risked more than a debug cheat
+  is worth under this round's time. Every new item is still obtainable by picking it up
+  in-level.
+- **Not compared against id's C**: the status bar's hipnotic/rogue draws, and whether
+  `r2m6`'s edict overflow (below) also happens in the real engine. `oracle/build.sh`'s
+  WinQuake (the same tree the port is ported from, with `-hipnotic`/`-rogue` support
+  bolted on by id) is missing at least one cvar the real Rogue engine had: a `map r2m6`
+  run under `-rogue` prints `Cvar_Set: variable campaign not found` over 20,000 times in
+  60 seconds and never finishes (no `grep -rn campaign quake-c/WinQuake` hit at all) —
+  the real, never-open-sourced Rogue Entertainment engine evidently registered a
+  `campaign` cvar (likely its deathmatch-tournament bookkeeping) this public source
+  never got. Hipnotic's oracle run (`-hipnotic +map hip1m1`, full composited screen) DID
+  complete cleanly (one benign `'fog' is not a field` warning, matching id's own
+  tolerance of a QuakeC field it doesn't have), but a quick, unsynchronized capture
+  against `quaketool shot` landed on two different camera positions (the oracle's own
+  frame was taken before its client-side signon settled: `vieworg [0,0,0]`,
+  `con_current` still the full screen height) — a real pixel comparison needs
+  `screen2d.py`'s own scripted multi-frame sequence extended to accept `-hipnotic`/a
+  custom pak, which this round did not do.
+- **`r2m6` (Rogue) cannot be spawned by this port**: `plat2_spawn_inside_trigger():
+  ED_Alloc: no free edicts` — `quaketool sim`/`census` both hit it on bare entity spawn,
+  reproduced identically with the shareware id1 and with the full 2021 re-release id1
+  merged in (so not a missing-registered-asset artifact). `MAX_EDICTS` is 600 in this
+  source for id1 too (`quakedef.h`'s own "FIXME: ouch! ouch! ouch!"); whether the real
+  Rogue engine raised it, or this map's `plat2` count is a genuine overflow nobody hit at
+  a lower skill, is open — the oracle can't settle it (previous bullet). Every other map
+  of both packs spawns clean (`quaketool census`, 18 hipnotic + 15 of 16 rogue single-
+  player maps — `rogue`'s own deathmatch-only maps, `ctf1`/`b_lnail*`/`b_mrock*`/
+  `b_plas*`, spawn too, untested for actual deathmatch play, which the port has none
+  of); `hip1m1`→`hip1m2` and `r1m1`→`r1m2` play start to exit with inventory carried
+  across (`quaketool changelevel`).
+- **The browser**: `?game=hipnotic`/`?game=rogue` is wired through to `-hipnotic`/
+  `-rogue` and, checked live (headless Chromium, no hipnotic data present), fails
+  exactly as id's own engine would — silently plays plain shareware, since an empty
+  `hipnotic/` game directory contributes nothing to the search path — not a crash or a
+  hang. The page's own file layer is unchanged and still id1-only: `index.html`'s drop
+  handler explicitly refuses anything but `pak0.pak`/`pak1.pak`
+  (`"only id's pak0.pak and pak1.pak are played (no mods or mission packs)"`), its
+  `files.json` manifest only ever adds `id1/pak1.pak`, and `fileList` (what `wasi.js`'s
+  `path_open` can ever see — a plain in-memory map, nothing fetched on demand) hardcodes
+  `id1/pak0.pak` as the one file every deploy always sends. The next round's page-side
+  work: teach the drop handler and `files.json` about `hipnotic/pak0.pak` /
+  `rogue/pak0.pak` (and their `music/trackNN.ogg`), add them to `fileList` when `?game=`
+  asks for them, and a picker so a player can choose without typing the URL.

@@ -23,8 +23,10 @@ Both are stills from `quaketool shot`, so the 2026 crosshair isn't drawn.
   - the status bar, the menus and the console;
   - the sound mixer.
 
-  It plays the shareware episode, and the registered game with your own `pak1.pak`. There
-  is no multiplayer.
+  It plays the shareware episode, the registered game with your own `pak1.pak`, and the
+  mission packs — Scourge of Armagon and Dissolution of Eternity — with your own
+  `hipnotic`/`rogue` game directory alongside `id1`'s, natively (`-hipnotic`/`-rogue`;
+  `AUDIT.md`, "The mission packs' own file layout and progs"). There is no multiplayer.
 - **Checked against id's code.** id's C, built headless (the "oracle", in `oracle/`), is the
   reference. With every extra switched off, the port and id's C agree on:
   - 100.00% of pixels in the standard 3-D views (two pixels differ on one map);
