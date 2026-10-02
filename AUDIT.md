@@ -3089,3 +3089,73 @@ same trick `make_paks.py` used for id1's registered `pak1.pak`).
   and still pass. Not verified: the picker's visuals on a phone-size viewport, and
   `verify_touch`'s touch/menu steps with a mission pack selected (only its unchanged
   id1-only path was re-run).
+
+## hip1m1's start door: not reproduced (2026-10-02, branch `fleet/startdoor`)
+
+The user reported, playing Scourge of Armagon on a phone, that in the room the player
+starts the door did not move, yet they could walk through it. hip1m1's start room has a
+`trigger_once` (x −289..−111, y 367..433, z −105..−39, found at edict 226) targeting a
+`trigger_relay` (1 s delay) that opens five `func_door` pieces (`t7`/`t2` at once, `t4`
++1.5 s, `t6`/`t8` +2.5 s; `spawnflags` 2052 = `DOOR_DONT_LINK` + not-in-deathmatch, `wait
+-1`). This round tried hard to reproduce it and could not, on real hipnotic data
+(`deploy/{id1,hipnotic}` in a work directory),
+three independent ways:
+
+- **A native Rust harness** (`Server::with_pak` directly, no client/renderer): teleported
+  the player into the trigger (the real `setorigin` builtin, #2, movetype left alone —
+  unlike a noclip "fly to" cheat, id's `SV_Physics_Noclip` links with
+  `touch_triggers=false`, so a noclip teleport alone never fires a touch trigger), then
+  stepped `client_frame_f64` at a fixed 0.1 s. All five doors move on the brief's own
+  schedule, `solid` stays `SOLID_BSP` (4) throughout (collision follows the moved
+  entity), and `Server::entities_sent_to_client()` keeps every door in the client's
+  visible-entity set the whole time — so `cl_main.rs`'s brush-entity loop (reads `origin`
+  fresh from the edict every frame, gated only on that `is_relinked`/`sent` flag) has
+  correct, live input every frame. Kept as `quake-rs/tests/hip1m1_start_door.rs`
+  (`#[ignore]`d, `QUAKE_HIP1M1_PAK` — mirrors `pr_edict.rs`'s `QUAKE_R2M6_DIR`): closed
+  doors block the player, the first two pieces open on the relay's own ~1 s delay, all
+  five are open and still solid by t=6 s, and the player is free to proceed once they are.
+- **A browser/wasm harness** (Playwright driving the real production automation calls —
+  `quake-wasm/src/automation.rs`'s `exec`, `setpos`-style `setorigin`, `step`,
+  `frame_hash`, plus throwaway `dbg_*` calls added and then reverted for this
+  investigation) against the real `wasm32-wasip1-threads` build, `?game=hipnotic`,
+  `map hip1m1`: with the camera actually facing the doors (the first attempt stared at a
+  blank wall and wrongly looked like a frozen frame — a methodology trap worth naming
+  since it is easy to fall into again), `frame_hash()` — the program's own last-rendered
+  frame, independent of canvas/rAF — changes every tick the door's `origin` changes, in
+  both the 2026 and Classic profiles; screenshots at t=1 s and t=5 s show the door
+  genuinely closed, then genuinely open onto the room beyond. A forced run straight at
+  the still-closed cluster gets physically blocked (position pinned for half a second)
+  before any piece has moved, then proceeds once they open. True natural play (the real
+  `info_player_start`, no teleport) also reaches the trigger and the same sequence plays
+  out.
+- **id's own C oracle**, run on the real data for the first time with its own game
+  directory: `census/oracle_run.py` gained `--hipnotic-pak`/`--rogue-pak` (sets up
+  `<base>/hipnotic/pak0.pak` or `rogue/pak0.pak` and passes `-hipnotic`/`-rogue` — stock
+  `COM_InitFilesystem` already knows those flags, nothing in `oracle/c` needed to
+  change) and `--id1-pak1` (`COM_CheckRegistered` gates `-hipnotic`/`-rogue` on
+  `gfx/pop.lmp`, which only the registered pak carries). An idle census at t=0/2/4/6 s
+  confirms id's C spawns the same five closed doors at the same spawn geometry the port
+  computes (absmin/absmax match to the hull-expansion rounding already documented
+  elsewhere in this file); a full triggered run needs a scripted walk through hip1m1's
+  actual (unmapped-by-this-round) corridor, which this round did not build — the static
+  baseline is as far as this extension went. The `--hipnotic-pak`/`--rogue-pak`/
+  `--id1-pak1` flags themselves are worth keeping either way: AUDIT's own "mission packs"
+  section above named this exact gap ("extend the harness to take a game directory if it
+  doesn't yet").
+
+**Not explained.** Every suspect the brief named was checked and came back faithful:
+the client's visible-entity list (no stale cache — reads live), the search path (one
+bsp, one set of `*N` indices, server and client alike), `DOOR_DONT_LINK` (each piece
+triggers independently, matching the relay's five separate `use` targets), the 2026
+extras (`r_lerpmove`/`r_lerpmodels` are client-side monster/alias-model smoothing,
+untouched by brush-submodel rendering, which reads `origin` raw every frame; the
+Classic profile reproduces the same open sequence). A persistent-renderer regression
+(`render::world::tests::a_moved_submodel_redraws_on_a_renderer_reused_across_frames`,
+quake-rs/src/render/world.rs) pins down the one structural risk this round worried about
+most — the real client reuses one `Renderer` every frame, unlike `render_once`'s
+fresh-renderer-per-call tests above it — and confirms a submodel's moved origin redraws
+correctly on a stationary camera, at any thread count. This leaves the report
+unreproduced on this build: either it predates a fix already on `main` (the mission-pack
+round landed hours before this one), or it needs the exact phone/touch
+conditions this round's keyboard-driven automation does not cover. If it recurs, the
+`hip1m1_start_door.rs` test and the oracle flags above are the fastest way back in.
