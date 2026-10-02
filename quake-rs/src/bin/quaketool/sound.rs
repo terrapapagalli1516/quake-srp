@@ -16,15 +16,25 @@
 //!   device clock, raw 16-bit stereo out, and the same per-`update` trace.
 //!   Without `--fixes` the mixer is Classic, which must match id's C sample
 //!   for sample.
+//! - `quaketool sndwalk <pak> <map> <script> <log> [--wav out.wav]` walks a
+//!   script (`frames yaw forward jump` a line) through the Classic client,
+//!   one host frame per 1/72 s, and logs every call it makes into the sound
+//!   layer as the C oracle's `oracle_sndlog` does (`oracle/c/walk_oracle.c`;
+//!   `oracle/sound_walk.py` walks both and compares). `--wav`: what id's
+//!   mixer at 11025 Hz makes of those calls.
 
 use std::fmt::Write as _;
+use std::rc::Rc;
 
 use quake_rs::bsp::NUM_AMBIENTS;
+use quake_rs::client::cl_input::KeyMove;
 use quake_rs::client::host::{host_filter_time, host_filter_time_uncapped};
-use quake_rs::client::{Listener, SoundCall, Vid, cl_demo};
+use quake_rs::client::{Listener, SoundCall, Vid, Walk, cl_demo, cl_main, host_cmd};
 use quake_rs::pak::Pak;
+use quake_rs::qrand::QRand;
 use quake_rs::render;
 use quake_rs::server::{SoundEvent, StaticSound};
+use quake_rs::settings::{Profile, Settings};
 use quake_rs::snd::{Fixes, Mixer, SoundMode};
 
 /// The device ring's size in sample pairs (the oracle's fake DMA buffer):
@@ -233,6 +243,177 @@ pub fn cmd_sndscript(pak_path: &str, script_path: &str, out_path: &str, rest: &[
     Ok(String::new())
 }
 
+/// id's Always Run (Options > Always Run sets `cl_forwardspeed 400`): the
+/// scripted walk's forward speed; `oracle/sound_walk.py` sets the same in
+/// id's game.
+const WALK_FORWARD_SPEED: f32 = 400.0;
+
+/// One line of a walk script: `frames yaw forward jump` (`oracle/c/walk_oracle.c`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct WalkSegment {
+    frames: u32,
+    yaw: f32,
+    forward: bool,
+    jump: bool,
+}
+
+/// A walk script's segments; `#` starts a comment.
+fn parse_walk(text: &str) -> Result<Vec<WalkSegment>, String> {
+    let mut segs = Vec::new();
+    for (n, line) in text.lines().enumerate() {
+        let w: Vec<&str> = line.split('#').next().unwrap_or("").split_whitespace().collect();
+        if w.is_empty() {
+            continue;
+        }
+        let bad = || format!("line {}: want `frames yaw forward jump`: {line}", n + 1);
+        if w.len() != 4 {
+            return Err(bad());
+        }
+        let flag = |s: &str| s.parse::<i32>().map(|v| v != 0).map_err(|_| bad());
+        segs.push(WalkSegment {
+            frames: w[0].parse().map_err(|_| bad())?,
+            yaw: w[1].parse().map_err(|_| bad())?,
+            forward: flag(w[2])?,
+            jump: flag(w[3])?,
+        });
+    }
+    Ok(segs)
+}
+
+/// The head of a log line, as `walk_oracle.c`'s `SndLog_Begin` writes it: the
+/// host frame, realtime, cl.time, sv.time, `cls.signon` and `spawned` (a
+/// level load here is over within the frame that starts it: always 4 and 1).
+fn walk_log_head(log: &mut String, frame: u32, realtime: f64, w: &Walk) {
+    let _ = write!(log, "{frame} {realtime:.6} {:.6} {:.6} 4 1 ", w.clock, w.server.vm.sv_time());
+}
+
+/// `oracle_sndlog`'s lines for the calls `calls` made into the sound layer.
+fn walk_log_calls(log: &mut String, frame: u32, realtime: f64, w: &Walk, calls: &[SoundCall]) {
+    let class = |e: i32| {
+        let vm = &w.server.vm;
+        let live = e > 0 && (e as usize) < vm.num_edicts() && !vm.is_free_edict(e);
+        let name = if live { vm.ent_str(e, vm.fo().classname) } else { "" };
+        if name.is_empty() { "-".to_string() } else { name.to_string() }
+    };
+    let byte = |v: f32, scale: f32| (v * scale + 0.5) as i32;
+    for call in calls {
+        match call {
+            SoundCall::Start { events, .. } => {
+                for e in events {
+                    walk_log_head(log, frame, realtime, w);
+                    let [x, y, z] = e.origin;
+                    let _ = writeln!(
+                        log,
+                        "start {} {} {} {} {x:.3} {y:.3} {z:.3} {} {}",
+                        e.entity, class(e.entity), e.channel, e.sample,
+                        byte(e.volume, 255.0), byte(e.attenuation, 64.0)
+                    );
+                }
+            }
+            SoundCall::Stop(stops) => {
+                for (ent, chan) in stops {
+                    walk_log_head(log, frame, realtime, w);
+                    let _ = writeln!(log, "stop {ent} {chan}");
+                }
+            }
+            SoundCall::StopAll => {
+                walk_log_head(log, frame, realtime, w);
+                let _ = writeln!(log, "stopall 1");
+            }
+            SoundCall::Static(statics) => {
+                for s in statics {
+                    walk_log_head(log, frame, realtime, w);
+                    let [x, y, z] = s.origin;
+                    let _ = writeln!(
+                        log,
+                        "static {} {x:.3} {y:.3} {z:.3} {} {}",
+                        s.sample, byte(s.volume, 255.0), byte(s.attenuation, 64.0)
+                    );
+                }
+            }
+            SoundCall::Update { .. } | SoundCall::Cd(_) => {}
+        }
+    }
+}
+
+/// `quaketool sndwalk`: see the module note.
+pub fn cmd_sndwalk(pak_path: &str, map: &str, script_path: &str, log_path: &str, rest: &[String]) -> Result<String, String> {
+    let mut wav_path = None;
+    let mut i = 0;
+    while i < rest.len() {
+        match rest[i].as_str() {
+            "--wav" => {
+                wav_path = Some(rest.get(i + 1).ok_or("--wav needs a path")?.clone());
+                i += 1;
+            }
+            a => return Err(format!("unknown argument {a:?}")),
+        }
+        i += 1;
+    }
+    let pak = open_pak(pak_path)?;
+    let text = std::fs::read_to_string(script_path).map_err(|e| format!("cannot read {script_path}: {e}"))?;
+    let segs = parse_walk(&text).map_err(|e| format!("{script_path}: {e}"))?;
+    let settings = Settings::new(Profile::Classic);
+    let rand = Rc::new(QRand::new());
+    let map_file = format!("maps/{map}.bsp");
+    let mut calls = Vec::new();
+    let mut w = host_cmd::build_walk_map(pak.clone(), &map_file, &rand, &mut calls, settings.cvars.max_edicts as usize)
+        .ok_or_else(|| format!("{map_file} would not load"))?;
+    w.viewsize = settings.cvars.viewsize;
+    let vid = Vid { width: 320, height: 200, display_aspect: 4.0 / 3.0, exact_perspective: false, video: render::VideoCvars::CLASSIC, mip: render::MipCvars::DEFAULT };
+    // id's mixer at id's rate, for --wav.
+    let mut mixer = Mixer::new(&pak, 11025, Fixes::NONE);
+    let rate = mixer.rate();
+    let mut pcm: Vec<i16> = Vec::new();
+
+    let mut log = String::new();
+    let (mut realtime, mut oldrealtime) = (0.0f64, 0.0f64);
+    walk_log_calls(&mut log, 0, realtime, &w, &calls);
+    mixer.run(&pak, &calls);
+    let (mut frame, mut forward_down, mut starts) = (0u32, false, count_starts(&calls));
+    for seg in segs.iter().flat_map(|s| std::iter::repeat(*s).take(s.frames as usize)) {
+        // A host frame every 1/72 s, through Host_FilterTime's gate.
+        let dt = loop {
+            realtime += f64::from(1.0f32 / 72.0);
+            if let Some(dt) = host_filter_time(realtime, &mut oldrealtime) {
+                break dt;
+            }
+        };
+        let org = w.server.vm.ent_vec(w.player, w.server.vm.fo().origin);
+        walk_log_head(&mut log, frame, realtime, &w);
+        let _ = writeln!(log, "walk {frame} {:.3} {:.3} {:.3}", org[0], org[1], org[2]);
+        // The mouse leaves the view at (0, yaw); CL_KeyState gives a key half
+        // the frame it goes down.
+        w.yaw = seg.yaw;
+        w.pitch = 0.0;
+        let forward = match (seg.forward, forward_down) {
+            (false, _) => 0.0,
+            (true, false) => 0.5,
+            (true, true) => 1.0,
+        };
+        forward_down = seg.forward;
+        w.key_move = KeyMove { fwd: WALK_FORWARD_SPEED * forward, jump: seg.jump, ..KeyMove::default() };
+        let f = cl_main::walk_frame(&mut w, dt, false, &vid);
+        render::recycle_image(f.image);
+        walk_log_calls(&mut log, frame, realtime, &w, &f.sound);
+        starts += count_starts(&f.sound);
+        if wav_path.is_some() {
+            // S_Update_: mix ahead of the device, which has played `realtime`.
+            mixer.run(&pak, &f.sound);
+            let n = mixer.samples_ahead((realtime * f64::from(rate)) as i64, RING_PAIRS);
+            let at = pcm.len();
+            pcm.resize(at + 2 * n, 0);
+            mixer.paint(&mut pcm[at..]);
+        }
+        frame += 1;
+    }
+    std::fs::write(log_path, log).map_err(|e| format!("cannot write {log_path}: {e}"))?;
+    if let Some(path) = &wav_path {
+        std::fs::write(path, wav_bytes(&pcm, rate)).map_err(|e| format!("cannot write {path}: {e}"))?;
+    }
+    Ok(format!("{map}: {frames} frames walked, {starts} S_StartSound, ended on {} -> {log_path}\n", w.map_name, frames = frame))
+}
+
 fn num<T: std::str::FromStr>(w: &[&str], i: usize) -> Result<T, String> {
     w.get(i).and_then(|v| v.parse().ok()).ok_or_else(|| format!("argument {i} missing or bad"))
 }
@@ -323,5 +504,25 @@ impl Script {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_walk_script_is_segments_and_comments() {
+        let segs = parse_walk("# a walk\n10 90 0 0\n\n268 -180 1 0   # north\n2 45 1 1\n").unwrap();
+        assert_eq!(
+            segs,
+            [
+                WalkSegment { frames: 10, yaw: 90.0, forward: false, jump: false },
+                WalkSegment { frames: 268, yaw: -180.0, forward: true, jump: false },
+                WalkSegment { frames: 2, yaw: 45.0, forward: true, jump: true },
+            ]
+        );
+        assert!(parse_walk("10 90 1\n").is_err(), "four fields a line");
+        assert!(parse_walk("ten 90 1 0\n").is_err());
     }
 }

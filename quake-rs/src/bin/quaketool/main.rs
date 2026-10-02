@@ -258,6 +258,12 @@ const COMMANDS: &[Command] = &[
         about: "a sound-oracle script through the port (oracle/sound.py)",
         run: |a| Ok(Out::Text(sound::cmd_sndscript(&a[0], &a[1], &a[2], &a[3..])?)),
     },
+    Command {
+        name: "sndwalk",
+        usage: "<pak> <map> <script> <log> [--wav out.wav]",
+        about: "a scripted walk through the Classic client, its sound calls logged (oracle/sound_walk.py)",
+        run: |a| Ok(Out::Text(sound::cmd_sndwalk(&a[0], &a[1], &a[2], &a[3], &a[4..])?)),
+    },
     // framerate.rs
     Command {
         name: "framerate",
@@ -406,7 +412,7 @@ mod tests {
             ("dis", 1), ("run", 2), ("render", 2), ("render-demo", 1), ("menu", 2), ("scene", 3), ("view", 3),
             ("shot", 3), ("sim", 2), ("simbench", 2), ("playtest", 2), ("changelevel", 2), ("walk", 3),
             ("demo", 3), ("census", 1), ("census-edicts", 3), ("play", 2), ("timedemo", 2), ("sound", 3),
-            ("sndscript", 3), ("framerate", 1),
+            ("sndscript", 3), ("sndwalk", 4), ("framerate", 1),
         ];
         assert_eq!(COMMANDS.len(), expected.len());
         for (name, n) in expected {
