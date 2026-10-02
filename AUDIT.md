@@ -30,10 +30,10 @@ the volumes, the mouse).
 | No 72 fps cap: a host frame on every display refresh, with the game stepped as id's 72 Hz frames step it (`Stepping::Uncapped`) | `wasm_uncapped` (Uncapped framerate) | on | The game must play the same from 60 to 480 Hz. id's gate caps the game at 72 fps, so a 120 Hz display runs at 60. The stepping keeps jumps, flashes, trails and clocks on id's 72 Hz values (`FRAMERATE.md`). |
 | The picture fills the window at the window's aspect, at its device pixels divided by a whole pixel size, with square pixels; the renderer's `hires` (views past 1280x1024, particles and the underwater warp in proportion). Video Options (2026 only) lists Native — Auto, then 1x..4x pixel size — above `RESOLUTION_PRESETS`, honestly marking whichever is actually live (printing its real size) and letting Enter switch back to it after a fixed mode; off (Classic, or the host never says `modern`), the screen is `VID_MenuDraw`'s alone | `vid_native` (Native resolution), `vid_pixelsize` (Pixel size) | on, Auto | id's modes stop at 1280x1024 and are shown in a 4:3 box. Whole pixels keep the chunky software look. Auto picks the smallest size that keeps a frame within 1920x1080 pixels times the whole square root of the render threads. ("High resolutions and Hor+") |
 | Hor+: `fov` spans a 4:3 screen, and a wider screen sees more at the sides | `fov_adapt` (Widescreen FOV) | on | id spreads `fov` over any width, so a wide screen loses the top and bottom. |
-| The 2-D layer (status bar, menus, console) at the largest whole multiple of 320x200 that fits | `wasm_scaled2d` (Scaled 2-D layer) | on | id draws it 1:1, so at 1440p the status bar is a 24-pixel strip. |
+| The 2-D layer (status bar, menus, console) at the largest whole multiple of 320x200 that fits; on its screen, wider than 320 on most frames (384 at 16:9), the level-complete screen centred as the status bar is (`Sbar_DrawPic`'s `(vid.width - 320)>>1`, `Screen2d::centred_320_x`) | `wasm_scaled2d` (Scaled 2-D layer) | on | id draws it 1:1, so at 1440p the status bar is a 24-pixel strip. `Sbar_IntermissionOverlay` draws at fixed coordinates laid out for 320 columns, so on a wider screen it sits left of the centred bar, menus and finale ("The 2-D layer on a wide screen", below). |
 | Monsters glide between their 0.1 s steps (QuakeSpasm's `r_lerpmove`) | `r_lerpmove` (Smooth monsters) | on | At high refresh rates a stepping monster visibly jumps ten times a second. ("Demo playback between messages") |
 | An alias model's animation blends between its frames (QuakeSpasm's `r_lerpmodels`) | `r_lerpmodels` (Smooth animations) | on | id steps `frame` ten times a second; at high refresh rates a monster's walk cycle (and the view weapon's) visibly holds a pose for several frames, then jumps. (`client::lerpmodels`, FRAMERATE.md "Animation frames blended") |
-| id's crosshair (`V_RenderView`'s `+`) | `crosshair` (Crosshair) | on (id: 0) | Mouse aiming. |
+| id's crosshair (`V_RenderView`'s `+`), left off the intermission and finale screens as id's GLQuake leaves it (`gl_screen.c`'s `SCR_UpdateScreen`; WinQuake draws it over the stats too) | `crosshair` (Crosshair) | on (id: 0) | Mouse aiming; a level's stats have nothing to aim at. |
 | Mouse look without holding `+mlook` | `freelook` (Mouse look) | on | How mouse play works today; `+mlook` still works in both profiles. |
 | Always Run | `cl_forwardspeed`, `cl_backspeed` 400 (Options > Always Run) | on (id: 200) | |
 | WASD: `w`/`s` forward and back, `a`/`d` strafe, over `default.cfg`'s `a` `+lookup` and `d` `+moveup` | the profile's bindings (`Bindings::with_wasd`) | on | |
@@ -46,6 +46,27 @@ the volumes, the mouse).
 | QuakeWorld's frame-rate readout | `wasm_showfps` (Show FPS) | off | Clutter. |
 | Exact perspective at every pixel | `wasm_exactpersp` (Exact perspective) | off | id's 16-pixel spans are part of the look. |
 | The `ED_Alloc` edict ceiling past id's 600 (`Vm::max_edicts`) | `sv_max_edicts` (console only, no settings row — nothing to choose until a map needs it) | on, 8192 | id's own number, kept for Classic; Rogue's `r2m6` needs more ("Files and the command line"). |
+
+**The 2-D layer on a wide screen.** Every 2-D draw that WinQuake places by screen
+coordinates, and where it sits on a 2-D screen wider than 320 (any mode past 320x200 in
+Classic; the scaled layer's own screen in 2026):
+- Centred by id, so in both profiles: the status bar, inventory and solo scoreboard
+  (`Sbar_DrawPic`/`Sbar_DrawString`'s `(vid.width - 320)>>1`), the menus (`M_DrawPic`,
+  `M_DrawCharacter`), the finale plaque (`Sbar_FinaleOverlay`, `(vid.width -
+  pic->width)/2`), centre prints and the finale text (`SCR_DrawCenterString`) and the New
+  Game prompt (`SCR_DrawNotifyString`), line by line `(vid.width - l*8)/2`, and the pause
+  plaque (`SCR_DrawPause`).
+- Laid out for a 320-wide screen at fixed coordinates: `Sbar_IntermissionOverlay` alone.
+  Classic keeps it in the top-left corner, as id; 2026 centres it (the scaled 2-D row).
+- Anchored by design, left where id puts them: the notify lines (`Con_DrawNotify`, at the
+  console's own left margin, wrapped to its width), the console, the crosshair (the view's
+  centre), and Show FPS (QuakeWorld's bottom-right corner).
+- Not ported: `SCR_DrawLoading` (centred by id; the port draws no loading plaque),
+  `SCR_DrawRam`/`SCR_DrawTurtle`/`SCR_DrawNet` (id's surface-cache, slow-frame and
+  lost-connection icons, at the view's top-left corner), `Draw_BeginDisc` (the screen's
+  top-right corner), and deathmatch's `Sbar_DeathmatchOverlay` (centred by id) and
+  `Sbar_MiniDeathmatchOverlay` (at a fixed x = 324: to look at again if deathmatch is
+  ever ported).
 
 **The same in both profiles** (id's behaviour, or the platform's, not a departure):
 - Raw mouse (`unadjustedMovement`): id's `IN_StartupMouse` switched pointer acceleration
