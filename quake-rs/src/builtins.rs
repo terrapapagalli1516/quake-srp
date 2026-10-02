@@ -211,8 +211,11 @@ fn pf_vectoangles(vm: &mut Vm) -> Result<()> {
 // ------------------------------------------------------------- #14/#15 spawn/remove
 
 /// `PF_Spawn` (#14): `entity() spawn` — allocate (or reuse) an edict. Enforces
-/// id's `MAX_EDICTS` ceiling (the C `ED_Alloc` `Sys_Error`s when full); here a
-/// runaway QuakeC spawn loop fails with a `run_error` rather than exhausting memory.
+/// the live `ED_Alloc` ceiling (`Vm::max_edicts`: id's `MAX_EDICTS` 600, or
+/// higher where the 2026-only `sv_max_edicts` cvar raised it — see
+/// `Vm::set_max_edicts`); the C `ED_Alloc` `Sys_Error`s when full, so here a
+/// spawn past the ceiling (a runaway QuakeC loop, or Classic's/an unraised
+/// 600) fails with a `run_error` rather than exhausting memory.
 fn pf_spawn(vm: &mut Vm) -> Result<()> {
     match vm.spawn_checked() {
         Some(e) => {

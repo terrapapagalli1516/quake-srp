@@ -281,6 +281,24 @@ impl Server {
         }
     }
 
+    /// The live `ED_Alloc` ceiling ([`crate::vm::Vm::max_edicts`]): id's
+    /// `MAX_EDICTS` (600) unless [`Self::set_max_edicts`] raised it.
+    pub fn max_edicts(&self) -> usize {
+        self.vm.max_edicts()
+    }
+
+    /// Raise (or restore) the edict ceiling — the 2026-only `sv_max_edicts`
+    /// cvar's engine side. Call before [`Self::spawn_entities`] (this is
+    /// `SV_SpawnServer` sizing `sv.edicts`, just with a port whose edict
+    /// storage already grows on demand — see `crate::vm::Vm::set_max_edicts`
+    /// for the clamp and why it is a floor, not a ceiling, on id's 600). A
+    /// front-end carries this to the next level's server exactly as it
+    /// carries [`Self::skill`] and [`Self::sv_gravity`] — see `host_cmd.rs`'s
+    /// `try_changelevel`/`try_restart`.
+    pub fn set_max_edicts(&mut self, n: usize) {
+        self.vm.set_max_edicts(n);
+    }
+
     /// Draw from the host session's random streams ([`QRand`]) from now on.
     /// A front-end hands each server it builds its session's, before
     /// [`Self::spawn_entities`], so the streams continue across level loads

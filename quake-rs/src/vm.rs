@@ -236,7 +236,31 @@ const RUNAWAY: u32 = 100_000;
 /// `Sys_Error("ED_Alloc: no free edicts")` when this is exceeded. We surface it as
 /// a `run_error` from the QuakeC-reachable `PF_Spawn` (via [`Vm::spawn_checked`])
 /// so a runaway `spawn()` loop fails cleanly instead of growing memory unbounded.
+/// id's own number, and [`Vm::classic`][Vm]'s ceiling — in Classic this is
+/// still the only ceiling there is. In 2026 the `sv_max_edicts` cvar
+/// ([`Vm::set_max_edicts`]) can raise the live ceiling past it (never below:
+/// see [`MAX_EDICTS_LIMIT`]).
 pub const MAX_EDICTS: usize = 600;
+
+/// The `sv_max_edicts` cvar's own ceiling: not id's (there is no real
+/// engine's own number to match here — the real, never-open-sourced Rogue
+/// engine that shipped `r2m6` is undocumented; see `AUDIT.md`), so this is
+/// the port's own choice, well clear of where an edict number stops being
+/// representable at all: `svc_spawnbaseline`/`svc_update`'s entity number is
+/// a signed 16-bit field end to end (`common.c`'s `MSG_ReadShort` casts
+/// through `(short)`), so 32768 would read back as -32768 — and every
+/// parser here already rejects a negative entity number, demo.rs's
+/// `svc_spawnbaseline` included. 32000 leaves headroom under that 32767
+/// wall, the same margin QuakeSpasm's own `max_edicts` cvar keeps.
+///
+/// One corner stays short of 32767: `svc_sound`'s entity+channel field packs
+/// `(ent << 3) | channel` into a signed 16-bit short (`sv_main.c`), so a
+/// sound AT an entity above 4095 would corrupt that pack — but this port's
+/// live single-player client never serializes sound through that encoding
+/// (`server::msg::start_sound` carries `ent`/`channel` as plain fields); only
+/// a hypothetical future demo *recorder* would need to mind it. No shipped
+/// map needs anywhere near 4095 edicts, let alone 32000.
+pub const MAX_EDICTS_LIMIT: usize = 32_000;
 
 /// `MAX_ENT_LEAFS` (progs.h): how many BSP leaves `SV_FindTouchedLeafs`
 /// records for one edict. An entity touching more is known by its first 16
@@ -361,6 +385,12 @@ pub struct Vm {
     /// `PR_RunError` ends the game, so the VM runs no more QuakeC once one has
     /// happened, until a harness resumes it ([`Vm::reset_execution`]).
     halted: Option<ProgramError>,
+    /// The live `ED_Alloc` ceiling [`Vm::spawn_checked`] enforces: id's
+    /// [`MAX_EDICTS`] (600) unless a 2026-only extra raised it
+    /// ([`Vm::set_max_edicts`], the `sv_max_edicts` cvar). Never below
+    /// [`MAX_EDICTS`] — this is a departure that only ever gives QuakeC more
+    /// room, never less, so Classic's ceiling is untouched.
+    max_edicts: usize,
 
     // --- private execution state ---
     /// Call stack of saved caller frames (`pr_stack` / `pr_depth`).
@@ -409,6 +439,7 @@ impl Vm {
             localstack: Vec::new(),
             xfunction: 0,
             xstatement: 0,
+            max_edicts: MAX_EDICTS,
         };
 
         // Edict 0 is the world. ED_ClearEdict zeroes its fields; it is not free.
@@ -919,7 +950,9 @@ impl Vm {
     }
 
     /// `ED_Alloc` with id's hard [`MAX_EDICTS`] ceiling (the C
-    /// `Sys_Error("ED_Alloc: no free edicts")`). Reuses a slot like
+    /// `Sys_Error("ED_Alloc: no free edicts")`) — [`Self::max_edicts`] in
+    /// 2026, where the `sv_max_edicts` cvar may have raised it past id's 600
+    /// (never below: [`Self::set_max_edicts`]). Reuses a slot like
     /// [`Self::spawn`], else grows — but returns `None` once the array is
     /// already at the ceiling, so the QuakeC-reachable `PF_Spawn` surfaces a
     /// `run_error` instead of growing memory without bound on a runaway
@@ -930,7 +963,7 @@ impl Vm {
             self.clear_edict(i);
             return Some(i as i32);
         }
-        if self.edict_free.len() >= MAX_EDICTS {
+        if self.edict_free.len() >= self.max_edicts {
             return None;
         }
         let i = self.edict_free.len();
@@ -938,6 +971,24 @@ impl Vm {
         self.edict_fields.resize(self.edict_fields.len() + ef, 0);
         self.edict_free.push(false);
         Some(i as i32)
+    }
+
+    /// The live `ED_Alloc` ceiling ([`Self::spawn_checked`]): id's
+    /// [`MAX_EDICTS`] unless [`Self::set_max_edicts`] raised it.
+    pub fn max_edicts(&self) -> usize {
+        self.max_edicts
+    }
+
+    /// Raise (or restore) the `ED_Alloc` ceiling — the `sv_max_edicts` cvar's
+    /// engine side, called once per level load (`SV_SpawnServer` sizes
+    /// `sv.edicts`; this port's edict storage already grows on demand, so
+    /// "sizing" it is just moving this ceiling before
+    /// `crate::server::Server::spawn_entities` runs). Clamped to
+    /// [`MAX_EDICTS`]..=[`MAX_EDICTS_LIMIT`]: this is a departure that only
+    /// ever gives QuakeC more room than id's 600, never less, so Classic
+    /// (which never calls this) is untouched either way.
+    pub fn set_max_edicts(&mut self, n: usize) {
+        self.max_edicts = n.clamp(MAX_EDICTS, MAX_EDICTS_LIMIT);
     }
 
     /// `ED_Free` (pr_edict.c): mark the edict free and clear exactly the fields
@@ -2214,6 +2265,47 @@ mod tests {
         // Freeing the world is a no-op.
         vm.free_edict(0);
         assert!(!vm.edict_free[0]);
+    }
+
+    #[test]
+    fn set_max_edicts_raises_or_restores_the_ed_alloc_ceiling() {
+        // The 2026-only sv_max_edicts extra: spawn_checked (PF_Spawn) holds at
+        // id's MAX_EDICTS until raised, then holds at the raised ceiling too —
+        // this is what fixes Rogue's r2m6 ("ED_Alloc: no free edicts" past 600
+        // edicts; AUDIT.md "the mission packs").
+        let mut b = Builder::new();
+        b.entityfields = 1;
+        let _main = add_function(&mut b, "main", vec![Statement { op: Op::Done, a: 0, b: 0, c: 0 }]);
+        let img = b.build();
+        let mut vm = Vm::load(&img).expect("load");
+
+        assert_eq!(vm.max_edicts(), MAX_EDICTS, "id's 600 until something raises it");
+
+        // Nothing is ever freed here, so spawn_checked always grows (never
+        // reuses) until the ceiling — world (edict 0) plus MAX_EDICTS-1 more.
+        for _ in 1..MAX_EDICTS {
+            assert!(vm.spawn_checked().is_some());
+        }
+        assert_eq!(vm.num_edicts(), MAX_EDICTS);
+        assert!(vm.spawn_checked().is_none(), "id's own ceiling: ED_Alloc: no free edicts");
+
+        // Raised past 600 (the extra, on): the same VM keeps allocating up to
+        // the new ceiling, then holds there too — never unbounded.
+        vm.set_max_edicts(700);
+        assert_eq!(vm.max_edicts(), 700);
+        for _ in MAX_EDICTS..700 {
+            assert!(vm.spawn_checked().is_some());
+        }
+        assert_eq!(vm.num_edicts(), 700);
+        assert!(vm.spawn_checked().is_none(), "the raised ceiling holds just as id's did");
+
+        // Clamped both ways: never below id's 600 (a departure only ever
+        // gives QuakeC more room, never less — Classic, which never calls
+        // this, is untouched either way) and never past the cvar's own limit.
+        vm.set_max_edicts(0);
+        assert_eq!(vm.max_edicts(), MAX_EDICTS, "never below id's own ceiling");
+        vm.set_max_edicts(usize::MAX);
+        assert_eq!(vm.max_edicts(), MAX_EDICTS_LIMIT, "never past the cvar's own ceiling");
     }
 
     #[test]
