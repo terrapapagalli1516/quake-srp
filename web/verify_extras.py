@@ -20,8 +20,10 @@ Chromium. The page opens as `?classic` (every departure off, id's keys):
      (`wasm_showfps "1"`, `viewsize "80"`, ...), and a plain reload (no
      `?classic`) comes back Classic with them.
   5. Esc in fullscreen (with vid_fkey on: F is the page's fullscreen key in
-     2026 only): F locks Escape (navigator.keyboard.lock(['Escape']),
-     spied) and the hint says to hold Esc; a tapped Esc toggles the menu, a
+     2026 only): F locks Escape, and F12 alongside it
+     (navigator.keyboard.lock(['Escape', 'F12']), spied — F12 is
+     default.cfg's `screenshot` bind, PLATFORM.md's "The F-keys") and the
+     hint says to hold Esc; a tapped Esc toggles the menu, a
      held one (autorepeat) toggles it once; a locked Esc that the browser
      also reports as a pointer-lock loss counts once, in either order;
      leaving fullscreen unlocks; without the Keyboard Lock API the old hint
@@ -275,8 +277,8 @@ with sync_playwright() as p:
         if pg.evaluate("!!document.fullscreenElement"):
             key("f")
     if fs:
-        check("the lock asks for exactly Escape",
-              pg.evaluate("JSON.stringify(window.__kb.locks)") == '[["Escape"]]')
+        check("the lock asks for Escape and F12",
+              pg.evaluate("JSON.stringify(window.__kb.locks)") == '[["Escape","F12"]]')
         check("the hint says hold Esc to leave",
               "hold Esc" in pg.evaluate("fsHint.textContent")
               and pg.evaluate("fsHint.classList.contains('show')"))
