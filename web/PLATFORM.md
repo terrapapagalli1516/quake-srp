@@ -557,6 +557,26 @@ it means, as id's `Key_Event`, `IN_MouseMove` and the joystick code do.
   console and the name fields. A key `code` does not name falls back to
   `key`. (`verify_input.py`: AZERTY's key in W's place is `w` in the game and
   types `z` in the console; letters used to follow the layout, `z`.)
+- **The F-keys.** `default.cfg`'s shortcuts (F1 help, F2/F3 the Save/Load
+  screen, F4 Options, F6/F9 quicksave/quickload, F10 quit, F12 a screenshot)
+  reach the game as ordinary `KEY` records like any other key; the page's
+  `keydown` handler calls `preventDefault()` for F1/F3/F5/F6/F10 (F5 is
+  unbound, but losing the game to a reload is worse than losing the browser
+  shortcut) so the browser's own help/find/reload/address-bar/menu-bar never
+  fires alongside the bind. F11 and F12 are reserved by every browser and
+  `preventDefault()` cannot get them back outside fullscreen; in fullscreen,
+  `lockEscape()` locks F12 along with Esc (Chromium only — the "Esc in
+  fullscreen" comment above `lockEscape` has the why), so F12 reaches the
+  page there too. Windowed, F12's `screenshot` bind is unreachable, which
+  the keys drawer says. `web/verify_fkeys.py` drives all eight end to end:
+  F1-F4 each open their screen directly, F6/F9 round-trip `quick.sav`
+  (`wait`'s one-frame delay included), F10 raises the Quit prompt without
+  quitting, and F12 writes a `.pcx` once fullscreen locks it. It also
+  presses F12 windowed, informationally: headless Chromium has no devtools
+  UI to reserve F12 for, so it passes the key through regardless, and a
+  `.pcx` is written there too — whether a real windowed browser keeps F12
+  for itself, as this section says it should, is NOT verified by this
+  check.
 - **The raw mouse.** The pointer lock asks for `unadjustedMovement`
   (Chromium's raw input, on Windows, macOS and ChromeOS): id's
   `IN_StartupMouse` switched Windows' pointer acceleration off while the game

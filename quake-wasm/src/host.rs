@@ -140,6 +140,20 @@ pub(crate) fn step(dt: f32) -> i32 {
     // IN_Commands: the pad's buttons through Key_Event, before the frame's
     // commands and move, as host.c orders them.
     crate::input::in_commands();
+    // Cbuf_Execute: right here in the C, after IN_Commands and before
+    // CL_SendCmd. This port has no persistent cmd_text buffer, but a `wait`
+    // inside a console command parks the rest of its line in
+    // `App::pending_cmd` for exactly this moment (`execute_console_command`).
+    // Taken (and run) OUTSIDE `ensure_app`: it calls back into
+    // `execute_console_command`, which borrows the App itself.
+    let pending = {
+        let mut text = None;
+        ensure_app(|a| text = a.pending_cmd.take());
+        text
+    };
+    if let Some(text) = pending {
+        crate::host_cmd::execute_console_command(&text);
+    }
     let mut ran = 0;
     ensure_app(|a| {
         let stepping = gate.stepping();
@@ -339,6 +353,31 @@ pub(crate) fn step(dt: f32) -> i32 {
             console_layer(a, img.as_mut(), dt);
         }
         bench::lap(Phase::Console);
+
+        // SCR_ScreenShot_f, deferred to here: `img` is the finished 8-bit
+        // frame (3D + HUD + menu/console overlays) exactly as id's
+        // vid.buffer reads at this point of SCR_UpdateScreen — BEFORE
+        // V_UpdatePalette's cshift/gamma DAC below, which is why id's
+        // screenshots never show a flash or a gamma ramp. The console
+        // command only raised the flag (nothing is rendered mid-command);
+        // this is the next frame with something to write, and its own raw
+        // palette ([`App::active_palette`], id's `host_basepal`) to write it
+        // with.
+        if a.screenshot_request {
+            a.screenshot_request = false;
+            if let (Some(im), Some(pal)) = (img.as_ref(), a.active_palette()) {
+                match quake_rs::screen::screenshot_name(|n| crate::common::read_file(n).is_ok()) {
+                    Some(name) => {
+                        let bytes = quake_rs::screen::write_pcx(im.w, im.h, &im.pixels, pal);
+                        match crate::common::write_file(&name, &bytes) {
+                            Ok(()) => a.console.println(format!("Wrote {name}")),
+                            Err(_) => a.console.println(format!("SCR_ScreenShot_f: couldn't write {name}")),
+                        }
+                    }
+                    None => a.console.println("SCR_ScreenShot_f: Couldn't create a PCX file"),
+                }
+            }
+        }
 
         // V_UpdatePalette runs LAST in SCR_UpdateScreen. V_CheckGamma (view.c):
         // rebuild the gamma table only when the cvar actually changed.

@@ -231,6 +231,7 @@
           <span class="k">Options</span><span>screen size, brightness, mouse, always run — Customize controls to rebind keys, Video Options for id's 4:3 modes, and <em>Classic / 2026</em>: ←/→ switches between id's WinQuake exactly and this port's 2026 settings, Enter lists each one (or open the page as <code>?classic</code> / <code>?2026</code>)</span>
           <span class="k"><kbd>-</kbd><kbd>=</kbd></span><span>screen size down / up</span>
           <span class="k"><kbd>F</kbd></span><span>fullscreen (2026; Classic leaves F unbound, as id's)</span>
+          <span class="k"><kbd>F6</kbd> / <kbd>F9</kbd></span><span>quicksave / quickload (id's own binds — also <kbd>F1</kbd> help, <kbd>F2</kbd>/<kbd>F3</kbd> the Save/Load screen, <kbd>F4</kbd> Options, <kbd>F10</kbd> quit, <kbd>F12</kbd> a screenshot — a <code>.pcx</code> file in this page's storage, not a download yet; F12 only reaches the game in fullscreen, where the browser keeps it for devtools otherwise)</span>
           <span class="k"><kbd>~</kbd></span><span>console (see below)</span>
         </div>
       </div>
@@ -291,6 +292,13 @@ const fsHint = document.getElementById('fsHint');
 // The keys whose browser default (scrolling, or a click on a focused button)
 // must never happen in the game, by Quake keynum: WASD, c, Space, the arrows.
 const MOVE_KEYNUMS = [119, 97, 115, 100, 99, 32, 128, 129, 130, 131];
+// F-keys default.cfg binds whose OWN browser default is worth losing even
+// while the game has the keyboard: F1 help, F3 find, F5 reload (unbound in
+// Quake, but losing the game to a reload is worse than losing the shortcut),
+// F6 focuses the address bar, F10 opens a menu bar. F2/F4/F9/F12 are left to
+// fall through to the catch-all below (menu/console only) — F12 can't be
+// stopped outside fullscreen anyway (see the Keyboard Lock API, below).
+const F_KEY_KEYNUMS = [135, 137, 139, 140, 144]; // F1, F3, F5, F6, F10
 // MouseEvent.button -> Quake keynum (keys.h K_MOUSE1/2/3): left, middle, right.
 const MOUSE_KEYNUMS = { 0: 200, 1: 202, 2: 201 };
 
@@ -630,7 +638,7 @@ addEventListener('keydown', e => {
   // moves focus, Firefox's quick-find opens on ' and / (the latter is
   // default.cfg's "impulse 10"), and while the menu or console has the
   // keyboard, typing must not scroll the page either.
-  if (MOVE_KEYNUMS.includes(qk) || qk === 9 || qk === 127 || qk === 96 || qk === 39 || qk === 47
+  if (MOVE_KEYNUMS.includes(qk) || F_KEY_KEYNUMS.includes(qk) || qk === 9 || qk === 127 || qk === 96 || qk === 39 || qk === 47
       || (!gameHasKeys && qk !== null && !e.ctrlKey && !e.metaKey)) e.preventDefault();
 });
 addEventListener('keyup', e => {
@@ -707,6 +715,12 @@ keysBtn.addEventListener('click', () => {
 // Headless Chromium resolves the lock but has no browser-side Esc handling, so
 // what a real browser does with a locked Esc is unverified; the page logic is
 // covered by verify_extras.py.
+//
+// F12 rides the same lock (`lockEscape`'s call locks both): outside
+// fullscreen F12 is browser-reserved everywhere and nothing can get it back
+// (so default.cfg's F12 `screenshot` bind never reaches the game windowed —
+// the keys help says so), but Chromium's Keyboard Lock hands a locked key to
+// the page instead of its usual action, same as Esc above.
 let escLocked = false;          // Esc is keyboard-locked (fullscreen, Chromium)
 let escKeyAt = -1e9, lockLossMenuAt = -1e9;   // performance.now() stamps
 // One Esc, one toggle. Should a browser both deliver a locked Esc AND drop the
@@ -723,7 +737,7 @@ function escPress() { keyEvent(27, true, 0); keyEvent(27, false, 0); }
 function lockEscape() {
   const kb = navigator.keyboard;
   if (!kb || typeof kb.lock !== 'function') return Promise.resolve(false);
-  return kb.lock(['Escape']).then(() => true, () => false);
+  return kb.lock(['Escape', 'F12']).then(() => true, () => false);
 }
 function unlockEscape() {
   escLocked = false;
@@ -734,7 +748,8 @@ function fsHintHtml(locked) {
     ? 'Esc = menu &nbsp;·&nbsp; hold Esc or F = leave fullscreen'
     : 'Esc = menu &nbsp;·&nbsp; F = leave fullscreen';
 }
-// Entering fullscreen: lock Esc, then surface the contract for a moment.
+// Entering fullscreen: lock Esc (and F12 with it), then surface the contract
+// for a moment.
 let fsHintTimer = 0;
 document.addEventListener('fullscreenchange', () => {
   if (!document.fullscreenElement) { unlockEscape(); fsHint.classList.remove('show'); return; }

@@ -176,6 +176,19 @@ pub(crate) struct App {
     /// loop reads it back with [`take_quit`] and ends the turn — and the
     /// program — with a `Quit` record, as id's `Sys_Quit` ended the process.
     pub(crate) quit: bool,
+    /// `Cmd_Wait_f`'s effect: the console lines that follow a `wait` in the
+    /// text [`crate::host_cmd::execute_console_command`] is currently
+    /// running, deferred to the NEXT host frame — `host::step` drains it
+    /// right where `Host_Frame`'s `Cbuf_Execute` would, before the frame's
+    /// own commands. `None` with nothing pending. (id shares one `cmd_text`
+    /// buffer across every caller; this port scopes a `wait` to its own
+    /// call — almost always one bound key's command line, `default.cfg`'s
+    /// F6/F9 included — rather than modelling that single global buffer.)
+    pub(crate) pending_cmd: Option<String>,
+    /// `SCR_ScreenShot_f`'s request, read and cleared by `host::step` once
+    /// it has the finished frame to write (nothing is rendered mid-console-
+    /// command, so the command itself only raises the flag).
+    pub(crate) screenshot_request: bool,
 }
 
 /// keys.c's `key_dest`: who gets the keyboard. The port keeps it as the menu's
@@ -282,6 +295,31 @@ impl App {
     pub(crate) fn m_menu_help(&mut self) {
         self.console.open = false;
         self.menu.open_help();
+    }
+
+    /// `M_Menu_Load_f` (menu.c; the `menu_load` command, F3 by default): the
+    /// Load screen, the menu taking the keyboard. Always available.
+    pub(crate) fn m_menu_load(&mut self) {
+        self.console.open = false;
+        self.menu.open_load();
+    }
+
+    /// `M_Menu_Save_f` (menu.c; the `menu_save` command, F2 by default): the
+    /// Save screen — refused without an active local game
+    /// ([`quake_rs::menu::Menu::open_save`]'s gate). On refusal nothing
+    /// happens here either: an open console, say, stays open.
+    pub(crate) fn m_menu_save(&mut self) {
+        if self.menu.open_save() {
+            self.console.open = false;
+        }
+    }
+
+    /// `M_Menu_Options_f` (menu.c; the `menu_options` command, F4 by
+    /// default): the Options screen, the menu taking the keyboard. Always
+    /// available.
+    pub(crate) fn m_menu_options(&mut self) {
+        self.console.open = false;
+        self.menu.open_options();
     }
 
     /// `M_ToggleMenu_f` (menu.c), what Escape does outside the menu and the
@@ -569,6 +607,8 @@ pub(crate) fn ensure_app(f: impl FnOnce(&mut App)) {
                 hw_threads: 1,
                 pad: crate::input::PadHost::default(),
                 quit: false,
+                pending_cmd: None,
+                screenshot_request: false,
             });
         }
         if let Some(a) = c.borrow_mut().as_mut() {

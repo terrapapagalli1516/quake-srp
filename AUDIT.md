@@ -189,12 +189,19 @@ marked *(2026-06)* were not re-checked since. Struck items were closed on 2026-0
 - ~~CD audio is not modelled~~: `cd_win.c` with the player's own tracks (content).
 
 **Game and client**
-- Missing `default.cfg` binds: F1–F4, F6, F9, F10, F12, `t` `messagemode`, the `zoom_in`
-  alias (CENSUS L12; its `pause` half is done). No loading plaque, on purpose: loads finish
-  inside a frame (timedemo).
-- Console commands id has and the port does not: `version`, `disconnect` (it does not end
-  the game), and among others `alias`, `wait`, `playvol`, `soundlist` (review; the
-  port's 34 are in `wasm_help`).
+- ~~Missing `default.cfg` binds: F1–F4, F6, F9, F10, F12~~ — ✅ fkeys: `keys.rs`'s
+  `default_cfg` binds all eight to id's console lines (F5/F7/F8/F11 stay
+  unbound, as id's own file leaves them). `t` `messagemode` and the
+  `zoom_in` alias (CENSUS L12; its `pause` half is done) remain open. No
+  loading plaque, on purpose: loads finish inside a frame (timedemo).
+- ~~Console commands id has and the port does not: `version`, `disconnect`
+  (it does not end the game)~~ — ✅ fkeys: `version` prints `CON_VERSION` and
+  the profile; `disconnect` runs `CL_Disconnect` (`cl_disconnect`, already
+  shared with `quit`/`Host_Error`). `wait` is ✅ too (`Cmd_Wait_f`: the rest
+  of a bound key's line, scoped to that one call rather than id's single
+  shared buffer, waits for the next host frame — `host::step`, where
+  `Cbuf_Execute` would run it). Among others `alias`, `playvol`, `soundlist`
+  are still open (review; the port's 42 are in `wasm_help`).
 - Multiplayer > Setup's name does not reach the player's edict: the server connects
   "player" (polish4b).
 - `pause`: the `pausable` and `showpause` cvars (id's defaults, both 1, are what the port
@@ -1144,7 +1151,7 @@ and the commit messages.
 - ✅ **L8 particles drawn before they move** (`R_DrawParticles`: free `die < cl.time`, draw, then move/ramp): `ParticleSystem::retire` + `integrate`, called around the draw list in step_walk/step_demo.
 - ✅ **L9 dlights drawn before they decay** (Host_Frame: `CL_DecayLights` after `SCR_UpdateScreen`; R_PushDlights skips `die < cl.time`): step_walk renders `pushed_dlights` and decays after the 3-D view.
 - ✅ **L11 notify lines** (`Con_Print` 38-column word-wrapped lines stamped at their start; `Con_DrawNotify` last 4 from `v = 0`): quake-wasm `ConNotify`, live + demo; `draw_notify` from y = 0. ~~Still open: prints never reach the drop-down console's scrollback~~ (✅ `quake/polish`, c71989f).
-- ✅ **L12 default.cfg binds** — ENTER `+jump`, MOUSE2 `+forward`, `\` and MOUSE3 `+mlook`, INS `+klook` seeded; the page sends MOUSE2/MOUSE3 while locked. Not done: PAUSE (no `pause`), the F-key commands, `t` messagemode.
+- ✅ **L12 default.cfg binds** — ENTER `+jump`, MOUSE2 `+forward`, `\` and MOUSE3 `+mlook`, INS `+klook` seeded; the page sends MOUSE2/MOUSE3 while locked. The F-key commands are ✅ too (fkeys: F1–F4, F6, F9, F10, F12, "Game and client" above). Not done: `t` messagemode, the `zoom_in` alias.
 - ✅ **L14 New Game asks first while a game runs** (`M_SinglePlayer_Key` → `SCR_ModalMessage`, y/n/Escape, faded screen + `SCR_DrawNotifyString`): `Menu::new_game_confirm`, raised when the host-set `server_active`; y (`menu_quit_yes`) starts the game.
 
 ## Census fixes, server side (2026-09-25, branch `quake/fix-server`)
@@ -2675,9 +2682,9 @@ settings live in one typed value the host owns (`quake_rs::settings`), and
   as "Full-rate sound"; the sound device reads it at every mix.
 - **Not done / slots:** `input`'s raw mouse and gamepad become a departure in
   `Cvars` (on in `Cvars::modern`) when they land. *(They landed: the 2026 pad is
-  departures, "Input" below; the raw mouse is id's feel, in both profiles.)* id's F-key
-  shortcuts (F1–F12), `messagemode` and the `zoom_in` alias are still not
-  bound (CENSUS L12).
+  departures, "Input" below; the raw mouse is id's feel, in both profiles.)*
+  *(id's F-key shortcuts (F1–F12) landed too: fkeys, CENSUS L12 above.)*
+  `messagemode` and the `zoom_in` alias are still not bound.
 
 ## Input: id's joystick, the 2026 gamepad, raw mouse, keys by place (2026-09-26, branch `q26/input`)
 
