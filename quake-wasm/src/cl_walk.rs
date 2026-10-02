@@ -1013,4 +1013,24 @@ mod tests {
         assert!(fog.iter().all(|e| e.origin.iter().all(|&v| on_the_wire(v))), "{fog:?}");
         assert!(fog.iter().any(|e| e.origin[0] == 544.25), "the player's x, 544.3, as the wire carried it: {fog:?}");
     }
+
+    /// The first episode's slipgate makes no sound of its own: id's
+    /// changelevel_touch starts none, and the frame it takes the player to
+    /// e1m1 stops every sound (S_StopAllSounds) and starts e1m1's placed
+    /// loops, nothing else (sound_walk.py walks into it through id's game).
+    #[test]
+    fn the_slipgate_to_e1m1_starts_no_sound() {
+        let mut w = build_walk_map("maps/start.bsp").expect("start boots");
+        for _ in 0..3 {
+            let _ = sound_frame(&mut w);
+        }
+        let gate = trigger_centres(&w, "trigger_changelevel", "map", "e1m1")[0];
+        let p = w.player;
+        set_origin(&mut w, p, gate);
+        let calls = sound_frame(&mut w);
+        assert_eq!(w.map_name, "maps/e1m1.bsp", "the slipgate's frame loads e1m1");
+        assert!(calls.iter().any(|c| matches!(c, SoundCall::StopAll)), "S_StopAllSounds");
+        assert!(calls.iter().any(|c| matches!(c, SoundCall::Static(s) if !s.is_empty())), "e1m1's loops");
+        assert_eq!(started(&calls), [], "no S_StartSound in the slipgate's frame");
+    }
 }
