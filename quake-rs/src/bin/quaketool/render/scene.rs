@@ -175,6 +175,7 @@ pub fn cmd_scene(pak_path: &str, map_name: &str, out: &str, opts: &[String]) -> 
             yaw: *yaw, pitch: 0.0, roll: 0.0,
             color: *color,
             frame: 0,
+            blend: None,
             skinnum: 0,
         })
         .collect();

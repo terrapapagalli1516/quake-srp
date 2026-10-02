@@ -194,6 +194,7 @@ pub(crate) fn step(dt: f32) -> i32 {
         let viewsize = a.settings.cvars.viewsize;
         let crosshair = a.settings.cvars.crosshair;
         let lerpmove = a.settings.cvars.lerpmove;
+        let lerpmodels = a.settings.cvars.lerpmodels;
         // Host_EndGame on the demo's svc_disconnect: once a demo has shown its
         // last frame, CL_NextDemo plays the next of the `startdemos` loop
         // (quake.rc: demo1 demo2 demo3) — or, outside the loop, the client
@@ -213,6 +214,7 @@ pub(crate) fn step(dt: f32) -> i32 {
             wk.crosshair = crosshair;
             wk.stepping = stepping;
             wk.lerpmove = lerpmove;
+            wk.lerpmodels = lerpmodels;
             wk.renderer.set_threads(threads);
         }
         // CL_SendCmd's IN_Move: the pad's IN_JoyMove joins the keys' move.
@@ -223,6 +225,7 @@ pub(crate) fn step(dt: f32) -> i32 {
             d.crosshair = crosshair;
             d.stepping = stepping;
             d.lerpmove = lerpmove;
+            d.lerpmodels = lerpmodels;
             // +showscores only reaches the game while it owns the keyboard.
             d.show_scores = km.showscores && !gate_gameplay;
         }
@@ -247,6 +250,7 @@ pub(crate) fn step(dt: f32) -> i32 {
                     d.crosshair = crosshair;
                     d.stepping = stepping;
                     d.lerpmove = lerpmove;
+                    d.lerpmodels = lerpmodels;
                     d.show_scores = km.showscores && !gate_gameplay;
                 }
             }

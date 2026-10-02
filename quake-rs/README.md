@@ -144,6 +144,7 @@ of spare frame buffers, the 2-D layer's scale flag, a hull cache and a trace cou
 | `client::view` | `view.c` | the damage kick and the colour shifts (damage, bonus flash) and their fades |
 | `client::host`, `host_cmd` | `host.c`, `host_cmd.c` | `Host_FilterTime`, `Host_Error`; `map`, `load`, the cheats |
 | `client::lerpmove` | QuakeSpasm's `r_lerpmove` | monsters glide between steps (2026) |
+| `client::lerpmodels` | QuakeSpasm's `r_lerpmodels` | an alias model's animation blends between frames (2026) |
 | `client::cl_tent`, `tent`, `particles`, `dlight` | `cl_tent.c`, `r_part.c`, `cl_main.c` | beams, temp entities, trails, particles, dynamic lights |
 | `demo` | `cl_demo.c`, `cl_parse.c` | `.dem` framing and the message decoder |
 | `stepping` | the port's | what the uncapped frame steps so it plays like 72 Hz (see [FRAMERATE.md](../FRAMERATE.md)) |

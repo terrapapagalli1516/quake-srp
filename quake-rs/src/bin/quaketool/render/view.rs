@@ -233,6 +233,7 @@ pub fn cmd_view(args: &[String]) -> CmdResult {
                 roll: ang[2],
                 color: color_for_name(name),
                 frame: *frame,
+                blend: None,
                 skinnum: *skin,
             }),
             _ => None,
@@ -290,6 +291,7 @@ pub fn cmd_view(args: &[String]) -> CmdResult {
         let viewmodel = vm_mdl.as_ref().map(|(mdl, frame)| render::Viewmodel {
             mdl,
             frame: *frame,
+            blend: None,
             origin_ofs,
             angles: gun_angles,
         });

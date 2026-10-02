@@ -23,6 +23,7 @@ use crate::wad::Qpic;
 
 use super::cl_tent::{rocket_trail_type, spawn_temp_entity};
 use super::host_cmd::IT_INVISIBILITY;
+use super::lerpmodels::{self, LerpModels};
 use super::lerpmove::LerpMove;
 use super::view::{
     cshift_add, fade_cshifts, parse_damage, stamp_item_gettime, stufftext_bonus_flash, BONUS_COLOR,
@@ -344,7 +345,7 @@ pub fn demo_frame(d: &mut DemoPlay, dt: f32, menu_up: bool, vid: &Vid) -> Client
     }
     // R_DrawParticles and the stair smoothing step by `cl.time - cl.oldtime`.
     let cl_frametime = (d.time - d.oldtime) as f32;
-    render_demo_frame(d, dt, cl_frametime, menu_up, vid, sound)
+    render_demo_frame(d, dt, cl_frametime, menu_up, vid, sound, d.lerpmodels)
 }
 
 /// The port's loop wrap ([`demo_frame`]): the playback starts over at its
@@ -384,6 +385,22 @@ fn restart_playback(d: &mut DemoPlay) {
 /// `CL_StopPlayback`) and this frame draws nothing — the host finishes the
 /// timedemo ([`TimeDemoClock::finish`]). Built by [`build_timedemo`].
 pub fn timedemo_frame(d: &mut DemoPlay, frametime: f32, menu_up: bool, vid: &Vid) -> Option<ClientFrame> {
+    timedemo_frame_lerpmodels(d, frametime, menu_up, vid, LerpModels::Classic)
+}
+
+/// [`timedemo_frame`], but blending animation frames as `lerpmodels` says
+/// instead of always Classic. Exists only so `quaketool timedemo
+/// --lerpframe` can measure `r_lerpmodels`' own cost (the vertex pass reads
+/// twice the frames): nothing else calls it with anything but
+/// [`LerpModels::Classic`], so `timedemo_frame`'s own numbers — "id's own
+/// measure agrees", FRAMERATE.md — are untouched.
+pub fn timedemo_frame_lerpmodels(
+    d: &mut DemoPlay,
+    frametime: f32,
+    menu_up: bool,
+    vid: &Vid,
+    lerpmodels: LerpModels,
+) -> Option<ClientFrame> {
     let mut sound = Vec::new();
     d.notify.check_resize(vid.width, vid.height);
     let n = d.demo.frames.len();
@@ -403,7 +420,7 @@ pub fn timedemo_frame(d: &mut DemoPlay, frametime: f32, menu_up: bool, vid: &Vid
     d.time = f64::from(now);
     // No glides either: a timedemo stays id's measure.
     cl_relink_entities(d, 1.0, first_read, LerpMove::Classic);
-    Some(render_demo_frame(d, frametime, now - oldtime, menu_up, vid, sound))
+    Some(render_demo_frame(d, frametime, now - oldtime, menu_up, vid, sound, lerpmodels))
 }
 
 // ---------------------------------------------------------------------------
@@ -575,7 +592,9 @@ fn cl_relink_entities(d: &mut DemoPlay, frac: f32, first_read: usize, lerpmove: 
 /// `V_CalcRefdef`, `S_Update`, the 3-D view and `SCR_UpdateScreen`'s 2-D
 /// layer. `dt` is `host_frametime`; `cl_frametime` is `cl.time - cl.oldtime`,
 /// the particles' and the stair smoothing's step (the two are the same frame
-/// time in ordinary playback).
+/// time in ordinary playback). `lerpmodels` is a parameter rather than read
+/// off `d` (like `lerpmove` above it) so [`timedemo_frame`] can hold it to
+/// [`LerpModels::Classic`] regardless of `d.lerpmodels`.
 fn render_demo_frame(
     d: &mut DemoPlay,
     dt: f32,
@@ -583,6 +602,7 @@ fn render_demo_frame(
     menu_up: bool,
     vid: &Vid,
     mut sound: Vec<SoundCall>,
+    lerpmodels: LerpModels,
 ) -> ClientFrame {
     let (render_w, render_h) = (vid.width, vid.height);
     // What moves — the clock, the POV, the entities — as the relink left it
@@ -612,8 +632,19 @@ fn render_demo_frame(
     let mut owned: Vec<ModelInstance> = Vec::new();
     let mut bmodels: Vec<render::BModelInstance> = Vec::new();
     let mut sprite_insts: Vec<render::SpriteInstance> = Vec::new();
+    let smooth_frames = lerpmodels == LerpModels::Smooth;
     for e in v.entities.iter() {
         if let Some(Some(mdl)) = d.models.get(e.modelindex) {
+            let frame = e.frame.max(0) as usize;
+            // r_lerpmodels (the 2026 extra): blend this entity's animation,
+            // like the live walk (`cl_main::walk_frame`); a static (`e.num <
+            // 0`) never gets a new frame, so nothing to blend.
+            let blend = if smooth_frames && e.num >= 0 {
+                let is_group = mdl.frame_is_group(e.frame);
+                d.frame_lerps.blend(e.num, e.modelindex, frame, is_group, e.origin, d.time)
+            } else {
+                None
+            };
             owned.push(ModelInstance {
                 mdl,
                 origin: e.origin,
@@ -625,7 +656,8 @@ fn render_demo_frame(
                 color: d.colors.get(e.modelindex).copied().unwrap_or([200, 200, 200]),
                 // Demo entities carry their current animation frame from the net
                 // stream — use it so monsters in the demo are actually posed.
-                frame: e.frame.max(0) as usize,
+                frame,
+                blend,
                 // R_AliasSetupSkin: `skinnum = currententity->skinnum`.
                 skinnum: e.skin,
             });
@@ -655,6 +687,11 @@ fn render_demo_frame(
             });
         }
     }
+    if smooth_frames {
+        d.frame_lerps.end_frame();
+    } else {
+        d.frame_lerps.clear();
+    }
     // CL_UpdateTEnts: expand the recorded lightning beams into bolt-model
     // pieces, exactly like the live walk. The bolt models resolve through the
     // demo's PRECACHE table (the .dem signon lists progs/bolt*.mdl); a beam
@@ -681,6 +718,7 @@ fn render_demo_frame(
                     roll: seg.roll,
                     color: d.colors.get(idx).copied().unwrap_or([200, 200, 200]),
                     frame: 0,
+                    blend: None,
                     skinnum: 0,
                 });
             }
@@ -823,9 +861,23 @@ fn render_demo_frame(
                 // CalcGunAngle: the recorded view (with the damage kick's
                 // pitch) before the punch, and the recorded roll.
                 let angles = render::viewmodel_angles(&cam, client.punchangle, v.view_angles[2]);
+                let weapon_frame = client.weaponframe.max(0) as usize;
+                // r_lerpmodels: the recorded gun blends too, under
+                // lerpmodels::VIEWMODEL's sentinel key like the live walk's
+                // (the weapon precache index is a stable model identity —
+                // unlike the live walk, the demo stream's weapon model IS
+                // already an index, no name to hash).
+                let blend = if smooth_frames {
+                    let model_id = client.weapon_model.max(0) as usize;
+                    let is_group = mdl.frame_is_group(client.weaponframe);
+                    d.frame_lerps.blend(lerpmodels::VIEWMODEL, model_id, weapon_frame, is_group, cam.pos, d.time)
+                } else {
+                    None
+                };
                 Some(Viewmodel {
                     mdl,
-                    frame: client.weaponframe.max(0) as usize,
+                    frame: weapon_frame,
+                    blend,
                     origin_ofs: render::viewmodel_origin_ofs(angles, bob, d.viewsize),
                     angles,
                 })

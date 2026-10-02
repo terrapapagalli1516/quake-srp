@@ -20,6 +20,7 @@
 //! | [`host`]     | host.c                            | `Host_FilterTime`: the 72 fps gate and the frame time it hands the game |
 //! | [`host_cmd`] | host_cmd.c                        | the level loads (`map`, changelevel, restart, a savegame's rebuild) and the cheats (god, noclip, fly, kill, give, impulse) |
 //! | [`lerpmove`] | (QuakeSpasm's `r_lerpmove`)       | the 2026 extra: monsters glide between their steps ([`lerpmove::LerpMove`]) |
+//! | [`lerpmodels`] | (QuakeSpasm's `r_lerpmodels`)  | the 2026 extra: an alias model's animation blends between frames ([`lerpmodels::LerpModels`]) |
 //!
 //! ## What a frame takes and gives
 //!
@@ -46,6 +47,7 @@ pub mod cl_tent;
 pub mod host;
 pub mod host_cmd;
 pub mod in_win;
+pub mod lerpmodels;
 pub mod lerpmove;
 pub mod view;
 
@@ -66,6 +68,7 @@ use crate::stepping::{Stepping, Tick72};
 use crate::tent::{BeamSegment, Beams};
 use crate::wad::Qpic;
 use cl_input::{clamp_pitch, KeyMove};
+use lerpmodels::{FrameLerps, LerpModels};
 use lerpmove::{LerpMove, StepGlides};
 
 // ---------------------------------------------------------------------------
@@ -163,6 +166,13 @@ pub struct Walk {
     pub lerpmove: LerpMove,
     /// The monsters' glides while [`LerpMove::Smooth`] is on.
     pub glides: StepGlides,
+    /// Whether an alias model's animation blends between frames
+    /// ([`LerpModels`], `r_lerpmodels`): Classic unless the host turns the
+    /// extra on. Set by the host each frame, like `lerpmove`.
+    pub lerpmodels: LerpModels,
+    /// Every drawn alias entity's (and the view weapon's) animation blend
+    /// while [`LerpModels::Smooth`] is on.
+    pub frame_lerps: FrameLerps,
     /// Accumulated mouse-strafe sidemove units (in_win.c IN_MouseMove's
     /// `cmd->sidemove += m_side.value * mouse_x` when lookstrafe / +strafe route
     /// mouse X away from yaw). Drained into the next UserCmd then cleared.
@@ -397,6 +407,12 @@ pub struct DemoPlay {
     pub lerpmove: LerpMove,
     /// The recorded monsters' glides while [`LerpMove::Smooth`] is on.
     pub glides: StepGlides,
+    /// Whether the recorded entities' (and the view weapon's) animation
+    /// blends between frames ([`LerpModels`]), set by the host each frame
+    /// like `lerpmove`.
+    pub lerpmodels: LerpModels,
+    /// Every drawn entity's animation blend while [`LerpModels::Smooth`] is on.
+    pub frame_lerps: FrameLerps,
     /// The `sv_gravity` cvar, which `R_DrawParticles` reads in playback too
     /// (`grav = frametime * sv_gravity * 0.05`): 800, or what the last map the
     /// host ran set it to (e1m8's worldspawn: 100; id's cvar outlives the map)
@@ -484,6 +500,8 @@ impl DemoPlay {
             stepping: Stepping::Classic,
             lerpmove: LerpMove::Classic,
             glides: StepGlides::default(),
+            lerpmodels: LerpModels::Classic,
+            frame_lerps: FrameLerps::default(),
             sv_gravity: crate::server::ServerCvars::default().sv_gravity,
             trail_org: HashMap::new(),
             tracercount: 0,
@@ -613,6 +631,8 @@ pub fn assemble_walk(
         stepping: Stepping::Classic,
         lerpmove: LerpMove::Classic,
         glides: StepGlides::default(),
+        lerpmodels: LerpModels::Classic,
+        frame_lerps: FrameLerps::default(),
         clock,
         host_time: 0.0,
         host_clock: 0.0,

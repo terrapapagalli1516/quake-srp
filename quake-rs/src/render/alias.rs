@@ -50,6 +50,14 @@ pub struct ModelInstance<'a> {
     /// Entity roll (`angles[ROLL]`, degrees). `0.0` for upright models.
     pub roll: f32,
     pub frame: usize,
+    /// The 2026 extra `r_lerpmodels` ([`crate::client::lerpmodels`]):
+    /// `Some((prev_frame, frac))` blends `prev_frame`'s vertices toward
+    /// `frame`'s by `frac` (0: `prev_frame` alone, 1: `frame` alone — the
+    /// caller skips the work and passes `None` instead once a blend
+    /// reaches 1). `None` (and the default, [`ModelInstance::with_frame`] /
+    /// [`ModelInstance::new`]) draws `frame` alone, byte for byte as
+    /// Classic always has.
+    pub blend: Option<(usize, f32)>,
     /// The flat colour of a model without a usable skin (never one of id's:
     /// `Mod_LoadAliasModel` requires a skin), drawn as the nearest palette entry.
     pub color: [u8; 3],
@@ -72,7 +80,7 @@ impl<'a> ModelInstance<'a> {
         frame: usize,
         color: [u8; 3],
     ) -> ModelInstance<'a> {
-        ModelInstance { mdl, origin, yaw, pitch: 0.0, roll: 0.0, frame, color, skinnum: 0 }
+        ModelInstance { mdl, origin, yaw, pitch: 0.0, roll: 0.0, frame, blend: None, color, skinnum: 0 }
     }
 
     /// Build a [`ModelInstance`] specifying the per-entity `skinnum` (pitch/roll 0).
@@ -84,7 +92,7 @@ impl<'a> ModelInstance<'a> {
         color: [u8; 3],
         skinnum: i32,
     ) -> ModelInstance<'a> {
-        ModelInstance { mdl, origin, yaw, pitch: 0.0, roll: 0.0, frame, color, skinnum }
+        ModelInstance { mdl, origin, yaw, pitch: 0.0, roll: 0.0, frame, blend: None, color, skinnum }
     }
 }
 
@@ -286,6 +294,8 @@ struct AliasEntity<'a> {
     /// `angles` as the entity stores them (pitch, yaw, roll; pitch "backward").
     angles: Vec3,
     frame: usize,
+    /// `r_lerpmodels`: see [`ModelInstance::blend`].
+    blend: Option<(usize, f32)>,
     skinnum: i32,
     /// The flat palette index for a model without a usable skin (port fallback).
     color: u8,
@@ -530,13 +540,37 @@ pub(super) struct AliasSetup<'a> {
 impl AliasSetup<'_> {
     /// `R_AliasTransformFinalVert` (r_alias.c): view-space position (the
     /// auxvert), skin coordinates in 16.16, and the vertex light: the ambient
-    /// offset, lowered by `shadelight * cos` where the normal faces the light.
-    fn final_vert(&self, tv: &crate::mdl::TriVertex, st: &crate::mdl::StVert) -> ClipVert {
-        let av = alias_transform_point(&self.transform, tv.v.map(f32::from));
+    /// offset, lowered by `shadelight * cos` where the normal faces the
+    /// light. With `prev` — `r_lerpmodels`, the smooth-animations extra —
+    /// the position and the light are each blended with `prev`'s vertex
+    /// first, by `frac` (0: `prev` alone, 1: `tv` alone): blending the
+    /// position before the transform (not the two transformed positions
+    /// after) is exactly the vertex a model whose *frame data* moved there
+    /// would have, so it transforms, clips and shades like any other frame.
+    /// The light is blended too, not just picked from the heavier side's
+    /// normal: the one normal index a vertex carries changes in a single
+    /// step between poses, so reading it alone would pop the shading at the
+    /// 50% crossover; blending the two shades costs one extra dot product
+    /// (self.vertex_light already paid for `tv`'s) and is never seen to pop.
+    fn final_vert(&self, tv: &crate::mdl::TriVertex, prev: Option<(&crate::mdl::TriVertex, f32)>, st: &crate::mdl::StVert) -> ClipVert {
+        let pos = match prev {
+            Some((pv, frac)) => std::array::from_fn(|i| {
+                let (p, c) = (f32::from(pv.v[i]), f32::from(tv.v[i]));
+                p + (c - p) * frac
+            }),
+            None => tv.v.map(f32::from),
+        };
+        let av = alias_transform_point(&self.transform, pos);
         let mut fv = FinalVert { v: [0; 6], flags: st.onseam };
         fv.v[2] = st.s.wrapping_shl(16);
         fv.v[3] = st.t.wrapping_shl(16);
-        fv.v[4] = self.vertex_light(tv.lightnormalindex);
+        fv.v[4] = match prev {
+            Some((pv, frac)) => {
+                let (a, b) = (self.vertex_light(pv.lightnormalindex), self.vertex_light(tv.lightnormalindex));
+                a + (((b - a) as f32) * frac) as i32
+            }
+            None => self.vertex_light(tv.lightnormalindex),
+        };
         (fv, av)
     }
 
@@ -621,6 +655,16 @@ fn alias_prepare<'a>(
     let (r_ambientlight, r_shadelight, plightvec) = alias_setup_lighting(light.0, light.1, &axes);
     // R_AliasSetupFrame
     let verts = mdl_frame_verts(mdl, ent.frame, time)?;
+    // r_lerpmodels (the 2026 extra): blend `verts` with the previous frame's
+    // vertices by `ent.blend`'s fraction (see `ModelInstance::blend` /
+    // `Viewmodel::blend`). The caller already ruled out a group frame on
+    // either side before setting `ent.blend`, so a `Some` here always means
+    // an ordinary two-pose blend; a failed read (an out-of-range `prev` the
+    // caller somehow passed) just draws `verts` alone, same as `None`.
+    let blend = ent.blend.and_then(|(prev_frame, frac)| {
+        let prev_verts = mdl_frame_verts(mdl, prev_frame, time)?;
+        Some((prev_verts, frac))
+    });
     let setup = AliasSetup {
         transform,
         r_ambientlight,
@@ -637,8 +681,9 @@ fn alias_prepare<'a>(
     let n = verts.len().min(mdl.stverts.len());
     let mut fverts: Vec<FinalVert> = Vec::with_capacity(n);
     let mut aux: Vec<[f32; 3]> = Vec::with_capacity(n);
-    for (tv, st) in verts.iter().zip(mdl.stverts.iter()) {
-        let (mut fv, av) = setup.final_vert(tv, st);
+    for (i, (tv, st)) in verts.iter().zip(mdl.stverts.iter()).enumerate() {
+        let prev = blend.as_ref().and_then(|(pv, frac)| pv.get(i).map(|p| (p, *frac)));
+        let (mut fv, av) = setup.final_vert(tv, prev, st);
         if trivial_accept != 0 {
             // R_AliasTransformAndProjectFinalVerts: the transform is prescaled,
             // so 1/z comes out times 2^31 and x, y in screen units.
@@ -828,6 +873,7 @@ pub(super) fn prepare_alias_model<'a>(
         origin: inst.origin,
         angles: [inst.pitch, inst.yaw, inst.roll],
         frame: inst.frame,
+        blend: inst.blend,
         skinnum: inst.skinnum,
         color: nearest_index(scene.palette, inst.color),
     };
@@ -917,6 +963,13 @@ static R_AVERTEXNORMALS: [[f32; 3]; 162] = [
 pub struct Viewmodel<'a> {
     pub mdl: &'a crate::mdl::Mdl,
     pub frame: usize,
+    /// The 2026 extra `r_lerpmodels` ([`ModelInstance::blend`]): the gun's
+    /// animation blends too (QuakeSpasm does the same), a weapon switch
+    /// (the model changes) snapping like any other model change. Computed
+    /// by the same [`crate::client::lerpmodels::FrameLerps`] the entities
+    /// share, under a sentinel key of its own (`cl_main::walk_frame`,
+    /// `cl_demo::render_demo_frame`): the view weapon is never an edict.
+    pub blend: Option<(usize, f32)>,
     /// Where V_CalcRefdef puts the gun (`view->origin`) relative to the
     /// camera (`r_refdef.vieworg`), in world units: see
     /// [`viewmodel_origin_ofs`](super::view::viewmodel_origin_ofs).
@@ -952,6 +1005,7 @@ pub(super) fn prepare_viewmodel<'a>(frame: &Frame<'_, 'a>, vm: &Viewmodel<'a>) -
         origin,
         angles: vm.angles,
         frame: vm.frame,
+        blend: vm.blend,
         skinnum: 0,
         color: nearest_index(scene.palette, [180, 180, 180]),
     };
@@ -985,6 +1039,7 @@ mod tests {
             pitch: 0.0,
             roll: 0.0,
             frame: 0,
+            blend: None,
             color: [255, 32, 32],
             skinnum: 0,
         };
@@ -1215,6 +1270,7 @@ mod tests {
             pitch: 0.0,
             roll: 0.0,
             frame: 0,
+            blend: None,
             color: [255, 32, 32],
             skinnum: 0,
         };
@@ -1230,6 +1286,7 @@ mod tests {
             pitch: 0.0,
             roll: 0.0,
             frame: 0,
+            blend: None,
             color: [255, 32, 32],
             skinnum: 0,
         };
@@ -1267,6 +1324,7 @@ mod tests {
             pitch: 0.0,
             roll: 0.0,
             frame: 0,
+            blend: None,
             color: [255, 32, 32],
             skinnum: 0,
         };
@@ -1296,6 +1354,7 @@ mod tests {
             pitch: 0.0,
             roll: 0.0,
             frame: 0,
+            blend: None,
             color: [255, 32, 32],
             skinnum: 0,
         };
@@ -1306,6 +1365,7 @@ mod tests {
             pitch: 0.0,
             roll: 0.0,
             frame: 1,
+            blend: None,
             color: [255, 32, 32],
             skinnum: 0,
         };
@@ -1318,6 +1378,94 @@ mod tests {
             .filter(|(a, b)| a != b)
             .count();
         assert!(changed > 0, "different frames should produce different images");
+    }
+
+    /// `r_lerpmodels`: `AliasSetup::final_vert` with a blend, checked at the
+    /// vertex level (no rasteriser involved) against hand-computed values —
+    /// the Proof the brief asks for ("at half the interval the vertices are
+    /// the midpoint").
+    #[test]
+    fn final_vert_blend_interpolates_position_and_light() {
+        use crate::mdl::{StVert, TriVertex};
+        // The identity transform (no rotation, no translation): the "view
+        // space" position a final vert reads out is the blended model-space
+        // position unchanged, so the midpoint is exact to compare.
+        let identity = [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]];
+        let setup = AliasSetup {
+            transform: identity,
+            r_ambientlight: 100,
+            r_shadelight: 80.0,
+            plightvec: [0.0, 0.0, 1.0],
+            ziscale: 1.0,
+            subdiv: false,
+            skin: None,
+            skinwidth: 0,
+            seamfixup: 0,
+            colormap: None,
+            flat: 0,
+        };
+        // Normal 5 faces the light vector exactly ([0,0,1]): ambient, unshaded.
+        // Normal 84 faces exactly away from it ([0,0,-1]): fully shaded, so
+        // the two give genuinely different light levels to blend between.
+        let prev = TriVertex { v: [10, 20, 30], lightnormalindex: 5 };
+        let cur = TriVertex { v: [50, 60, 70], lightnormalindex: 84 };
+        let st = StVert { onseam: 0, s: 0, t: 0 };
+        let light_at = |n: u8| setup.vertex_light(n);
+
+        // frac 0: prev alone, byte for byte.
+        let (fv0, av0) = setup.final_vert(&cur, Some((&prev, 0.0)), &st);
+        assert_eq!(av0, [10.0, 20.0, 30.0]);
+        assert_eq!(fv0.v[4], light_at(5));
+        // frac 1: cur alone.
+        let (fv1, av1) = setup.final_vert(&cur, Some((&prev, 1.0)), &st);
+        assert_eq!(av1, [50.0, 60.0, 70.0]);
+        assert_eq!(fv1.v[4], light_at(84));
+        // frac 0.5: the midpoint of both the position and the light (not
+        // whichever side's normal is "heavier" — see the module doc).
+        let (fv_mid, av_mid) = setup.final_vert(&cur, Some((&prev, 0.5)), &st);
+        assert_eq!(av_mid, [30.0, 40.0, 50.0], "the position at the midpoint");
+        let want_light = light_at(5) + ((light_at(84) - light_at(5)) as f32 * 0.5) as i32;
+        assert_eq!(fv_mid.v[4], want_light, "the light at the midpoint");
+        assert_ne!(fv_mid.v[4], light_at(5));
+        assert_ne!(fv_mid.v[4], light_at(84));
+        // No blend (`None`, Classic or a snapped frame): `cur` alone, same as frac 1.
+        let (fv_none, av_none) = setup.final_vert(&cur, None, &st);
+        assert_eq!((av_none, fv_none.v[4]), (av1, fv1.v[4]));
+    }
+
+    /// `r_lerpmodels` through the real pipeline: a blended render differs
+    /// from both its endpoints (an actual blend, not a snap to either one).
+    #[test]
+    fn render_scene_blend_differs_from_both_endpoint_frames() {
+        let bsp = demo_room();
+        let pal = fixtures::ramp_palette();
+        let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
+        let mdl = two_frame_mdl();
+        let inst = |frame, blend| ModelInstance {
+            mdl: &mdl,
+            origin: [-80.0, 0.0, 0.0],
+            yaw: 0.0,
+            pitch: 0.0,
+            roll: 0.0,
+            frame,
+            blend,
+            color: [255, 32, 32],
+            skinnum: 0,
+        };
+        let scene = |inst: &ModelInstance| {
+            render_once(&Scene { models: std::slice::from_ref(inst), ..Scene::new(&bsp, cam, 160, 120, &pal) })
+        };
+        let img0 = scene(&inst(0, None));
+        let img1 = scene(&inst(1, None));
+        let mid = scene(&inst(1, Some((0, 0.5))));
+        let differs = |a: &Image, b: &Image| a.pixels.iter().zip(b.pixels.iter()).any(|(x, y)| x != y);
+        assert!(differs(&mid, &img0), "a blend at 0.5 must not just redraw the old frame");
+        assert!(differs(&mid, &img1), "a blend at 0.5 must not just redraw the new frame");
+        // At each end the blend reproduces the plain render exactly.
+        let end0 = scene(&inst(1, Some((0, 0.0))));
+        let end1 = scene(&inst(1, Some((0, 1.0))));
+        assert_eq!(end0.pixels, img0.pixels, "frac 0 is the old frame");
+        assert_eq!(end1.pixels, img1.pixels, "frac 1 is the new frame");
     }
 
     // -- First-person weapon viewmodel (camera-anchored, drawn on top) --------
@@ -1441,8 +1589,8 @@ mod tests {
         let cam_a = Camera { pos: [0.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, roll: 0.0, fov_deg: 90.0 };
         let cam_b = Camera { pos: [0.0, 0.0, 0.0], yaw: 137.0, pitch: 0.0, roll: 0.0, fov_deg: 90.0 };
 
-        let img_a = render_once(&Scene { viewmodel: Some(Viewmodel { mdl: &gun, frame: 0, origin_ofs: [0.0, 0.0, 2.0], angles: [cam_a.pitch, cam_a.yaw, 0.0] }), ..Scene::new(&bsp, cam_a, w, h, &pal) });
-        let img_b = render_once(&Scene { viewmodel: Some(Viewmodel { mdl: &gun, frame: 0, origin_ofs: [0.0, 0.0, 2.0], angles: [cam_b.pitch, cam_b.yaw, 0.0] }), ..Scene::new(&bsp, cam_b, w, h, &pal) });
+        let img_a = render_once(&Scene { viewmodel: Some(Viewmodel { mdl: &gun, frame: 0, blend: None, origin_ofs: [0.0, 0.0, 2.0], angles: [cam_a.pitch, cam_a.yaw, 0.0] }), ..Scene::new(&bsp, cam_a, w, h, &pal) });
+        let img_b = render_once(&Scene { viewmodel: Some(Viewmodel { mdl: &gun, frame: 0, blend: None, origin_ofs: [0.0, 0.0, 2.0], angles: [cam_b.pitch, cam_b.yaw, 0.0] }), ..Scene::new(&bsp, cam_b, w, h, &pal) });
 
         // Isolate the gun pixels (its unique skin colour) in each frame.
         let gun_only = |img: &Image| {
@@ -1507,7 +1655,7 @@ mod tests {
             "wall-only render must not contain gun-coloured pixels"
         );
 
-        let with_gun = render_once(&Scene { viewmodel: Some(Viewmodel { mdl: &gun, frame: 0, origin_ofs: [0.0, 0.0, 2.0], angles: [cam.pitch, cam.yaw, 0.0] }), ..Scene::new(&bsp, cam, w, h, &pal) });
+        let with_gun = render_once(&Scene { viewmodel: Some(Viewmodel { mdl: &gun, frame: 0, blend: None, origin_ofs: [0.0, 0.0, 2.0], angles: [cam.pitch, cam.yaw, 0.0] }), ..Scene::new(&bsp, cam, w, h, &pal) });
 
         // The gun's pure-yellow skin (B == 0) must appear, proving it drew on top
         // of the wall rather than being depth-occluded by it.
@@ -1535,7 +1683,7 @@ mod tests {
         // Frameless model -> draw_viewmodel returns early.
         let mut frameless = viewmodel_mdl();
         frameless.frames.clear();
-        let img = render_once(&Scene { viewmodel: Some(Viewmodel { mdl: &frameless, frame: 0, origin_ofs: [0.0, 0.0, 2.0], angles: [cam.pitch, cam.yaw, 0.0] }), ..Scene::new(&bsp, cam, 80, 60, &pal) });
+        let img = render_once(&Scene { viewmodel: Some(Viewmodel { mdl: &frameless, frame: 0, blend: None, origin_ofs: [0.0, 0.0, 2.0], angles: [cam.pitch, cam.yaw, 0.0] }), ..Scene::new(&bsp, cam, 80, 60, &pal) });
         let baseline = render_once(&Scene::new(&bsp, cam, 80, 60, &pal));
         assert_eq!(img.pixels, baseline.pixels, "frameless weapon must draw nothing");
 
@@ -1543,7 +1691,7 @@ mod tests {
         let mut bad = viewmodel_mdl();
         bad.triangles = vec![crate::mdl::Triangle { facesfront: 1, vertindex: [0, 1, 9999] }];
         // Must not panic.
-        let _ = render_once(&Scene { viewmodel: Some(Viewmodel { mdl: &bad, frame: 0, origin_ofs: [0.0, 0.0, 2.0], angles: [cam.pitch, cam.yaw, 0.0] }), ..Scene::new(&bsp, cam, 80, 60, &pal) });
+        let _ = render_once(&Scene { viewmodel: Some(Viewmodel { mdl: &bad, frame: 0, blend: None, origin_ofs: [0.0, 0.0, 2.0], angles: [cam.pitch, cam.yaw, 0.0] }), ..Scene::new(&bsp, cam, 80, 60, &pal) });
     }
 
     /// A viewmodel whose geometry deliberately *straddles* the alias clip plane:
@@ -1613,7 +1761,7 @@ mod tests {
         let gun = straddling_viewmodel_mdl();
         let cam = Camera { pos: [0.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, roll: 0.0, fov_deg: 90.0 };
 
-        let img = render_once(&Scene { viewmodel: Some(Viewmodel { mdl: &gun, frame: 0, origin_ofs: [0.0, 0.0, 2.0], angles: [cam.pitch, cam.yaw, 0.0] }), ..Scene::new(&bsp, cam, w, h, &pal) });
+        let img = render_once(&Scene { viewmodel: Some(Viewmodel { mdl: &gun, frame: 0, blend: None, origin_ofs: [0.0, 0.0, 2.0], angles: [cam.pitch, cam.yaw, 0.0] }), ..Scene::new(&bsp, cam, w, h, &pal) });
 
         // (a) it drew SOME gun pixels (not all-dropped). With the old whole-tri
         // drop, every straddling triangle vanished and this would be zero.
@@ -1676,7 +1824,7 @@ mod tests {
         let draw_as
  = |w: usize, h: usize, fov_deg: f32, video: VideoCvars| {
             let cam = Camera { pos: [200.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, roll: 0.0, fov_deg };
-            let vm = Viewmodel { mdl: &gun, frame: 0, origin_ofs: [0.0, 0.0, 2.0], angles: [cam.pitch, cam.yaw, 0.0] };
+            let vm = Viewmodel { mdl: &gun, frame: 0, blend: None, origin_ofs: [0.0, 0.0, 2.0], angles: [cam.pitch, cam.yaw, 0.0] };
             let options = RenderOptions { video, ..RenderOptions::default() };
             let img = render_once(&Scene { viewmodel: Some(vm), options, ..Scene::new(&bsp, cam, w, h, &pal) });
             let gun_px: Vec<(usize, usize)> =

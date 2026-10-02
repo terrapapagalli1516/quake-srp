@@ -25,6 +25,7 @@ use super::cl_input::{
 use super::cl_tent::{rocket_trail_type, spawn_temp_entity};
 use super::host::host_error;
 use super::host_cmd::{try_changelevel, try_restart, IT_INVISIBILITY};
+use super::lerpmodels::{self, LerpModels};
 use super::lerpmove::LerpMove;
 use super::view::{
     cshift_add, fade_cshifts, parse_damage, stamp_item_gettime, stufftext_bonus_flash, BONUS_COLOR,
@@ -113,6 +114,17 @@ pub fn client_punchangle(w: &Walk) -> [f32; 3] {
     p.map(|v| (v as i32) as i8 as f32)
 }
 
+/// `r_lerpmodels`' "model identity" for the view weapon ([`lerpmodels::FrameLerps::blend`]):
+/// the view weapon is not an edict, so it has no `modelindex` to compare like
+/// an entity's; its precache name hashed is just as stable a key (changes
+/// exactly when the weapon model does, same as any other entity's).
+fn weapon_model_id(name: &str) -> usize {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    name.hash(&mut hasher);
+    hasher.finish() as usize
+}
+
 /// `cl.items` as SV_WriteClientdataToMessage sends it: the player's `items`
 /// with the rune bits "stuffed into the high bits of items for sbar" —
 /// `(int)ent->v.items | ((int)pr_global_struct->serverflags << 28)`. QC
@@ -129,8 +141,10 @@ pub fn server_items(server: &crate::server::Server, player: i32) -> i32 {
 }
 
 /// Owned visible-entity descriptor gathered from the server before rendering:
-/// `(model name, origin, angles, frame, shirt/pants colour, skin)`.
-type EntityDesc = (String, [f32; 3], [f32; 3], usize, [u8; 3], i32);
+/// `(model name, origin, angles, frame, shirt/pants colour, skin, blend)`.
+/// `blend` is `r_lerpmodels`' ([`ModelInstance::blend`]) — `None` for a
+/// static (its frame never changes after `makestatic`).
+type EntityDesc = (String, [f32; 3], [f32; 3], usize, [u8; 3], i32, Option<(usize, f32)>);
 
 /// What a static entity draws as, gathered before the camera is known.
 enum StaticDraw {
@@ -592,6 +606,7 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
     // it touches is in the view's PVS (after the camera, below).
     let mut statics: Vec<StaticDesc> = Vec::new();
     let smooth = w.lerpmove == LerpMove::Smooth;
+    let smooth_frames = w.lerpmodels == LerpModels::Smooth;
     for e in 0..n {
         let ent = e as i32;
         if ent == w.player || w.server.vm.is_free_edict(ent) {
@@ -690,19 +705,20 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
             let h = ALIAS_MODEL_HALF;
             let (emins, emaxs) = offset_box(origin, [-h; 3], [h; 3]);
             statics.push(StaticDesc {
-                draw: StaticDraw::Alias((m, origin, angles, frame, color, skin)),
+                // A static's frame never changes after `makestatic`: no blend.
+                draw: StaticDraw::Alias((m, origin, angles, frame, color, skin, None)),
                 emins,
                 emaxs,
             });
             continue;
         }
         // The model header flags (rocket/grenade/gib/tracer trails + EF_ROTATE).
-        let mflags = w
-            .model_cache
-            .get(&m)
-            .and_then(|o| o.as_ref())
-            .map(|md| md.header.flags)
-            .unwrap_or(0);
+        let cached_mdl = w.model_cache.get(&m).and_then(|o| o.as_ref());
+        let mflags = cached_mdl.map(|md| md.header.flags).unwrap_or(0);
+        // r_lerpmodels (the 2026 extra): a group frame (a torch's flicker) is
+        // not a motion between two poses — [`lerpmodels::FrameLerps::blend`]
+        // snaps instead of blending across one.
+        let frame_is_group = cached_mdl.is_some_and(|md| md.frame_is_group(frame as i32));
         // CL_RelinkEntities (cl_main.c:531): a model carrying EF_ROTATE (bonus
         // pickups — ammo/health/armour boxes, weapons, keys, runes, powerups) has
         // its yaw overwritten with `anglemod(100*cl.time)` every frame so it spins.
@@ -726,22 +742,34 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
             w.trail_org.entry(ent).or_insert(TrailHead::at(origin));
             trail_spawns.push((ent, origin, ttype));
         }
+        let model_index = w.server.vm.ent_float(ent, w.server.vm.fo().modelindex) as usize;
         // r_lerpmove (the 2026 extra): a monster glides between its steps
         // where it is drawn; its trail and everything else keep the server's
         // origin.
         let (origin, angles) = if smooth && w.server.vm.movetype(ent) == MoveType::Step {
-            let model = w.server.vm.ent_float(ent, w.server.vm.fo().modelindex) as usize;
-            let drawn = w.glides.draw(ent, model, origin, angles, f64::from(w.clock));
+            let drawn = w.glides.draw(ent, model_index, origin, angles, f64::from(w.clock));
             (drawn.origin, drawn.angles)
         } else {
             (origin, angles)
         };
-        descs.push((m, origin, angles, frame, color, skin));
+        // r_lerpmodels (the 2026 extra): blend this entity's animation
+        // toward `frame` from whatever frame it was at a moment ago.
+        let blend = if smooth_frames {
+            w.frame_lerps.blend(ent, model_index, frame, frame_is_group, origin, f64::from(w.clock))
+        } else {
+            None
+        };
+        descs.push((m, origin, angles, frame, color, skin, blend));
     }
     if smooth {
         w.glides.end_frame();
     } else {
         w.glides.clear();
+    }
+    if smooth_frames {
+        w.frame_lerps.end_frame();
+    } else {
+        w.frame_lerps.clear();
     }
 
     // Emit the collected trails (after the entity loop to keep the borrows
@@ -889,7 +917,7 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
     }
     let mut instances: Vec<ModelInstance> = descs
         .iter()
-        .filter_map(|(name, origin, angles, frame, color, skin)| match w.model_cache.get(name) {
+        .filter_map(|(name, origin, angles, frame, color, skin, blend)| match w.model_cache.get(name) {
             Some(Some(mdl)) => Some(ModelInstance {
                 mdl,
                 origin: *origin,
@@ -898,6 +926,7 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
                 roll: angles[2],
                 color: *color,
                 frame: *frame,
+                blend: *blend,
                 skinnum: *skin,
             }),
             _ => None,
@@ -923,6 +952,7 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
                     roll: seg.roll,
                     color: color_for_name(seg.model.model_name()),
                     frame: 0,
+                    blend: None,
                     skinnum: 0,
                 });
             }
@@ -964,9 +994,21 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
             Some(Some(mdl)) => {
                 let punch = client_punchangle(w);
                 let angles = render::viewmodel_angles(&cam, punch, ang[2]);
+                // r_lerpmodels: the gun blends too (a weapon switch is a model
+                // change, which snaps like any other). The view weapon is not
+                // an edict, so its "model identity" is the weapon name's hash,
+                // not a modelindex, under lerpmodels::VIEWMODEL's sentinel key.
+                let blend = if smooth_frames {
+                    let model_id = weapon_model_id(&weapon_name);
+                    let is_group = mdl.frame_is_group(weapon_frame as i32);
+                    w.frame_lerps.blend(lerpmodels::VIEWMODEL, model_id, weapon_frame, is_group, cam.pos, f64::from(w.clock))
+                } else {
+                    None
+                };
                 Some(Viewmodel {
                     mdl,
                     frame: weapon_frame,
+                    blend,
                     origin_ofs: render::viewmodel_origin_ofs(angles, bob, w.viewsize),
                     angles,
                 })

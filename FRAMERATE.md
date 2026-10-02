@@ -336,7 +336,8 @@ every frame. The 2026 extra `client::lerpmove::LerpMove::Smooth` (off in
 Classic; QuakeSpasm's `r_lerpmove`) draws it gliding from step to step, over
 0.1 s from where it is drawn when the step comes (one frame for a mover the
 server moves every frame); the module doc says why that rule and not
-QuakeSpasm's own. Animation frames are not blended.
+QuakeSpasm's own. Animation frames are a separate extra ("Animation frames
+blended" below).
 
 `quaketool framerate <pak> --lerpmove`, native, 2026-09-26: over the frames
 in which a monster was walking (it moved within 0.1 s before and after),
@@ -364,6 +365,57 @@ behind where the server has it (1 unit walking, 6 running), for at most
 left is the monsters' own: their steps are of different lengths (a patrol's
 1–4 units, a run's 8–15). `--strip DIR` writes a 240 Hz step of the charging
 grunt, Classic and with the extra, as frames.
+
+## Animation frames blended (`r_lerpmodels`, `q26/lerpframes`)
+
+id steps an animated model's `frame` field at 10 Hz (a monster's walk cycle,
+the view weapon's fire animation) — on a 1996 display that was most of a
+frame's worth of pose change anyway; at 144–480 Hz, beside a camera that
+moves every frame, the model visibly holds a pose for several frames and
+jumps to the next. The 2026 extra `client::lerpmodels::LerpModels::Smooth`
+(off in Classic; QuakeSpasm's `r_lerpmodels`) blends the alias pipeline's
+vertex pass between the current pose and the one before it, by how far
+through 0.1 s (`GLIDE_FRAME`, the same reasoning as `r_lerpmove`'s own
+`GLIDE`) the clock is; the module doc says why a frame change does not chain
+the way a position glide does. A `Frame::Group` pose (a torch's flicker, a
+flame) never blends — it is not a motion between two named poses — and
+neither does the view weapon across a model change (a weapon switch).
+
+Stepping is unchanged: `quaketool framerate --check` passes with the extra
+on or off, because nothing about *when* a frame changes moves — only how it
+is drawn between the changes.
+
+The cost is the vertex pass reading two frames instead of one (positions
+and, for the light, both vertices' normals) for every alias model, every
+frame. `quaketool timedemo <pak> demo1 --video modern --res 1280x800
+--lerpframe 1` against the same without `--lerpframe` (`r_lerpmodels`
+otherwise always reads Classic in a timedemo — `cl_demo::timedemo_frame`'s
+own doc — so the flag is the only way to measure it), interleaved, 11
+repetitions, medians, native release build, 2026-10-02, under other load
+(load varied a lot across the runs — one 1-thread rep's total frame time was
+4.7x another's — so the `fps` column below is noisy):
+
+| threads | Classic (median fps) | `r_lerpmodels` (median fps) | cost by total fps |
+|---|---|---|---|
+| 1 | 243.4 | 180.3 | 35% (dominated by machine noise, see below) |
+| 8 | 537.9 | 531.4 | 1.2% |
+
+The `fps` numbers fold in everything a frame does (world surfaces, the edge
+scan, particles — not just alias models), so a slow unrelated phase in one
+rep swings the total as much as the extra itself would; `--profile 1`'s own
+`alias` + `gun` milliseconds isolate just the phases `r_lerpmodels` touches,
+9 reps each, medians:
+
+| threads | Classic `alias+gun` (ms) | `r_lerpmodels` `alias+gun` (ms) | cost |
+|---|---|---|---|
+| 1 | 0.627 | 0.626 | −0.2% (within noise) |
+| 8 | 0.788 | 0.788 | 0.0% (within noise) |
+
+Demo1 never has more than a few alias models on screen at once (a couple of
+grunts, the view weapon), so doubling their vertex reads is not measurable
+against the timings' noise floor — "a few percent at most" turned
+out to be an upper bound, not the real number. A level with many more
+visible monsters at once would show more; not measured here.
 
 ## Budget
 
@@ -463,4 +515,7 @@ demo's 60 Hz messages), the live walk 480 of 480, with no console errors.
 `r_lerpmove 0|1`, Options > Classic / 2026 > "Smooth monsters"): off in the
 Classic profile, on in 2026, handed to the walk and the demo each frame in
 `host::step` beside `viewsize` and the renderer's threads (a timedemo ignores
-it).
+it). `r_lerpmodels` ("Smooth animations") is wired the same way, beside it;
+a timedemo ignores it too — `cl_demo::timedemo_frame` always reads
+`LerpModels::Classic`, not `d.lerpmodels` (`timedemo_frame_lerpmodels`
+exists only for `quaketool timedemo --lerpframe`'s own measurement, above).

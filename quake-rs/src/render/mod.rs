@@ -1609,7 +1609,7 @@ mod tests {
             .map(|i| ([-150.0 + i as f32, (i % 13) as f32 * 9.0 - 60.0, (i % 7) as f32 * 9.0], (i % 250) as u8))
             .collect();
         let sprites = [SpriteInstance { sprite: &spr, origin: [-60.0, 20.0, 10.0], frame: 0 }];
-        let gun = Viewmodel { mdl: &mdl, frame: 0, origin_ofs: [8.0, 0.0, -6.0], angles: [cam.pitch, cam.yaw, 0.0] };
+        let gun = Viewmodel { mdl: &mdl, frame: 0, blend: None, origin_ofs: [8.0, 0.0, -6.0], angles: [cam.pitch, cam.yaw, 0.0] };
         let dlights = [crate::dlight::DynamicLight::new([0.0; 3], 250.0, f32::MAX, 0.0, 0.0, 0)];
         let world = Scene { time: 1.3, dlights: &dlights, ..Scene::new(&bsp, cam, 211, 157, &pal) };
         let scene = Scene { models: &models, particles: &particles, sprites: &sprites, viewmodel: Some(gun), ..world };

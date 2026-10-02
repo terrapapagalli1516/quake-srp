@@ -269,6 +269,7 @@ pub fn cmd_walk(pak_path: &str, map_name: &str, out_prefix: &str, steps: u32) ->
             yaw: *yaw, pitch: 0.0, roll: 0.0,
             color: *color,
             frame: 0,
+            blend: None,
             skinnum: 0,
         })
         .collect();
@@ -371,6 +372,7 @@ pub fn cmd_demo(pak_path: &str, demo_name: &str, out_prefix: &str, stride_arg: u
                 yaw: *yaw, pitch: 0.0, roll: 0.0,
                 color: *color,
                 frame: 0,
+                blend: None,
                 skinnum: 0,
             })
             .collect();
