@@ -956,6 +956,54 @@ impl Menu {
         self.snd(MenuSound::Menu2);
     }
 
+    /// Open the menu directly on the Load screen (`M_Menu_Load_f`, menu.c):
+    /// what the `menu_load` console command (F3, by default) runs. Always
+    /// available, like [`Menu::open_help`] — `M_ScanSaves` already ran
+    /// host-side, so the slot comments ([`Menu::set_save_comments`]) are
+    /// current.
+    pub fn open_load(&mut self) {
+        self.visible = true;
+        self.screen = MenuScreen::Load;
+        self.bind_grab = false;
+        self.snd(MenuSound::Menu2);
+    }
+
+    /// Open the menu directly on the Save screen (`M_Menu_Save_f`, menu.c):
+    /// what the `menu_save` console command (F2, by default) runs. Refused
+    /// without an active local single-player game — `!sv.active ||
+    /// cl.intermission || svs.maxclients != 1`, folded into `game_active`
+    /// ([`Menu::set_game_active`], kept current every `step`), the same gate
+    /// SinglePlayer > Save uses ([`Menu::select`]). Unlike that row — whose
+    /// OUTER `M_SinglePlayer_Key` latches `m_entersound` before ever calling
+    /// `M_Menu_Save_f` — a refusal here is silent: the C's `m_entersound` sits
+    /// AFTER the three early returns in `M_Menu_Save_f` itself, and
+    /// `key_dest` is never touched, so (say) an open console stays open.
+    /// Returns whether it opened, so the host knows whether to take any
+    /// console down with it.
+    pub fn open_save(&mut self) -> bool {
+        if !self.game_active {
+            return false;
+        }
+        self.visible = true;
+        self.screen = MenuScreen::Save;
+        self.bind_grab = false;
+        self.snd(MenuSound::Menu2);
+        true
+    }
+
+    /// Open the menu directly on the Options screen (`M_Menu_Options_f`,
+    /// menu.c): what the `menu_options` console command (F4, by default)
+    /// runs. Always available, like [`Menu::open_help`]. (The C's own tail —
+    /// clamping `options_cursor` off a Windows-only "current mode" row, then
+    /// an odd `vid_menukeyfn(key)` call with whatever key is live — is
+    /// Win32-video housekeeping this port has no equivalent for.)
+    pub fn open_options(&mut self) {
+        self.visible = true;
+        self.screen = MenuScreen::Options;
+        self.bind_grab = false;
+        self.snd(MenuSound::Menu2);
+    }
+
     /// Toggle the menu (`M_ToggleMenu_f`): if hidden, open on the main screen; if
     /// showing a submenu, go back to main; if already on the main screen, close.
     /// Returns the resulting [`MenuAction`] (`Closed` when it closed, else `None`).

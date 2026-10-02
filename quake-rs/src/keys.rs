@@ -308,9 +308,12 @@ impl Default for Bindings {
 
 impl Bindings {
     /// id's `default.cfg`: `unbindall`, then its `bind` lines for every key
-    /// the page can deliver whose command the port runs. (Not ported: the
-    /// function keys' shortcuts, `messagemode` on `t`, the `zoom_in` alias;
-    /// Escape's `togglemenu` is `Key_Event`'s own.)
+    /// the page can deliver whose command the port runs — including the
+    /// function-key shortcuts (F1 `help`, F2 `menu_save`, F3 `menu_load`, F4
+    /// `menu_options`, F6/F9 quicksave/quickload, F10 `quit`, F12
+    /// `screenshot`; F5/F7/F8/F11 are unbound, as in id's own file). (Not
+    /// ported: `messagemode` on `t`, the `zoom_in` alias; Escape's
+    /// `togglemenu` is `Key_Event`'s own.)
     pub fn default_cfg() -> Bindings {
         let mut b = Bindings::default();
         for (key, cmd) in [
@@ -352,6 +355,25 @@ impl Bindings {
         // NUMBER, so the digit row selects weapons whatever Shift or the layout.
         for n in 0..=8u8 {
             b.bind(b'0' + n, BIND_IMPULSE_0 + n as usize);
+        }
+        // The function-key shortcuts: none of these is one of BIND_COMMANDS
+        // (the host's per-frame moves/impulses/pause/console), so each is a
+        // console Line, like the gamepad's "impulse 12" below — run once
+        // through the console when the key goes down. F6/F9's `wait` holds
+        // the `save`/`load` to the NEXT host frame, after the `echo` has had
+        // one frame on screen (AUDIT.md's "A stuffed bf runs in the same
+        // host frame" note is the same simplification, the other way).
+        for (key, line) in [
+            (K_F1, "help"),
+            (K_F1 + 1, "menu_save"),
+            (K_F1 + 2, "menu_load"),
+            (K_F1 + 3, "menu_options"),
+            (K_F1 + 5, "echo Quicksaving...; wait; save quick"),
+            (K_F1 + 8, "echo Quickloading...; wait; load quick"),
+            (K_F1 + 9, "quit"),
+            (K_F1 + 11, "screenshot"),
+        ] {
+            b.set(key, Binding::parse(line));
         }
         b
     }
@@ -581,6 +603,31 @@ mod tests {
         assert_eq!(pad.get(aux(10)).map(Binding::text), Some("togglemenu"), "Start");
         assert_eq!(pad.get(aux(5)).map(Binding::text), Some("impulse 12"), "LB: the previous weapon");
         assert_eq!((pad.get(K_JOY1 + 2), pad.get(aux(12))), (None, None), "X and R3 free");
+    }
+
+    /// AUDIT.md's "Missing `default.cfg` binds: F1-F4, F6, F9, F10, F12":
+    /// each is a console Line (none is one of BIND_COMMANDS), so Customize
+    /// controls (the BINDNAMES rows) never lists it, but a rebind over it —
+    /// or Reset to defaults — treats it like any other key. F5/F7/F8/F11
+    /// stay unbound, as in id's own `default.cfg`.
+    #[test]
+    fn default_cfg_binds_ids_function_key_shortcuts() {
+        let b = Bindings::default_cfg();
+        let line = |k| b.get(k).map(Binding::text);
+        assert_eq!(line(K_F1), Some("help"));
+        assert_eq!(line(K_F1 + 1), Some("menu_save"));
+        assert_eq!(line(K_F1 + 2), Some("menu_load"));
+        assert_eq!(line(K_F1 + 3), Some("menu_options"));
+        assert_eq!(line(K_F1 + 5), Some("echo Quicksaving...; wait; save quick"));
+        assert_eq!(line(K_F1 + 8), Some("echo Quickloading...; wait; load quick"));
+        assert_eq!(line(K_F1 + 9), Some("quit"));
+        assert_eq!(line(K_F1 + 11), Some("screenshot"));
+        for k in [K_F1 + 4, K_F1 + 6, K_F1 + 7, K_F1 + 10] {
+            assert_eq!(b.get(k), None, "F5/F7/F8/F11 stay unbound");
+        }
+        for k in [K_F1, K_F1 + 1, K_F1 + 2, K_F1 + 3, K_F1 + 5, K_F1 + 8, K_F1 + 9, K_F1 + 11] {
+            assert!(matches!(b.get(k), Some(Binding::Line(_))), "F{}", k - K_F1 + 1);
+        }
     }
 
     #[test]

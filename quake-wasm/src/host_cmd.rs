@@ -49,12 +49,17 @@ pub(crate) const COMMANDS: &[ConsoleCommand] = &[
     c("joyadvancedupdate", "re-read the joy* axis maps", cmd_joyadvancedupdate),
     c("timedemo", "timedemo <demo>  time a demo", cmd_timedemo),
     c("playdemo", "playdemo <demo>", cmd_playdemo),
+    c("disconnect", "end the game", cmd_disconnect),
     c("impulse", "impulse <n>", cmd_game),
     c("cd", "cd play|loop <track>, stop, pause, resume, info, ...", cmd_cd),
     c("play", "play <sound>", cmd_play),
     c("sizedown", "screen size -10", cmd_sizedown),
     c("sizeup", "screen size +10", cmd_sizeup),
+    c("screenshot", "write quakeNN.pcx of this frame", cmd_screenshot),
     c("help", "the Help screen", cmd_help),
+    c("menu_options", "the Options screen", cmd_menu_options),
+    c("menu_save", "the Save screen", cmd_menu_save),
+    c("menu_load", "the Load screen", cmd_menu_load),
     c("togglemenu", "the menu", cmd_togglemenu),
     c("clear", "clear the console", cmd_clear),
     c("toggleconsole", "the console", cmd_toggleconsole),
@@ -70,6 +75,7 @@ pub(crate) const COMMANDS: &[ConsoleCommand] = &[
     c("pause", "pause the game", cmd_pause),
     c("kill", "respawn", cmd_game),
     c("color", "color <0-13> [0-13]", cmd_color),
+    c("version", "the port's version", cmd_version),
     c("noclip", "walk through walls", cmd_game),
     c("name", "name <name>", cmd_name),
     c("map", "map <name>", cmd_map),
@@ -77,6 +83,7 @@ pub(crate) const COMMANDS: &[ConsoleCommand] = &[
     c("god", "invulnerability", cmd_game),
     c("quit", "leave the game", cmd_quit),
     c("path", "the search path", cmd_path),
+    c("wait", "delay the rest of a bound key's line one frame", cmd_wait),
     c("echo", "echo <text>", cmd_echo),
     c("exec", "exec <file>  run a file's lines", cmd_exec),
     c("profile", "profile classic|2026", cmd_profile),
@@ -95,11 +102,38 @@ pub(crate) fn complete(partial: &str) -> Option<String> {
 /// (split at newlines and at `;` outside quotes) — its command from
 /// [`COMMANDS`], else `Cvar_Command` for a cvar, else `Unknown command "…"`.
 /// Nothing here panics on a bad or missing argument.
+///
+/// A `wait` line (`Cmd_Wait_f`) stops this call early: id's `Cbuf_Execute`
+/// shares one `cmd_text` buffer across every caller and, on `wait`, leaves
+/// whatever follows it in that buffer for the NEXT host frame's
+/// `Cbuf_Execute`. This port has no such persistent buffer — each call to
+/// this function is its own self-contained text — so a `wait` instead
+/// stashes the REST OF THIS CALL's lines in [`App::pending_cmd`], for
+/// [`crate::host::step`] to run (through this same function) right before
+/// its own frame's commands, where `Cbuf_Execute` would. The common case
+/// this serves is exactly id's: a single bound key's command line
+/// (`default.cfg`'s F6/F9, `bind g "impulse 5; +attack; wait; -attack"`).
 pub(crate) fn execute_console_command(text: &str) {
-    for line in cmd::split_lines(text) {
+    let lines = cmd::split_lines(text);
+    for (i, line) in lines.iter().enumerate() {
         let args = Args::tokenize(line);
         if args.argc() == 0 {
             continue;
+        }
+        if args.argv(0).eq_ignore_ascii_case("wait") {
+            // `split_lines` keeps a line's leading space (it splits right at
+            // the `;`); trimmed here so `pending_cmd` holds a clean line.
+            let rest = lines[i + 1..].iter().map(|s| s.trim()).collect::<Vec<_>>().join(";");
+            if !rest.is_empty() {
+                ensure_app(|a| match &mut a.pending_cmd {
+                    Some(p) => {
+                        p.push(';');
+                        p.push_str(&rest);
+                    }
+                    None => a.pending_cmd = Some(rest),
+                });
+            }
+            return;
         }
         if let Some(command) = cmd::find(COMMANDS, args.argv(0)) {
             (command.run)(&args);
@@ -151,6 +185,13 @@ fn cmd_echo(args: &Args) {
     let text = args.all()[1..].join(" ");
     ensure_app(|a| a.console.println(text));
 }
+
+/// `Cmd_Wait_f`: never actually dispatched through here —
+/// [`execute_console_command`] intercepts a `wait` line before reaching
+/// this table (it alone needs the REST OF THE LINES, which a table entry's
+/// lone [`Args`] cannot see). Kept in [`COMMANDS`] only so Tab-completion
+/// and `wasm_help` list it, as id's `cmd_functions` does.
+fn cmd_wait(_: &Args) {}
 
 /// `Con_Clear_f`.
 fn cmd_clear(_: &Args) {
@@ -218,11 +259,47 @@ fn cmd_path(_: &Args) {
     ensure_app(|a| lines.into_iter().for_each(|l| a.console.println(l)));
 }
 
+/// `CL_Disconnect_f`: end the game. `CL_Disconnect` (`cl_disconnect`, shared
+/// with `quit`'s immediate branch and `Host_Error`'s cleanup) already shuts
+/// the local server down and disconnects on its own, which is the whole of
+/// `CL_Disconnect_f` bar its own redundant, never-reached `Host_ShutdownServer`
+/// (the C's own `CL_Disconnect` guards the same `sv.active` check first).
+fn cmd_disconnect(_: &Args) {
+    ensure_app(cl_disconnect);
+}
+
+/// `Host_Version_f`: id prints `VERSION` then the EXE's build timestamp; this
+/// port has no such timestamp, so its second line names itself and the live
+/// profile instead — the same two facts [`quake_rs::console::CON_VERSION`]
+/// (the console background's and the DOS end screen's stamp) and the
+/// Options > Classic/2026 page already show.
+fn cmd_version(_: &Args) {
+    ensure_app(|a| {
+        a.console.println(format!("Version {}", quake_rs::console::CON_VERSION));
+        a.console.println(format!("quake-rs, profile {}", a.settings.profile.name()));
+    });
+}
+
 /// M_Menu_Help_f (menu.c registers it as `help`): the Help/Ordering screen,
 /// on its first page, with the keyboard (key_dest = key_menu: the console
 /// goes up).
 fn cmd_help(_: &Args) {
     ensure_app(App::m_menu_help);
+}
+
+/// `M_Menu_Options_f`: the Options screen.
+fn cmd_menu_options(_: &Args) {
+    ensure_app(App::m_menu_options);
+}
+
+/// `M_Menu_Save_f`: the Save screen (refused without an active local game).
+fn cmd_menu_save(_: &Args) {
+    ensure_app(App::m_menu_save);
+}
+
+/// `M_Menu_Load_f`: the Load screen.
+fn cmd_menu_load(_: &Args) {
+    ensure_app(App::m_menu_load);
 }
 
 /// `SCR_SizeUp_f`: viewsize + 10.
@@ -233,6 +310,13 @@ fn cmd_sizeup(_: &Args) {
 /// `SCR_SizeDown_f`: viewsize - 10.
 fn cmd_sizedown(_: &Args) {
     ensure_app(|a| a.settings.cvars.size_down());
+}
+
+/// `SCR_ScreenShot_f`: raise the request flag; `host::step` has the finished
+/// frame (and its raw, unblended palette) [`crate::host::step`] needs to
+/// actually write the PCX, which nothing mid-console-command has.
+fn cmd_screenshot(_: &Args) {
+    ensure_app(|a| a.screenshot_request = true);
 }
 
 /// `Key_Bind_f` (keys.c): `bind <key>` prints the key's binding, `bind <key>
@@ -1005,6 +1089,147 @@ mod tests {
     /// [`run_console_line`], which types into the open console).
     fn run_console_line_closed(line: &str) {
         execute_console_command(line);
+    }
+
+    /// `CL_Disconnect_f`: ends the game, exactly as `quit`'s immediate branch
+    /// does (both share `cl_disconnect`).
+    #[test]
+    fn disconnect_ends_the_game() {
+        assert_eq!(boot(), 1);
+        close_menu();
+        assert!(APP.with(|c| c.borrow().as_ref().unwrap().walk.is_some()));
+        run_console_line_closed("disconnect");
+        assert!(APP.with(|c| c.borrow().as_ref().unwrap().walk.is_none()), "CL_Disconnect ran");
+        assert!(APP.with(|c| c.borrow().as_ref().unwrap().disconnected));
+    }
+
+    /// `Host_Version_f`: id's `Version %4.2f` line, then a second line naming
+    /// the port and the live profile in place of id's EXE build timestamp.
+    #[test]
+    fn version_prints_con_version_and_the_profile() {
+        assert_eq!(boot(), 1);
+        close_menu();
+        console_toggle();
+        run_console_line("version");
+        let lines: Vec<String> =
+            APP.with(|c| c.borrow().as_ref().unwrap().console.lines().map(str::to_string).collect());
+        assert_eq!(
+            lines[lines.len() - 2..],
+            [format!("Version {}", quake_rs::console::CON_VERSION), "quake-rs, profile classic".to_string()]
+        );
+    }
+
+    /// `Cmd_Wait_f`: a `wait` in a console-command call stops THAT call —
+    /// nothing after it runs this frame — and stashes the remainder in
+    /// `App::pending_cmd`, which `host::step` runs on the NEXT host frame
+    /// (right where `Cbuf_Execute` would, before the frame's own commands).
+    #[test]
+    fn wait_defers_the_rest_of_the_call_to_the_next_host_frame() {
+        assert_eq!(boot(), 1);
+        close_menu();
+        console_toggle();
+        let last = || APP.with(|c| c.borrow().as_ref().unwrap().console.lines().last().map(str::to_string));
+        run_console_line("echo a; wait; echo b");
+        assert_eq!(last(), Some("a".to_string()), "only up to `wait` ran this call");
+        assert_eq!(
+            APP.with(|c| c.borrow().as_ref().unwrap().pending_cmd.clone()),
+            Some("echo b".to_string())
+        );
+        step(0.0);
+        assert_eq!(last(), Some("b".to_string()), "the rest ran on the next frame");
+        assert_eq!(APP.with(|c| c.borrow().as_ref().unwrap().pending_cmd.clone()), None);
+
+        // A `wait` with nothing after it (or nothing at all) leaves no pending
+        // text — the frame it runs on does nothing extra.
+        run_console_line("wait");
+        assert_eq!(APP.with(|c| c.borrow().as_ref().unwrap().pending_cmd.clone()), None);
+    }
+
+    /// `menu_options`/`menu_save`/`menu_load` (`M_Menu_Options_f` etc.): the
+    /// F4/F2/F3 console lines `keys::Bindings::default_cfg` binds. `menu_save`
+    /// is refused without an active local game — silently, unlike
+    /// SinglePlayer > Save's own row (`Menu::select`), which always plays the
+    /// enter sound because ITS caller latches it first.
+    #[test]
+    fn menu_options_save_load_commands_open_the_right_screen() {
+        use crate::menu::menu_visible;
+        use quake_rs::render::MenuScreen;
+        assert_eq!(boot(), 1);
+        // game_active is a `step`-set flag (host.rs): one frame lets it see
+        // the fresh walk before menu_save's gate reads it.
+        step(0.0);
+        close_menu();
+        run_console_line_closed("menu_options");
+        assert_eq!(menu_screen(), MenuScreen::Options);
+        close_menu();
+        run_console_line_closed("menu_load");
+        assert_eq!(menu_screen(), MenuScreen::Load);
+        close_menu();
+        run_console_line_closed("menu_save");
+        assert_eq!(menu_screen(), MenuScreen::Save, "a local game is running: menu_save opens");
+
+        // Without an active game (disconnected), menu_save does nothing: no
+        // menu opens, and the screen is left exactly as it was (Save, above).
+        close_menu();
+        run_console_line_closed("disconnect");
+        step(0.0); // lets game_active see the disconnect
+        run_console_line_closed("menu_save");
+        assert_eq!(menu_visible(), 0, "refused: nothing opened");
+        assert_eq!(menu_screen(), MenuScreen::Save, "refused: the screen is untouched");
+    }
+
+    /// F6/F9, `default.cfg`'s own binds: `echo Quicksaving...; wait; save
+    /// quick` and the reverse. The echo prints at once; `save`/`load` wait
+    /// one frame, then round-trip the live player's state through
+    /// `common::write_file`/`read_file` (the browser's IndexedDB-backed FS).
+    #[test]
+    fn f6_and_f9_quicksave_and_quickload_round_trip() {
+        use quake_rs::keys::K_F1;
+        assert_eq!(boot(), 1);
+        close_menu();
+        let lines = || APP.with(|c| c.borrow().as_ref().unwrap().console.lines().map(str::to_string).collect::<Vec<_>>());
+
+        crate::input::press(K_F1 + 5); // F6: quicksave
+        assert_eq!(lines().last().map(String::as_str), Some("Quicksaving..."), "the echo ran at once");
+        step(0.0); // `wait` releases the save
+        assert!(lines().iter().any(|l| l.starts_with("Saving game to quick.sav")), "{:?}", lines());
+        assert_eq!(lines().last().map(String::as_str), Some("done."));
+
+        APP.with(|c| {
+            let mut b = c.borrow_mut();
+            let w = b.as_mut().unwrap().walk.as_mut().unwrap();
+            let p = w.player;
+            w.server.vm.ent_set_float(p, "health", 1.0);
+        });
+        assert_eq!(player_field("health"), 1.0, "test setup: wound the live player");
+
+        crate::input::press(K_F1 + 8); // F9: quickload
+        assert_eq!(lines().last().map(String::as_str), Some("Quickloading..."));
+        step(0.0); // `wait` releases the load
+        assert_eq!(player_field("health"), 100.0, "F9 restored the quicksaved health");
+    }
+
+    /// `SCR_ScreenShot_f`: the command only raises the request; `host::step`
+    /// writes `quakeNN.pcx` once it has the finished frame + the active
+    /// mode's raw palette. A second shot finds the next free slot.
+    #[test]
+    fn screenshot_writes_the_next_free_quake_nn_pcx() {
+        assert_eq!(boot(), 1);
+        close_menu();
+        assert!(crate::common::read_file("quake00.pcx").is_err(), "a fresh gamedir is empty");
+        run_console_line_closed("screenshot");
+        assert!(APP.with(|c| c.borrow().as_ref().unwrap().screenshot_request), "flag raised, not written yet");
+        step(0.0);
+        assert!(!APP.with(|c| c.borrow().as_ref().unwrap().screenshot_request), "written: the flag is clear");
+        let bytes = crate::common::read_file("quake00.pcx").expect("quake00.pcx written");
+        assert_eq!(bytes[0..4], [0x0a, 5, 1, 8], "a type-5 PCX header");
+        assert!(bytes.len() > 128 + 1 + 768, "a header, some pixel data, the marker and the palette");
+        let last = APP.with(|c| c.borrow().as_ref().unwrap().console.lines().last().map(str::to_string));
+        assert_eq!(last, Some("Wrote quake00.pcx".to_string()));
+
+        run_console_line_closed("screenshot");
+        step(0.0);
+        assert!(crate::common::read_file("quake01.pcx").is_ok(), "the next shot takes the next free slot");
     }
 
     /// QuakeC deadflag values (client.qc / defs.qc).

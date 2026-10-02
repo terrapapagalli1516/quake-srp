@@ -2,7 +2,8 @@
 //!
 //! Ported from Quake (GPLv2). Copyright (C) 1996-1997 Id Software, Inc.
 //! Source: `WinQuake/screen.c` — `SCR_CalcRefdef` (with `R_SetVrect`, `r_main.c`),
-//! `SCR_UpdateScreen`'s tile-cleared border, `SCR_DrawCenterString`.
+//! `SCR_UpdateScreen`'s tile-cleared border, `SCR_DrawCenterString`,
+//! `SCR_ScreenShot_f`/`WritePCXfile`.
 
 use crate::draw::{blit_qpic_at, draw_char_scaled, draw_string_scaled, draw_tile_clear, screen_2d};
 use crate::render::Image;
@@ -383,6 +384,58 @@ pub fn draw_crosshair(image: &mut Image, conchars: &crate::wad::Qpic, vrect: &Vi
     draw_char_scaled(image, conchars, x as f32, y as f32, b'+', sc.scale, 0.0, 0.0);
 }
 
+// ---------------------------------------------------------------------------
+// Screen shots: SCR_ScreenShot_f, WritePCXfile
+// ---------------------------------------------------------------------------
+
+/// `SCR_ScreenShot_f`'s filename search: `quake00.pcx` .. `quake99.pcx`, the
+/// first for which `exists` is false (the C's `Sys_FileTime(checkname) ==
+/// -1`). `None` once all 100 are taken (the C's `i == 100` guard, "Couldn't
+/// create a PCX file"), which `exists` never has to know about.
+pub fn screenshot_name(exists: impl Fn(&str) -> bool) -> Option<String> {
+    (0..=99).map(|i| format!("quake{i:02}.pcx")).find(|name| !exists(name))
+}
+
+/// `WritePCXfile`: `width` x `height` of 8-bit palette indices (`pixels`,
+/// `width*height` of them — the port's framebuffers are never row-padded, so
+/// the C's `rowbytes` is always `width` here) and the 256-colour `palette`,
+/// as a type-5 (256-colour, one plane) PCX: the 128-byte header, the pixel
+/// data in the C's "RLE" (a byte whose top two bits are both set is written
+/// as a run of exactly one — `0xc1` then the byte itself — anything else
+/// literally; the packer never actually forms a longer run), the palette
+/// marker `0x0c`, then the 768-byte RGB palette.
+pub fn write_pcx(width: usize, height: usize, pixels: &[u8], palette: &[[u8; 3]; 256]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(128 + width * height * 2 + 1 + 768);
+    out.push(0x0a); // manufacturer: the PCX id
+    out.push(5); // version: 256 colour
+    out.push(1); // encoding: "RLE" (see above)
+    out.push(8); // bits per pixel
+    out.extend_from_slice(&0u16.to_le_bytes()); // xmin
+    out.extend_from_slice(&0u16.to_le_bytes()); // ymin
+    out.extend_from_slice(&((width - 1) as u16).to_le_bytes()); // xmax
+    out.extend_from_slice(&((height - 1) as u16).to_le_bytes()); // ymax
+    out.extend_from_slice(&(width as u16).to_le_bytes()); // hres
+    out.extend_from_slice(&(height as u16).to_le_bytes()); // vres
+    out.resize(out.len() + 48, 0); // the EGA palette, unused at 256 colours
+    out.push(0); // reserved
+    out.push(1); // colour planes: chunky image
+    out.extend_from_slice(&(width as u16).to_le_bytes()); // bytes per line
+    out.extend_from_slice(&2u16.to_le_bytes()); // palette type: not greyscale
+    out.resize(out.len() + 58, 0); // filler
+    debug_assert_eq!(out.len(), 128, "the PCX header is always 128 bytes");
+    for &b in pixels.iter().take(width * height) {
+        if b & 0xc0 == 0xc0 {
+            out.push(0xc1);
+        }
+        out.push(b);
+    }
+    out.push(0x0c); // palette ID byte
+    for c in palette {
+        out.extend_from_slice(c);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -741,5 +794,47 @@ mod tests {
                 assert!(got.pixels == want, "{w}x{h} {vrect:?} tile {}", t.is_some());
             }
         }
+    }
+
+    #[test]
+    fn screenshot_name_finds_the_first_free_slot_and_gives_up_at_100() {
+        assert_eq!(screenshot_name(|_| false), Some("quake00.pcx".to_string()), "a fresh directory");
+        let taken = ["quake00.pcx", "quake01.pcx", "quake02.pcx"];
+        assert_eq!(screenshot_name(|n| taken.contains(&n)), Some("quake03.pcx".to_string()));
+        assert_eq!(screenshot_name(|_| true), None, "every one of the 100 is taken");
+    }
+
+    #[test]
+    fn write_pcx_is_a_128_byte_header_the_rle_lite_pixels_then_the_palette() {
+        let palette: [[u8; 3]; 256] = std::array::from_fn(|i| [i as u8, (2 * i) as u8, (3 * i) as u8]);
+        // 0x05 is a literal byte; 0xc3 and 0xff have their top two bits set, so
+        // each becomes the C's "run of one": 0xc1 then the byte itself.
+        let pixels = [0x05, 0xc3, 0x00, 0xff];
+        let out = write_pcx(4, 1, &pixels, &palette);
+        // Header: manufacturer, version, encoding, bits-per-pixel, then the
+        // bounds (xmax = width-1, ymax = height-1) and resolution, little-endian.
+        assert_eq!(out[0..4], [0x0a, 5, 1, 8]);
+        assert_eq!(&out[8..10], &3u16.to_le_bytes(), "xmax = width - 1");
+        assert_eq!(&out[10..12], &0u16.to_le_bytes(), "ymax = height - 1");
+        assert_eq!(&out[12..14], &4u16.to_le_bytes(), "hres = width");
+        assert_eq!(&out[66..68], &4u16.to_le_bytes(), "bytes per line = width");
+        assert_eq!(out[65], 1, "one colour plane");
+
+        let pixels_out = &out[128..];
+        // 0x05 literal; 0xc3 as 0xc1,0xc3; 0x00 literal; 0xff as 0xc1,0xff;
+        // then the palette marker and the 768-byte palette.
+        assert_eq!(pixels_out[..9], [0x05, 0xc1, 0xc3, 0x00, 0xc1, 0xff, 0x0c, 0, 0]);
+        assert_eq!(out.len(), 128 + 6 + 1 + 768, "header + packed pixels + marker + palette");
+        let pal_bytes = &out[out.len() - 768..];
+        for (i, c) in palette.iter().enumerate() {
+            assert_eq!(&pal_bytes[i * 3..i * 3 + 3], c, "palette entry {i}");
+        }
+
+        // A run of ordinary bytes never gets RLE-expanded: id's packer only
+        // ever emits a "run" of exactly one, never combines repeats.
+        let plain = [1u8, 2, 3, 4, 5, 6];
+        let out = write_pcx(6, 1, &plain, &palette);
+        assert_eq!(&out[128..134], &plain[..]);
+        assert_eq!(out.len(), 128 + 6 + 1 + 768);
     }
 }
