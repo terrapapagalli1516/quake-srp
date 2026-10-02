@@ -28,6 +28,7 @@ use crate::client::lerpmove::LerpMove;
 use crate::render::Threads;
 use crate::snd::SoundMode;
 use crate::screen::{VIEWSIZE_DEFAULT, VIEWSIZE_MAX, VIEWSIZE_MIN, VIEWSIZE_STEP};
+use crate::vm::{MAX_EDICTS, MAX_EDICTS_LIMIT};
 
 /// The port's pixel sizes for [`Cvars::pixel_size`]: 0 is Auto, 1..=4 a
 /// fixed size.
@@ -132,6 +133,14 @@ pub struct Cvars {
     /// the platform offers). The pixels are the same for any count, so it is
     /// no departure.
     pub threads: Threads,
+    /// `sv_max_edicts`: the `ED_Alloc` ceiling ([`crate::vm::MAX_EDICTS`] in
+    /// Classic, where id's own 600 is also the port's; higher in 2026). A
+    /// departure, but an unusual one: it never changes anything *drawn* —
+    /// id's `MAX_EDICTS` is an engine limit, not game design — only whether
+    /// a map that spawns more than 600 edicts (Rogue's `r2m6`; `AUDIT.md`
+    /// "the mission packs") can be played at all. Clamped to
+    /// [`crate::vm::MAX_EDICTS`]..=[`crate::vm::MAX_EDICTS_LIMIT`].
+    pub max_edicts: u32,
     /// `in_touch`: on a touch screen, the page's touch controls for play —
     /// a stick, look by dragging, fire, jump and next weapon (quake-wasm's
     /// `web/touch.js`). id's Quake has none; without them a phone can only
@@ -186,6 +195,7 @@ impl Cvars {
             lerpmove: LerpMove::Classic,
             sound: SoundMode::Classic,
             threads: Threads::Auto,
+            max_edicts: MAX_EDICTS as u32,
             touch: false,
             touch_accel: 0.0,
             joy: JoyCvars::classic(),
@@ -200,7 +210,9 @@ impl Cvars {
     /// fullscreen and touch controls on a phone. Show FPS and exact
     /// perspective stay off: the readout is clutter, and id's 16-pixel spans
     /// are part of the look. A gamepad works as a modern twin-stick pad
-    /// ([`JoyCvars::modern`]).
+    /// ([`JoyCvars::modern`]). The edict pool grows past id's 600
+    /// (`max_edicts`, QuakeSpasm's own default) — invisible on every
+    /// shareware/registered map, needed by Rogue's `r2m6`.
     pub fn modern() -> Cvars {
         Cvars {
             cl_forwardspeed: 400.0,
@@ -216,6 +228,7 @@ impl Cvars {
             joy: JoyCvars::modern(),
             lerpmove: LerpMove::Smooth,
             sound: SoundMode::Modern,
+            max_edicts: 8192,
             touch: true,
             ..Cvars::classic()
         }
@@ -449,6 +462,9 @@ pub const CVARS: &[Cvar] = &[
         set: |c, v| c.sound = if on(v) { SoundMode::Modern } else { SoundMode::Classic } },
     Cvar { name: "r_threads", archive: true, departure: false, help: "3-D view threads, 0 auto",
         get: |c| c.threads.cvar().to_string(), set: |c, v| c.threads = Threads::from_cvar(atof(v)) },
+    Cvar { name: "sv_max_edicts", archive: true, departure: true, help: "edict pool past id's 600 (needs r2m6)",
+        get: |c| c.max_edicts.to_string(),
+        set: |c, v| c.max_edicts = atof(v).clamp(MAX_EDICTS as f32, MAX_EDICTS_LIMIT as f32) as u32 },
     Cvar { name: "in_touch", archive: true, departure: true, help: "touch controls on a touch screen",
         get: |c| flag(c.touch), set: |c, v| c.touch = on(v) },
     Cvar { name: "in_touchaccel", archive: true, departure: false, help: "touch look acceleration, 0 none",
