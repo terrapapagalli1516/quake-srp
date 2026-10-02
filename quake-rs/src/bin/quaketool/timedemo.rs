@@ -1,5 +1,5 @@
 //! `quaketool timedemo <pak> <demo> [--res WxH[,WxH...]] [--profile 1]
-//! [video options]` — id's `timedemo` (`CL_TimeDemo_f`), natively: the
+//! [--lerpframe 1] [video options]` — id's `timedemo` (`CL_TimeDemo_f`), natively: the
 //! recorded demo played as fast as the client can draw it, one message per
 //! host frame with no 72 fps cap, then `CL_FinishTimeDemo`'s line,
 //! `"%i frames %5.1f seconds %5.1f fps"`.
@@ -29,6 +29,12 @@
 //! sprites, the gun; with `--threads` above 1 these add every thread's time,
 //! and the bands' wall time is printed beside them). The profiled run is a
 //! little slower than the timed one.
+//!
+//! `--lerpframe 1` blends animation frames ([`LerpModels::Smooth`],
+//! `r_lerpmodels`) instead of this command's own default, Classic (a
+//! timedemo stays id's measure otherwise: `cl_demo::timedemo_frame`'s own
+//! doc) — for measuring the extra's own cost (FRAMERATE.md, "Animation
+//! frames blended").
 
 use std::cell::RefCell;
 use std::fmt::Write as _;
@@ -36,6 +42,7 @@ use std::time::Instant;
 
 use quake_rs::client::cl_demo::{self, TimeDemoClock};
 use quake_rs::client::host::host_filter_time_uncapped;
+use quake_rs::client::lerpmodels::LerpModels;
 use quake_rs::client::{set_lap_hook, Phase, Vid};
 use quake_rs::pak::Pak;
 use quake_rs::render;
@@ -79,7 +86,17 @@ struct Run {
 
 /// One timedemo of `name` at `vid`, drawn on `threads` threads, with the
 /// render profiler on if `profile`.
-fn run(pak: &Pak, name: &str, vid: &Vid, threads: usize, clock: &mut TimeDemoClock, rgba: &mut Vec<u8>, profile: bool) -> Option<Run> {
+#[allow(clippy::too_many_arguments)]
+fn run(
+    pak: &Pak,
+    name: &str,
+    vid: &Vid,
+    threads: usize,
+    clock: &mut TimeDemoClock,
+    rgba: &mut Vec<u8>,
+    profile: bool,
+    lerpmodels: LerpModels,
+) -> Option<Run> {
     let gamma = render::build_gamma_table(1.0);
     let mut sound = Vec::new();
     let mut d = cl_demo::build_timedemo(pak.clone(), name, &mut sound)?;
@@ -97,7 +114,10 @@ fn run(pak: &Pak, name: &str, vid: &Vid, threads: usize, clock: &mut TimeDemoClo
         let frametime = host_filter_time_uncapped(realtime, &mut oldrealtime) as f32;
         clock.message(host_framecount, realtime);
         lap_hook(Phase::Input);
-        let Some(frame) = cl_demo::timedemo_frame(&mut d, frametime, false, vid) else {
+        // `--lerpframe` (off by default: a timedemo stays id's measure,
+        // `cl_demo::timedemo_frame`'s own doc) lets this command measure
+        // `r_lerpmodels`' own cost instead.
+        let Some(frame) = cl_demo::timedemo_frame_lerpmodels(&mut d, frametime, false, vid, lerpmodels) else {
             break clock.finish(host_framecount, realtime);
         };
         // V_UpdatePalette + VID_ShiftPalette: the frame into RGBA through
@@ -117,6 +137,7 @@ pub fn cmd_timedemo(pak_path: &str, demo: &str, rest: &[String]) -> Result<Strin
     let mut res = "320x200".to_string();
     let mut video = VideoArgs::default();
     let mut profile = false;
+    let mut lerpmodels = LerpModels::Classic;
     let mut i = 0;
     while i < rest.len() {
         let flag = rest[i].as_str();
@@ -125,6 +146,7 @@ pub fn cmd_timedemo(pak_path: &str, demo: &str, rest: &[String]) -> Result<Strin
             match flag {
                 "--res" => res = val.clone(),
                 "--profile" => profile = val == "1",
+                "--lerpframe" => lerpmodels = if val == "1" { LerpModels::Smooth } else { LerpModels::Classic },
                 a => return Err(format!("unknown argument {a:?}")),
             }
         }
@@ -148,7 +170,7 @@ pub fn cmd_timedemo(pak_path: &str, demo: &str, rest: &[String]) -> Result<Strin
         let _ = writeln!(o, "Playing demo from {name}.");
         let display_aspect = video.display_aspect(width, height, Some(DISPLAY_ASPECT));
         let vid = Vid { width, height, display_aspect, exact_perspective: false, video: video.cvars, mip: render::MipCvars::DEFAULT };
-        let Some(timed) = run(&pak, &name, &vid, video.threads(), &mut clock, &mut rgba, false) else {
+        let Some(timed) = run(&pak, &name, &vid, video.threads(), &mut clock, &mut rgba, false, lerpmodels) else {
             let _ = writeln!(o, "ERROR: couldn't open.");
             return Ok(o);
         };
@@ -157,7 +179,7 @@ pub fn cmd_timedemo(pak_path: &str, demo: &str, rest: &[String]) -> Result<Strin
             LAPS.with(|l| *l.borrow_mut() = (None, [0.0; PHASES]));
             set_lap_hook(Some(lap_hook));
             let t0 = Instant::now();
-            let profiled = run(&pak, &name, &vid, video.threads(), &mut clock, &mut rgba, true);
+            let profiled = run(&pak, &name, &vid, video.threads(), &mut clock, &mut rgba, true, lerpmodels);
             let total = t0.elapsed().as_secs_f64();
             set_lap_hook(None);
             let (frames, st, (bytes, blocks)) = match profiled {

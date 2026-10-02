@@ -115,7 +115,7 @@ pub struct SettingRow {
 
 /// The settings page's rows, in order: the profile, then each departure the
 /// profiles switch ([`crate::cvar::Cvars::modern`] says which are on in 2026).
-pub const SETTING_ROWS: [SettingRow; 17] = [
+pub const SETTING_ROWS: [SettingRow; 18] = [
     SettingRow {
         cvar: "profile",
         label: "               Profile",
@@ -156,6 +156,12 @@ pub const SETTING_ROWS: [SettingRow; 17] = [
         cvar: "r_lerpmove",
         label: "       Smooth monsters",
         help: ["Monsters glide between their", "steps, not 10 jumps a second"],
+        kind: RowKind::Toggle,
+    },
+    SettingRow {
+        cvar: "r_lerpmodels",
+        label: "     Smooth animations",
+        help: ["Walking and firing poses blend", "together, not 10 snaps a second"],
         kind: RowKind::Toggle,
     },
     SettingRow {
@@ -2398,12 +2404,16 @@ fn draw_options_screen(
 /// `qplaque` being 32 wide at x=16): the white [`EXTRAS_HEADER`] a row below
 /// the list — right under it once the rows leave no room for the gap in the
 /// 200-line screen (17 rows do not) — and the highlighted row's help lines
-/// right under the header, at most [`EXTRAS_NOTE_COLS`] columns.
+/// right under the header, at most [`EXTRAS_NOTE_COLS`] columns and
+/// [`EXTRAS_HELP_LINES`] of them.
 const EXTRAS_ROW_Y0: f32 = OPTIONS_ROW_Y0;
 const EXTRAS_NOTE_X: f32 = 64.0;
 const EXTRAS_NOTE_COLS: usize = (MENU_VIRT_W as usize - EXTRAS_NOTE_X as usize) / 8;
 const EXTRAS_LIST_END: f32 = EXTRAS_ROW_Y0 + SETTING_ROWS.len() as f32 * OPTIONS_ROW_STEP;
-/// The header and the three help lines.
+/// The header and the three help lines, when they fit (see
+/// [`EXTRAS_HELP_LINES`]): the budget this reserves no longer always holds
+/// once the list itself is long enough, so the header's own position
+/// ([`EXTRAS_HEADER_Y`]) does not wait on it.
 const EXTRAS_NOTES_H: f32 = 4.0 * OPTIONS_ROW_STEP;
 const EXTRAS_HEADER_Y: f32 = if EXTRAS_LIST_END + OPTIONS_ROW_STEP + EXTRAS_NOTES_H <= 200.0 {
     EXTRAS_LIST_END + OPTIONS_ROW_STEP
@@ -2411,6 +2421,23 @@ const EXTRAS_HEADER_Y: f32 = if EXTRAS_LIST_END + OPTIONS_ROW_STEP + EXTRAS_NOTE
     EXTRAS_LIST_END
 };
 const EXTRAS_HELP_Y: f32 = EXTRAS_HEADER_Y + OPTIONS_ROW_STEP;
+/// How many of a row's three help lines ([`extras_help_lines`]: its own
+/// two, then its console line) actually fit between [`EXTRAS_HELP_Y`] and
+/// the 200-line screen's bottom. Up to 17 rows in [`SETTING_ROWS`] all
+/// three do (so every row keeps showing its console command); past that —
+/// this round's `r_lerpmodels` makes 18 — the list alone has used the
+/// budget the gap and the notes shared, and the third line (the console
+/// command, the one a player can still find by opening the console and
+/// typing the cvar's name) goes first so the two that explain the setting
+/// in plain words still show.
+const EXTRAS_HELP_LINES: usize = {
+    let fit = ((200.0 - EXTRAS_HELP_Y) / OPTIONS_ROW_STEP) as usize;
+    if fit < 3 {
+        fit
+    } else {
+        3
+    }
+};
 /// The page's header (`M_PrintWhite`): what these rows are.
 const EXTRAS_HEADER: &str = "Not in id's Quake";
 
@@ -2419,8 +2446,8 @@ const EXTRAS_HEADER: &str = "Not in id's Quake";
 /// [`SETTING_ROWS`] row an Options row — the right-justified `M_Print` label
 /// at x=16, its value at x=220 (`M_DrawCheckbox`'s "on" / "off" for a
 /// toggle), the 4 Hz flashing cursor at x=200 — and under the rows the
-/// [`EXTRAS_HEADER`] in white and the highlighted row's three bronze help
-/// lines.
+/// [`EXTRAS_HEADER`] in white and up to [`EXTRAS_HELP_LINES`] of the
+/// highlighted row's bronze help lines.
 #[allow(clippy::too_many_arguments)]
 fn draw_extras_screen(
     image: &mut Image,
@@ -2447,7 +2474,7 @@ fn draw_extras_screen(
     draw_char_scaled(image, cc, OPTIONS_CURSOR_X, cy, cursor_glyph, scale, ox, oy);
     draw_string_scaled(image, cc, EXTRAS_NOTE_X, EXTRAS_HEADER_Y, EXTRAS_HEADER, scale, ox, oy);
     if let Some(row) = SETTING_ROWS.get(menu.cursor()) {
-        for (i, line) in extras_help_lines(row).iter().enumerate() {
+        for (i, line) in extras_help_lines(row).iter().take(EXTRAS_HELP_LINES).enumerate() {
             let y = EXTRAS_HELP_Y + i as f32 * 8.0;
             let line = &line[..line.len().min(EXTRAS_NOTE_COLS)];
             m_print(image, cc, EXTRAS_NOTE_X, y, line, scale, ox, oy);
@@ -4096,7 +4123,8 @@ mod tests {
             assert_eq!(SETTING_ROWS.iter().filter(|r| r.cvar == c.name).count(), 1, "{}: one row", c.name);
         }
         assert_eq!(MenuScreen::Extras.item_count(), SETTING_ROWS.len());
-        const _: () = assert!(EXTRAS_HELP_Y + 3.0 * 8.0 <= 200.0, "the help fits the 200-line menu screen");
+        const _: () = assert!(EXTRAS_HELP_Y + EXTRAS_HELP_LINES as f32 * 8.0 <= 200.0, "the help fits the 200-line menu screen");
+        const _: () = assert!(EXTRAS_HELP_LINES >= 2, "at least the row's own two help lines always fit");
     }
 
     #[test]

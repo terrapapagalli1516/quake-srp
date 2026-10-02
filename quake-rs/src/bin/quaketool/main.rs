@@ -241,7 +241,7 @@ const COMMANDS: &[Command] = &[
     },
     Command {
         name: "timedemo",
-        usage: "<pak> <demo> [--res WxH[,WxH...]] [--profile 1] [video options]",
+        usage: "<pak> <demo> [--res WxH[,WxH...]] [--profile 1] [--lerpframe 1] [video options]",
         about: "id's `timedemo`: the demo one message a frame, uncapped; prints CL_FinishTimeDemo's line",
         run: |a| Ok(Out::Text(timedemo::cmd_timedemo(&a[0], &a[1], &a[2..])?)),
     },

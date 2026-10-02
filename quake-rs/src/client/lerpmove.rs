@@ -11,8 +11,10 @@
 //! mover gliding from where it was drawn when a step came to where the step
 //! put it, turning the short way round. It changes only where the model is
 //! drawn: the entity's origin for everything else (trails, lights, sound,
-//! collisions) stays the server's. The animation frames are not blended
-//! (QuakeSpasm's `r_lerpmodels`): the stepped animation is part of the look.
+//! collisions) stays the server's. The animation frames are a separate
+//! extra, [`crate::client::lerpmodels::LerpModels::Smooth`] (QuakeSpasm's
+//! `r_lerpmodels`): off here, the stepped animation is part of the look;
+//! on (2026's default, beside this one), it blends too.
 //!
 //! **How long a glide lasts: 0.1 s, id1's think interval (and QuakeSpasm's
 //! glide), from where the entity is drawn when the step comes.** A step that

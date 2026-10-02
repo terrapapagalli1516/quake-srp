@@ -479,6 +479,20 @@ impl Mdl {
         }
     }
 
+    /// Whether `frame` (range-checked the same way as [`Self::frame_pose`])
+    /// is an [`Frame::Group`]: id picks its sub-pose by `time` (a torch's
+    /// flicker, a flame), not a motion between two poses an entity's `frame`
+    /// field stepped to. The smooth-animations extra
+    /// ([`crate::client::lerpmodels`]) never blends across one.
+    pub fn frame_is_group(&self, frame: i32) -> bool {
+        let idx = if frame < 0 || (frame as usize) >= self.frames.len() {
+            0
+        } else {
+            frame as usize
+        };
+        matches!(self.frames.get(idx), Some(Frame::Group { .. }))
+    }
+
     /// Resolve which skin image to use for skin `skinnum` at game `time`, porting
     /// `R_AliasSetupSkin` (`r_alias.c`).
     ///
@@ -912,6 +926,19 @@ mod tests {
         assert_eq!(c[0].v[0], 20);
         let d = mdl.frame_pose(-3, 0.05).expect("pose");
         assert_eq!(d[0].v[0], 10);
+    }
+
+    #[test]
+    fn frame_is_group_tells_single_from_group() {
+        let grouped = Mdl::parse(&build_grouped()).expect("parse grouped");
+        assert!(grouped.frame_is_group(0));
+        // Out-of-range resets to 0, same as frame_pose: still the group.
+        assert!(grouped.frame_is_group(99));
+        assert!(grouped.frame_is_group(-1));
+
+        let single = Mdl::parse(&build_canonical()).expect("parse canonical");
+        assert!(!single.frame_is_group(0));
+        assert!(!single.frame_is_group(99), "out of range resets to frame 0, a Single here too");
     }
 
     #[test]

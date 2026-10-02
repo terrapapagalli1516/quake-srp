@@ -443,7 +443,7 @@ pub fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> CmdRes
         }
         let inst: Vec<render::ModelInstance> = owned
             .iter()
-            .map(|(mdl, origin, yaw, color)| render::ModelInstance { mdl, origin: *origin, yaw: *yaw, pitch: 0.0, roll: 0.0, color: *color, frame: 0, skinnum: 0 })
+            .map(|(mdl, origin, yaw, color)| render::ModelInstance { mdl, origin: *origin, yaw: *yaw, pitch: 0.0, roll: 0.0, color: *color, frame: 0, blend: None, skinnum: 0 })
             .collect();
         let external: Vec<render::ExternalBModel> = ext_owned
             .iter()
@@ -471,6 +471,7 @@ pub fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> CmdRes
             .map(|mdl| render::Viewmodel {
                 mdl,
                 frame: weapon_frame,
+                blend: None,
                 // No bob in this still.
                 origin_ofs: render::viewmodel_origin_ofs([cam.pitch, cam.yaw, 0.0], 0.0, viewsize),
                 angles: [cam.pitch, cam.yaw, 0.0],

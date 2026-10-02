@@ -32,6 +32,7 @@ the volumes, the mouse).
 | Hor+: `fov` spans a 4:3 screen, and a wider screen sees more at the sides | `fov_adapt` (Widescreen FOV) | on | id spreads `fov` over any width, so a wide screen loses the top and bottom. |
 | The 2-D layer (status bar, menus, console) at the largest whole multiple of 320x200 that fits | `wasm_scaled2d` (Scaled 2-D layer) | on | id draws it 1:1, so at 1440p the status bar is a 24-pixel strip. |
 | Monsters glide between their 0.1 s steps (QuakeSpasm's `r_lerpmove`) | `r_lerpmove` (Smooth monsters) | on | At high refresh rates a stepping monster visibly jumps ten times a second. ("Demo playback between messages") |
+| An alias model's animation blends between its frames (QuakeSpasm's `r_lerpmodels`) | `r_lerpmodels` (Smooth animations) | on | id steps `frame` ten times a second; at high refresh rates a monster's walk cycle (and the view weapon's) visibly holds a pose for several frames, then jumps. (`client::lerpmodels`, FRAMERATE.md "Animation frames blended") |
 | id's crosshair (`V_RenderView`'s `+`) | `crosshair` (Crosshair) | on (id: 0) | Mouse aiming. |
 | Mouse look without holding `+mlook` | `freelook` (Mouse look) | on | How mouse play works today; `+mlook` still works in both profiles. |
 | Always Run | `cl_forwardspeed`, `cl_backspeed` 400 (Options > Always Run) | on (id: 200) | |
