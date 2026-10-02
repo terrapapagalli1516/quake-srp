@@ -926,8 +926,12 @@ fn render_demo_frame(
         d.renderer.render_into(&scene, &mut img);
         lap(Phase::Render3d);
     }
-    // V_RenderView: the crosshair over the view, before the 2-D layer.
-    if let Some(cc) = d.conchars.as_ref().filter(|_| d.crosshair) {
+    // V_RenderView: the crosshair over the view, before the 2-D layer — but
+    // not over an intermission or finale, which id's GLQuake leaves it off
+    // (gl_screen.c's SCR_UpdateScreen draws it only outside them): WinQuake
+    // draws it there too, over the level's stats, with nothing to aim at.
+    // (`crosshair` is a 2026 setting; Classic draws none.)
+    if let Some(cc) = d.conchars.as_ref().filter(|_| d.crosshair && f.intermission == 0) {
         render::draw_crosshair(&mut img, cc, &vrect);
     }
     lap(Phase::Post3d);

@@ -603,6 +603,22 @@ mod tests {
             (160..320).any(|x| with_overlay.pixels[y * 320 + x] != without_overlay.pixels[y * 320 + x])
         });
         assert!(region_differs, "the intermission overlay painted the stats region");
+        // The crosshair (2026's `crosshair 1`) stays off the level-complete
+        // screen, as id's GLQuake leaves it: the frozen frame is the same with
+        // it on or off — and out of the intermission it does draw.
+        let crosshair_changes = |intermission: u8| {
+            walk_mut(|w| {
+                w.intermission = intermission;
+                w.crosshair = true;
+                let on = step_walk(w, 0.0, false, &crate::vid::mode_vid(320, 200)).0;
+                w.crosshair = false;
+                let off = step_walk(w, 0.0, false, &crate::vid::mode_vid(320, 200)).0;
+                w.intermission = 1;
+                on.pixels != off.pixels
+            })
+        };
+        assert!(!crosshair_changes(1), "no crosshair over the intermission");
+        assert!(crosshair_changes(0), "the crosshair draws outside it");
         dump_frame("intermission-e1m1");
 
         // --- No button: the intermission HOLDS even long past exittime.

@@ -1101,8 +1101,12 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
     // The 2-D oracle harness paints the view one flat colour (the C oracle's
     // `oracle_blank`), so a shot measures the 2-D layer alone (`set_view_hook`).
     view_hook(&mut img, vrect);
-    // V_RenderView: the crosshair over the view, before the 2-D layer.
-    if let Some(cc) = w.conchars.as_ref().filter(|_| w.crosshair) {
+    // V_RenderView: the crosshair over the view, before the 2-D layer — but
+    // not over an intermission or finale, which id's GLQuake leaves it off
+    // (gl_screen.c's SCR_UpdateScreen draws it only outside them): WinQuake
+    // draws it there too, over the level's stats, with nothing to aim at.
+    // (`crosshair` is a 2026 setting; Classic draws none.)
+    if let Some(cc) = w.conchars.as_ref().filter(|_| w.crosshair && w.intermission == 0) {
         render::draw_crosshair(&mut img, cc, &vrect);
     }
     // cl.cshifts order: CONTENTS (bottom) -> DAMAGE -> BONUS -> POWERUP (top).
