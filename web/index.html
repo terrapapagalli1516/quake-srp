@@ -796,10 +796,25 @@ addEventListener('keyup', e => {
   // held-then-released arrow can't scroll either.
   if (MOVE_KEYNUMS.includes(qk)) e.preventDefault();
 });
-// A key released while the window was elsewhere never comes up here: on
-// losing the keyboard, vid_win.c's ClearAllStates (every key up, repeats
-// cleared), so nothing stays held.
-addEventListener('blur', () => sendRecord(IN.CLEAR_KEYS, new Uint8Array(0)));
+// --- Every key up when a release may never come (PLATFORM.md, "Input").
+// A key let go while the page did not have the keyboard never comes up
+// here, and nor does one let go after the browser took a key for itself:
+// Chromium drops every keyup after a key it handled until the next keydown,
+// so W held through the Esc that ends the pointer lock stayed +forward for
+// good. id's vid_win.c ran ClearAllStates on every activation change and
+// mode set ("fix the leftover Alt from any Alt-Tab"); the page runs it
+// whenever it may have lost a release: the window blurs, the tab hides, the
+// pointer lock or fullscreen ends. One CLEAR_KEYS record is all of it in
+// the program (input.rs clear_all_states: Key_Event(key, false) for every
+// key, Key_ClearStates, IN_ClearStates); the page's own half is the unlocked
+// drag. A key still held presses again with its next autorepeat (Key_Event
+// takes a repeat as a press once the count is cleared).
+function clearAllStates() {
+  dragging = false;
+  sendRecord(IN.CLEAR_KEYS, new Uint8Array(0));
+}
+addEventListener('blur', clearAllStates);
+document.addEventListener('visibilitychange', () => { if (document.hidden) clearAllStates(); });
 
 // No UI control may KEEP focus after a click: a focused button re-triggers on
 // Space/Enter (the 🔊 sound toggle was the known offender — every jump replayed
@@ -965,7 +980,15 @@ function showFsHint(html) {
 // Entering fullscreen: lock Esc (and F12 with it), then surface the contract
 // for a moment.
 document.addEventListener('fullscreenchange', () => {
-  if (!document.fullscreenElement) { unlockEscape(); fsHint.classList.remove('show'); return; }
+  if (!document.fullscreenElement) {
+    // Leaving: the browser's own Esc may have eaten a key's release, and
+    // the Keyboard Lock goes with fullscreen (Esc itself is never held in
+    // the game: escPress sends its down and up together).
+    unlockEscape();
+    clearAllStates();
+    fsHint.classList.remove('show');
+    return;
+  }
   lockEscape().then(ok => {
     if (!document.fullscreenElement) return;   // left again before the lock settled
     escLocked = ok;
@@ -1065,6 +1088,9 @@ canvas.addEventListener('contextmenu', e => e.preventDefault());
 // captured, and a lock loss that pairs with that keydown is not a second Esc.
 document.addEventListener('pointerlockchange', () => {
   if (!locked()) {
+    // However the lock ended (the browser's Esc, a focus change), a key's
+    // release may have gone with it (clearAllStates, above).
+    clearAllStates();
     const pageInitiated = expectUnlock;
     expectUnlock = false;
     const pairsWithEscKey = escLocked && performance.now() - escKeyAt < ESC_PAIR_MS;

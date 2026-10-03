@@ -101,7 +101,7 @@ round-trip tests; `wasi.js` and `index.html` carry the same constants.
 | 1 | TICK | `seq u32`, `dt f64` (seconds since the last tick) |
 | 2 | KEY | `keynum u8`, `down u8`, `0 u16`, `ch u32` (the character the layout typed; 0 none) |
 | 3 | MOUSE | `dx f32`, `dy f32` (raw `movementX`/`movementY`) |
-| 4 | CLEAR_KEYS | — (window blur: `ClearAllStates`) |
+| 4 | CLEAR_KEYS | — (a release may be lost: `ClearAllStates`, "Input") |
 | 5 | POINTER_UNLOCKED | — (the port's `+mlook` release: lookspring) |
 | 6 | AUDIO_READY | `ready u8`, `0 ×3`, `rate u32` (the AudioContext's sample rate; 0 none yet) |
 | 7 | CALL | `id u32`, then the UTF-8 line |
@@ -672,6 +672,30 @@ it means, as id's `Key_Event`, `IN_MouseMove` and the joystick code do.
   console and the name fields. A key `code` does not name falls back to
   `key`. (`verify_input.py`: AZERTY's key in W's place is `w` in the game and
   types `z` in the console; letters used to follow the layout, `z`.)
+- **Every key up when a release may never come.** A key let go while the
+  page did not have the keyboard never comes up to it, and Chromium also
+  drops every keyup after a key the browser handled itself (the Esc that
+  ends the pointer lock) until the next keydown: W held through that Esc
+  stayed `+forward` for good. So, as id's `vid_win.c` ran `ClearAllStates`
+  on every activation change and mode set (vid_win.c: "fix the leftover Alt from any
+  Alt-Tab"), the page sends one `CLEAR_KEYS` record whenever a release may
+  have been lost: the window blurs, the tab hides, the pointer lock ends,
+  fullscreen ends. The program (`input.rs`, `clear_all_states`) runs
+  `Key_Event (key, false)` for every key, so each `+` binding lets go as
+  its release would, then `Key_ClearStates` and `IN_ClearStates`; the page
+  ends its unlocked mouse drag. A key still held presses again with its
+  next autorepeat (its repeat count starts over); one whose repeat a later
+  key stopped waits for its next press, as in id's. Not on entering
+  fullscreen (no keyup was lost there) nor on `pointerlockerror` (a lock
+  never taken loses nothing). The touch controls' `releaseAll` and the pad
+  are unchanged. `verify_input.py` (8) checks each trigger headless with the
+  `keys_held` call; a headed Chromium 146 (2026-10-02, as in "Fullscreen")
+  showed the stuck W before, and nothing left held after in 15 cases (Esc
+  windowed and held in fullscreen, fullscreen without Keyboard Lock, the
+  focus to another window with Alt or the fire button held, a click
+  elsewhere, Alt+Enter both ways, F11, a new tab). Not tried: Firefox,
+  Safari, macOS, Windows, a real Alt-Tab (XTEST's keys never reach the Wayland compositor
+  there; another window was activated instead).
 - **The F-keys.** `default.cfg`'s shortcuts (F1 help, F2/F3 the Save/Load
   screen, F4 Options, F6/F9 quicksave/quickload, F10 quit, F12 a screenshot)
   reach the game as ordinary `KEY` records like any other key; the page's
