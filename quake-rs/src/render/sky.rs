@@ -219,7 +219,43 @@ pub(super) fn draw_sky_span(
     tw: usize,
     view: &SkyView,
 ) {
-    sky_span(out, u, v, count, view, |s, t| sky_sample(pixels, tw, s, t, view.front));
+    // id's 256x128 sky reads its two layers with no check and no branch
+    // ([`sky_layers_sample`]); any other texture, never id's, the guarded way.
+    match sky_layers(pixels, tw) {
+        Some(layers) => sky_span(out, u, v, count, view, |s, t| sky_layers_sample(layers, s, t, view.front)),
+        None => sky_span(out, u, v, count, view, |s, t| sky_sample(pixels, tw, s, t, view.front)),
+    }
+}
+
+/// The sky miptexture as every id map has it: `SKYSIZE` rows of the two
+/// layers side by side, front then back.
+type SkyLayers = [u8; LAYERS_WIDTH * SKYSIZE as usize];
+/// The width of [`SkyLayers`]: two layers.
+const LAYERS_WIDTH: usize = 2 * SKYSIZE as usize;
+
+/// `pixels` as [`SkyLayers`], when it is a sky of id's shape (`tw` 256 wide,
+/// 128 rows or more): an array, so that the texel indices
+/// [`sky_layers_sample`] masks to `SKYMASK` are known to be inside it.
+fn sky_layers(pixels: &[u8], tw: usize) -> Option<&SkyLayers> {
+    if tw != LAYERS_WIDTH {
+        return None;
+    }
+    pixels.get(..LAYERS_WIDTH * SKYSIZE as usize)?.try_into().ok()
+}
+
+/// [`sky_sample`] on id's 256x128 sky, for [`draw_sky_span`]'s pixel loop:
+/// the same two texels, both read at every pixel (each index is inside the
+/// array by its masks, so neither read is checked) and one of them taken
+/// without a branch. The guarded [`sky_sample`] reads the back layer only
+/// behind a transparent cloud texel: a branch at every pixel that a cloud's
+/// ragged edge makes unpredictable, and a sky pixel cost twice a wall's
+/// with it (PERF_PLAN.md, §14).
+#[inline]
+fn sky_layers_sample(layers: &SkyLayers, s: i32, t: i32, front: i32) -> u8 {
+    let texel = |c: i32| ((c >> 16) & SKYMASK) as usize;
+    let cloud = layers[texel(t.wrapping_add(front)) * LAYERS_WIDTH + texel(s.wrapping_add(front))];
+    let back = layers[texel(t) * LAYERS_WIDTH + LAYERS_WIDTH / 2 + texel(s)];
+    if cloud != 0 { cloud } else { back }
 }
 
 /// [`draw_sky_span`]'s walk of the span's 16.16 coordinates, each pixel
@@ -231,7 +267,7 @@ fn sky_span(out: &mut [u8], u: i32, v: i32, count: i32, view: &SkyView, sample: 
     let mut count = count;
     let (mut s, mut t) = sky_uv_to_st(u, v, view);
     let (mut sstep, mut tstep) = (0i32, 0i32);
-    let mut out = out.iter_mut();
+    let mut out = out;
     while count > 0 {
         let spancount = count.min(SKY_SPAN_MAX);
         count -= spancount;
@@ -250,13 +286,16 @@ fn sky_span(out: &mut [u8], u: i32, v: i32, count: i32, view: &SkyView, sample: 
                 tstep = tnext.wrapping_sub(t) / spancountminus1;
             }
         }
-        for _ in 0..spancount {
-            if let Some(p) = out.next() {
-                *p = sample(s, t);
-            }
+        // The segment's pixels: as many as `out` still has (the callers'
+        // `count` is `out`'s length).
+        let n = (spancount as usize).min(out.len());
+        let (segment, rest) = std::mem::take(&mut out).split_at_mut(n);
+        for p in segment {
+            *p = sample(s, t);
             s = s.wrapping_add(sstep);
             t = t.wrapping_add(tstep);
         }
+        out = rest;
         s = snext;
         t = tnext;
     }
@@ -352,6 +391,50 @@ mod tests {
         assert_eq!(sky_sample(&tiny, 2, fx(1000), fx(-1000), fx(5)), 0);
         // Near i32's edge the offset wraps without changing the texel read.
         assert_eq!(sky_sample(&pixels, tw, i32::MAX, 0, fx(1)), sky_sample(&pixels, tw, i32::MAX - fx(128), 0, fx(1)));
+    }
+
+    /// [`sky_layers_sample`], the span loop's unchecked and branch-free read of
+    /// id's 256x128 sky, is [`sky_sample`] for every coordinate and offset:
+    /// 16.16 values over the whole `i32` range, the patterned sky's
+    /// transparent and opaque cloud texels both. A sky of any other shape has
+    /// no [`SkyLayers`] and its spans keep the guarded read.
+    #[test]
+    fn the_unchecked_sky_sample_is_the_guarded_one() {
+        let pixels = patterned_sky();
+        let layers = sky_layers(&pixels, 256).expect("id's shape");
+        let mut seed = 0x9E37_79B9u32;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed as i32
+        };
+        let (mut clouds, mut backs) = (0, 0);
+        for i in 0..200_000 {
+            // Whole-range values, and small ones around the texel edges.
+            let (s, t, front) = if i % 2 == 0 { (next(), next(), next()) } else { (next() >> 9, next() >> 9, next() >> 12) };
+            let want = sky_sample(&pixels, 256, s, t, front);
+            assert_eq!(sky_layers_sample(layers, s, t, front), want, "s {s} t {t} front {front}");
+            let cloud = pixels[(((t.wrapping_add(front)) >> 16) & 127) as usize * 256 + ((s.wrapping_add(front) >> 16) & 127) as usize];
+            if cloud != 0 { clouds += 1 } else { backs += 1 }
+        }
+        assert!(clouds > 50_000 && backs > 50_000, "both layers read: {clouds} cloud, {backs} back");
+        for edge in [i32::MIN, -1, 0, 0xFFFF, 0x1_0000, 127 << 16, 128 << 16, i32::MAX] {
+            assert_eq!(sky_layers_sample(layers, edge, edge, 0), sky_sample(&pixels, 256, edge, edge, 0), "{edge}");
+            assert_eq!(sky_layers_sample(layers, 0, 0, edge), sky_sample(&pixels, 256, 0, 0, edge), "front {edge}");
+        }
+        // Not id's shape: no layers, and the span is still drawn, guarded.
+        assert!(sky_layers(&pixels, 128).is_none() && sky_layers(&pixels[..256 * 127], 256).is_none());
+        assert!(sky_layers(&[0u8; 4], 2).is_none());
+        let v = SkyView::new([1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, 1.0], 320.0, (160, 100), 3.3, SkyScroll::Fluid);
+        let mut out = vec![9u8; 40];
+        draw_sky_span(&mut out, 0, 60, 40, &[0u8; 4], 2, &v);
+        assert!(out.iter().all(|&p| p == 0), "a degenerate sky draws index 0");
+        // A span shorter than its count writes what fits, the same pixels.
+        let (mut whole, mut short) = (vec![0u8; 100], vec![0u8; 70]);
+        draw_sky_span(&mut whole, 5, 60, 100, &pixels, 256, &v);
+        draw_sky_span(&mut short, 5, 60, 100, &pixels, 256, &v);
+        assert_eq!(short[..], whole[..70]);
     }
 
     #[test]
