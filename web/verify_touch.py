@@ -17,8 +17,10 @@ the reason: 3's stick, look, two thumbs, FIRE and JUMP, and 2b's held arrow
 Gecko's touch events and pointer events.
 
   1. The page: touch.js loads on the coarse pointer, the touch layout fills
-     the screen, "tap to start"; the rotate prompt shows upright and a tap
-     dismisses it; the manifest and its icons.
+     the screen, "tap to start"; held upright (390x844) the rotate prompt
+     covers the page and the start prompt, the attract loop stops (no ticks,
+     no frames), a tap on the prompt asks for fullscreen and never plays
+     upright, and turned back it runs; the manifest and its icons.
   2. The menu by tapping (the engine's own item layout: menu_tap): a tap on
      the demo brings the menu, Single Player > New Game starts the game;
      Options' Always Run takes a tap to point and one to flip; Quit asks,
@@ -36,13 +38,25 @@ Gecko's touch events and pointer events.
   4. The console from Options > Go to console, typed on the phone's keyboard
      (a hidden field: `echo` prints), BACK closes it.
   5. Hidden page: the game pauses under its menu; back in the game it runs.
+  5b. Upright mid-game (web/PLATFORM.md, "Quake plays only sideways"): the
+     game waits (its own time, the player's nextthink, stands still), the
+     keys and fingers held are let go, the sound stops, the window's box is
+     not reported, a key pressed upright is not heard; turned back, the
+     same game runs on from the same instant, the sound is back, and the
+     finger still down walks nobody on. Also mid-demo and in a menu (2.).
+  12. A page that loads upright: the prompt is up, not a tick or a window
+     size sent, the start prompt takes no tap; turned sideways it starts,
+     fills the screen and answers a tap.
   6. Classic (in_touch off): no game controls, the menu still a tap away.
   7. Offline: every file kept by the service worker; with the server gone,
      a reload plays from the cache.
   8. Any static host: served with no isolation headers, the page reloads
      under its service worker and runs isolated.
   9./10. Clear of the status bar, at several phone sizes and the phone profile's
-     (PHONE_26, devicePixelRatio 2.6).
+     (PHONE_26, devicePixelRatio 2.6); then that phone held upright (412x1012)
+     mid-game: the prompt, no play layout, no way to play upright, and
+     turned back the game's time went on from where it stopped
+     (verify_touch_portrait.png).
   11. The game picker (PHONE_26), on a deploy offering a synthesized mission
      pack: the start overlay's buttons, the running game marked; a finger on
      Scourge of Armagon (pointerdown, pointerup, click) reloads the page as
@@ -51,8 +65,9 @@ Gecko's touch events and pointer events.
      the quit screen offers them too. A shareware-only deploy shows none.
 
 Not verifiable here: Safari and iOS (Playwright's WebKit does not start on
-the test host), a real phone's touch screen, fullscreen and the landscape
-lock (headless has no screen), vibration, the wake lock's effect, and a
+the test host), a real phone's touch screen and its turning (a viewport
+resize stands in for it), fullscreen and the landscape lock (headless has no
+screen: only that the tap asks), vibration, the wake lock's effect, and a
 hard reload on a server without the headers (CDP's cache-ignoring reload
 also bypasses the service worker for the reload the page then asks for,
 which a person's shift-reload is documented not to).
@@ -229,6 +244,32 @@ def main():
                 return True
             except Exception:
                 return False
+        # Portrait (12. below, and each state's own turn): the game waits
+        # behind the prompt. `counts`: the frames the program made and the
+        # ticks the page sent (index.html's frame loop), both still while
+        # held; `turn` sets the box and waits for the page to take it.
+        counts = lambda pg_=None: (pg_ or pg).evaluate("[Atomics.load(ctl, C.FRAMES), tickSeq]")
+        def runs(pg_=None, seconds=0.6):
+            before = counts(pg_)
+            time.sleep(seconds)
+            return counts(pg_) != before
+        def turn(width, height, pg_=None):
+            pg_ = pg_ or pg
+            pg_.set_viewport_size({"width": width, "height": height})
+            return wait(f"held === {'true' if height >= width else 'false'}", pg_=pg_)
+        # The prompt is on top of the page everywhere: at the middle, the
+        # corners and wherever the start prompt's and MENU's buttons are.
+        COVERED_JS = """() => {
+          const R = document.getElementById('tRotate'), w = innerWidth, h = innerHeight;
+          const at = [[w / 2, h / 2], [4, 4], [w - 4, 4], [4, h - 4], [w - 4, h - 4]];
+          for (const id of ['play', 'tMenu', 'tFire', 'tPadOk', 'tBack']) {
+            const e = document.getElementById(id);
+            const r = e && e.getBoundingClientRect();
+            if (r && r.width > 0) at.push([r.x + r.width / 2, r.y + r.height / 2]);
+          }
+          return at.every(([x, y]) => { const t = document.elementFromPoint(x, y); return !!t && !!t.closest('#tRotate'); });
+        }"""
+        game_hash = lambda pg_=None: (pg_ or pg).evaluate("quake.callLine('frame_hash').then(r => r.text)")
         def listener():
             return pg.evaluate("Promise.all(['listener_x','listener_y','listener_z','listener_fwd_x','listener_fwd_y'].map(n => quake.call(n)))")
         # The menu pad's buttons (PLATFORM.md "The menu pad"): a quick tap,
@@ -279,12 +320,31 @@ def main():
         check("the manifest: fullscreen, landscape, icons",
               manifest["display"] == "fullscreen" and manifest["orientation"] == "landscape"
               and all(s == "200 image/png" for s in icons), str(icons))
-        pg.set_viewport_size({"width": 390, "height": 844})
-        time.sleep(0.3)
+        # Upright, at the start prompt (12. is the page that loads this way):
+        # the prompt covers the page, the start prompt under it cannot be
+        # tapped, and nothing plays upright — a tap on the prompt does not
+        # dismiss it, and there is no word of "upright" in it.
+        pg.evaluate("(() => { window.__fsAsked = 0; const ask = HTMLElement.prototype.requestFullscreen;"
+                    " HTMLElement.prototype.requestFullscreen = function (...a) { window.__fsAsked++; return ask.apply(this, a); }; })()")
+        check("the attract loop runs under the start prompt", runs())
+        win0, size0 = pg.evaluate("windowSent"), pg.evaluate("quake.size()")
+        check("upright: the page takes the turn", turn(390, 844))
         check("upright: the rotate prompt", shown("#tRotate"))
+        check("it covers the page, the start prompt and the layer", pg.evaluate(COVERED_JS))
+        check("upright: the game waits (no ticks, no frames)", not runs(seconds=0.8), str(counts()))
+        pg.touchscreen.tap(195, 422)                      # where "tap to start" is: the prompt's own tap
+        time.sleep(0.3)
+        check("the start prompt under it takes no tap", not pg.evaluate("firstGestureDone") and shown("#overlay"))
+        asked = pg.evaluate("window.__fsAsked")
         tap_el("#tRotate")
-        check("a tap dismisses it", not shown("#tRotate"))
-        pg.set_viewport_size({"width": 844, "height": 390})
+        check("a tap does not dismiss it: nothing plays upright",
+              shown("#tRotate") and not pg.evaluate("document.documentElement.classList.contains('upright')"))
+        check("a tap on it asks for fullscreen (and so the landscape lock)",
+              asked >= 1 and pg.evaluate("window.__fsAsked") == asked + 1, f"{asked} -> {pg.evaluate('window.__fsAsked')}")
+        check("it does not offer to play upright", "upright" not in pg.evaluate("document.getElementById('tRotate').textContent").lower())
+        check("upright, the window's size is not reported (the frame keeps its size)",
+              pg.evaluate("windowSent") == win0 and pg.evaluate("quake.size()") == size0, pg.evaluate("windowSent"))
+        check("turned back: the prompt goes and the game runs", turn(844, 390) and not shown("#tRotate") and runs())
         time.sleep(0.5)
         pg.screenshot(path=os.path.join(WEB, "verify_touch_start.png"))
 
@@ -293,10 +353,32 @@ def main():
         check("started: the attract demo, the MENU button", wait("document.getElementById('touch').dataset.mode === 'demo'")
               and shown("#tMenu"), mode())
         check("menu pad hidden in demo mode", not shown("#tMenuPad"))
+        # Turned upright mid-demo: the demo stops (not a frame, and the
+        # picture it last drew stays), and goes on when turned back.
+        check("the demo runs", runs())
+        turn(390, 844)
+        time.sleep(0.2)
+        still = game_hash()
+        check("upright mid-demo: the demo waits", not runs(seconds=0.8) and game_hash() == still and shown("#tRotate"))
+        turn(844, 390)
+        time.sleep(0.4)
+        check("turned back: the demo goes on", runs() and game_hash() != still and mode() == "demo")
         pg.touchscreen.tap(500, 200)                      # any tap: the menu
         check("a tap on the demo opens the menu", wait("quake.state.flags & 1") and mode() == "menu" and shown("#tBack"))
         check("menu pad shown in menu mode", shown("#tMenuPad"))
         check("no GAME in the menu: no mission pack on this deploy", not shown("#tGame"))
+        # Turned upright in the menu: it stays where it was (the cursor, the
+        # screen), a tap on the prompt where a row was does nothing under it.
+        cursor0, screen0 = cursor(), screen_id()
+        turn(390, 844)
+        pg.touchscreen.tap(195, 330)
+        time.sleep(0.3)
+        check("upright in the menu: it waits, covered, untouched",
+              not runs(seconds=0.6) and pg.evaluate(COVERED_JS) and cursor() == cursor0 and screen_id() == screen0)
+        turn(844, 390)
+        time.sleep(0.4)
+        check("turned back: the same menu, the same row, running",
+              runs() and mode() == "menu" and cursor() == cursor0 and screen_id() == screen0 and shown("#tMenuPad"))
         pg.screenshot(path=os.path.join(WEB, "verify_touch_menu.png"))
         tap_menu(160, 42)                                 # Main > Single Player
         check("Single Player by a tap", wait("quake.state.menuScreen === 1"), str(screen_id()))
@@ -489,6 +571,69 @@ def main():
         tap_el("#tBack")
         check("back in the game: it runs", wait("(quake.state.flags & 513) === 0") and mode() == "play", str(flags()))
 
+        # --- 5b. Upright, mid-game -------------------------------------------------
+        # The game waits as a hidden tab's does (no ticks: its own time, the
+        # player entity's nextthink, stands still), every key and finger is
+        # let go, the sound stops, the window's box is not reported; turned
+        # back it goes on from the same instant — and the finger still down
+        # does not walk the player on.
+        keys_held = lambda: pg.evaluate("quake.callLine('keys_held').then(r => r.value)")
+        nextthink = lambda: field("nextthink")
+        audio_state = lambda: pg.evaluate("audioCtx ? audioCtx.state : 'none'")
+        stick_on = lambda: pg.evaluate("document.getElementById('tStick').classList.contains('on')")
+        size0, win0, flags0 = pg.evaluate("[quake.size(), windowSent, quake.state.flags]")
+        check("the game runs, the sound is on", runs() and audio_state() == "running", audio_state())
+        if FIREFOX:
+            skip("a held finger is let go as the phone turns", "a held finger: Playwright's Firefox touchscreen only taps")
+        else:
+            touches("touchStart", [(5, (150, 300))])
+            for k in range(1, 6):
+                touches("touchMove", [(5, (150, 300 - 10 * k))])
+                time.sleep(0.016)
+            time.sleep(0.2)                                # the stick, thumb up: walking
+        pg.keyboard.down("w")
+        time.sleep(0.2)
+        check("a key is held", keys_held() == 1, str(keys_held()))
+        turn(390, 844)
+        check("upright mid-game: the prompt covers the layer", shown("#tRotate") and pg.evaluate(COVERED_JS))
+        check("the game waits (no ticks, no frames)", not runs(seconds=0.8), str(counts()))
+        def keys_zero(seconds=2.0):
+            t0 = time.time()
+            while time.time() - t0 < seconds:
+                if keys_held() == 0:
+                    return True
+                time.sleep(0.05)
+            return False
+        check("every key is let go", keys_zero(), str(keys_held()))
+        if not FIREFOX:
+            check("the stick is let go", not stick_on())
+        check("the sound stops", wait("audioCtx.state === 'suspended'"), audio_state())
+        check("the wait is not reported as a window", pg.evaluate("windowSent") == win0 and pg.evaluate("quake.size()") == size0)
+        pg.keyboard.press("Escape")                        # a keyboard beside the phone: not heard
+        pg.keyboard.up("w")
+        if not FIREFOX:
+            touches("touchMove", [(5, (200, 200))])        # the finger goes on, to no one
+        t1 = nextthink()
+        time.sleep(2.0)
+        t2 = nextthink()
+        check("the game's own time stands still", t1 > 0 and t1 == t2, f"{t1:.2f} -> {t2:.2f}")
+        turn(844, 390)
+        time.sleep(1.0)
+        t3 = nextthink()
+        check("turned back: it goes on from the same instant (the 2 s are not played)", 0.2 < t3 - t2 < 1.6, f"{t2:.2f} -> {t3:.2f}")
+        check("the sound is back", wait("audioCtx.state === 'running'"), audio_state())
+        check("the key pressed upright was not heard (no menu)", not (flags() & 1) and mode() == "play", str(flags()))
+        check("the same game, as it was (state flags, frame size, window)",
+              pg.evaluate("quake.state.flags") == flags0 and pg.evaluate("quake.size()") == size0 and pg.evaluate("windowSent") == win0)
+        after = listener()
+        time.sleep(0.6)
+        later = listener()
+        if not FIREFOX:
+            check("the finger still down walks nobody on", math.hypot(later[0] - after[0], later[1] - after[1]) < 2
+                  and not stick_on(), f"{math.hypot(later[0] - after[0], later[1] - after[1]):.1f} units")
+            touches("touchEnd", [])
+        time.sleep(0.3)
+
         # --- 6. Classic ----------------------------------------------------------
         call("exec profile classic")
         check("Classic: no game controls, MENU still there",
@@ -646,19 +791,58 @@ def main():
             safe_zone_check(pg3, f"915x412@2.6 viewsize {vs}")
         set_viewsize(pg3, call3, 100)
 
-        # A portrait phone: the "turn sideways" prompt, not the play layout,
-        # but MENU (a tap to play upright, then the demo's own MENU button)
-        # must still be reachable.
-        pg3.set_viewport_size({"width": 412, "height": 1012})
-        pg3.evaluate("window.dispatchEvent(new Event('resize'))")
-        time.sleep(0.3)
-        check("412x1012 portrait: the rotate prompt", shown("#tRotate", pg3))
-        pg3.locator("#tRotate").click()
-        check("a tap plays upright anyway", not shown("#tRotate", pg3) and shown("#tMenu", pg3))
+        # The phone profile held upright, mid-game (412x1012 at 2.6): the
+        # "turn sideways" prompt is all there is — no play layout, no MENU,
+        # and no way to play upright — and turned back it is the same game.
+        t_before = pg3.evaluate("quake.callLine('player_field nextthink').then(r => r.value)")
+        check("412x1012 portrait: the page takes the turn", turn(412, 1012, pg3))
+        check("412x1012 portrait: the rotate prompt covers the page", shown("#tRotate", pg3) and pg3.evaluate(COVERED_JS))
+        tap_el3("#tRotate")
+        check("a tap does not play upright anyway", shown("#tRotate", pg3) and not runs(pg3, 0.6))
         pg3.screenshot(path=os.path.join(WEB, "verify_touch_portrait.png"))
+        check("412x1012 portrait: back to landscape, the game goes on",
+              turn(915, 412, pg3) and not shown("#tRotate", pg3) and runs(pg3) and mode(pg3) == "play")
+        t_after = pg3.evaluate("quake.callLine('player_field nextthink').then(r => r.value)")
+        check("the game's time went on from where it stopped", 0 < t_after - t_before < 8, f"{t_before:.1f} -> {t_after:.1f}")
 
         check("other phone sizes: no console errors", not errs3, str(errs3[-5:]))
         ctx3.close()
+
+        # --- 12. A page that loads upright -----------------------------------------
+        # The phone opened with the screen held upright: the prompt
+        # is up and the game has not been given a tick (the attract loop does
+        # not run behind it), the window's box has not been reported (the
+        # tall box is not a size to start at), and turning the phone starts
+        # everything: the box, the ticks, the picture over the whole screen,
+        # and the start prompt answers a tap.
+        ctx4 = phone(**dict(PHONE_26, viewport={"width": 412, "height": 1012}))
+        ctx4.add_init_script(NO_FULLSCREEN_JS)
+        pg4 = ctx4.new_page()
+        errs4 = []
+        pg4.on("console", lambda m: errs4.append(m.text) if m.type == "error" else None)
+        pg4.on("pageerror", lambda e: errs4.append("PAGEERROR: " + str(e)))
+        pg4.goto(f"http://127.0.0.1:{PORT}/index.html?2026", wait_until="load")
+        pg4.wait_for_function("window.quake && quake.ready && window.QuakeTouch", timeout=120000)
+        time.sleep(0.5)
+        check("loads upright: the prompt covers the page", shown("#tRotate", pg4) and pg4.evaluate(COVERED_JS)
+              and "TURN YOUR PHONE SIDEWAYS" in pg4.evaluate("document.getElementById('tRotate').textContent"))
+        check("loads upright: not a tick sent, the window not reported",
+              pg4.evaluate("tickSeq") == 0 and pg4.evaluate("windowSent") == "" and not runs(pg4, 0.8))
+        pg4.touchscreen.tap(206, 506)                     # the start prompt's place
+        time.sleep(0.3)
+        check("loads upright: the start prompt takes no tap", not pg4.evaluate("firstGestureDone"))
+        pg4.screenshot(path=os.path.join(WEB, "verify_touch_portrait_load.png"))
+        check("turned sideways: the game starts running", turn(1012, 412, pg4) and not shown("#tRotate", pg4) and runs(pg4))
+        pg4.wait_for_function("(() => { const r = document.getElementById('c').getBoundingClientRect();"
+                              " return Math.abs(r.width - 1012) <= 1 && Math.abs(r.height - 412) <= 1; })()", timeout=5000)
+        check("the box is reported then, and the picture fills the screen",
+              pg4.evaluate("windowSent") != "" and pg4.evaluate("quake.size()")[0] > 0,
+              f"{pg4.evaluate('windowSent')} {pg4.evaluate('quake.size()')}")
+        pg4.touchscreen.tap(506, 206)
+        check("and the start prompt answers a tap",
+              wait("document.getElementById('touch').dataset.mode === 'demo'", pg_=pg4) and pg4.evaluate("firstGestureDone"))
+        check("loads upright: no console errors", not errs4, str(errs4[-5:]))
+        ctx4.close()
 
         # --- 11. The game picker -------------------------------------------------
         # PLATFORM.md "The game picker", in the phone profile (PHONE_26), with a

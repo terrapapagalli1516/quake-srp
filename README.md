@@ -5,7 +5,10 @@
 **Play it:** `DEMO-URL` (id's shareware episode, in the browser)
 
 **Browsers:** tested in Chromium and Firefox (headless and headed) and on an Android phone; not
-yet in Safari. Firefox has no Keyboard Lock, so there one Esc in fullscreen also leaves it.
+yet in Safari. Firefox has no Keyboard Lock, so there one Esc in fullscreen also leaves it. The
+threads build needs the browser to give it its memory and its worker threads: if it will not,
+the page says so and the game does not start (the single-threaded build is a deploy you choose,
+not a fallback).
 
 | Classic | 2026 (the default) |
 |:---:|:---:|
@@ -124,7 +127,8 @@ You play with WASD and the mouse (click the game to capture the mouse), in eithe
 | Alt+Enter | fullscreen (and the bar's button, or the browser's F11); in fullscreen Esc is the menu, hold Esc to leave |
 | F6 / F9 | quicksave / quickload (id's F-keys: F1 help, F2/F3 save/load, F4 options, F10 quit) |
 
-A gamepad or a touch screen also works. The mouse wheel switches weapons in 2026 only (id's
+A gamepad or a touch screen also works (a phone plays sideways only: held upright, a "turn your
+phone sideways" screen covers the page and the game waits behind it). The mouse wheel switches weapons in 2026 only (id's
 `default.cfg` leaves it unbound). The page's **keys** button lists them all. For id's own
 1996 controls (the arrows, no mouse look, no gamepad, Always Run off) type `idcontrols` in
 the console.
