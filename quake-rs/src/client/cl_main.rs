@@ -562,7 +562,7 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
         }
         // The explosions' light (CL_ParseTEnt's CL_AllocDlight) is made with
         // their particles, by the call a demo's playback makes as well.
-        if let Some(name) = spawn_temp_entity(&mut w.particles, &mut w.dlights, ev, now, &mut w.prng) {
+        if let Some(name) = spawn_temp_entity(&mut w.particles, &mut w.dlights, ev, f64::from(now), &mut w.prng) {
             // CL_ParseTEnt read the position with MSG_ReadCoord, so the sound
             // starts to the 1/8 unit (the particles above still start at the
             // unrounded position: an open item, in the particles' code).
@@ -608,7 +608,7 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
         if !is_relinked(e.key) {
             continue;
         }
-        let flashed = w.dlights.relink_effects(e.key, e.origin, e.angles, e.effects, now, &mut w.prng);
+        let flashed = w.dlights.relink_effects(e.key, e.origin, e.angles, e.effects, f64::from(now), &mut w.prng);
         // r_lerpmodels: the same relink keeps a flashing entity's animation
         // from blending across the flare (`FrameLerps::muzzle_flash`) — the
         // player's flash is the view weapon's.
@@ -817,7 +817,7 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
             w.particles.spawn_trail(head, neworg, ttype, step, &mut w.tracercount, &mut w.prng);
         }
         if ttype == TRAIL_ROCKET {
-            w.dlights.relink_rocket(ent, neworg, now);
+            w.dlights.relink_rocket(ent, neworg, f64::from(now));
         }
     }
 
@@ -1092,7 +1092,7 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
     // walls: R_PushDlights skips `die < cl.time || !radius`. A light is drawn
     // at the radius it was allocated with; CL_DecayLights shrinks it after the
     // frame (below).
-    let active_dlights = w.dlights.active(now);
+    let active_dlights = w.dlights.active(f64::from(now));
     // The animated light-style scales (torch flicker, pulsing lights) at the
     // current server clock, stepped as id's or gliding (`r_lerplightstyles`,
     // the video cvars'); the worldspawn populated the styles at spawn time.
@@ -1150,7 +1150,7 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
     // Host_Frame runs CL_DecayLights after SCR_UpdateScreen: `radius -=
     // (cl.time - cl.oldtime)*decay` — 0 while paused, nothing fades or dies.
     if dt.is_finite() && dt > 0.0 && !paused {
-        w.dlights.advance(dt, now);
+        w.dlights.advance(dt, f64::from(now));
     }
 
     // 5b. Colour shifts (V_UpdatePalette, the software build's palette shift):

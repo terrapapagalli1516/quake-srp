@@ -186,7 +186,8 @@ fn demo_cd_track(demo: &crate::demo::Demo, track: u8) -> u8 {
 /// for the 1024-particle fiery burst. Each temp entity replays through the same
 /// [`spawn_temp_entity`] mapping the live walk uses (explosion / impact / splash).
 /// (`spawn_*` set `die = now + life`.)
-fn spawn_demo_frame_effects(d: &mut DemoPlay, idx: usize, now: f32, sound: &mut Vec<SoundCall>) {
+fn spawn_demo_frame_effects(d: &mut DemoPlay, idx: usize, time: f64, sound: &mut Vec<SoundCall>) {
+    let now = time as f32;
     if d.last_spawned_idx == Some(idx) {
         return; // already spawned this frame's effects; don't double-spawn
     }
@@ -235,7 +236,7 @@ fn spawn_demo_frame_effects(d: &mut DemoPlay, idx: usize, now: f32, sound: &mut 
         }
         // Reuse the live-walk mapping (explosion/impact/splash) — including
         // its client-side impact sound, exactly like walk_frame's te_sounds.
-        if let Some(name) = spawn_temp_entity(&mut d.particles, &mut d.dlights, ev, now, &mut d.prng) {
+        if let Some(name) = spawn_temp_entity(&mut d.particles, &mut d.dlights, ev, time, &mut d.prng) {
             te_sounds.push(crate::server::SoundEvent {
                 entity: 0,
                 channel: 0,
@@ -330,10 +331,10 @@ pub fn demo_frame(d: &mut DemoPlay, dt: f32, menu_up: bool, vid: &Vid) -> Client
     // first update); then a message is read whenever `cl.time` has passed
     // the newest one (`cl.time <= cl.mtime[0]`: "don't need another yet").
     let first_read = if d.last_spawned_idx.is_none() { 0 } else { d.idx + 1 };
-    spawn_demo_frame_effects(d, d.idx, d.time as f32, &mut sound);
+    spawn_demo_frame_effects(d, d.idx, d.time, &mut sound);
     while d.idx + 1 < n && d.time > f64::from(d.demo.frames[d.idx].time) {
         d.idx += 1;
-        spawn_demo_frame_effects(d, d.idx, d.time as f32, &mut sound);
+        spawn_demo_frame_effects(d, d.idx, d.time, &mut sound);
     }
     let f = &d.demo.frames[d.idx];
     if f.disconnect {
@@ -409,7 +410,7 @@ pub fn timedemo_frame_lerpmodels(
     let n = d.demo.frames.len();
     let first = d.last_spawned_idx.is_none();
     if first {
-        spawn_demo_frame_effects(d, 0, d.demo.frames[0].time, &mut sound);
+        spawn_demo_frame_effects(d, 0, f64::from(d.demo.frames[0].time), &mut sound);
     }
     if d.idx + 1 >= n {
         return None;
@@ -418,7 +419,7 @@ pub fn timedemo_frame_lerpmodels(
     let oldtime = d.demo.frames[d.idx].time;
     d.idx += 1;
     let now = d.demo.frames[d.idx].time;
-    spawn_demo_frame_effects(d, d.idx, now, &mut sound);
+    spawn_demo_frame_effects(d, d.idx, f64::from(now), &mut sound);
     d.oldtime = f64::from(oldtime);
     d.time = f64::from(now);
     // No glides either: a timedemo stays id's measure.
@@ -654,13 +655,13 @@ fn render_demo_frame(
         if e.num < 0 {
             continue;
         }
-        d.dlights.relink_effects(e.num, e.origin, e.angles, e.effects, v.time, &mut d.prng);
+        d.dlights.relink_effects(e.num, e.origin, e.angles, e.effects, d.time, &mut d.prng);
         let flags = d.models.get(e.modelindex).and_then(|m| m.as_ref()).map_or(0, |m| m.header.flags);
         if let Some(ttype) = rocket_trail_type(flags) {
             let head = d.trail_org.entry(e.num).or_insert(TrailHead::at(e.origin));
             d.particles.spawn_trail(head, e.origin, ttype, step, &mut d.tracercount, &mut d.prng);
             if ttype == TRAIL_ROCKET {
-                d.dlights.relink_rocket(e.num, e.origin, v.time);
+                d.dlights.relink_rocket(e.num, e.origin, d.time);
             }
         }
     }
@@ -865,7 +866,7 @@ fn render_demo_frame(
     // they were made with: `CL_DecayLights` shrinks them after the frame is
     // drawn (below), as in walk_frame.
     v.dlights.clear();
-    v.dlights.extend(d.dlights.pushed(v.time));
+    v.dlights.extend(d.dlights.pushed(d.time));
     let lights: Vec<DynamicLight> = v.dlights.iter().map(|&(_, l)| l).collect();
     // R_DrawParticles' order, as in walk_frame: retire (`die < cl.time`), draw,
     // then move and ramp.
@@ -997,7 +998,7 @@ fn render_demo_frame(
     // Host_Frame runs CL_DecayLights after SCR_UpdateScreen: `radius -=
     // (cl.time - cl.oldtime) * decay` — the clock the messages gave this
     // frame, which is the host's step in ordinary playback.
-    d.dlights.advance(cl_frametime, v.time);
+    d.dlights.advance(cl_frametime, d.time);
     // V_RenderView: the crosshair over the view, before the 2-D layer — but
     // not over an intermission or finale, which id's GLQuake leaves it off
     // (gl_screen.c's SCR_UpdateScreen draws it only outside them): WinQuake
@@ -1574,14 +1575,14 @@ mod tests {
         let mut d = lit_playback(vec![message(0, vec![lit(5, [100.0, 200.0, 50.0], [0.0, 90.0, 0.0], EF_MUZZLEFLASH)])]);
         let mut seed = d.prng;
         draw(&mut d);
-        let now = d.view.time;
+        let now = d.time; // cl.time, the double
         let mut live = DynamicLights::new();
         live.relink_effects(5, [100.0, 200.0, 50.0], [0.0, 90.0, 0.0], EF_MUZZLEFLASH, now, &mut seed);
         assert_eq!(d.view.dlights, live.pushed(now).collect::<Vec<_>>(), "the same light, slot and all");
         let (_, l) = d.view.dlights[0];
         assert_eq!((l.key(), l.minlight, l.decay), (5, 32.0, 0.0));
         assert!((200.0..232.0).contains(&l.radius), "200 + (rand()&31): {}", l.radius);
-        assert!((l.die - (now + 0.1)).abs() < 1e-6);
+        assert_eq!(l.die, (now + 0.1) as f32, "die = (float)(cl.time + 0.1)");
         // 16 up and 18 along the way it faces (+y here).
         assert!((l.origin[0] - 100.0).abs() < 1e-3 && (l.origin[1] - 218.0).abs() < 1e-3, "{:?}", l.origin);
         assert!((l.origin[2] - 66.0).abs() < 1e-3);
@@ -1684,13 +1685,13 @@ mod tests {
         rocket.header.flags = 1; // EF_ROCKET
         d.models = vec![None, Some(rocket)];
         draw(&mut d);
-        let now = d.view.time;
+        let now = d.time;
         let lights: Vec<_> = d.view.dlights.iter().map(|&(slot, l)| (slot, l)).collect();
         assert_eq!(lights.len(), 1, "{lights:?}");
         let (slot, l) = lights[0];
         assert_eq!(slot, 0);
         assert_eq!((l.key(), l.origin, l.radius, l.minlight, l.decay), (9, [30.0, 40.0, 50.0], 200.0, 0.0, 0.0));
-        assert!((l.die - (now + 0.01)).abs() < 1e-6);
+        assert_eq!(l.die, (now + 0.01) as f32, "die = (float)(cl.time + 0.01)");
         // A model with a grenade's flag (EF_GRENADE) leaves a trail but no light.
         let mut d = lit_playback(vec![message(0, vec![lit(9, [30.0, 40.0, 50.0], [0.0; 3], 0)])]);
         let mut grenade = poseless_model();

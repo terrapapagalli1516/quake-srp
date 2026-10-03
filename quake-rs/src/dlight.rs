@@ -28,6 +28,13 @@
 //!    (clamped at 0) for every light that has not died and has a radius. A light
 //!    is drawn (`R_PushDlights`) while `die >= now` and its radius is not 0:
 //!    [`DynamicLights::active`].
+//!  * The clock is `cl.time` as the C has it, a `double`, and `die` is a `float`:
+//!    a light is made with `die = (float)(cl.time + 0.5)` and is dead once
+//!    `die < cl.time`, the float widened. In a recorded demo `cl.time` is the
+//!    host's running sum, which has more bits than a float, so a light's last
+//!    frame — an explosion's, 0.5 s after its message was read, a whole number
+//!    of 1/72 s frames on — is decided by those bits; the live walk's clock is
+//!    the server's float.
 //!  * `key == 0` (explosions/temp entities) never matches an existing slot, so it
 //!    always takes a fresh dead slot — each explosion gets its own light. A
 //!    non-zero `key` (the entity's number for its effect lights) reuses the
@@ -109,8 +116,8 @@ impl DynamicLight {
 
     /// `R_PushDlights`' test, inverted: the renderer draws a light whose
     /// `die` has not passed and whose radius is not 0.
-    fn is_drawn(&self, now: f32) -> bool {
-        self.die >= now && self.radius != 0.0
+    fn is_drawn(&self, now: f64) -> bool {
+        f64::from(self.die) >= now && self.radius != 0.0
     }
 }
 
@@ -158,7 +165,7 @@ impl DynamicLights {
         die: f32,
         decay: f32,
         minlight: f32,
-        now: f32,
+        now: f64,
     ) -> &mut DynamicLight {
         let idx = self.choose_slot(key, now);
         let dl = &mut self.slots[idx];
@@ -173,7 +180,7 @@ impl DynamicLights {
 
     /// Resolve the slot index per the `CL_AllocDlight` policy. Always in
     /// `0..MAX_DLIGHTS`.
-    fn choose_slot(&self, key: i32, now: f32) -> usize {
+    fn choose_slot(&self, key: i32, now: f64) -> usize {
         // 1. Exact key match (non-zero key only), whether the light there is
         //    alive or not.
         if key != 0 {
@@ -183,7 +190,7 @@ impl DynamicLights {
         }
         // 2. First dead slot.
         // 3. Otherwise slot 0.
-        self.slots.iter().position(|dl| dl.die < now).unwrap_or(0)
+        self.slots.iter().position(|dl| f64::from(dl.die) < now).unwrap_or(0)
     }
 
     /// `CL_DecayLights`: shrink every light that has not died and has a radius
@@ -195,10 +202,10 @@ impl DynamicLights {
     ///
     /// A non-finite or negative `dt` is treated as 0 (no decay), so a bad clock
     /// can never invert a light.
-    pub fn advance(&mut self, dt: f32, now: f32) {
+    pub fn advance(&mut self, dt: f32, now: f64) {
         let dt = if dt.is_finite() && dt > 0.0 { dt } else { 0.0 };
         for dl in &mut self.slots {
-            if dl.die < now || dl.radius == 0.0 {
+            if f64::from(dl.die) < now || dl.radius == 0.0 {
                 continue;
             }
             dl.radius -= dt * dl.decay;
@@ -211,20 +218,20 @@ impl DynamicLights {
     /// The lights `R_PushDlights` marks at `now`, with the slot each is in
     /// (its bit in the surfaces' `dlightbits` is `1 << slot`), in slot order:
     /// `die >= now` and a radius.
-    pub fn pushed(&self, now: f32) -> impl Iterator<Item = (usize, DynamicLight)> + '_ {
+    pub fn pushed(&self, now: f64) -> impl Iterator<Item = (usize, DynamicLight)> + '_ {
         self.slots.iter().copied().enumerate().filter(move |(_, dl)| dl.is_drawn(now))
     }
 
     /// The lights drawn at `now` ([`Self::pushed`] without their slots), by
     /// value so callers can pass the slice to the renderer without holding a
     /// borrow on the pool.
-    pub fn active(&self, now: f32) -> Vec<DynamicLight> {
+    pub fn active(&self, now: f64) -> Vec<DynamicLight> {
         self.pushed(now).map(|(_, dl)| dl).collect()
     }
 
     /// The number of lights drawn at `now` (for diagnostics / playtest
     /// reporting).
-    pub fn active_count(&self, now: f32) -> usize {
+    pub fn active_count(&self, now: f64) -> usize {
         self.pushed(now).count()
     }
 
@@ -253,7 +260,7 @@ impl DynamicLights {
         origin: [f32; 3],
         angles: [f32; 3],
         effects: i32,
-        now: f32,
+        now: f64,
         rng: &mut Lcg,
     ) -> bool {
         let mut jittered = |base: f32| base + rng.next_range(32) as f32;
@@ -263,14 +270,14 @@ impl DynamicLights {
             // `dl->origin[2] += 16`, then `VectorMA (dl->origin, 18, fv, ...)`.
             let raised = [origin[0], origin[1], origin[2] + 16.0];
             let muzzle = std::array::from_fn(|i| raised[i] + 18.0 * forward[i]);
-            self.alloc(key, muzzle, jittered(200.0), now + 0.1, 0.0, 32.0, now);
+            self.alloc(key, muzzle, jittered(200.0), (now + 0.1) as f32, 0.0, 32.0, now);
         }
         if effects & EF_BRIGHTLIGHT != 0 {
             let up = [origin[0], origin[1], origin[2] + 16.0];
-            self.alloc(key, up, jittered(400.0), now + 0.001, 0.0, 0.0, now);
+            self.alloc(key, up, jittered(400.0), (now + 0.001) as f32, 0.0, 0.0, now);
         }
         if effects & EF_DIMLIGHT != 0 {
-            self.alloc(key, origin, jittered(200.0), now + 0.001, 0.0, 0.0, now);
+            self.alloc(key, origin, jittered(200.0), (now + 0.001) as f32, 0.0, 0.0, now);
         }
         flash
     }
@@ -278,15 +285,15 @@ impl DynamicLights {
     /// `CL_RelinkEntities`' light for a model flagged `EF_ROCKET`, on entity
     /// `key` at `origin`: radius 200, for 0.01 s, made again every frame the
     /// rocket flies.
-    pub fn relink_rocket(&mut self, key: i32, origin: [f32; 3], now: f32) {
-        self.alloc(key, origin, 200.0, now + 0.01, 0.0, 0.0, now);
+    pub fn relink_rocket(&mut self, key: i32, origin: [f32; 3], now: f64) {
+        self.alloc(key, origin, 200.0, (now + 0.01) as f32, 0.0, 0.0, now);
     }
 
     /// `CL_ParseTEnt`'s light for `TE_EXPLOSION` and `TE_EXPLOSION2` at `origin`:
     /// radius 350 for 0.5 s, shrinking 300 a second (`decay`), unowned (key 0)
     /// so every explosion has a slot of its own. (`TE_TAREXPLOSION` has none.)
-    pub fn explosion(&mut self, origin: [f32; 3], now: f32) {
-        self.alloc(0, origin, 350.0, now + 0.5, 300.0, 0.0, now);
+    pub fn explosion(&mut self, origin: [f32; 3], now: f64) {
+        self.alloc(0, origin, 350.0, (now + 0.5) as f32, 300.0, 0.0, now);
     }
 }
 
@@ -295,7 +302,7 @@ mod tests {
     use super::*;
 
     /// Slot numbers of the lights drawn at `now`.
-    fn slots(dl: &DynamicLights, now: f32) -> Vec<usize> {
+    fn slots(dl: &DynamicLights, now: f64) -> Vec<usize> {
         dl.pushed(now).map(|(i, _)| i).collect()
     }
 

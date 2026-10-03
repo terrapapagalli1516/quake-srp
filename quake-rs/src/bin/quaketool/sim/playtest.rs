@@ -309,7 +309,7 @@ pub fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> CmdRes
                     TE_EXPLOSION | TE_TAREXPLOSION | TE_EXPLOSION2 => {
                         te_explosions += 1;
                         if ev.te_type != TE_TAREXPLOSION {
-                            dlights.explosion(ev.pos, now);
+                            dlights.explosion(ev.pos, f64::from(now));
                         }
                     }
                     TE_GUNSHOT => te_gunshots += 1,
@@ -322,12 +322,12 @@ pub fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> CmdRes
             // Entity light effects (EF_MUZZLEFLASH / BRIGHTLIGHT / DIMLIGHT) from
             // the in-use edicts, as CL_RelinkEntities makes them.
             for e in server.lit_entities() {
-                dlights.relink_effects(e.key, e.origin, e.angles, e.effects, now, &mut prng);
+                dlights.relink_effects(e.key, e.origin, e.angles, e.effects, f64::from(now), &mut prng);
             }
             particles.advance(0.1, now, PARTICLE_GRAVITY);
             // Decay dynamic lights, then track the peak set for the POV.
-            dlights.advance(0.1, now);
-            let active = dlights.active(now);
+            dlights.advance(0.1, f64::from(now));
+            let active = dlights.active(f64::from(now));
             if active.len() > max_active_dlights {
                 max_active_dlights = active.len();
             }

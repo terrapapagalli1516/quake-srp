@@ -69,15 +69,17 @@ pub fn spawn_temp_entity(
     particles: &mut ParticleSystem,
     dlights: &mut DynamicLights,
     ev: &TempEntityEvent,
-    now: f32,
+    now: f64,
     rng: &mut Lcg,
 ) -> Option<&'static str> {
     use crate::server::te_consts::*;
+    // The particles' clock is the float of it.
+    let time = now as f32;
     match ev.te_type {
         // Rocket explosion: R_ParticleExplosion, its light, and r_exp3
         // (CL_ParseTEnt).
         TE_EXPLOSION => {
-            particles.spawn_explosion(ev.pos, now, rng);
+            particles.spawn_explosion(ev.pos, time, rng);
             dlights.explosion(ev.pos, now);
             Some(TE_EXPLOSION_SOUND)
         }
@@ -85,7 +87,7 @@ pub fn spawn_temp_entity(
         // effect, NOT the rocket explosion: no light (CL_ParseTEnt allocates
         // none for it).
         TE_TAREXPLOSION => {
-            particles.spawn_blob_explosion(ev.pos, now, rng);
+            particles.spawn_blob_explosion(ev.pos, time, rng);
             Some(TE_EXPLOSION_SOUND)
         }
         // Coloured explosion: R_ParticleExplosion2 honouring the colour ramp
@@ -96,7 +98,7 @@ pub fn spawn_temp_entity(
                 ev.pos,
                 ev.color_start as i32,
                 ev.color_length as i32,
-                now,
+                time,
                 rng,
             );
             dlights.explosion(ev.pos, now);
@@ -107,7 +109,7 @@ pub fn spawn_temp_entity(
         // (CL_ParseTEnt). The rng draw follows spawn_burst to keep C's ordering.
         TE_SPIKE | TE_SUPERSPIKE => {
             let count = if ev.te_type == TE_SPIKE { 10 } else { 20 };
-            particles.spawn_burst(ev.pos, [0.0; 3], 0, count, now, rng);
+            particles.spawn_burst(ev.pos, [0.0; 3], 0, count, time, rng);
             Some(if rng.next_range(5) != 0 {
                 "weapons/tink1.wav"
             } else {
@@ -120,27 +122,27 @@ pub fn spawn_temp_entity(
         }
         // Bullet impact: dust only, NO sound (CL_ParseTEnt plays nothing for TE_GUNSHOT).
         TE_GUNSHOT => {
-            particles.spawn_burst(ev.pos, [0.0; 3], 0, 20, now, rng);
+            particles.spawn_burst(ev.pos, [0.0; 3], 0, 20, time, rng);
             None
         }
         // Scrag (wizard) spike impact -> wizard/hit.wav.
         TE_WIZSPIKE => {
-            particles.spawn_burst(ev.pos, [0.0; 3], 20, 30, now, rng);
+            particles.spawn_burst(ev.pos, [0.0; 3], 20, 30, time, rng);
             Some("wizard/hit.wav")
         }
         // Hell-knight spike impact -> hknight/hit.wav.
         TE_KNIGHTSPIKE => {
-            particles.spawn_burst(ev.pos, [0.0; 3], 226, 20, now, rng);
+            particles.spawn_burst(ev.pos, [0.0; 3], 226, 20, time, rng);
             Some("hknight/hit.wav")
         }
         // The real lava-burst spiral (R_LavaSplash), not a 20-particle puff.
         TE_LAVASPLASH => {
-            particles.spawn_lava_splash(ev.pos, now, rng);
+            particles.spawn_lava_splash(ev.pos, time, rng);
             None
         }
         // The teleport-fog column (R_TeleportSplash).
         TE_TELEPORT => {
-            particles.spawn_teleport_splash(ev.pos, now, rng);
+            particles.spawn_teleport_splash(ev.pos, time, rng);
             None
         }
         _ => None, // beam/lightning types: no effect here.
