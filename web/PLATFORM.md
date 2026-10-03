@@ -703,6 +703,20 @@ it means, as id's `Key_Event`, `IN_MouseMove` and the joystick code do.
   is the same at any frame rate (`mouse_turns_the_same_at_60_and_480_hz`).
   `pointerrawupdate` would deliver samples sooner within a refresh, but the
   frame starts at the refresh either way, so it would not show them sooner.
+- **The wheel** (2026's weapon cycle, `Bindings::with_wheel`). id's
+  `WM_MOUSEWHEEL` (`vid_win.c`) turns every message into one press+release of
+  `K_MWHEELUP`/`K_MWHEELDOWN`, whatever the message's own delta — Windows
+  already chunks a wheel's spin into one message per notch — so the page
+  turns a browser `wheel` event's continuous `deltaY` back into notches:
+  accumulated and normalized to Chrome's 100-per-notch (a line mouse's own
+  notch in Firefox, `deltaMode` 1, is 3 lines), one press+release per notch
+  consumed, capped so a fast flick or a trackpad's fling can't cycle through
+  every weapon. It needs no pointer lock — id's own never did — and fires
+  whatever has the keyboard: `Key_Event` routes it itself (the console
+  already scrolls on it, `consolekey()`; Customize controls' bind grab takes
+  it like any key). `default.cfg` predates the wheel, so Classic leaves it
+  unbound, as id's players who bound it themselves; 2026 binds a notch up to
+  `impulse 10` (next weapon) and down to `impulse 12` (previous).
 - **The gamepad.** The Gamepad API has no events for a pad's state, so the
   page polls `navigator.getGamepads()` once per refresh, just before the tick
   (as late as the frame allows), and sends a `GAMEPAD` record when the state

@@ -256,6 +256,7 @@
           <span class="k">click</span><span>fire</span>
           <span class="k"><kbd>Ctrl</kbd></span><span>fire (DOS-style — arrows + <kbd>Ctrl</kbd> play fine without capturing the mouse)</span>
           <span class="k"><kbd>1</kbd>–<kbd>8</kbd></span><span>select weapon (1 axe · 2 shotgun · 4 nailgun, once owned)</span>
+          <span class="k">wheel</span><span>2026: switch weapon — up next, down previous (Classic: id's, unbound)</span>
         </div>
       </div>
       <div class="col">
@@ -1119,6 +1120,48 @@ canvas.addEventListener('mousemove', e => {
   // it comes, so the same motion turns as far at 60 Hz as at 480 Hz.
   if (locked() || dragging) mouseMove(e.movementX, e.movementY, e.timeStamp);
 });
+
+// --- The mouse wheel (2026's weapon cycle; `web/PLATFORM.md` "Input") ----------
+// vid_win.c's WM_MOUSEWHEEL turns every message into one press+release of
+// K_MWHEELUP (239) or K_MWHEELDOWN (240), whatever the message's own delta —
+// Windows already chunks a wheel's spin into one message per notch. A
+// browser's `wheel` event instead reports a running deltaY (a trackpad's
+// keeps coming in small steps), so this turns it back into notches:
+// accumulated and normalized to Chrome's 100-per-notch (deltaMode 0 PIXEL as
+// is; 1 LINE — a wheel mouse's own notch in Firefox, 3 lines — times
+// WHEEL_NOTCH_PX/3; 2 PAGE, rare off a real wheel, as a full flick), one
+// press+release per notch consumed, and capped so one fast flick or a
+// trackpad's fling can't cycle through every weapon. Unlike the buttons
+// (MOUSE_KEYNUMS, gated on locked()/bindGrabbing() below) the wheel needs no
+// capture — id's own never did — so this fires with the pointer locked or
+// free, and whatever has the keyboard: Key_Event routes it itself (the
+// console already scrolls on K_MWHEELUP/DOWN, consolekey() keeps them for it;
+// Customize controls' bind grab takes one like any key, M_Keys_Key); id's
+// menu has no other use for the wheel, so nothing here checks menuVisible()/
+// consoleVisible() first. Bound only in 2026 (Bindings::with_wheel) — id's
+// default.cfg predates the wheel, so Classic leaves it unbound and this KEY
+// record just finds nothing to run.
+const WHEEL_NOTCH_PX = 100, WHEEL_LINE_PX = WHEEL_NOTCH_PX / 3, WHEEL_MAX_NOTCHES = 3;
+let wheelAccum = 0;   // pixel-equivalent carried to the next event; + down, - up
+canvas.addEventListener('wheel', e => {
+  if (!readyToPlay) return;
+  e.preventDefault();
+  const px = e.deltaMode === 1 ? e.deltaY * WHEEL_LINE_PX
+           : e.deltaMode === 2 ? Math.sign(e.deltaY) * WHEEL_NOTCH_PX * WHEEL_MAX_NOTCHES
+           : e.deltaY;
+  if (!px) return;
+  if ((px < 0) !== (wheelAccum < 0)) wheelAccum = 0;   // direction flipped: drop stale momentum
+  const cap = WHEEL_NOTCH_PX * WHEEL_MAX_NOTCHES;
+  wheelAccum = Math.max(-cap, Math.min(cap, wheelAccum + px));
+  const notches = Math.trunc(wheelAccum / WHEEL_NOTCH_PX);
+  if (!notches) return;
+  wheelAccum -= notches * WHEEL_NOTCH_PX;
+  const key = notches < 0 ? 239 : 240;   // K_MWHEELUP (up) : K_MWHEELDOWN (down)
+  for (let i = 0; i < Math.abs(notches); i++) {
+    keyEvent(key, true, 0, e.timeStamp);
+    keyEvent(key, false, 0, e.timeStamp);
+  }
+}, { passive: false });
 
 // --- The gamepad ---------------------------------------------------------------
 // The Gamepad API has no events for a pad's state, so the page polls it once
