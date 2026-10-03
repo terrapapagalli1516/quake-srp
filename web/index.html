@@ -559,6 +559,11 @@ function onWorkerMessage(e) {
   else if (m.t === 'log') {
     console.log('[quake]', m.text);
     if (m.text.startsWith('quake: ')) engineError = m.text.slice(7);   // a Sys_Error, before it exits
+    // Rust's allocation failure, before it aborts: the program's memory is
+    // full (the threads build's is a fixed 1 GiB, PLATFORM.md "Threads").
+    if (m.text.startsWith('memory allocation of ')) {
+      engineError = 'out of memory (' + m.text + '): a larger pixel size, in Video Options, needs less';
+    }
   }
   else if (m.t === 'exit') gameExited(m);
 }
@@ -608,7 +613,7 @@ function gameExited(m) {
   for (const pc of pendingCalls.values()) pc.reject(new Error('the game ended: ' + m.why));
   pendingCalls.clear();
   if (m.run !== 2) {
-    setStatus('the game stopped: ' + m.why);
+    setStatus('the game stopped: ' + (engineError.startsWith('out of memory') ? engineError : m.why));
     console.error('[quake]', m.why);
   }
 }
