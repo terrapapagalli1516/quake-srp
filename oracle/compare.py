@@ -177,7 +177,8 @@ def run_c(args, case: str, mapname: str, ents: bool, out: Path) -> dict:
             cmds.append("oracle_view " + " ".join(repr(float(v)) for v in args.view))
         if args.time is not None:
             cmds.append(f"oracle_time {args.time!r}")
-        cmds += [f'oracle_shot "{out / case}.c"', f"map {mapname}"]
+        start = f"playdemo {args.demo}" if args.demo else f"map {mapname}"
+        cmds += [f'oracle_shot "{out / case}.c"', start] + args.c_post
         (base / "id1" / "oracle.cfg").write_text("\n".join(cmds) + "\n")
         cmd = [str(ensure_oracle(args.oracle)), "-basedir", str(base), "-width", str(w), "-height", str(h)]
         cmd += extra_flags
@@ -329,6 +330,13 @@ def main() -> None:
     ap.add_argument("--c-cmd", action="append", default=[],
                     help="extra C console command before the map loads (repeatable), e.g. 'd_mipscale 0' "
                          "(d_mipscale and d_mipcap are handed to the port as well)")
+    ap.add_argument("--c-post", action="append", default=[],
+                    help="C console command after the map is loaded (repeatable; each `wait` defers what "
+                         "follows one frame), e.g. six `--c-post wait` then `--c-post 'impulse 9'`: the "
+                         "cheat once the player is in the game, which gives the rocket launcher")
+    ap.add_argument("--demo",
+                    help="C: play this demo (playdemo NAME) instead of loading the map; the shot is frame "
+                         "--settle of its playback, and --maps names the demo's map for the port's side")
     ap.add_argument("--aspect", type=float,
                     help="vid.aspect, both renderers (default 1.0, square pixels; 0.8333333 = id's "
                          "16:10 modes on a 4:3 monitor, what the browser page shows)")
