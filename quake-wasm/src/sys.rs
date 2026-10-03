@@ -558,6 +558,58 @@ mod tests {
         assert_eq!(states.last().map(|s| s & STATE_MENU), Some(STATE_MENU), "Start opened it: {states:?}");
     }
 
+    /// The same hand motion turns the drawn view as far at any refresh rate:
+    /// a 1000 Hz mouse moving 1000 counts in a second, as a browser delivers
+    /// it — the counts since the last refresh summed into one `mousemove`
+    /// (or split over three), a whole number each, then the refresh's tick —
+    /// at 60 to 480 Hz with the 2026 profile's uncapped frames, and in
+    /// Classic behind id's 72 fps gate. The view the frames draw (the
+    /// listener's facing, from the server's `v_angle`) turns 160° each time:
+    /// 0.16° a count at `sensitivity 3`. Nothing on the mouse path is per
+    /// frame: `IN_MouseMove` adds each record as it comes.
+    #[test]
+    fn the_mouse_turns_the_view_the_same_at_any_refresh_rate() {
+        let turn = |profile: &str, hz: u32, split: u32| {
+            APP.with(|c| *c.borrow_mut() = None);
+            let mut input = Vec::new();
+            input.extend(encode::call(1, &format!("exec profile {profile}; r_threads 1")));
+            input.extend(encode::call(2, "boot"));
+            input.extend(encode::call(3, "menu_cancel"));
+            input.extend(encode::call(4, "set_resolution 320 200"));
+            input.extend(encode::tick(1, 0.1));
+            input.extend(encode::call(5, "listener_fwd_x"));
+            input.extend(encode::call(6, "listener_fwd_y"));
+            let mut sent = 0;
+            for i in 1..=hz {
+                let due = i * 1000 / hz; // the mouse's counts by the end of this refresh
+                let counts = due - sent;
+                for part in 0..split {
+                    let n = counts / split + u32::from(part == split - 1) * (counts % split);
+                    if n > 0 {
+                        input.extend(encode::mouse(n as f32, 0.0));
+                    }
+                }
+                sent = due;
+                input.extend(encode::tick(1 + i, 1.0 / f64::from(hz)));
+            }
+            // A last host frame past the 72 fps gate draws the last counts.
+            input.extend(encode::tick(hz + 2, 0.1));
+            input.extend(encode::call(7, "listener_fwd_x"));
+            input.extend(encode::call(8, "listener_fwd_y"));
+            let replies: Vec<f64> =
+                run_on(&input).iter().filter(|r| r.kind == Record::REPLY).map(|r| r.f64_at(4)).collect();
+            let [.., x0, y0, x1, y1] = replies[..] else { panic!("the facing replies: {replies:?}") };
+            let degrees = (y1.atan2(x1) - y0.atan2(x0)).to_degrees();
+            (degrees + 540.0).rem_euclid(360.0) - 180.0
+        };
+        for (profile, hz, split) in
+            [("2026", 60, 1), ("2026", 144, 1), ("2026", 240, 1), ("2026", 480, 1), ("2026", 480, 3), ("classic", 60, 1), ("classic", 480, 1)]
+        {
+            let t = turn(profile, hz, split);
+            assert!((t + 160.0).abs() < 0.01, "{profile} at {hz} Hz, {split} event(s) a refresh: turned {t}°, not 160° right");
+        }
+    }
+
     #[test]
     fn a_timedemo_polls_instead_of_waiting_for_ticks() {
         let mut input = Vec::new();
