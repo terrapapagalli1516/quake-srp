@@ -90,14 +90,25 @@ const FLICKER_1: &[u8] = b"mmnmmommommnonmmonqnmmo";
 /// world.qc's FLICKER (second variety), light style 6.
 const FLICKER_6: &[u8] = b"nmonqnmomnmomomno";
 
-/// How a kind of flame flickers: one of world.qc's flicker patterns, read at
-/// `rate` letters a tenth of a second (id's styles: 1), its swing about its
-/// mean scaled by `depth`.
+/// One voice of a flame's flicker: a world.qc flicker pattern, read at `rate`
+/// letters a tenth of a second (a light style reads 1).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct Voice {
+    pub(super) pattern: &'static [u8],
+    pub(super) rate: f32,
+}
+
+/// How a kind of flame flickers: world.qc's two flickers at once, each at its
+/// own rate and phase, their swings about their means summed over √2 (so
+/// `depth` 1 swings as much as one flicker style does, in the mean square),
+/// times `depth`. One pattern alone is a loop — the same rises and the one
+/// bright `q` every 1.7 or 2.3 s, a beat the eye finds; two at rates whose
+/// periods do not divide wander and never come round the same way, as a
+/// flame does.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct Flicker {
-    pattern: &'static [u8],
-    rate: f32,
-    depth: f32,
+    pub(super) voices: [Voice; 2],
+    pub(super) depth: f32,
 }
 
 /// The three kinds of flame the shareware and registered maps place
@@ -126,12 +137,15 @@ impl Flame {
         }
     }
 
-    /// The kind's flicker.
+    /// The kind's flicker: the wall torch quick and shallow (style 6 at a
+    /// light style's own rate, style 1 a little slower), the big flame slow
+    /// and deep (both at about half speed), the small flame between.
     pub(super) fn flicker(self) -> Flicker {
+        let voice = |pattern, rate| Voice { pattern, rate };
         match self {
-            Flame::WallTorch => Flicker { pattern: FLICKER_6, rate: 1.0, depth: 1.0 },
-            Flame::LargeFlame => Flicker { pattern: FLICKER_1, rate: 1.0, depth: 1.0 },
-            Flame::SmallFlame => Flicker { pattern: FLICKER_1, rate: 1.0, depth: 1.0 },
+            Flame::WallTorch => Flicker { voices: [voice(FLICKER_6, 1.0), voice(FLICKER_1, 0.75)], depth: 0.8 },
+            Flame::SmallFlame => Flicker { voices: [voice(FLICKER_1, 0.8), voice(FLICKER_6, 0.9)], depth: 1.0 },
+            Flame::LargeFlame => Flicker { voices: [voice(FLICKER_1, 0.5), voice(FLICKER_6, 0.6)], depth: 1.3 },
         }
     }
 }
@@ -143,12 +157,13 @@ fn pattern_mean(pattern: &[u8]) -> f32 {
     sum as f32 / pattern.len().max(1) as f32
 }
 
-/// A torch's phase in its pattern, in letters, from its origin: a hash of the
-/// whole units the entity lump gives, so it is the same every time the map
-/// loads, in the live game and in a demo, and neighbouring torches land far
-/// apart. Sixteenths of a letter, so torches do not even step together.
-fn phase_of(origin: Vec3, len: usize) -> f32 {
-    let mut h: u32 = 0x811c_9dc5;
+/// A torch's phase in a pattern of `len` letters, in letters, from its origin
+/// (and `voice`, so its two voices start apart): a hash of the whole units
+/// the entity lump gives, the same every time the map loads, in the live
+/// game and in a demo, neighbouring torches far apart. Sixteenths of a
+/// letter, so torches do not even step together.
+fn phase_of(origin: Vec3, voice: u32, len: usize) -> f32 {
+    let mut h: u32 = 0x811c_9dc5 ^ voice;
     for c in origin {
         h = (h ^ (c.round() as i32 as u32)).wrapping_mul(0x0100_0193);
     }
@@ -169,24 +184,41 @@ pub(super) struct Torch {
     /// The `light` key, or LIGHT.EXE's `DEFAULTLIGHTLEVEL` (300) without one.
     pub(super) light: f32,
     pub(super) flame: Flame,
-    /// Where in its pattern it is at time 0, in letters ([`phase_of`]).
-    phase: f32,
-    /// The pattern's mean ([`pattern_mean`]).
-    mean: f32,
+    /// Where in each voice's pattern it is at time 0, in letters
+    /// ([`phase_of`]).
+    phases: [f32; 2],
+    /// Each voice's pattern's mean ([`pattern_mean`]).
+    means: [f32; 2],
 }
 
 impl Torch {
-    /// The torch's scale this frame: `strength · depth · (s(t)/s̄ - 1)`, the
-    /// fraction of its share each luxel it lights gains (or loses) at `time`
-    /// (`cl.time`). A pure function of the time and the torch.
+    fn new(origin: Vec3, light: f32, flame: Flame) -> Torch {
+        let voices = flame.flicker().voices;
+        Torch {
+            origin,
+            light,
+            flame,
+            phases: [0, 1].map(|k| phase_of(origin, k, voices[k as usize].pattern.len())),
+            means: voices.map(|v| pattern_mean(v.pattern)),
+        }
+    }
+
+    /// The torch's scale this frame: `strength · depth · Σ (s_k(t)/s̄_k - 1) / √2`
+    /// over its two voices, the fraction of its share each luxel it lights
+    /// gains (or loses) at `time` (`cl.time`). A pure function of the time and
+    /// the torch.
     pub(super) fn scale(&self, time: f32, lerp: LerpLightStyles, strength: TorchFlicker) -> f32 {
         if strength.is_off() {
             return 0.0;
         }
         let f = self.flame.flicker();
-        let letters = f64::from(if time.is_finite() { time } else { 0.0 }) * 10.0 * f64::from(f.rate) + f64::from(self.phase);
-        let v = lightstyle_value_at(f.pattern, letters, lerp);
-        strength.value() * f.depth * (v as f32 / self.mean - 1.0)
+        let tenths = f64::from(if time.is_finite() { time } else { 0.0 }) * 10.0;
+        let mut swing = 0.0f32;
+        for (k, v) in f.voices.iter().enumerate() {
+            let value = lightstyle_value_at(v.pattern, tenths * f64::from(v.rate) + f64::from(self.phases[k]), lerp);
+            swing += value as f32 / self.means[k] - 1.0;
+        }
+        strength.value() * f.depth * swing * std::f32::consts::FRAC_1_SQRT_2
     }
 }
 
@@ -224,8 +256,7 @@ pub(super) fn steady_torches(entities: &str) -> Vec<Torch> {
             continue;
         }
         let light = if light == 0.0 { DEFAULT_LIGHT } else { light };
-        let pattern = flame.flicker().pattern;
-        out.push(Torch { origin, light, flame, phase: phase_of(origin, pattern.len()), mean: pattern_mean(pattern) });
+        out.push(Torch::new(origin, light, flame));
     }
     out
 }
@@ -333,15 +364,46 @@ impl TorchSet {
 }
 
 /// [`TorchSet::build`] for one face: push a [`TorchLit`] onto `lit` for each
-/// torch that lights it.
+/// torch that lights it, its shares bounded by what each luxel holds.
 fn face_shares(bsp: &Bsp, face: &DFace, torches: &[Torch], poly: &mut Vec<Vec3>, lit: &mut Vec<TorchLit>) {
-    let Some(ti) = usize::try_from(face.texinfo).ok().and_then(|i| bsp.texinfo.get(i)) else { return };
+    let Some(FaceShares { block, grids }) = unbounded_shares(bsp, face, torches, poly) else { return };
+    let first = lit.len();
+    for (torch, shares) in grids {
+        if shares.iter().any(|&s| s >= MIN_SHARE) {
+            lit.push(TorchLit { torch, shares: shares.into_boxed_slice() });
+        }
+    }
+    let mine = &mut lit[first..];
+    for (j, &held) in block.iter().enumerate() {
+        let total: f32 = mine.iter().map(|l| l.shares[j]).sum();
+        let held = f32::from(held);
+        if total > held {
+            let k = if total > 0.0 { held / total } else { 0.0 };
+            for l in mine.iter_mut() {
+                l.shares[j] *= k;
+            }
+        }
+    }
+}
+
+/// A face's style-0 block and, for each torch in front of it and in reach,
+/// its [`share`] of each luxel — before the bound by the block.
+struct FaceShares<'a> {
+    block: &'a [u8],
+    grids: Vec<(u32, Vec<f32>)>,
+}
+
+/// [`FaceShares`] for `face`, or `None` when no torch reaches it or it has no
+/// style-0 block (a sky or liquid, a face without samples, one only a
+/// switched or animated light reached).
+fn unbounded_shares<'a>(bsp: &'a Bsp, face: &DFace, torches: &[Torch], poly: &mut Vec<Vec3>) -> Option<FaceShares<'a>> {
+    let ti = usize::try_from(face.texinfo).ok().and_then(|i| bsp.texinfo.get(i))?;
     if ti.flags & TEX_SPECIAL != 0 || face.lightofs < 0 {
-        return;
+        return None;
     }
     // The torch's light is in the face's style-0 block.
-    let Some(slot) = face.styles.iter().take_while(|&&s| s != STYLE_NONE).position(|&s| s == 0) else { return };
-    let Some(plane) = usize::try_from(face.planenum).ok().and_then(|i| bsp.planes.get(i)) else { return };
+    let slot = face.styles.iter().take_while(|&&s| s != STYLE_NONE).position(|&s| s == 0)?;
+    let plane = usize::try_from(face.planenum).ok().and_then(|i| bsp.planes.get(i))?;
     // `l->facenormal`, `l->facedist`: the plane turned to the face's side.
     let (normal, facedist) = if face.side != 0 {
         ([-plane.normal[0], -plane.normal[1], -plane.normal[2]], -plane.dist)
@@ -356,18 +418,15 @@ fn face_shares(bsp: &Bsp, face: &DFace, torches: &[Torch], poly: &mut Vec<Vec3>,
         })
         .collect();
     if reaching.is_empty() || !face_world_poly(bsp, face, poly) {
-        return;
+        return None;
     }
-    let Some((texmins, extent)) = surface_extents(ti, poly) else { return };
+    let (texmins, extent) = surface_extents(ti, poly)?;
     let (lmw, lmh) = ((extent[0] / 16 + 1) as usize, (extent[1] / 16 + 1) as usize);
     let n = lmw * lmh;
-    let Some(block) = usize::try_from(face.lightofs)
+    let block = usize::try_from(face.lightofs)
         .ok()
         .and_then(|o| o.checked_add(slot * n))
-        .and_then(|o| bsp.lighting.get(o..o.checked_add(n)?))
-    else {
-        return;
-    };
+        .and_then(|o| bsp.lighting.get(o..o.checked_add(n)?))?;
     // The sample point of each luxel: on the plane a unit in front
     // (`CalcFaceVectors`' texorg), at the texture coordinates
     // `texturemins + 16 * (s, t)` (`CalcPoints` without `-extra`): solve
@@ -378,7 +437,7 @@ fn face_shares(bsp: &Bsp, face: &DFace, torches: &[Torch], poly: &mut Vec<Vec3>,
         [ti.vecs[1][0], ti.vecs[1][1], ti.vecs[1][2]],
         normal,
     ];
-    let Some(inv) = invert3(rows) else { return };
+    let inv = invert3(rows)?;
     let point = |s: usize, t: usize| {
         let b = [
             (texmins[0] + 16 * s as i32) as f32 - ti.vecs[0][3],
@@ -387,29 +446,14 @@ fn face_shares(bsp: &Bsp, face: &DFace, torches: &[Torch], poly: &mut Vec<Vec3>,
         ];
         [dot(inv[0], b), dot(inv[1], b), dot(inv[2], b)]
     };
-    let first = lit.len();
-    for &i in &reaching {
-        let t = &torches[i as usize];
-        let mut shares = vec![0.0f32; n];
-        for (j, cell) in shares.iter_mut().enumerate() {
-            *cell = share(t.origin, t.light, point(j % lmw, j / lmw), normal);
-        }
-        if shares.iter().any(|&s| s >= MIN_SHARE) {
-            lit.push(TorchLit { torch: i, shares: shares.into_boxed_slice() });
-        }
-    }
-    // Bound each luxel's shares by what it holds.
-    let mine = &mut lit[first..];
-    for (j, &held) in block.iter().enumerate() {
-        let total: f32 = mine.iter().map(|l| l.shares[j]).sum();
-        let held = f32::from(held);
-        if total > held {
-            let k = if total > 0.0 { held / total } else { 0.0 };
-            for l in mine.iter_mut() {
-                l.shares[j] *= k;
-            }
-        }
-    }
+    let grids = reaching
+        .iter()
+        .map(|&i| {
+            let t = &torches[i as usize];
+            (i, (0..n).map(|j| share(t.origin, t.light, point(j % lmw, j / lmw), normal)).collect())
+        })
+        .collect();
+    Some(FaceShares { block, grids })
 }
 
 /// The inverse of the 3x3 matrix `m` (rows), or `None` when it is singular
@@ -508,3 +552,4 @@ mod tests {
         assert_eq!(TorchFlicker::from_value(0.333).value(), 0.33);
     }
 }
+

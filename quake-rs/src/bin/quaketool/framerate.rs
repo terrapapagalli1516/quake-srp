@@ -9,6 +9,10 @@
 //! [--threads N] [--reps N] [--secs S] [--view NAME=MAP:X,Y,Z:YAW]...` — what
 //! the gliding light styles (`r_lerplightstyles`) cost: surfaces rebaked
 //! and the 3-D view's time per frame, standing where lights animate.
+//! `quaketool framerate <pak>[,<pak>...] --torchflicker S [the same options]
+//! [--dump DIR [--strengths LIST]]` — the same for the steady torches'
+//! flicker (`r_torchflicker` at strength S), standing by torches; with
+//! `--dump`, every frame of each view at the first rate as raw RGB instead.
 //!
 //! Each scenario is a scripted piece of play on the shareware maps — a jump,
 //! a fall, a grenade, a lift, a damage flash, a demo — run through the same
@@ -1499,28 +1503,32 @@ fn write_strip(pak: &Pak, dir: &str) -> Result<(), String> {
 // Light styles: what `r_lerplightstyles` costs
 // ---------------------------------------------------------------------------
 
-/// A view `--lightstyles` measures: the player standing at `origin` on
-/// `maps/<map>.bsp`, looking along `yaw`.
+/// A view `--lightstyles` and `--torchflicker` measure: the player standing
+/// at `origin` on `maps/<map>.bsp`, looking along `yaw`, `pitch` degrees
+/// down.
 #[derive(Clone, Debug)]
 struct StyleView {
     name: String,
     map: String,
     origin: [f32; 3],
     yaw: f32,
+    pitch: f32,
 }
 
 impl StyleView {
-    /// `NAME=MAP:X,Y,Z:YAW` (`--view`).
+    /// `NAME=MAP:X,Y,Z:YAW[:PITCH]` (`--view`).
     fn parse(s: &str) -> Result<StyleView, String> {
-        let bad = || format!("--view: expected NAME=MAP:X,Y,Z:YAW, got {s:?}");
+        let bad = || format!("--view: expected NAME=MAP:X,Y,Z:YAW[:PITCH], got {s:?}");
         let (name, rest) = s.split_once('=').ok_or_else(bad)?;
         let mut parts = rest.split(':');
-        let (Some(map), Some(xyz), Some(yaw), None) = (parts.next(), parts.next(), parts.next(), parts.next()) else {
+        let (Some(map), Some(xyz), Some(yaw), pitch, None) = (parts.next(), parts.next(), parts.next(), parts.next(), parts.next())
+        else {
             return Err(bad());
         };
         let v: Vec<f32> = xyz.split(',').map(|p| p.trim().parse()).collect::<Result<_, _>>().map_err(|_| bad())?;
         let origin: [f32; 3] = v.try_into().map_err(|_| bad())?;
-        Ok(StyleView { name: name.into(), map: map.into(), origin, yaw: yaw.parse().map_err(|_| bad())? })
+        let pitch = pitch.map_or(Ok(0.0), str::parse).map_err(|_| bad())?;
+        Ok(StyleView { name: name.into(), map: map.into(), origin, yaw: yaw.parse().map_err(|_| bad())?, pitch })
     }
 }
 
@@ -1539,12 +1547,29 @@ const STYLE_VIEWS: &[&str] = &[
     "e2m5-torches=e2m5:-864,-1100,-142:225",
 ];
 
+/// The views `--torchflicker` measures without `--view`: on the maps with
+/// the most steady torches, the views where the most drawn surfaces are
+/// torch-lit (of standing 160 and 288 units from each torch, facing it) —
+/// e1m2's start besides (two wall torches on the far wall), e1m3's flames,
+/// e1m4's, and with the registered `pak1.pak` layered on, e2m6's (109 wall
+/// torches) and e4m5's (48 large flames). A torch's light reaches 300
+/// units: four in five of the surfaces drawn there are torch-lit.
+const TORCH_VIEWS: &[&str] = &[
+    "e1m2-start=e1m2:1496,1664,288:270",
+    "e1m3-flames=e1m3:-1352,-720,-72:90",
+    "e1m4-torches=e1m4:998,2246,944:90",
+    "e2m6-torches=e2m6:542,1002,-488:-45",
+    "e4m5-flames=e4m5:-854,-1046,-264:-135",
+];
+
 /// One run's frames: per frame, the surfaces whose lightmap carries a style
-/// past 0, the blocks the surface cache baked and their texels (with the
-/// renderer's counters on), or the 3-D view's time in seconds (with them off).
+/// past 0 and those a steady torch flickers on, the blocks the surface cache
+/// baked and their texels (with the renderer's counters on), or the 3-D
+/// view's time in seconds (with them off).
 #[derive(Default)]
 struct StyleRun {
     styled: Vec<f64>,
+    torchlit: Vec<f64>,
     baked: Vec<f64>,
     texels: Vec<f64>,
     view_s: Vec<f64>,
@@ -1557,6 +1582,7 @@ fn style_run(pak: &Pak, view: &StyleView, rate: Rate, vid: Vid, threads: usize, 
     let mut s = Sim::new(pak, &view.map, rate, stepping);
     s.w.renderer.set_threads(threads);
     s.teleport(view.origin, view.yaw);
+    s.w.pitch = view.pitch;
     let mut run = StyleRun::default();
     let (warm, end) = (s.t + 1.0, s.t + 1.0 + secs);
     while s.t < end - 1e-9 {
@@ -1575,6 +1601,7 @@ fn style_run(pak: &Pak, view: &StyleView, rate: Rate, vid: Vid, threads: usize, 
         if counters {
             let st = s.w.renderer.stats_end();
             run.styled.push(st.surf_styled as f64);
+            run.torchlit.push(st.surf_torchlit as f64);
             run.baked.push(st.surf_baked as f64);
             run.texels.push(st.surf_texels_baked as f64);
         } else {
@@ -1593,16 +1620,33 @@ fn style_run(pak: &Pak, view: &StyleView, rate: Rate, vid: Vid, threads: usize, 
 /// cvars are the 2026 profile's but for the light styles.
 fn lightstyles_report(pak: &Pak, rates: &[Rate], views: &[StyleView], res: (usize, usize), threads: usize, reps: usize, secs: f64) -> String {
     use quake_rs::server::LerpLightStyles;
+    let modes = [LerpLightStyles::Classic, LerpLightStyles::Smooth]
+        .map(|lightstyles| render::VideoCvars { lightstyles, ..render::VideoCvars::MODERN });
+    let title = format!("r_lerplightstyles at {}x{}, {threads} thread(s), {secs} s a run; Classic → Smooth", res.0, res.1);
+    ab_report(pak, &title, modes, rates, views, res, threads, reps, secs)
+}
+
+/// `--torchflicker S [--rates LIST] [--res WxH] [--threads N] [--reps N]
+/// [--secs S] [--view NAME=MAP:X,Y,Z:YAW[:PITCH]]...`: as `--lightstyles`,
+/// the steady torches as id's → flickering at strength S (`r_torchflicker`),
+/// the rest of the 2026 profile's video cvars on in both.
+fn torches_report(pak: &Pak, rates: &[Rate], views: &[StyleView], res: (usize, usize), threads: usize, reps: usize, secs: f64, strength: render::TorchFlicker) -> String {
+    let modes = [render::TorchFlicker::OFF, strength].map(|torches| render::VideoCvars { torches, ..render::VideoCvars::MODERN });
+    let title = format!("r_torchflicker at {}x{}, {threads} thread(s), {secs} s a run; 0 → {}", res.0, res.1, strength.value());
+    ab_report(pak, &title, modes, rates, views, res, threads, reps, secs)
+}
+
+/// Per view and rate, the two video settings `modes`, A → B: the styled and
+/// torch-lit surfaces drawn, the blocks rebaked and their texels per frame
+/// (the renderer's counters, one run each), and the 3-D view's time per
+/// frame (median, mean, p95 over `reps` runs of each, interleaved, the
+/// counters off).
+#[allow(clippy::too_many_arguments)]
+fn ab_report(pak: &Pak, title: &str, modes: [render::VideoCvars; 2], rates: &[Rate], views: &[StyleView], res: (usize, usize), threads: usize, reps: usize, secs: f64) -> String {
     let mut o = String::new();
-    let vid_for = |lerp| Vid {
-        width: res.0,
-        height: res.1,
-        display_aspect: res.0 as f64 / res.1 as f64,
-        video: render::VideoCvars { lightstyles: lerp, ..render::VideoCvars::MODERN },
-        ..VID
-    };
+    let vid_for = |video| Vid { width: res.0, height: res.1, display_aspect: res.0 as f64 / res.1 as f64, video, ..VID };
     let mean = |xs: &[f64]| xs.iter().sum::<f64>() / xs.len().max(1) as f64;
-    let _ = writeln!(o, "r_lerplightstyles at {}x{}, {threads} thread(s), {secs} s a run; Classic → Smooth", res.0, res.1);
+    let _ = writeln!(o, "{title}");
     quake_rs::client::set_lap_hook(Some(lap));
     for view in views {
         if pak.read_file(&format!("maps/{}.bsp", view.map)).ok().flatten().is_none() {
@@ -1611,7 +1655,6 @@ fn lightstyles_report(pak: &Pak, rates: &[Rate], views: &[StyleView], res: (usiz
         }
         let _ = writeln!(o, "{} — maps/{}.bsp at {:?} looking {}", view.name, view.map, view.origin, view.yaw);
         for &rate in rates {
-            let modes = [LerpLightStyles::Classic, LerpLightStyles::Smooth];
             let counts = modes.map(|m| style_run(pak, view, rate, vid_for(m), threads, secs, true));
             let mut times: [Vec<f64>; 2] = Default::default();
             for _ in 0..reps {
@@ -1620,8 +1663,8 @@ fn lightstyles_report(pak: &Pak, rates: &[Rate], views: &[StyleView], res: (usiz
                 }
             }
             let cell = |f: &dyn Fn(&StyleRun) -> f64| format!("{} → {}", fmt(f(&counts[0])), fmt(f(&counts[1])));
-            let _ = writeln!(o, "  {:>6} Hz: styled surfaces/frame {}; blocks rebaked/frame {}; texels baked/frame {}",
-                rate.label(), cell(&|r| mean(&r.styled)), cell(&|r| mean(&r.baked)), cell(&|r| mean(&r.texels)));
+            let _ = writeln!(o, "  {:>6} Hz: styled surfaces/frame {}; torch-lit {}; blocks rebaked/frame {}; texels baked/frame {}",
+                rate.label(), cell(&|r| mean(&r.styled)), cell(&|r| mean(&r.torchlit)), cell(&|r| mean(&r.baked)), cell(&|r| mean(&r.texels)));
             // (median, mean, p95) in ms.
             let stat = |xs: &mut Vec<f64>| {
                 let m = mean(xs) * 1000.0;
@@ -1638,6 +1681,57 @@ fn lightstyles_report(pak: &Pak, rates: &[Rate], views: &[StyleView], res: (usiz
     }
     quake_rs::client::set_lap_hook(None);
     o
+}
+
+/// `--torchflicker S --dump DIR [--strengths LIST]`: `secs` of each view at
+/// `rate` (after a second to settle), the whole screen at viewsize 120 (the
+/// view and the gun, no status bar), once for each strength — `0` is id's —
+/// as `DIR/<view>-<strength>.rgb`, the frames' RGB one after another, and
+/// `DIR/<view>.txt` saying `W H RATE FRAMES`: what the strips, the stills
+/// and the side-by-side clip are cut from.
+fn torches_dump(pak: &Pak, views: &[StyleView], rate: Rate, res: (usize, usize), secs: f64, strengths: &[f32], dir: &str) -> Result<String, String> {
+    use std::io::Write as _;
+    let palette = pak
+        .read_file("gfx/palette.lmp")
+        .ok()
+        .flatten()
+        .and_then(|b| render::parse_palette(&b))
+        .ok_or("gfx/palette.lmp is missing or short")?;
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let stepping = if rate == Rate::Hz(72) { Stepping::Classic } else { Stepping::Uncapped };
+    let mut o = String::new();
+    for view in views {
+        let mut frames = 0;
+        for &strength in strengths {
+            let torches = render::TorchFlicker::from_value(strength);
+            let video = render::VideoCvars { torches, ..render::VideoCvars::MODERN };
+            let vid = Vid { width: res.0, height: res.1, display_aspect: res.0 as f64 / res.1 as f64, video, ..VID };
+            let mut s = Sim::new(pak, &view.map, rate, stepping);
+            s.teleport(view.origin, view.yaw);
+            s.w.pitch = view.pitch;
+            s.w.viewsize = 120.0;
+            let path = format!("{dir}/{}-{}.rgb", view.name, torches.value());
+            let mut out = std::io::BufWriter::new(std::fs::File::create(&path).map_err(|e| format!("{path}: {e}"))?);
+            let (warm, end) = (s.t + 1.0, s.t + 1.0 + secs);
+            frames = 0;
+            while s.t < end - 1e-9 {
+                let dt = s.clock.next();
+                let frame = cl_main::walk_frame(&mut s.w, dt, false, &vid);
+                s.t += dt;
+                if s.t > warm {
+                    let rgb = frame.image.to_rgb(&palette);
+                    let bytes: Vec<u8> = rgb.pixels.iter().flatten().copied().collect();
+                    out.write_all(&bytes).map_err(|e| format!("{path}: {e}"))?;
+                    frames += 1;
+                }
+                render::recycle_image(frame.image);
+            }
+            let _ = writeln!(o, "{path}: {frames} frames");
+        }
+        let meta = format!("{dir}/{}.txt", view.name);
+        std::fs::write(&meta, format!("{} {} {} {frames}\n", res.0, res.1, rate.label())).map_err(|e| format!("{meta}: {e}"))?;
+    }
+    Ok(o)
 }
 
 // ---------------------------------------------------------------------------
@@ -1673,6 +1767,8 @@ pub fn cmd_framerate(pak_path: &str, rest: &[String]) -> Result<String, String> 
     let (mut lerpmove, mut strip) = (false, None::<String>);
     // `--lightstyles`' own: 72 Hz is a rate like any other there.
     let (mut lightstyles, mut views, mut style_rates) = (false, Vec::new(), vec![Rate::Hz(72), Rate::Hz(480)]);
+    // `--torchflicker`'s: the strength, and `--dump`'s directory and strengths.
+    let (mut torchflicker, mut dump, mut strengths) = (None::<f32>, None::<String>, vec![0.0, 0.5, 1.0]);
     let (mut threads, mut reps, mut secs) = (1usize, 3usize, 4.6f64);
     let mut i = 0;
     while i < rest.len() {
@@ -1701,6 +1797,20 @@ pub fn cmd_framerate(pak_path: &str, rest: &[String]) -> Result<String, String> 
                 i += 1;
             }
             "--lightstyles" => lightstyles = true,
+            "--torchflicker" => {
+                let v = rest.get(i + 1).ok_or("--torchflicker needs a strength")?;
+                torchflicker = Some(v.parse().map_err(|_| format!("--torchflicker: bad strength {v:?}"))?);
+                i += 1;
+            }
+            "--dump" => {
+                dump = Some(rest.get(i + 1).ok_or("--dump needs a directory")?.clone());
+                i += 1;
+            }
+            "--strengths" => {
+                let v = rest.get(i + 1).ok_or("--strengths needs a list")?;
+                strengths = v.split(',').map(|x| x.parse().map_err(|_| format!("--strengths: bad strength {x:?}"))).collect::<Result<_, _>>()?;
+                i += 1;
+            }
             "--view" => {
                 views.push(StyleView::parse(rest.get(i + 1).ok_or("--view needs NAME=MAP:X,Y,Z:YAW")?)?);
                 i += 1;
@@ -1732,6 +1842,19 @@ pub fn cmd_framerate(pak_path: &str, rest: &[String]) -> Result<String, String> 
         });
     }
     let pak = pak.ok_or("no pak")?;
+    if let Some(strength) = torchflicker {
+        style_rates.retain(|r| matches!(r, Rate::Hz(_)));
+        if views.is_empty() {
+            views = TORCH_VIEWS.iter().map(|v| StyleView::parse(v)).collect::<Result<_, _>>()?;
+        }
+        views.retain(|v| pak.read_file(&format!("maps/{}.bsp", v.map)).ok().flatten().is_some());
+        let size = super::parse_res(res.split(',').next().unwrap_or("1920x1080"), render::VideoCvars::MODERN)?;
+        if let Some(dir) = dump {
+            let rate = style_rates.first().copied().unwrap_or(Rate::Hz(240));
+            return torches_dump(&pak, &views, rate, size, secs, &strengths, &dir);
+        }
+        return Ok(torches_report(&pak, &style_rates, &views, size, threads, reps, secs, render::TorchFlicker::from_value(strength)));
+    }
     if lightstyles {
         style_rates.retain(|r| matches!(r, Rate::Hz(_)));
         if views.is_empty() {
@@ -1944,3 +2067,4 @@ fn frame_budget(pak: &Pak, sizes: &[(usize, usize)]) -> String {
     quake_rs::client::set_lap_hook(None);
     o
 }
+
