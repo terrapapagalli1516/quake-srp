@@ -4,16 +4,17 @@
 # server R2 (d5db64a): error/objerror as id's (CENSUS L16) — objerror frees self, so start.bsp's forced teleporter touch faults 1x not 3x and the shared random stream shifts for later maps; edicts vs id's C still 9/9
 # play: demo1..3's frame hashes re-recorded on q26/settings after merging q26/lerp, whose Classic demo playback draws between the recorded messages as id's CL_ReadFromServer/CL_LerpPoint do (it had shown each message's frame as it came); demo_lerp.py matches id's client over the whole loop (17,500 frames, clock identical, camera and entities within 2.5e-4); the demos' sound tallies and every walk/fire/quad hash unchanged
 # packclass 2026-10-02: world.rs sums a slanted plane's distance in f64 (id's x87 registers), so a point on a 45-degree clip plane lands on id's side (hip1m1/hip2m6/hip3m1's items, census/packs.py); fire_e1m1 moves (a muzzle-lit wall patch in frame 418, two pixels at 440; no f32/f64 sign flip in any walk/fire/quad/demo workload, instrumented, so this is trace magnitudes by ulps); every id-anchored check (edicts, demolerp, oracle, census) unchanged
-census.report 855daa19919aff01
+# makestatic 2026-10-02: PF_makestatic frees its edict into a signon list the client draws, as id's does, so every edict number after a map's first static moves to id's (each matched entity is now id's number minus one, CENSUS L25's player-last offset, but for random fireballs and bubbles): census moves in edict numbers only (with them normalised, the report is the same but for its makestatic line's wording), edicts.start and e1m2..e1m7 lose their 'only in port' statics and the port's live counts equal id's (random fireballs and bubbles aside); e1m1 and e1m8 have no statics; goldens, play, timedemo, oracle, screen2d, demolerp, sound unchanged
+census.report 23dbb77f97b6e7ff
 edicts.e1m1 fea55149a7ee4427
-edicts.e1m2 5ff403cb869b3f72
-edicts.e1m3 d510685451febfe5
-edicts.e1m4 829a67383459f004
-edicts.e1m5 ffcb4503e9b6ea81
-edicts.e1m6 942568f226d0a030
-edicts.e1m7 b3a87f4904a2ba6b
+edicts.e1m2 b6e96a2fc2b69dfd
+edicts.e1m3 a2a323ee946e3363
+edicts.e1m4 8be762f202ab6047
+edicts.e1m5 396dfc57ba4ffd6d
+edicts.e1m6 94949ecd54ced771
+edicts.e1m7 074d6449c5a2862b
 edicts.e1m8 c0ff572efd77c5e3
-edicts.start 69ffb417d449e6c5
+edicts.start a8db38b78812ed1e
 goldens.e1m1 4807aaa1
 goldens.e1m2 9ae2b478
 goldens.e1m3 c65b7046
