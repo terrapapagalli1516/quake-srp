@@ -101,7 +101,7 @@ In the 2026 profile you play with WASD and the mouse (click the game to capture 
 | 1–8 | choose a weapon |
 | Esc | the menu |
 | `~` | the console |
-| F | fullscreen |
+| Alt+Enter | fullscreen (and the bar's button, or the browser's F11); in fullscreen Esc is the menu, hold Esc to leave |
 | F6 / F9 | quicksave / quickload (id's F-keys: F1 help, F2/F3 save/load, F4 options, F10 quit) |
 
 A gamepad or a touch screen also works. Classic uses id's own `default.cfg` keys. The

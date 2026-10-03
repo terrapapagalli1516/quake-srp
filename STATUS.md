@@ -76,7 +76,8 @@ the older history, kept as evidence, with superseded items marked.
     unless a finger moves; see below);
   - real pointer lock (headless Chromium's lock jumps the pitch to −70);
   - a real gamepad (emulated);
-  - Esc under the Keyboard Lock API;
+  - ~~Esc under the Keyboard Lock API~~ (verified 2026-10-02 in a headed Chromium: a tap is
+    the menu, a hold leaves fullscreen);
   - sound by ear (only its counters, samples and the C oracle).
 - **Deployed.** The threads build of `main` is served over https on a private network:
   the shareware page, and a registered one that offers `pak1.pak` and the CD tracks
