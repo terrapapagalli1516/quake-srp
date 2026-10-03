@@ -216,7 +216,7 @@ pub fn cmd_timedemo(pak_path: &str, demo: &str, rest: &[String]) -> Result<Strin
                 o,
                 "  bands: {:.3} ms wall per frame on {} thread(s), {:.1} rounds of threads a frame (the 3-D times above add every thread's)",
                 ns(st.bands_ns),
-                st.band_threads / st.views.max(1),
+                st.band_threads / frames as u64,
                 st.thread_rounds as f64 / frames as f64,
             );
             let _ = writeln!(
