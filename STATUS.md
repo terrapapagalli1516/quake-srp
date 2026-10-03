@@ -261,7 +261,7 @@ phone.
 
 ## 2026-09-26: the 2026 push
 
-the user's brief:
+The user's brief:
 - **Extremely important:** zero dependencies, no `unsafe`, and identical to id with
   every feature off.
 - **Beyond that:** "the most amazing experience ever of an idealized version of
@@ -274,7 +274,7 @@ the user's brief:
 
 The chair ran 17 agents, at most 4 at a time, one branch each. It merged them into
 `quake/2026` (from `quake/overnight` @ `3866e1b`) after a full check each time. Its
-ledger is a `PLAN.md` outside this repository; each
+ledger (a `PLAN.md`) is kept outside this repository; each
 merge message summarises its branch. In merge order:
 
 - **rustcheck** (`638571c`): `CODE_PLAN.md`, a measured plan for showcase-quality Rust
@@ -410,13 +410,13 @@ profile. The browser build is a WASI program: the pak is a file, not embedded; t
 engine mixes the sound, not Web Audio; saves are files, not localStorage. The top of
 this file is current.*
 
-the user's brief: faithful by default (only Always Run departs; anything
+The user's brief: faithful by default (only Always Run departs; anything
 else becomes an opt-in extra), three bugs they had noticed (Chthon has no electricity; the
 Options cursor blinks too fast; Screen size does the wrong thing), performance, well
 structured code. The chair split it into branches, one agent each, merged into
 `quake/overnight` in order (`git log --first-parent 5af4fa1..31775f5`; each merge message
-summarises its branch). The chair's ledger is
-a `PLAN.md` outside this repository.
+summarises its branch). The chair's ledger
+(a `PLAN.md`) is kept outside this repository.
 
 **The three reported bugs.**
 - *Chthon's lightning* (`ce2dbf8`): boss.qc writes `TE_LIGHTNING3` to `MSG_ALL`, and the

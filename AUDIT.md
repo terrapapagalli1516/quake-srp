@@ -3149,7 +3149,7 @@ starts the door did not move, yet they could walk through it. hip1m1's start roo
 `trigger_relay` (1 s delay) that opens five `func_door` pieces (`t7`/`t2` at once, `t4`
 +1.5 s, `t6`/`t8` +2.5 s; `spawnflags` 2052 = `DOOR_DONT_LINK` + not-in-deathmatch, `wait
 -1`). This round tried hard to reproduce it and could not, on real hipnotic data
-(`deploy/{id1,hipnotic}` in a work directory),
+(a local deploy dir, `deploy/{id1,hipnotic}`),
 three independent ways:
 
 - **A native Rust harness** (`Server::with_pak` directly, no client/renderer): teleported

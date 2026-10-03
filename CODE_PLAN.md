@@ -606,7 +606,7 @@ These structural issues are likely to survive the `platform` rewrite.
 ## 9. How the numbers were made
 
 All runs used scratch copies or `CARGO_TARGET_DIR` outside the worktree
-(a scratch directory), during one sitting.
+(a scratch directory beside it), during one sitting.
 - **Lints:** `cargo clippy --release --all-targets --message-format=json -- -W clippy::pedantic -W clippy::nursery`
   (and `--lib --bins` with selected `restriction` lints), aggregated by lint and file.
   `CLIPPY_CONF_DIR` set `too-many-lines-threshold = 150`.
