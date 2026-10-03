@@ -269,7 +269,8 @@ const COMMANDS: &[Command] = &[
     Command {
         name: "framerate",
         usage: "<pak> [--rates 60,144,240,480,jitter] [--only NAMES] [--markdown] [--check] \
-                | --budget [--res WxH,...] | --lerpmove [--rates LIST] [--strip DIR]",
+                | --budget [--res WxH,...] | --lerpmove [--rates LIST] [--strip DIR] \
+                | --lightstyles [--rates LIST] [--res WxH] [--threads N] [--reps N] [--secs S] [--view NAME=MAP:X,Y,Z:YAW]...",
         about: "play scripted scenarios at 72 Hz and each rate; how each quantity differs (FRAMERATE.md)",
         run: |a| Ok(Out::Text(framerate::cmd_framerate(&a[0], &a[1..])?)),
     },

@@ -1,13 +1,16 @@
 //! The video options `shot`, `view`, `play` and `timedemo` share: the port's video
-//! cvars ([`VideoCvars`]: Hor+, hires and the fluid sky), the display the frame
-//! is shown on (which with the mode's size gives `vid.aspect`), and the scaled
-//! 2-D layer.
+//! cvars ([`VideoCvars`]: Hor+, hires, the fluid sky and the gliding light
+//! styles), the display the frame is shown on (which with the mode's size gives
+//! `vid.aspect`), and the scaled 2-D layer.
 //!
 //! ```text
-//! --video classic|modern   every cvar at once: id's, or Hor+, hires and the fluid sky (default classic)
+//! --video classic|modern   every cvar at once: id's, or Hor+, hires, the fluid sky and
+//!                          the gliding light styles (default classic)
 //! --fov-mode classic|horplus  how `fov` meets the display's shape
 //! --hires 0|1              views past 1280x1024, particles and the warp at 320x200 proportions
 //! --sky classic|fluid      the clouds in id's whole-texel steps, or gliding (`r_fluidsky`)
+//! --lightstyles classic|smooth  the animated lights in id's ten steps a second, or
+//!                          gliding between them (`r_lerplightstyles`)
 //! --display W:H|square     the display's width:height (square: the mode's own,
 //!                          square pixels); the default is the command's
 //! --scaled2d 0|1           the status bar, menus and console blown up from 320x200
@@ -16,6 +19,7 @@
 //! ```
 
 use quake_rs::render::{FovMode, SkyScroll, VideoCvars};
+use quake_rs::server::LerpLightStyles;
 
 /// The parsed video options (see the module docs).
 #[derive(Clone, Copy, Debug, Default)]
@@ -57,6 +61,13 @@ impl VideoArgs {
                     "classic" => SkyScroll::Classic,
                     "fluid" => SkyScroll::Fluid,
                     _ => return Err(format!("--sky: expected classic or fluid, got {val:?}")),
+                }
+            }
+            "--lightstyles" => {
+                self.cvars.lightstyles = match val {
+                    "classic" => LerpLightStyles::Classic,
+                    "smooth" => LerpLightStyles::Smooth,
+                    _ => return Err(format!("--lightstyles: expected classic or smooth, got {val:?}")),
                 }
             }
             "--threads" => {
