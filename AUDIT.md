@@ -3380,7 +3380,7 @@ was done. Struck items are fixed on this branch.
   out of it and turn with the view. Certain: the 3-D oracle on hip1m1 after `+attack`,
   seen along the wall (id's thin slivers; the port's billboards, cut by the wall).
   `s_blood1.spr` (type 3, `wallsprite`) is placed by no map.
-- **P6 The re-release's strings are localization keys** (open: brief B3). 136 of
+- **P6 ~~The re-release's strings are localization keys~~** (fixed, `fleet/strings` `a64a0a9`: `localization.rs`, the pack's `loc_english.txt` in its pak; was: open, brief B3). 136 of
   Hipnotic's string immediates and 190 of Rogue's in `sprint`/`bprint`/`centerprint`/
   `dprint`/`WriteString` are `$qc_...` keys, and the formatted ones take arguments the
   re-release's engine substitutes (`sprint(other, "$qc_got_item", self.netname)` with
