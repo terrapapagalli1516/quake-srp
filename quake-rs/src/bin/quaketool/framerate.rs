@@ -9,9 +9,10 @@
 //! [--threads N] [--reps N] [--secs S] [--view NAME=MAP:X,Y,Z:YAW]...` — what
 //! the gliding light styles (`r_lerplightstyles`) cost: surfaces rebaked
 //! and the 3-D view's time per frame, standing where lights animate.
-//! `quaketool framerate <pak>[,<pak>...] --bake [--threads LIST] [the same
-//! options]` — what the frame's lit-surface bakes cost on 1 to 16 threads:
-//! the 3-D view's time and its serial part where many blocks rebake.
+//! `quaketool framerate <pak>[,<pak>...] --bake [--threads LIST] [--paced]
+//! [the same options]` — what the frame's lit-surface bakes cost on 1 to 16
+//! threads: the 3-D view's time and its serial part where many blocks
+//! rebake; `--paced` keeps the display's real time between frames.
 //! `quaketool framerate <pak>[,<pak>...] --torchflicker S [the same options]
 //! [--dump DIR [--strengths LIST]]` — the same for the steady torches'
 //! flicker (`r_torchflicker` at strength S), standing by torches; with
@@ -1610,8 +1611,19 @@ struct StyleRun {
 
 /// `secs` of the live game at `rate` standing at `view`, drawn at `vid`,
 /// after a second to settle and warm the caches.
+/// `--paced`: the runs keep the display's real time, each frame started on
+/// the rate's tick (a sleep between), as a game shown on that display runs:
+/// the render threads idle between frames, and a frame's first round of
+/// threads starts cold. Without it the frames run back to back.
+static PACED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 fn style_run(pak: &Pak, view: &StyleView, rate: Rate, vid: Vid, threads: usize, secs: f64, counters: bool) -> StyleRun {
     let stepping = if rate == Rate::Hz(72) { Stepping::Classic } else { Stepping::Uncapped };
+    let tick = match rate {
+        Rate::Hz(hz) if PACED.load(std::sync::atomic::Ordering::Relaxed) => Some(std::time::Duration::from_secs_f64(1.0 / f64::from(hz))),
+        _ => None,
+    };
+    let mut next = Instant::now();
     let mut s = Sim::new(pak, &view.map, rate, stepping);
     s.w.renderer.set_threads(threads);
     s.teleport(view.origin, view.yaw);
@@ -1627,6 +1639,12 @@ fn style_run(pak: &Pak, view: &StyleView, rate: Rate, vid: Vid, threads: usize, 
         let measuring = s.t >= warm;
         if measuring && counters {
             s.w.renderer.stats_begin();
+        }
+        if let Some(tick) = tick {
+            next += tick;
+            if let Some(wait) = next.checked_duration_since(Instant::now()) {
+                std::thread::sleep(wait);
+            }
         }
         lap_start();
         let frame = cl_main::walk_frame(&mut s.w, dt, false, &vid);
@@ -1970,6 +1988,7 @@ pub fn cmd_framerate(pak_path: &str, rest: &[String]) -> Result<String, String> 
             "--lightstyles" => lightstyles = true,
             "--exactpersp" => exactpersp = true,
             "--bake" => bake = true,
+            "--paced" => PACED.store(true, std::sync::atomic::Ordering::Relaxed),
             "--torchflicker" => {
                 let v = rest.get(i + 1).ok_or("--torchflicker needs a strength")?;
                 torchflicker = Some(v.parse().map_err(|_| format!("--torchflicker: bad strength {v:?}"))?);

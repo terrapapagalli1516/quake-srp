@@ -1370,7 +1370,12 @@ on several threads (quake-rs `render/band.rs`: row bands after the edge scan,
 the same pixels for any count). `wasi.js`:
 
 - makes the shared memory with the limits the module's import section
-  declares (the JS API does not tell them, so `importedMemory` reads them);
+  declares (the JS API does not tell them, so `importedMemory` reads them):
+  for the game, initial = maximum = 512 MiB, a memory that never grows
+  (below, "A memory that never grows"). If the browser will not make it, the
+  page stops and says so ("the game did not start: this browser would not
+  give the game the 512 MB of memory it needs to run"): there is no other
+  mode;
 - before the program starts, makes a pool of thread workers (as many as
   `navigator.hardwareConcurrency`, 2–16), each another instance of
   `wasi.js` — a worker made after its parent has blocked may never start;
@@ -1390,6 +1395,95 @@ the same pixels for any count). `wasi.js`:
 A thread has the clocks, randomness, sleep and stderr (to its worker's
 console: the parent never reads messages again). The files, stdin and
 stdout stay the main program's, and a thread cannot spawn threads yet.
+
+**A thread's stack** (1 MiB, malloc'd, no guard page) is what `std` asks
+wasi-libc's `pthread_create` for:
+1 MiB (`std::thread`'s wasip1 `DEFAULT_MIN_STACK_SIZE`; the bands' and the
+bakes' scoped threads ask nothing more), allocated from the program's own
+heap, with no guard below it — linear memory has no unmapped pages. A
+thread that recurses past it does not fault: it writes over whatever the
+heap holds below its stack (the review of the bakes measured 1500 KiB of
+frames silently overwriting the heap). Nothing the threads run recurses
+deeply: the light tool's trace (quake-rs `render/torch.rs`'s `test_line`)
+goes as deep as the world's node tree, tens of frames.
+
+**A memory that never grows.** In Chromium a worker thread can trap —
+`RuntimeError: memory access out of bounds`, in `calloc` or wherever it
+first touches the memory — when another thread grows the shared memory
+(`memory.grow`, from `malloc`'s `sbrk`) while it runs: one thread grows the
+heap, another is handed and touches what lies in the new pages. The game hit
+it about one page load in four on the registered episode
+(`verify_content.py`, a worker of the torch set's build after a map load:
+2 of 12 runs) once its threads allocated as the heap grew; 40 lines of safe
+Rust show it alone (`threadcheck`'s last stage: eight scoped threads each
+allocating and keeping buffers, so the heap grows under them) — 6 of 20
+Chromium runs trapped, 0 of 10 in Firefox. With the memory linked at
+initial = maximum, so that `sbrk` never grows it, 0 of 40 (and `verify_content.py`
+24 of 24). So `quake-wasm/build.rs` links the threads build that way, 512
+MiB (`QUAKE_WASM_GROWABLE=1` links it growable again), the program checks
+the size at startup (a line on stderr if it is not), and `verify_threads.py`
+runs `threadcheck` repeatedly, fails on any trap, and in a Chromium before
+157 shows the growable link still trapping. The single-thread build has no
+shared memory and no workers, and keeps its growable one.
+
+Why: a V8 bug, fixed upstream on 2026-09-29 (V8 commit
+[3424101](https://chromium-review.googlesource.com/c/v8/v8/+/8466625),
+"Atomic memory.size and dynamic bounds checks for shared memory"; Chromium
+issues [529880019](https://issues.chromium.org/issues/529880019) and
+[533026477](https://issues.chromium.org/issues/533026477)), first in Chrome
+157. Up to 156 each worker keeps its own copy of a shared memory's size,
+refreshed only when it enters wasm from JS, when it grows the memory itself,
+or when it handles the grow's interrupt. Ordinary loads and stores are
+covered by guard pages and see the new pages, but `memory.fill`,
+`memory.copy`, the atomics and `memory.size` are checked against the stale
+size — and `calloc` (Rust's `vec![x; n]`) is a `memory.fill`, a `Vec`'s
+`realloc` a `memory.copy`. So a worker handed pages another thread has just
+grown traps. Safari 26.0–26.2 had the same class of bug
+([WebKit 303387](https://bugs.webkit.org/show_bug.cgi?id=303387)); Firefox
+reads the live size. Others met it: napi-rs
+([#3552](https://github.com/napi-rs/napi-rs/issues/3552), in rolldown) and
+Emscripten ([#25905](https://github.com/emscripten-core/emscripten/issues/25905)),
+whose pthreads build is a memory that never grows by default. It must be
+the link's setting: wasi-libc's heap starts at the size the module was
+linked with, so a bigger `WebAssembly.Memory` from the host would not give
+`malloc` the room. The fixed memory stays after Chrome 157: older Chromes
+and Safaris stay in use.
+
+**A crashed thread** ends the game, it does not freeze it. A trap in a
+thread (a panic aborts, `panic = "abort"`, so it traps too) used to leave
+the thread's worker logging it and the program's main thread waiting for
+ever to join it, and the page waiting for the program. Now the worker sets
+the control block's run state to crashed, wakes every Sync waiter, and tells
+the page on a `BroadcastChannel` the page names at `init` (the program's
+worker, the thread workers' parent, may be the one blocked in that join and
+read no messages); the page stops the program's worker, and its thread
+workers with it, refuses any call waiting on the program, and shows "The game
+stopped: a thread stopped (...)" over the view with a button to reload —
+the same box a trap of the main thread, a full memory or a `Sys_Error`
+during play now shows. `verify_crash.py` checks it with a deliberate panic
+in a thread (automation's `crash_a_thread`): the box is up within a second.
+
+**What 512 MiB holds.** The paks stay in the page's file store and are read
+as the game asks, so the program's memory is its frames (about 14 bytes a
+pixel: the 8-bit frame, the 16-bit z-buffer, the RGBA slots) and its caches.
+Measured with a growable build (its size is the heap's high-water mark)
+through every map of a game, each looked all the way round, in Chromium:
+id1 (pak0 and pak1) 64 MB at 1886×996 and 153 MB at 3806×2076 (4K, pixel
+size 1); Scourge of Armagon 68 and 153; Dissolution of Eternity 68 and 154
+(this round's research measured 46 MiB at 1280×720 and 152 MiB at a 4K
+window). So 512 MiB is three times what the largest frame the page's Auto
+pixel size makes needs (4K's worth of pixels at 16 threads); only a
+pixel size of 1 forced on a display past about 6K would not fit (8K, about
+500 MB, is the renderer's limit). It is half the threads build's old
+maximum: a fixed memory is committed whole when it is made — free on Linux
+and Android until a page is touched (here the page's resident memory with it
+fixed is the growable build's: Chromium, all processes, 984 MB against 972 at
+1 GiB), but a commit charge on Windows; 32-bit Chrome retries a smaller
+reservation only for a growable memory; iOS counts a shared memory's
+maximum against a pool (the research's notes). A full memory stops the game
+cleanly on the main thread — `memory allocation of N bytes failed`, then
+`std`'s abort — and the page shows "The game stopped: out of memory ...: a
+larger pixel size, in Video Options, needs less" (a 96 MiB build at 4K).
 
 **The renderer's threads** are the cvar `r_threads` (quake-wasm `App::
 render_threads`, the typed `quake_rs::render::Threads`): 0, the default,

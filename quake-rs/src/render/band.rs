@@ -16,17 +16,22 @@
 //! the particles' projection — is done once, before the bands, and handed to
 //! them read-only. The surface cache's bakes, the blocks the frame finds
 //! stale, are independent of one another, and run on the threads too, as
-//! jobs ([`map_jobs`]), once every block is looked up and before the bands. One thread is the same code with one band, drawn on the
-//! calling thread. A band's pixels are the view's own rows or, drawn straight
-//! into the screen, the screen's rows under the view ([`Band::placed`]).
+//! jobs ([`map_jobs`]), once every block is looked up and before the bands.
+//! One thread is the same code with one band, drawn on the calling thread.
+//! A band's pixels are the view's own rows or, drawn straight into the
+//! screen, the screen's rows under the view ([`Band::placed`]).
 //!
 //! The threads are `std::thread::scope`'s, spawned for the bands of a frame
 //! and joined before [`Renderer::render`](super::Renderer::render) returns:
 //! they borrow the frame, and nothing outlives it. That is the one way safe
 //! Rust lends a frame's buffers to other threads; a pool of threads kept
-//! across frames would need the frame's data owned or `'static`. A spawn
-//! costs about 10 µs natively (0.15 ms a frame for 16 threads), against
-//! milliseconds of pixels at the sizes where threads pay.
+//! across frames would need the frame's data owned or `'static`. A round —
+//! spawn, run, join — of 1, 3 and 7 helper threads costs about 32, 61 and
+//! 77 µs natively when threads ran a moment before, and 145–415 µs after 14
+//! ms idle (a frame's first round at 72 Hz); in the page, where a spawn
+//! wakes a pooled worker, 10–25 µs hot and 160–265 µs cold in Chromium,
+//! 20–40 and 180–240 in Firefox (the review of the bakes, 2026-10-03) —
+//! against milliseconds of pixels at the sizes where threads pay.
 
 use std::ops::Range;
 use std::sync::atomic::{AtomicUsize, Ordering};

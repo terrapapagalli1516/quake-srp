@@ -10,10 +10,12 @@
 //! links the threads build growable again, for `verify_threads.py` to show
 //! the trap.
 
-/// The threads build's memory, initial and maximum: 1 GiB, the most
-/// `wasm32-wasip1-threads` links for by default (web/PLATFORM.md, "Threads",
+/// The threads build's memory, initial and maximum: 512 MiB, three times the
+/// most the game was measured to use (154 MB: every map of the registered
+/// game and both mission packs at 4K, pixel size 1), and half the old
+/// maximum, as a fixed memory is committed whole (web/PLATFORM.md, "Threads",
 /// for what it holds and what a full one does).
-const FIXED_MEMORY: u64 = 1 << 30;
+const FIXED_MEMORY: u64 = 512 << 20;
 
 fn main() {
     println!("cargo:rerun-if-env-changed=QUAKE_WASM_GROWABLE");
