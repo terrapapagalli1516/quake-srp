@@ -19,7 +19,7 @@
 //! --fire N           hold +attack for the last N frames (muzzle flash, particles)
 //! --crosshair N      the `crosshair` cvar: 1 the 2026 cross, 2 id's + (default 0: none, the view alone)
 //! --sbaroverlay 0|1  `scr_sbaroverlay`: the world beside the status bar, as 2026 (default 0, id's)
-//! plus the video options (`video.rs`): --video, --fov-mode, --hires, --sky, --display (default square), --scaled2d, --threads
+//! plus the video options (`video.rs`): --video, --fov-mode, --hires, --sky, --lightstyles, --display (default square), --scaled2d, --threads
 //! ```
 
 use std::fmt::Write as _;

@@ -839,15 +839,17 @@ fn render_demo_frame(
     }
     // The RECORDED svc_lightstyle table drives the world lighting through the
     // same R_AnimateLight 10 Hz logic the live walk uses (lightstyle_scales_at)
-    // — the demo's torch flicker matches the recording exactly. A synthetic
-    // demo without a table (tests) falls back to the previous seeded default:
-    // style 0 = 'm' (264/256, id's steady-world brightness), the rest neutral.
+    // — the demo's torch flicker matches the recording exactly — stepped or
+    // gliding as `r_lerplightstyles` says, as live play is (the attract demo
+    // is the first thing a visitor sees). A synthetic demo without a table
+    // (tests) falls back to the previous seeded default: style 0 = 'm'
+    // (264/256, id's steady-world brightness), the rest neutral.
     let demo_styles = if f.lightstyles.is_empty() {
         let mut s = render::NEUTRAL_LIGHTSTYLE_SCALES;
         s[0] = 264.0 / 256.0;
         s
     } else {
-        crate::server::lightstyle_scales_at(&f.lightstyles, v.time)
+        crate::server::lightstyle_scales_at(&f.lightstyles, v.time, vid.video.lightstyles)
     };
     // The first-person weapon viewmodel: SU_WEAPON is the model PRECACHE index
     // (`view->model = cl.model_precache[cl.stats[STAT_WEAPON]]`, V_CalcRefdef),
@@ -1133,6 +1135,11 @@ mod tests {
 
     /// A playback of `frames` over the test room, with no assets.
     fn playback(frames: Vec<DemoFrame>) -> DemoPlay {
+        playback_in(render::demo_room(), [[0u8; 3]; 256], frames)
+    }
+
+    /// A playback of `frames` over `bsp`, drawn with `palette`, with no assets.
+    fn playback_in(bsp: Bsp, palette: [[u8; 3]; 256], frames: Vec<DemoFrame>) -> DemoPlay {
         let demo = Demo {
             level_name: "test".into(),
             static_sounds: Vec::new(),
@@ -1150,7 +1157,7 @@ mod tests {
             img
         })
         .unwrap();
-        DemoPlay::new(pak, render::demo_room(), [[0u8; 3]; 256], demo)
+        DemoPlay::new(pak, bsp, palette, demo)
     }
 
     const VID: Vid = Vid { width: 64, height: 40, display_aspect: 4.0 / 3.0, exact_perspective: false, video: render::VideoCvars::CLASSIC, mip: render::MipCvars::DEFAULT };
@@ -1247,6 +1254,40 @@ mod tests {
         let x = v.view_entity_origin[0];
         render::recycle_image(demo_frame(&mut d, 1.0 / 72.0, false, &VID).image);
         assert!(d.view.view_entity_origin[0] > x);
+    }
+
+    /// The demo animates its RECORDED light styles through the live walk's
+    /// `lightstyle_scales_at`, stepped or gliding as the video cvars say
+    /// (`r_lerplightstyles`): on a whole tenth the two frames are the same,
+    /// halfway through one they are not.
+    #[test]
+    fn the_recorded_light_styles_step_or_glide_as_the_cvars_say() {
+        // Style 1 (every wall's second lightmap) toggles 'a' / 'z' each tenth.
+        let msg = |n: u8| DemoFrame {
+            time: f32::from(n) / 10.0,
+            prev_time: f32::from(n - 1) / 10.0,
+            viewheight: 22.0,
+            lightstyles: std::rc::Rc::new(vec!["m".into(), "az".into()]),
+            ..Default::default()
+        };
+        let room = render::fixtures::lightmapped_demo_room(100, 200);
+        let mut d = playback_in(room, render::fixtures::ramp_palette(), (10..14).map(msg).collect());
+        d.viewsize = 120.0; // no status bar: the whole 64x40 is the view
+        let smooth = Vid {
+            video: render::VideoCvars { lightstyles: crate::server::LerpLightStyles::Smooth, ..render::VideoCvars::CLASSIC },
+            ..VID
+        };
+        // The first frame pulls the clock to 0.1 s before the first message:
+        // 0.9, tenth 9 ('z'). A dt of 0 draws the same frame again.
+        let stepped = demo_frame(&mut d, 1.0 / 72.0, false, &VID).image;
+        assert_eq!(d.time, 0.9);
+        let glided = demo_frame(&mut d, 0.0, false, &smooth).image;
+        assert!(stepped.pixels == glided.pixels, "on the tenth: id's frame");
+        // 0.95: id's 'z' still, the glide halfway to 'a'.
+        let glided = demo_frame(&mut d, 0.05, false, &smooth).image;
+        let stepped = demo_frame(&mut d, 0.0, false, &VID).image;
+        assert!((d.time - 0.95).abs() < 1e-6, "{}", d.time);
+        assert!(stepped.pixels != glided.pixels, "mid-tenth the glide is between the letters");
     }
 
     /// `U_NOLERP` (id's monsters): drawn where the message put them in the

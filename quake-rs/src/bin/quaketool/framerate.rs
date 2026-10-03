@@ -5,6 +5,10 @@
 //! `quaketool framerate <pak> --lerpmove [--rates LIST] [--strip DIR]` — how
 //! smoothly the monsters' steps are drawn, Classic and with `r_lerpmove`
 //! ([`LerpMove`]; "Monsters between their steps" below).
+//! `quaketool framerate <pak>[,<pak>...] --lightstyles [--rates LIST] [--res WxH]
+//! [--threads N] [--reps N] [--secs S] [--view NAME=MAP:X,Y,Z:YAW]...` — what
+//! the gliding light styles (`r_lerplightstyles`) cost: surfaces rebaked
+//! and the 3-D view's time per frame, standing where lights animate.
 //!
 //! Each scenario is a scripted piece of play on the shareware maps — a jump,
 //! a fall, a grenade, a lift, a damage flash, a demo — run through the same
@@ -1492,6 +1496,151 @@ fn write_strip(pak: &Pak, dir: &str) -> Result<(), String> {
 }
 
 // ---------------------------------------------------------------------------
+// Light styles: what `r_lerplightstyles` costs
+// ---------------------------------------------------------------------------
+
+/// A view `--lightstyles` measures: the player standing at `origin` on
+/// `maps/<map>.bsp`, looking along `yaw`.
+#[derive(Clone, Debug)]
+struct StyleView {
+    name: String,
+    map: String,
+    origin: [f32; 3],
+    yaw: f32,
+}
+
+impl StyleView {
+    /// `NAME=MAP:X,Y,Z:YAW` (`--view`).
+    fn parse(s: &str) -> Result<StyleView, String> {
+        let bad = || format!("--view: expected NAME=MAP:X,Y,Z:YAW, got {s:?}");
+        let (name, rest) = s.split_once('=').ok_or_else(bad)?;
+        let mut parts = rest.split(':');
+        let (Some(map), Some(xyz), Some(yaw), None) = (parts.next(), parts.next(), parts.next(), parts.next()) else {
+            return Err(bad());
+        };
+        let v: Vec<f32> = xyz.split(',').map(|p| p.trim().parse()).collect::<Result<_, _>>().map_err(|_| bad())?;
+        let origin: [f32; 3] = v.try_into().map_err(|_| bad())?;
+        Ok(StyleView { name: name.into(), map: map.into(), origin, yaw: yaw.parse().map_err(|_| bad())? })
+    }
+}
+
+/// The views `--lightstyles` measures without `--view`: where the shareware
+/// maps animate a light — e1m1's start (the fluorescent flicker, style 10,
+/// in the room ahead) and the flickering corridor itself, e1m5's slow
+/// pulse (style 2) — and, with the registered `pak1.pak` layered on,
+/// episode 2's flickering wall torches (styles 1 and 6): e2m2's start, and
+/// the most torch-lit surfaces found in a view, by e2m5's start. The
+/// shareware maps' torches are steady (style 0).
+const STYLE_VIEWS: &[&str] = &[
+    "e1m1-start=e1m1:480,-352,88:90",
+    "e1m1-flicker=e1m1:600,140,88:270",
+    "e1m5-pulse=e1m5:-544,1880,-192:270",
+    "e2m2-torches=e2m2:-256,-1952,280:0",
+    "e2m5-torches=e2m5:-864,-1100,-142:225",
+];
+
+/// One run's frames: per frame, the surfaces whose lightmap carries a style
+/// past 0, the blocks the surface cache baked and their texels (with the
+/// renderer's counters on), or the 3-D view's time in seconds (with them off).
+#[derive(Default)]
+struct StyleRun {
+    styled: Vec<f64>,
+    baked: Vec<f64>,
+    texels: Vec<f64>,
+    view_s: Vec<f64>,
+}
+
+/// `secs` of the live game at `rate` standing at `view`, drawn at `vid`,
+/// after a second to settle and warm the caches.
+fn style_run(pak: &Pak, view: &StyleView, rate: Rate, vid: Vid, threads: usize, secs: f64, counters: bool) -> StyleRun {
+    let stepping = if rate == Rate::Hz(72) { Stepping::Classic } else { Stepping::Uncapped };
+    let mut s = Sim::new(pak, &view.map, rate, stepping);
+    s.w.renderer.set_threads(threads);
+    s.teleport(view.origin, view.yaw);
+    let mut run = StyleRun::default();
+    let (warm, end) = (s.t + 1.0, s.t + 1.0 + secs);
+    while s.t < end - 1e-9 {
+        let dt = s.clock.next();
+        let measuring = s.t >= warm;
+        if measuring && counters {
+            s.w.renderer.stats_begin();
+        }
+        lap_start();
+        let frame = cl_main::walk_frame(&mut s.w, dt, false, &vid);
+        s.t += dt;
+        render::recycle_image(frame.image);
+        if !measuring {
+            continue;
+        }
+        if counters {
+            let st = s.w.renderer.stats_end();
+            run.styled.push(st.surf_styled as f64);
+            run.baked.push(st.surf_baked as f64);
+            run.texels.push(st.surf_texels_baked as f64);
+        } else {
+            run.view_s.push(lap_times()[1]);
+        }
+    }
+    run
+}
+
+/// `--lightstyles [--rates LIST] [--res WxH] [--threads N] [--reps N]
+/// [--secs S] [--view NAME=MAP:X,Y,Z:YAW]...`: per view and rate, id's
+/// stepped light styles → `r_lerplightstyles`' glide: the styled surfaces
+/// drawn, the blocks rebaked and their texels per frame (the renderer's
+/// counters, one run each), and the 3-D view's time per frame (median, mean,
+/// p95 over `reps` runs of each, interleaved, the counters off). The video
+/// cvars are the 2026 profile's but for the light styles.
+fn lightstyles_report(pak: &Pak, rates: &[Rate], views: &[StyleView], res: (usize, usize), threads: usize, reps: usize, secs: f64) -> String {
+    use quake_rs::server::LerpLightStyles;
+    let mut o = String::new();
+    let vid_for = |lerp| Vid {
+        width: res.0,
+        height: res.1,
+        display_aspect: res.0 as f64 / res.1 as f64,
+        video: render::VideoCvars { lightstyles: lerp, ..render::VideoCvars::MODERN },
+        ..VID
+    };
+    let mean = |xs: &[f64]| xs.iter().sum::<f64>() / xs.len().max(1) as f64;
+    let _ = writeln!(o, "r_lerplightstyles at {}x{}, {threads} thread(s), {secs} s a run; Classic → Smooth", res.0, res.1);
+    quake_rs::client::set_lap_hook(Some(lap));
+    for view in views {
+        if pak.read_file(&format!("maps/{}.bsp", view.map)).ok().flatten().is_none() {
+            let _ = writeln!(o, "{}: maps/{}.bsp is not in the pak (skipped)", view.name, view.map);
+            continue;
+        }
+        let _ = writeln!(o, "{} — maps/{}.bsp at {:?} looking {}", view.name, view.map, view.origin, view.yaw);
+        for &rate in rates {
+            let modes = [LerpLightStyles::Classic, LerpLightStyles::Smooth];
+            let counts = modes.map(|m| style_run(pak, view, rate, vid_for(m), threads, secs, true));
+            let mut times: [Vec<f64>; 2] = Default::default();
+            for _ in 0..reps {
+                for (k, &m) in modes.iter().enumerate() {
+                    times[k].extend(style_run(pak, view, rate, vid_for(m), threads, secs, false).view_s);
+                }
+            }
+            let cell = |f: &dyn Fn(&StyleRun) -> f64| format!("{} → {}", fmt(f(&counts[0])), fmt(f(&counts[1])));
+            let _ = writeln!(o, "  {:>6} Hz: styled surfaces/frame {}; blocks rebaked/frame {}; texels baked/frame {}",
+                rate.label(), cell(&|r| mean(&r.styled)), cell(&|r| mean(&r.baked)), cell(&|r| mean(&r.texels)));
+            // (median, mean, p95) in ms.
+            let stat = |xs: &mut Vec<f64>| {
+                let m = mean(xs) * 1000.0;
+                let (med, p95) = median_p95(xs);
+                (med, m, p95)
+            };
+            let (a, b) = (stat(&mut times[0]), stat(&mut times[1]));
+            let _ = writeln!(
+                o,
+                "          3-D view ms/frame median {:.3} → {:.3}, mean {:.3} → {:.3} ({:+.1}%), p95 {:.3} → {:.3}  ({} frames each)",
+                a.0, b.0, a.1, b.1, (b.1 / a.1 - 1.0) * 100.0, a.2, b.2, times[0].len()
+            );
+        }
+    }
+    quake_rs::client::set_lap_hook(None);
+    o
+}
+
+// ---------------------------------------------------------------------------
 // The command
 // ---------------------------------------------------------------------------
 
@@ -1522,12 +1671,16 @@ pub fn cmd_framerate(pak_path: &str, rest: &[String]) -> Result<String, String> 
     let (mut only, mut markdown, mut check) = (None::<Vec<String>>, false, false);
     let (mut budget, mut res) = (false, "1280x800,1280x1024".to_string());
     let (mut lerpmove, mut strip) = (false, None::<String>);
+    // `--lightstyles`' own: 72 Hz is a rate like any other there.
+    let (mut lightstyles, mut views, mut style_rates) = (false, Vec::new(), vec![Rate::Hz(72), Rate::Hz(480)]);
+    let (mut threads, mut reps, mut secs) = (1usize, 3usize, 4.6f64);
     let mut i = 0;
     while i < rest.len() {
         match rest[i].as_str() {
             "--rates" => {
                 let v = rest.get(i + 1).ok_or("--rates needs a list")?;
                 rates = v.split(',').map(Rate::parse).collect::<Result<_, _>>()?;
+                style_rates = rates.clone();
                 rates.retain(|&r| r != Rate::Hz(72));
                 i += 1;
             }
@@ -1547,12 +1700,46 @@ pub fn cmd_framerate(pak_path: &str, rest: &[String]) -> Result<String, String> 
                 res = rest.get(i + 1).ok_or("--res needs WxH[,WxH...]")?.clone();
                 i += 1;
             }
+            "--lightstyles" => lightstyles = true,
+            "--view" => {
+                views.push(StyleView::parse(rest.get(i + 1).ok_or("--view needs NAME=MAP:X,Y,Z:YAW")?)?);
+                i += 1;
+            }
+            "--threads" | "--reps" | "--secs" => {
+                let v = rest.get(i + 1).ok_or_else(|| format!("{} needs a number", rest[i]))?;
+                let bad = || format!("{}: bad number {v:?}", rest[i]);
+                match rest[i].as_str() {
+                    "--threads" => threads = v.parse().ok().filter(|&n| n > 0).ok_or_else(bad)?,
+                    "--reps" => reps = v.parse().ok().filter(|&n| n > 0).ok_or_else(bad)?,
+                    _ => secs = v.parse().ok().filter(|&s: &f64| s > 0.0).ok_or_else(bad)?,
+                }
+                i += 1;
+            }
             a => return Err(format!("unknown argument {a:?}")),
         }
         i += 1;
     }
-    let bytes = std::fs::read(pak_path).map_err(|e| format!("cannot read {pak_path}: {e}"))?;
-    let pak = Pak::from_bytes("pak0.pak".into(), bytes).map_err(|e| e.to_string())?;
+    // A comma-separated list layers like `view`'s (the last searched first):
+    // the registered maps need `pak1.pak` over `pak0.pak`.
+    let mut pak: Option<Pak> = None;
+    for path in pak_path.split(',') {
+        let bytes = std::fs::read(path).map_err(|e| format!("cannot read {path}: {e}"))?;
+        let name = std::path::Path::new(path).file_name().map_or("pak0.pak".into(), |n| n.to_string_lossy().to_lowercase());
+        let over = Pak::from_bytes(name, bytes).map_err(|e| e.to_string())?;
+        pak = Some(match pak {
+            Some(under) => over.over(under),
+            None => over,
+        });
+    }
+    let pak = pak.ok_or("no pak")?;
+    if lightstyles {
+        style_rates.retain(|r| matches!(r, Rate::Hz(_)));
+        if views.is_empty() {
+            views = STYLE_VIEWS.iter().map(|v| StyleView::parse(v)).collect::<Result<_, _>>()?;
+        }
+        let size = super::parse_res(res.split(',').next().unwrap_or("1920x1080"), render::VideoCvars::MODERN)?;
+        return Ok(lightstyles_report(&pak, &style_rates, &views, size, threads, reps, secs));
+    }
     if budget {
         let sizes = res.split(',').map(|r| super::parse_res(r, render::VideoCvars::CLASSIC)).collect::<Result<Vec<_>, _>>()?;
         return Ok(frame_budget(&pak, &sizes));

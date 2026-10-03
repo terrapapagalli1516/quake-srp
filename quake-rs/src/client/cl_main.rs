@@ -1112,8 +1112,9 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
     // frame (below).
     let active_dlights = pushed_dlights(&w.dlights, now);
     // The animated light-style scales (torch flicker, pulsing lights) at the
-    // current server clock; the worldspawn populated the styles at spawn time.
-    let light_styles = w.server.lightstyle_scales(w.clock);
+    // current server clock, stepped as id's or gliding (`r_lerplightstyles`,
+    // the video cvars'); the worldspawn populated the styles at spawn time.
+    let light_styles = w.server.lightstyle_scales(w.clock, vid.video.lightstyles);
     // SCR_CalcRefdef / R_SetVrect: the viewsize picks the 3-D view rectangle
     // (the view sits ABOVE the status bar, projected about its own centre)
     // and how much status bar shows; an intermission is always full screen.

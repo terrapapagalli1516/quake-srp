@@ -1,13 +1,14 @@
 //! The video settings beyond id's modes: sizes past `MAXWIDTH` x `MAXHEIGHT`,
-//! a field of view that widens with the display (Hor+), and a sky whose
-//! clouds glide at the display's rate.
+//! a field of view that widens with the display (Hor+), and sky clouds and
+//! animated lights that glide at the display's rate.
 //!
 //! id's WinQuake never set a mode larger than 1280x1024 (`r_shared.h`), and
 //! `R_ViewChanged` (`r_main.c`) spreads `fov` over the view's width whatever
 //! its shape, so a wider view shows the same horizontal angle with less above
 //! and below. Both are right for 1996 and both are kept as **Classic**
 //! ([`VideoCvars::CLASSIC`], the default here, which every golden and oracle
-//! run uses), with id's sky. The port's three extras are for 2026 displays:
+//! run uses), with id's sky and light styles. The port's four extras are for
+//! 2026 displays:
 //!
 //! - [`FovMode::HorPlus`]: `fov` is the horizontal field of view of a 4:3
 //!   screen; a wider screen keeps that screen's VERTICAL field of view and sees
@@ -23,14 +24,23 @@
 //!   320x200 is 6 at 1080p and 11 at 4K, where id's eight one-texel jumps a
 //!   second are a visible lurch; the fluid clouds glide, still in whole texels
 //!   of the sky's own, unfiltered.
+//! - [`LerpLightStyles::Smooth`]: an animated light's brightness glides from
+//!   each letter of its pattern to the next in steps of two light units
+//!   ([`crate::server::lightstyle_scales_at`]), where id's `R_AnimateLight`
+//!   snaps ten times a second: at 240 Hz a flickering torch holds each
+//!   brightness for 24 frames, then jumps. At every whole tenth of a second
+//!   it is id's value.
 //!
 //! These are cvars in id's sense — settings the platform sets and the
 //! renderer reads each frame, like `d_mipscale` ([`super::MipCvars`]): the
 //! scene hands them in with every frame
 //! ([`RenderOptions::video`](super::RenderOptions::video)), and the client's
-//! [`Vid`](crate::client::Vid) carries them from the platform.
+//! [`Vid`](crate::client::Vid) carries them from the platform. (The light
+//! styles are the client's to read: it animates them into the scene's
+//! [`light_styles`](super::Scene::light_styles).)
 
 use super::sky::SkyScroll;
+use crate::server::LerpLightStyles;
 
 /// id's widest and tallest view (`r_shared.h`: `MAXWIDTH` 1280, `MAXHEIGHT`
 /// 1024): `vid_win.c` and `vid_ext.c` offer no larger mode, and the renderer
@@ -122,13 +132,27 @@ pub struct VideoCvars {
     /// How the sky's clouds scroll: id's whole texels, or fluid
     /// (`r_fluidsky`).
     pub sky: SkyScroll,
+    /// How the animated light styles step: id's ten snaps a second, or
+    /// gliding (`r_lerplightstyles`).
+    pub lightstyles: LerpLightStyles,
 }
 
 impl VideoCvars {
-    /// id's WinQuake: `fov` across the view, at most 1280x1024, id's sky.
-    pub const CLASSIC: VideoCvars = VideoCvars { fov_mode: FovMode::Classic, hires: false, sky: SkyScroll::Classic };
+    /// id's WinQuake: `fov` across the view, at most 1280x1024, id's sky and
+    /// light styles.
+    pub const CLASSIC: VideoCvars = VideoCvars {
+        fov_mode: FovMode::Classic,
+        hires: false,
+        sky: SkyScroll::Classic,
+        lightstyles: LerpLightStyles::Classic,
+    };
     /// Every extra on: what a 2026 display wants.
-    pub const MODERN: VideoCvars = VideoCvars { fov_mode: FovMode::HorPlus, hires: true, sky: SkyScroll::Fluid };
+    pub const MODERN: VideoCvars = VideoCvars {
+        fov_mode: FovMode::HorPlus,
+        hires: true,
+        sky: SkyScroll::Fluid,
+        lightstyles: LerpLightStyles::Smooth,
+    };
 }
 
 impl VideoCvars {

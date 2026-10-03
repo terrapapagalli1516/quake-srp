@@ -36,7 +36,7 @@
 //!                    passes id's `cl_dlights`, in slot order)
 //! --d-mipscale X     the `d_mipscale` cvar (default 1; 0 = every surface at mip 0)
 //! --d-mipcap N       the `d_mipcap` cvar (default 0; the finest mip level allowed)
-//! --video, --fov-mode, --hires, --sky  the port's video cvars (`video.rs`; default classic)
+//! --video, --fov-mode, --hires, --sky, --lightstyles  the port's video cvars (`video.rs`; default classic)
 //! ```
 //!
 //! The map's entities are still spawned (worldspawn's QuakeC sets the light-style
@@ -196,7 +196,7 @@ pub fn cmd_view(args: &[String]) -> CmdResult {
     let angles = angles.unwrap_or([0.0, start.map_or(0.0, |(_, a)| a), 0.0]);
     let cam = Camera { pos: origin, yaw: angles[1], pitch: -angles[0], roll: angles[2], fov_deg: fov };
     let time = time.unwrap_or_else(|| server.time());
-    let light_styles = server.lightstyle_scales(time);
+    let light_styles = server.lightstyle_scales(time, video.cvars.lightstyles);
 
     // The entity list, resolved against per-name model caches (each file parsed once).
     let mut mdls: HashMap<String, Option<Mdl>> = HashMap::new();

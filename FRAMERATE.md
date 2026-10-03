@@ -74,13 +74,16 @@ What needed nothing: QuakeC thinks (`SV_RunThink` runs each at its own
 `nextthink` time, so monster AI, animation and weapon cadence are the same at
 every rate — the grunt's fight is identical), pushers' paths (`SV_Physics_Pusher`
 moves them exactly to their think times), everything drawn from `cl.time`
-(view bob and roll, light styles, sky and water, the intermission sway),
-linear fades (the view kick, dlights, the punch angle, and the stair
-smoothing — 80 u/s times the frame's time — once its ground flag holds),
-the ambient sounds, which already step in 1/72 s ticks (`snd.rs`), and demo
-playback: id's `CL_LerpPoint` draws every frame between the two newest
-recorded messages at any rate (`client::cl_demo::demo_frame`; the port's
-Classic playback did not until `q26/lerp`).
+(view bob and roll, light styles, sky and water, the intermission sway — the
+light styles still step ten times a second at every rate, as id's do, and
+the 2026 profile glides between the steps: "Light styles between their
+letters", below), linear fades (the view kick, dlights, the punch angle,
+and the stair smoothing — 80 u/s times the frame's time — once its ground
+flag holds), the ambient sounds, which already step in 1/72 s ticks
+(`snd.rs`), and demo playback: id's `CL_LerpPoint` draws every frame
+between the two newest recorded messages at any rate
+(`client::cl_demo::demo_frame`; the port's Classic playback did not until
+`q26/lerp`).
 
 Tried and dropped (return on complexity): the exponential particle
 velocities (`pt_explode`'s `vel += vel·dvel`) and the ground and water
@@ -493,6 +496,81 @@ against the timings' noise floor — "a few percent at most" turned
 out to be an upper bound, not the real number. A level with many more
 visible monsters at once would show more; not measured here.
 
+## Light styles between their letters (`r_lerplightstyles`, `fleet/lerplight`)
+
+id's `R_AnimateLight` (`r_light.c`) gives each light style the letter of
+the current tenth of a second, `(map[(int)(cl.time*10) % len] - 'a') * 22`:
+a flickering torch, a fluorescent tube or a pulsing light holds a brightness
+for a tenth and jumps to the next. On a 1996 display that was seven frames
+a step; at 240 Hz it is 24, and the jump moves a third of e2m2's torch-lit
+start in one frame. The 2026 extra `server::LerpLightStyles::Smooth` (off in
+Classic; DarkPlaces' `r_lerplightstyles`) moves from letter `k` to letter
+`k+1` across the tenth, by `frac(cl.time*10)`, in steps of two of id's light
+units (`server::GLIDE_STEP`; 256 is the white point, a letter 22). At every
+whole tenth the value is id's letter, so those frames are id's
+(`server::lightstyle::tests`); DarkPlaces glides from `k-1` to `k` instead,
+the same shape a tenth later. One function serves the live walk and demo
+playback (`server::lightstyle_scales_at`), so the attract demo glides too.
+A one-letter style — a steady light, a switched one — never moves, and a
+pattern QuakeC replaces (`lightstyle()`) still changes at once.
+
+What it does to worldspawn's twelve patterns (`world.qc`): the flickers
+(styles 1, 6) and candles (3, 7, 8) keep their rhythm and holds, but each
+change becomes a tenth-long slope; the pulses (2, 5, 11) were staircases of
+22-unit steps and become smooth triangles; the strobes become ramps — the
+fast strobe (4, "mamama") a 5 Hz triangle that never holds still, the slow
+strobe (9) two 0.1 s fades between 0.7 s of dark and of bright — and e1m1's
+fluorescent flicker (10) a run of quick dips. Style 0 ("m") does not move.
+In the shareware episode the torches are steady (style 0); its animated
+lights are e1m1's fluorescent flicker, e1m5's and e1m6's slow pulse. The
+flickering torches are the registered episode 2's (e2m2–e2m5, styles 1 and
+6).
+
+At 240 Hz (`quaketool view --lightstyles classic|smooth` at 24 clock times
+1/240 s apart, the two modes' frames at the whole tenth byte-identical):
+
+| wall, 640x400 | id's: frames that change, the jump | the glide: frames that change, the largest |
+|---|---|---|
+| e2m2's start, torch-lit (styles 1, 6) | 1 of 23, 33% of the view | 23 of 23, 2.2% |
+| e1m1's fluorescent corridor (style 10, 'm' to 'a') | 1 of 23, 51% | 23 of 23, 16% |
+
+**The cost.** The lit-surface caches (`D_CacheSurface`'s, the port's
+`render::surf`) are keyed on the style's value: every new value rebakes each
+block the style lights. id's rebake once a tenth; the glide, while the
+value moves, once a frame — at most once a step. Hence the step: a one-letter
+change is 11 steps of 2, not 22 of 1, and at 480 Hz a torch's blocks rebake
+on fewer frames (e2m2's start: 9.0 blocks a frame instead of 14.1; e2m5's:
+17.9 instead of 30.7). The look does not change: a step of two units is half
+a colormap row at the brightest luxel (one row is 1024 of `luxel * value`),
+and on e2m2's wall at 480 Hz the most any frame changes is 1.3% of the view
+with steps of 2, 1.2% with 1; with 4 (a whole row) it is 2.4%, the changes
+bunched onto every other frame. Where a style jumps the whole range in a
+tenth (`'m'` to `'a'`, 264 units) the value moves more than a step a frame
+at any rate, so its blocks rebake every frame whatever the step.
+
+`quaketool framerate <pak0>,<pak1> --lightstyles --rates 72,480 --res
+1920x1080 --threads 1|8 --reps 3`: the live game standing at each view, the
+2026 video settings but the light styles, 4.6 s a run (the counters from one
+run of each mode, the times from three of each, interleaved, the counters
+off), native release build, 2026-10-03, load average 1–4. "Styled" is the
+surfaces drawn whose lightmap has a style past 0; the time is the 3-D view's
+mean per frame:
+
+| view | styled | blocks rebaked a frame, 72 Hz / 480 Hz | 1 thread, ms, 72 / 480 Hz | 8 threads, ms, 72 / 480 Hz |
+|---|---|---|---|---|
+| e1m1 start | 14 | 1.27 → 9.64 / 0.19 → 9.13 | 3.75 → 3.81 / 3.87 → 3.99 | 1.08 → 1.13 / 1.08 → 1.13 |
+| e1m1 fluorescent corridor | 26 | 2.36 → 17.9 / 0.35 → 17.0 | 4.06 → 4.24 / 4.03 → 3.86 | 1.01 → 1.06 / 1.02 → 1.07 |
+| e1m5 slow pulse | 7 | 0.95 → 6.85 / 0.14 → 1.57 | 3.19 → 3.27 / 3.22 → 3.21 | 0.72 → 0.81 / 0.71 → 0.73 |
+| e2m2 start, torches | 18 | 2.50 → 18.0 / 0.38 → 9.01 | 3.36 → 3.50 / 3.10 → 3.21 | 0.82 → 0.95 / 0.80 → 0.89 |
+| e2m5 by the start, torches | 46 | 5.74 → 41.4 / 0.86 → 17.9 | 3.39 → 3.61 / 3.19 → 3.30 | 0.91 → 1.13 / 0.87 → 0.98 |
+
+At most 0.22 ms a frame (e2m5 at 72 Hz, where nearly every frame rebakes
+every torch-lit block), 0.02–0.13 ms elsewhere, the same with 1 thread or 8:
+the blocks bake in `D_DrawSurfaces`' setup, before the bands, so with 8
+threads the same time is a larger share (up to 25% at 72 Hz, 13% at 480).
+The worst frame stays well inside 480 Hz's 2.08 ms. The 1-thread rows are
+within the timings' noise (one comes out 4% faster).
+
 ## Budget
 
 `quaketool framerate <pak> --budget --res 640x400,1280x800,1280x1024`, native
@@ -540,6 +618,7 @@ cd quake-rs && cargo build --release
 ./target/release/quaketool framerate ../quake-data/ID1/PAK0.PAK --only jump,flash --rates 144,480
 ./target/release/quaketool framerate ../quake-data/ID1/PAK0.PAK --budget --res 1280x800
 ./target/release/quaketool framerate ../quake-data/ID1/PAK0.PAK --lerpmove  # monsters between steps (5 s)
+./target/release/quaketool framerate ../quake-data/ID1/PAK0.PAK,PAK1.PAK --lightstyles --res 1920x1080  # gliding lights' cost (8 min)
 ```
 
 Each scenario restarts the process's random sequences (`server::reset_random`)

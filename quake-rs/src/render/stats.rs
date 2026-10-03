@@ -72,6 +72,10 @@ pub struct RenderStats {
     /// distant surface costs a quarter, a sixteenth or a sixty-fourth of its
     /// mip-0 area (`R_DrawSurface`'s work).
     pub surf_texels_baked: u64,
+    /// Surfaces asked of the surface cache whose lightmap carries a style
+    /// other than 0 — an animated light (`R_AnimateLight`'s patterns) or a
+    /// switched one: the blocks a light-style change rebakes.
+    pub surf_styled: u64,
     /// Alias models handed to the renderer (`cl_visedicts` entries that reach
     /// `R_DrawEntitiesOnList`), those `R_AliasCheckBBox` accepted, and the
     /// accepted models' triangles.
@@ -105,7 +109,7 @@ impl RenderStats {
         sub_tris: 0, sub_lm_builds: 0,
         world_pvs_ns: 0, world_sort_ns: 0, world_setup_ns: 0, world_light_ns: 0,
         world_surf_ns: 0,
-        surf_cache_hits: 0, surf_baked: 0, surf_bypass_baked: 0, surf_texels_baked: 0,
+        surf_cache_hits: 0, surf_baked: 0, surf_bypass_baked: 0, surf_texels_baked: 0, surf_styled: 0,
         alias_models: 0, alias_accepted: 0, alias_tris: 0,
         edges_emitted: 0, surfs_emitted: 0, spans_emitted: 0, edges_peak: 0, surfs_peak: 0,
         bands_ns: 0, band_threads: 0,
@@ -118,7 +122,7 @@ impl RenderStats {
             faces_total, faces_pvs_culled, faces_frustum_culled, faces_drawn, world_tris, world_pixels,
             surf_hits, surf_misses, sub_faces_visited, sub_faces_drawn, sub_surf_hits, sub_surf_misses,
             sub_tris, sub_lm_builds, world_pvs_ns, world_sort_ns, world_setup_ns, world_light_ns,
-            world_surf_ns, surf_cache_hits, surf_baked, surf_bypass_baked, surf_texels_baked,
+            world_surf_ns, surf_cache_hits, surf_baked, surf_bypass_baked, surf_texels_baked, surf_styled,
             alias_models, alias_accepted, alias_tris, edges_emitted, surfs_emitted, spans_emitted,
             edges_peak, surfs_peak, bands_ns, band_threads,
         } = *o;
@@ -138,6 +142,7 @@ impl RenderStats {
             (&mut self.world_light_ns, world_light_ns), (&mut self.world_surf_ns, world_surf_ns),
             (&mut self.surf_cache_hits, surf_cache_hits), (&mut self.surf_baked, surf_baked),
             (&mut self.surf_bypass_baked, surf_bypass_baked), (&mut self.surf_texels_baked, surf_texels_baked),
+            (&mut self.surf_styled, surf_styled),
             (&mut self.alias_models, alias_models), (&mut self.alias_accepted, alias_accepted),
             (&mut self.alias_tris, alias_tris), (&mut self.edges_emitted, edges_emitted),
             (&mut self.surfs_emitted, surfs_emitted), (&mut self.spans_emitted, spans_emitted),

@@ -2933,13 +2933,13 @@ mod tests {
         assert_eq!(f2.lightstyles[0], "m", "earlier styles persist");
         // The table feeds the same R_AnimateLight math as the live walk: style
         // 0 ('m') = 264/256; an unset style stays at normal brightness.
-        let scales = crate::server::lightstyle_scales_at(&f1.lightstyles, 0.0);
+        let scales = crate::server::lightstyle_scales_at(&f1.lightstyles, 0.0, crate::server::LerpLightStyles::Classic);
         assert!((scales[0] - 264.0 / 256.0).abs() < 1e-6, "'m' = 264/256");
         assert!((scales[2] - 1.0).abs() < 1e-6, "unset style = 1.0");
         // A two-char "az" style animates at 10 Hz: t=1.1 -> char index 11 % 2
         // = 1 -> 'z' = 550/256; t=1.0 -> index 10 % 2 = 0 -> 'a' = 0.
-        let s2a = crate::server::lightstyle_scales_at(&f2.lightstyles, 1.0);
-        let s2b = crate::server::lightstyle_scales_at(&f2.lightstyles, 1.1);
+        let s2a = crate::server::lightstyle_scales_at(&f2.lightstyles, 1.0, crate::server::LerpLightStyles::Classic);
+        let s2b = crate::server::lightstyle_scales_at(&f2.lightstyles, 1.1, crate::server::LerpLightStyles::Classic);
         assert!((s2a[4] - 0.0).abs() < 1e-6, "'a' = 0 (dark)");
         assert!((s2b[4] - 550.0 / 256.0).abs() < 1e-6, "'z' = 550/256");
 
