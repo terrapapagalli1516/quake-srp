@@ -6,15 +6,15 @@ Chromium. The page opens as `?classic` (every departure off, id's keys):
   1. Options' 14th row, "Classic / 2026" (the port's): left/right switch the
      whole profile (the 2026 one turns wasm_uncapped and wasm_scaled2d on),
      Enter opens the settings page (menu_screen_id 10), whose rows switch
-     each setting (Uncapped framerate row 1, Show FPS row 13, Exact
-     perspective row 14: left/right/Enter), Esc returns to Options; the
+     each setting (Uncapped framerate row 1, Show FPS row 14, Exact
+     perspective row 15: left/right/Enter), Esc returns to Options; the
      wasm_* console variables set the same settings, with the console's
      history and Tab completion. Screenshots: verify_extras_options.png,
      verify_extras.png (the page), verify_extras_fps.png (the readout).
   2. wasm_uncapped through the real program: a second of 1/144 s steps runs
      72 host frames with the cap (id's), 144 without.
-  3. On frozen frames: wasm_showfps changes only the box at the bottom
-     right above the status bar, wasm_exactpersp redraws the walls, and
+  3. On frozen frames: wasm_showfps changes only the box in the top-left
+     corner, wasm_exactpersp redraws the walls, and
      switching either off restores id's frame byte for byte.
   4. Persistence: config.cfg keeps the profile and what differs from it
      (`wasm_showfps "1"`, `viewsize "80"`, ...), and a plain reload (no
@@ -150,13 +150,13 @@ with sync_playwright() as p:
     pg.locator("#c").screenshot(path=os.path.join(WEB, "verify_extras.png"))
     key("ArrowDown"); key("ArrowRight")    # row 1: Uncapped framerate
     check("Right toggles Uncapped framerate", ext() == 1)
-    key("ArrowDown", 12); key("Enter")     # row 13: Show FPS
+    key("ArrowDown", 13); key("Enter")     # row 14: Show FPS
     check("Enter toggles Show FPS", ext() == 3)
     key("ArrowLeft")
     check("Left toggles it back", ext() == 1)
-    key("ArrowUp", 12); key("ArrowLeft")
+    key("ArrowUp", 13); key("ArrowLeft")
     check("all off again", ext() == 0)
-    key("ArrowDown", 13); key("ArrowRight")  # row 14: Exact perspective
+    key("ArrowDown", 14); key("ArrowRight")  # row 15: Exact perspective
     check("Right toggles Exact perspective", ext() == 4)
     key("ArrowLeft")
     check("...and back off", ext() == 0)
@@ -218,11 +218,12 @@ with sync_playwright() as p:
     w, h = pg.evaluate("Promise.all([exp.width(), exp.height()])")
     d = pg.evaluate(DIFF, ["_on", "_off"])
     # The 2-D layer is 1:1 as id draws it (the scaled-2-D extra is off):
-    # " 60 FPS" at x w-64..w-8, y h-56..h-48 (viewsize 100: sb_lines 48).
-    box = (w - 64, w - 8, h - 56, h - 48)
+    # " 60 FPS" at x 8..64, y 0..8, the top-left corner at the notify lines'
+    # margin (they start a row lower while it shows; none are up here).
+    box = (8, 64, 0, 8)
     inside = d is not None and d["x0"] >= box[0] and d["x1"] < box[1] \
         and d["y0"] >= box[2] and d["y1"] < box[3]
-    check("the readout draws bottom right, above the status bar, and nowhere else",
+    check("the readout draws in the top-left corner, and nowhere else",
           inside, f"{d}; box {box}")
     pg.evaluate("exp.set_extras(2)")
     pg.evaluate(FROZEN)

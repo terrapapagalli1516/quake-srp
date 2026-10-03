@@ -9,7 +9,7 @@ use crate::draw::{
     HUD_TRANSPARENT, HUD_VIRT_W,
 };
 use crate::render::Image;
-use crate::screen::draw_center_string_revealed;
+use crate::screen::{draw_center_string_revealed, SbarLayout};
 use crate::server::GameMode;
 
 // ---------------------------------------------------------------------------
@@ -131,6 +131,12 @@ pub struct Hud<'a> {
     /// strip and the status bar, 24 the status bar alone, 0 neither — though
     /// the death / Tab scoreboard still shows at 0, as in `Sbar_Draw`.
     pub sb_lines: i32,
+    /// How the view meets the bar ([`SbarLayout`], the frame's
+    /// [`calc_refdef`](crate::screen::calc_refdef) layout): id's tile-clears
+    /// the bar's sides; the 2026 overlay leaves them to the world drawn
+    /// under the view (or the screen's own backtile, where none is: the same
+    /// tile).
+    pub sbar_layout: SbarLayout,
     /// `standard_quake`/`hipnotic`/`rogue` (common.c): which game this is —
     /// id1 or one of the two mission packs, detected from the `progs.dat`
     /// ([`crate::server::GameMode::detect`]). Draws the extra weapons/items
@@ -697,6 +703,26 @@ fn draw_sbar_inventory(
     }
 }
 
+/// The framebuffer rectangle [`draw_hud_into`]'s bar covers on a `vid_w x
+/// vid_h` frame for `sb_lines`: its 320 columns, centred as `Sbar_DrawPic`
+/// centres them, from `sb_lines` 2-D rows above the bottom (scaled with the
+/// 2-D layer) to the frame's bottom — what the 2026 overlay's world under the
+/// view stays out of ([`crate::screen::Refdef::below_parts`]). `sbar`, `ibar`
+/// and `scorebar` have no transparent texel, so the bar covers all of it.
+/// `None` with no bar (`sb_lines` 0).
+pub fn status_bar_rect(vid_w: usize, vid_h: usize, sb_lines: i32) -> Option<crate::screen::ViewRect> {
+    let xf = BarXf::new(vid_w, vid_h);
+    let sc = screen_2d(vid_w, vid_h);
+    if sb_lines <= 0 || !(xf.scale.is_finite() && xf.scale > 0.0) {
+        return None;
+    }
+    let (x0, _) = xf.at(0.0, 0.0);
+    let (x1, _) = xf.at(HUD_VIRT_W, 0.0);
+    let (x0, x1) = (x0.clamp(0, vid_w as i64) as usize, x1.clamp(0, vid_w as i64) as usize);
+    let y0 = sc.px(sc.h - sb_lines).clamp(0, vid_h as i64) as usize;
+    Some(crate::screen::ViewRect { x: x0, y: y0, w: x1 - x0, h: vid_h - y0 })
+}
+
 /// Draw the Quake status bar (HUD) across the bottom of `image`, on top of the
 /// finished 3-D frame — a faithful port of `sbar.c`'s `Sbar_Draw` (single-player /
 /// non-deathmatch path).
@@ -704,8 +730,9 @@ fn draw_sbar_inventory(
 /// The bar is 320 wide, centred at the bottom of the [`screen_2d`] screen
 /// (`Sbar_DrawPic`'s `(vid.width - 320)>>1`), with `backtile` either side of
 /// it on a wider screen (`Draw_TileClear (0, vid.height - sb_lines,
-/// vid.width, sb_lines)`); the "scaled 2-D" extra blows it up with the rest
-/// of the 2-D layer. The *status area* is 48 virtual rows tall: the `ibar`
+/// vid.width, sb_lines)`) — or, with [`SbarLayout::Overlay`], the game
+/// either side of it; the "scaled 2-D" extra blows it up with the rest of
+/// the 2-D layer. The *status area* is 48 virtual rows tall: the `ibar`
 /// inventory strip (320x24) sits in the 24 rows ABOVE the `sbar` (320x24)
 /// status strip — matching `Sbar_DrawPic(0, -24, sb_ibar)` (the C draws relative
 /// to `vid.height - SBAR_HEIGHT`, so a virtual `y` maps straight to our `vy`).
@@ -739,9 +766,11 @@ pub fn draw_hud_into(image: &mut Image, hud: &Hud) {
 
     // Sbar_Draw: `if (sb_lines && vid.width > 320) Draw_TileClear (0,
     // vid.height - sb_lines, vid.width, sb_lines);` — the backtile either side
-    // of the bar (and under it, where the bar pics draw over it).
+    // of the bar (and under it, where the bar pics draw over it). With the 2026
+    // overlay the world under the view is there instead, and the bar's opaque
+    // pics cover their own 320 columns.
     let sc = screen_2d(image.w, image.h);
-    if hud.sb_lines > 0 && sc.w > HUD_VIRT_W as i32 {
+    if hud.sb_lines > 0 && sc.w > HUD_VIRT_W as i32 && hud.sbar_layout == SbarLayout::Classic {
         let y0 = sc.px(sc.h - hud.sb_lines).max(0) as usize;
         draw_tile_clear(image, wad.qpic("backtile").ok().as_ref(), 0, y0, image.w, image.h - y0.min(image.h));
     }
@@ -1376,6 +1405,7 @@ mod tests {
             level_name: "",
             show_scores: false,
             sb_lines: SB_LINES_FULL,
+            sbar_layout: SbarLayout::Classic,
             face_pain: false,
         };
         draw_hud_into(&mut img, &hud);
@@ -1430,6 +1460,7 @@ mod tests {
             level_name: "",
             show_scores: false,
             sb_lines: SB_LINES_FULL,
+            sbar_layout: SbarLayout::Classic,
             face_pain: false,
         };
         draw_hud_into(&mut img, &hud);
@@ -1477,6 +1508,7 @@ mod tests {
             level_name: "",
             show_scores: false,
             sb_lines: SB_LINES_FULL,
+            sbar_layout: SbarLayout::Classic,
             face_pain: false,
         };
         draw_hud_into(&mut img, &hud);
@@ -1536,6 +1568,7 @@ mod tests {
             show_scores: false,
             face_pain: false,
             sb_lines: SB_LINES_FULL,
+            sbar_layout: SbarLayout::Classic,
         };
         let gt: &'static [f32; 32] = Box::leak(Box::new(gettime));
         let name = |h: &Hud, i: usize| weapon_icon_name(weapon_flashon(h, i), i);
@@ -1780,6 +1813,7 @@ mod tests {
             level_name: "",
             show_scores: false,
             sb_lines: SB_LINES_FULL,
+            sbar_layout: SbarLayout::Classic,
             face_pain: false,
         };
         draw_hud_into(&mut img, &hud);
@@ -1878,6 +1912,7 @@ mod tests {
             level_name: "",
             show_scores: false,
             sb_lines: SB_LINES_FULL,
+            sbar_layout: SbarLayout::Classic,
             face_pain: false,
         };
         // All face pics share index 70 here, so we can't distinguish quad vs health
@@ -1918,6 +1953,7 @@ mod tests {
                 level_name: "",
                 show_scores: false,
                 sb_lines: SB_LINES_FULL,
+                sbar_layout: SbarLayout::Classic,
                 face_pain,
             };
             draw_hud_into(&mut img, &hud);
@@ -1985,6 +2021,7 @@ mod tests {
                 show_scores: false,
                 face_pain: false,
                 sb_lines,
+                sbar_layout: SbarLayout::Classic,
             };
             draw_hud_into(&mut img, &hud);
             img
@@ -2006,6 +2043,59 @@ mod tests {
         assert_eq!((img.pixels[ibar_row], img.pixels[sbar_row]), (fill, 3));
         let img = draw(48, 0);
         assert_eq!((img.pixels[ibar_row], img.pixels[sbar_row]), (2, 3));
+    }
+
+    #[test]
+    fn the_bar_over_the_view_leaves_the_game_either_side() {
+        // A 2-D screen wider than the bar: 960x600 at 1:1, the bar's 48 rows
+        // (552..600) in columns 320..640. The wad has no backtile, so id's
+        // tile clear either side fills black (Draw_TileClear's fallback).
+        let wad = build_sbar_strips_wad();
+        let fill = 42u8;
+        let draw = |sbar_layout: SbarLayout| {
+            let mut img = Image::new(960, 600, fill);
+            let hud = Hud {
+                wad: &wad,
+                mode: GameMode::Id1,
+                health: 100,
+                ammo: 0,
+                armor: 0,
+                items: 0,
+                weapon: 0,
+                ammo_shells: 0,
+                ammo_nails: 0,
+                ammo_rockets: 0,
+                ammo_cells: 0,
+                time: 0.0,
+                item_gettime: None,
+                monsters: 0,
+                total_monsters: 0,
+                secrets: 0,
+                total_secrets: 0,
+                level_name: "",
+                show_scores: false,
+                face_pain: false,
+                sb_lines: SB_LINES_FULL,
+                sbar_layout,
+            };
+            draw_hud_into(&mut img, &hud);
+            img.pixels
+        };
+        let (id, over) = (draw(SbarLayout::Classic), draw(SbarLayout::Overlay));
+        for y in 0..600 {
+            for x in 0..960 {
+                let i = y * 960 + x;
+                let (bar_row, bar_col) = (y >= 552, (320..640).contains(&x));
+                if bar_row && bar_col {
+                    assert_eq!(over[i], id[i], "({x},{y}): the bar itself is the same");
+                    assert_ne!(over[i], fill, "({x},{y}): its opaque pics cover it");
+                } else if bar_row {
+                    assert_eq!((id[i], over[i]), (0, fill), "({x},{y}): id tile-clears the side, the overlay leaves the view");
+                } else {
+                    assert_eq!((id[i], over[i]), (fill, fill), "({x},{y}): above the bar, untouched");
+                }
+            }
+        }
     }
 
     // -- Hipnotic / Rogue item bits -------------------------------------------
@@ -2072,6 +2162,7 @@ mod tests {
             show_scores: false,
             face_pain: false,
             sb_lines: SB_LINES_FULL,
+            sbar_layout: SbarLayout::Classic,
         };
         static GT: [f32; 32] = {
             let mut g = [0.0f32; 32];
@@ -2133,6 +2224,7 @@ mod tests {
             show_scores: false,
             face_pain: false,
             sb_lines: SB_LINES_FULL,
+            sbar_layout: SbarLayout::Classic,
         };
 
         let drew = |mode: GameMode, fill: u8| {
@@ -2184,6 +2276,7 @@ mod tests {
             show_scores: false,
             face_pain: false,
             sb_lines: SB_LINES_FULL,
+            sbar_layout: SbarLayout::Classic,
         };
         let drew = |hud: &Hud, fill: u8| {
             let mut img = Image::new(320, 200, 0);

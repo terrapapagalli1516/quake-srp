@@ -30,7 +30,7 @@ use super::view::{
     BONUS_PERCENT, FACE_ANIM_TIME, V_KICKTIME,
 };
 use super::{
-    backtile_for, color_for_name, lap, render_options, s_update, ClientFrame, DemoPlay, Listener,
+    backtile_for, color_for_name, draw_world_below, lap, render_options, s_update, warp_below, ClientFrame, DemoPlay, Listener,
     Phase, SoundCall, Vid,
 };
 
@@ -895,7 +895,7 @@ fn render_demo_frame(
     // SCR_CalcRefdef: the same viewsize framing as live play (the C's demo IS
     // the client rendering a recorded stream).
     lap(Phase::Sim);
-    let refdef = render::calc_refdef(render_w, render_h, d.viewsize, f.intermission != 0);
+    let refdef = render::calc_refdef(render_w, render_h, d.viewsize, f.intermission != 0, d.sbar_layout);
     let vrect = refdef.vrect;
     // R_SetupFrame's r_dowarp: a submerged recorded POV renders into the warp
     // buffer (at most 320x200) like live play.
@@ -922,15 +922,18 @@ fn render_demo_frame(
     // straight into it — or, submerged, into the warp buffer and then
     // D_WarpScreen'd over the rectangle while it wobbles: the warp applies to
     // the 3-D view FIRST; the content tint joins the deferred whole-screen
-    // blend below (V_UpdatePalette order).
+    // blend below (V_UpdatePalette order). 2026's status bar overlay goes on
+    // drawing the world under the view, as live play does.
     let backtile = backtile_for(&vrect, render_w, render_h, d.gfx_wad.as_ref());
     let mut img = render::screen_with_backtile(vrect, render_w, render_h, backtile.as_ref());
     if dowarp {
-        let view = d.renderer.render(&scene);
+        let below = warp_below(&refdef, vid);
+        let view = d.renderer.render_extended(&scene, below);
         lap(Phase::Render3d);
-        d.renderer.warp_into(view, &mut img, vrect, v.time, vid.video.hires);
+        d.renderer.warp_into(view, &mut img, vrect, below, v.time, vid.video.hires);
     } else {
         d.renderer.render_into(&scene, &mut img);
+        draw_world_below(&mut d.renderer, &scene, &refdef, &mut img);
         lap(Phase::Render3d);
     }
     // V_RenderView: the crosshair over the view, before the 2-D layer — but
@@ -1015,6 +1018,7 @@ fn render_demo_frame(
             show_scores: d.show_scores,
             face_pain: v.time <= d.faceanimtime,
             sb_lines: refdef.sb_lines,
+            sbar_layout: d.sbar_layout,
         };
         render::draw_hud_into(&mut img, &hud);
     }
@@ -1044,7 +1048,7 @@ fn render_demo_frame(
             }
             let lines = d.notify.visible(v.time);
             if !lines.is_empty() {
-                render::draw_notify(&mut img, cc, &lines);
+                render::draw_notify(&mut img, cc, &lines, render::notify_top(d.show_fps));
             }
         }
     }

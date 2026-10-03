@@ -193,6 +193,8 @@ pub(crate) fn step(dt: f32) -> i32 {
         let km = derive_key_move(&a.settings.cvars, &a.settings.binds, &a.keys_held);
         let viewsize = a.settings.cvars.viewsize;
         let crosshair = a.settings.cvars.crosshair;
+        let sbar_layout = a.settings.cvars.sbar_layout;
+        let show_fps = a.settings.cvars.show_fps;
         let lerpmove = a.settings.cvars.lerpmove;
         let lerpmodels = a.settings.cvars.lerpmodels;
         // Host_EndGame on the demo's svc_disconnect: once a demo has shown its
@@ -212,6 +214,8 @@ pub(crate) fn step(dt: f32) -> i32 {
             wk.key_move = km;
             wk.viewsize = viewsize;
             wk.crosshair = crosshair;
+            wk.sbar_layout = sbar_layout;
+            wk.show_fps = show_fps;
             wk.stepping = stepping;
             wk.lerpmove = lerpmove;
             wk.lerpmodels = lerpmodels;
@@ -223,6 +227,8 @@ pub(crate) fn step(dt: f32) -> i32 {
             d.renderer.set_threads(threads);
             d.viewsize = viewsize;
             d.crosshair = crosshair;
+            d.sbar_layout = sbar_layout;
+            d.show_fps = show_fps;
             d.stepping = stepping;
             d.lerpmove = lerpmove;
             d.lerpmodels = lerpmodels;
@@ -248,6 +254,8 @@ pub(crate) fn step(dt: f32) -> i32 {
                 if let Some(d) = a.demo.as_mut() {
                     d.viewsize = viewsize;
                     d.crosshair = crosshair;
+                    d.sbar_layout = sbar_layout;
+                    d.show_fps = show_fps;
                     d.stepping = stepping;
                     d.lerpmove = lerpmove;
                     d.lerpmodels = lerpmodels;
@@ -301,16 +309,17 @@ pub(crate) fn step(dt: f32) -> i32 {
         // The wasm_showfps setting (off in both profiles): QuakeWorld draws it with the
         // rest of the play-screen 2-D (SCR_DrawFPS, before Sbar_Draw, the
         // console and M_Draw — so the menu's fade dims it) and not on the
-        // intermission/finale screens.
-        if a.settings.cvars.show_fps {
+        // intermission/finale screens. The port's sits in the top-left
+        // corner, where the mode's notify lines made room for it (`show_fps`
+        // above).
+        if show_fps {
             let intermission = if a.mode == 1 {
                 a.demo.as_ref().and_then(|d| d.demo.frames.get(d.idx)).map(|f| f.intermission != 0)
             } else {
                 a.walk.as_ref().map(|wk| wk.intermission != 0)
             };
             if let (Some(false), Some(img), Some(cc)) = (intermission, img.as_mut(), a.conchars.as_ref()) {
-                let sb_lines = render::calc_refdef(w, h, viewsize, false).sb_lines;
-                render::draw_fps(img, cc, a.show_fps.shown(), sb_lines);
+                render::draw_fps(img, cc, a.show_fps.shown());
             }
         }
 
@@ -572,8 +581,11 @@ mod tests {
         crate::host_cmd::execute_console_command("crosshair 0");
         step(0.0);
         let without = APP.with(|c| c.borrow().as_ref().unwrap().present.rgba());
-        // The view above the scaled status bar (viewsize 100: 48 rows x 5).
-        let vrect = render::calc_refdef(w, h, 100.0, false).vrect;
+        // The view above the scaled status bar (viewsize 100: 48 rows x 5),
+        // id's in either layout: the world drawn under it beside the bar
+        // (2026's scr_sbaroverlay) leaves its centre where it was.
+        let vrect = render::calc_refdef(w, h, 100.0, false, render::SbarLayout::Overlay).vrect;
+        assert_eq!(vrect, render::calc_refdef(w, h, 100.0, false, render::SbarLayout::Classic).vrect);
         let (cx, cy) = (vrect.x + vrect.w / 2, vrect.y + vrect.h / 2);
         let differing: Vec<(usize, usize)> = (0..w * h)
             .filter(|&i| with[i * 4..i * 4 + 3] != without[i * 4..i * 4 + 3])
@@ -630,18 +642,109 @@ mod tests {
         assert!(run(100.0, 3, 2)[60..].iter().all(|&f| f == 50), "the cap's 50 at 100 Hz");
     }
 
+    /// 2026's status bar overlay end to end, at 1920x1080 (pixel
+    /// size 1, the 2-D layer at 5x, the bar 240 rows) and a wide frame
+    /// (1315x535, 2x, 96 rows), on frozen frames of e1m1 in turn — id's, the
+    /// overlay's twice, id's again: every pixel above the world under the
+    /// view (the whole view, id's projection) is byte for byte id's; the bar
+    /// is the same bar; each part beside it shows the world where id has the
+    /// backtile; and an overlay frame leaves nothing behind (id's frame after
+    /// it is id's frame). Then the same under water (the view in a water
+    /// leaf, wobbled), where the wobble runs on into the corners.
     #[test]
-    fn wasm_showfps_draws_the_rate_bottom_right_above_the_status_bar_only_when_on() {
+    fn the_2026_overlay_draws_the_world_beside_the_bar_and_leaves_every_view_pixel_as_it_was() {
+        assert_eq!(boot(), 1);
+        close_menu();
+        use_2026();
+        let grab = || APP.with(|c| c.borrow().as_ref().unwrap().present.rgba());
+        let frame = |on: bool| {
+            crate::host_cmd::execute_console_command(if on { "scr_sbaroverlay 1" } else { "scr_sbaroverlay 0" });
+            step(0.0);
+            grab()
+        };
+        // The eye in water: the first point of a 7x7x7 grid over e1m1's water
+        // leaves with water 24 units every way round it (quaketool shot's
+        // `--liquid` search, shorter).
+        let in_water = || {
+            APP.with(|c| {
+                let mut b = c.borrow_mut();
+                let wk = b.as_mut().unwrap().walk.as_mut().unwrap();
+                let (bsp, water) = (&wk.bsp, quake_rs::bsp::CONTENTS_WATER);
+                let wet = |p: [f32; 3]| quake_rs::world::point_contents(bsp, p) == water;
+                let deep = |p: [f32; 3]| {
+                    wet(p) && (0..3).all(|k| [-24.0, 24.0].iter().all(|d| wet({ let mut q = p; q[k] += d; q })))
+                };
+                let eye = (bsp.leafs.iter().filter(|l| l.contents == water))
+                    .flat_map(|l| {
+                        let at = |k: usize, i: usize| l.mins[k] as f32 + (l.maxs[k] - l.mins[k]) as f32 * (i as f32 + 0.5) / 7.0;
+                        (0..343).map(move |c| [at(0, c % 7), at(1, c / 7 % 7), at(2, c / 49)])
+                    })
+                    .find(|&p| deep(p))
+                    .expect("e1m1 has water");
+                wk.server.vm.ent_set_vector(wk.player, "origin", [eye[0], eye[1], eye[2] - 22.0]);
+                let view = wk.server.player_view().0;
+                assert_eq!(quake_rs::world::point_contents(&wk.bsp, view), water, "the view in water: warped");
+            })
+        };
+        for underwater in [false, true] {
+            if underwater {
+                in_water();
+            }
+            for (ww, wh) in [(1920, 1080), (1315, 535)] {
+                crate::vid::set_window(ww, wh, 1.0);
+                step(0.0);
+                let (w, h) = APP.with(|c| {
+                    let b = c.borrow();
+                    (b.as_ref().unwrap().render_w, b.as_ref().unwrap().render_h)
+                });
+                assert_eq!((w, h), (ww as usize, wh as usize), "Auto: one device pixel a pixel");
+                let refdef = render::calc_refdef(w, h, 100.0, false, render::SbarLayout::Overlay);
+                let below = refdef.below.expect("the view stands on the bar");
+                let bar = render::status_bar_rect(w, h, refdef.sb_lines).expect("a bar");
+                let (id, over, over2, id2) = (frame(false), frame(true), frame(true), frame(false));
+                let what = format!("{w}x{h}{}", if underwater { " under water" } else { "" });
+                assert_eq!(id2, id, "{what}: id's frame after the overlay's is id's");
+                assert_eq!(over2, over, "{what}: the overlay's frame again is the same");
+                let px = |img: &[u8], x: usize, y: usize| img[(y * w + x) * 4..(y * w + x) * 4 + 3].to_vec();
+                assert!(over[..below.y * w * 4] == id[..below.y * w * 4], "{what}: every row of the view is id's");
+                for y in bar.y..h {
+                    for x in bar.x..bar.x + bar.w {
+                        assert_eq!(px(&over, x, y), px(&id, x, y), "{what} ({x},{y}): the bar is the same bar");
+                    }
+                }
+                let parts: Vec<_> = refdef.below_parts(Some(bar)).collect();
+                assert!(parts.len() >= 2, "{what}: a corner either side of the bar: {parts:?}");
+                for part in parts {
+                    let differs = (part.y..part.y + part.h)
+                        .flat_map(|y| (part.x..part.x + part.w).map(move |x| (x, y)))
+                        .filter(|&(x, y)| px(&over, x, y) != px(&id, x, y))
+                        .count();
+                    assert!(differs * 2 > part.w * part.h, "{what}: {part:?} shows the world, not the backtile ({differs} differ)");
+                }
+                // Left of the view and right of it (id's even widths leave a
+                // column or two in the wide frame): the backtile, as id's.
+                for y in below.y..h {
+                    for x in (0..below.x).chain(below.x + below.w..w) {
+                        assert_eq!(px(&over, x, y), px(&id, x, y), "{what} ({x},{y}): beside the view, id's");
+                    }
+                }
+            }
+        }
+        crate::host_cmd::execute_console_command("scr_sbaroverlay 1");
+    }
+
+    #[test]
+    fn wasm_showfps_draws_the_rate_top_left_only_when_on() {
         assert_eq!(boot(), 1);
         close_menu();
         for _ in 0..90 {
             step(1.0 / 60.0);
         }
-        let (w, h) = APP.with(|c| {
+        let w = APP.with(|c| {
             let b = c.borrow();
             let a = b.as_ref().unwrap();
             assert_eq!(a.show_fps.shown(), 60, "60 Hz presents 60 frames a second");
-            (a.render_w, a.render_h)
+            a.render_w
         });
         let grab = || APP.with(|c| c.borrow().as_ref().unwrap().present.rgba());
         // Frozen frames (dt = 0): only the readout can differ.
@@ -651,10 +754,11 @@ mod tests {
         step(0.0);
         let on = grab();
         assert_ne!(off, on, "wasm_showfps draws");
-        // " 60 FPS" at x w-64..w-8, y h-56..h-48 (viewsize 100: sb_lines 48):
-        // the 2-D layer 1:1 as id draws it (the scaled-2-D extra is off).
-        let (x0, x1) = (w - 64, w - 8);
-        let (y0, y1) = (h - 56, h - 48);
+        // " 60 FPS" at x 8..64, y 0..8, the top-left corner at the notify
+        // lines' margin: the 2-D layer 1:1 as id draws it (the scaled-2-D
+        // extra is off).
+        let (x0, x1) = (8, 64);
+        let (y0, y1) = (0, 8);
         for (i, (a, b)) in off.chunks_exact(4).zip(on.chunks_exact(4)).enumerate() {
             if a != b {
                 let (x, y) = (i % w, i / w);

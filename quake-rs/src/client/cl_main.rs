@@ -32,7 +32,7 @@ use super::view::{
     BONUS_PERCENT, FACE_ANIM_TIME, V_KICKTIME,
 };
 use super::{
-    backtile_for, color_for_name, lap, render_options, s_update, view_hook, ClientFrame,
+    backtile_for, color_for_name, draw_world_below, lap, render_options, s_update, view_hook, warp_below, ClientFrame,
     Listener, Phase, SoundCall, Vid, Walk,
 };
 
@@ -1109,10 +1109,12 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
     // current server clock; the worldspawn populated the styles at spawn time.
     let light_styles = w.server.lightstyle_scales(w.clock);
     // SCR_CalcRefdef / R_SetVrect: the viewsize picks the 3-D view rectangle
-    // (the view sits ABOVE the status bar, projected about its own centre) and
-    // how much status bar shows; an intermission is always full screen.
+    // (the view sits ABOVE the status bar, projected about its own centre)
+    // and how much status bar shows; an intermission is always full screen.
+    // With 2026's status bar overlay, also the rows under the view the world
+    // goes on into, beside the bar (`refdef.below`).
     lap(Phase::Sim);
-    let refdef = render::calc_refdef(render_w, render_h, w.viewsize, intermission);
+    let refdef = render::calc_refdef(render_w, render_h, w.viewsize, intermission, w.sbar_layout);
     let vrect = refdef.vrect;
     // R_SetupFrame's r_dowarp (r_waterwarp 1): with the eye's leaf in water,
     // slime or lava the view is rendered into the (at most 320x200) warp
@@ -1140,14 +1142,18 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
     };
     // The screen: backtile around the view rectangle (SCR_UpdateScreen's
     // Draw_TileClear) and the view drawn straight into it, or, underwater,
-    // into the warp buffer for D_WarpScreen below. The status bar is drawn
+    // into the warp buffer for D_WarpScreen below. With 2026's status bar
+    // overlay the world goes on under the view, beside the bar (underwater,
+    // in the view's buffer, to be wobbled with it). The status bar is drawn
     // over it later.
     let backtile = backtile_for(&vrect, render_w, render_h, w.gfx_wad.as_ref());
     let mut img = render::screen_with_backtile(vrect, render_w, render_h, backtile.as_ref());
+    let below = warp_below(&refdef, vid);
     let warp_view = if dowarp {
-        Some(w.renderer.render(&scene))
+        Some(w.renderer.render_extended(&scene, below))
     } else {
         w.renderer.render_into(&scene, &mut img);
+        draw_world_below(&mut w.renderer, &scene, &refdef, &mut img);
         None
     };
     lap(Phase::Render3d);
@@ -1169,7 +1175,7 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
     // over the screen's view rectangle while it wobbles, BEFORE the content
     // tint so the screen ripples, not just darkens.
     if let Some(view) = warp_view {
-        w.renderer.warp_into(view, &mut img, vrect, w.clock, vid.video.hires);
+        w.renderer.warp_into(view, &mut img, vrect, below, w.clock, vid.video.hires);
     }
     // The 2-D oracle harness paints the view one flat colour (the C oracle's
     // `oracle_blank`), so a shot measures the 2-D layer alone (`set_view_hook`).
@@ -1294,6 +1300,7 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
             show_scores: km.showscores,
             face_pain: w.server.time() <= w.faceanimtime,
             sb_lines: refdef.sb_lines,
+            sbar_layout: w.sbar_layout,
         };
         render::draw_hud_into(&mut img, &hud);
     }
@@ -1321,7 +1328,7 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
             }
             let lines = w.notify.visible(w.host_time);
             if !lines.is_empty() {
-                render::draw_notify(&mut img, cc, &lines);
+                render::draw_notify(&mut img, cc, &lines, render::notify_top(w.show_fps));
             }
         }
     }

@@ -536,6 +536,7 @@ pub fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> CmdRes
                 level_name: "",
                 show_scores: false,
                 sb_lines: refdef.sb_lines,
+                sbar_layout: render::SbarLayout::Classic,
                 face_pain: false,
             };
             render::draw_hud_into(&mut img, &hud);
@@ -561,7 +562,7 @@ pub fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> CmdRes
 /// bar as in the game.
 fn pov_screen(vid_w: usize, vid_h: usize) -> (f32, quake_rs::screen::Refdef) {
     let viewsize = render::VIEWSIZE_DEFAULT;
-    (viewsize, render::calc_refdef(vid_w, vid_h, viewsize, false))
+    (viewsize, render::calc_refdef(vid_w, vid_h, viewsize, false, render::SbarLayout::Classic))
 }
 
 #[cfg(test)]
