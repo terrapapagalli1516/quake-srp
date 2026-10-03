@@ -693,7 +693,7 @@ pub struct Vid {
     pub display_aspect: f64,
     /// Exact perspective at every pixel of walls and liquids instead of id's
     /// 16-pixel spans (`D_DrawSpans16`): the web port's `wasm_exactpersp`
-    /// extra, off in id's Quake.
+    /// extra, off in id's Quake and in Classic, on in the 2026 profile.
     pub exact_perspective: bool,
     /// The port's video cvars (Hor+, views past id's largest mode): Classic
     /// in id's Quake.

@@ -17,8 +17,6 @@
 //! --aspect A         vid.aspect, R_ViewChanged's pixelAspect (default 1, square
 //!                    pixels, as the oracle's vid_null; id's DOS/Win 320x200 on a
 //!                    4:3 monitor is 0.8333 — the oracle's -oracle_aspect)
-//! --exactpersp 0|1   1: exact perspective at every pixel, the port's extra (default
-//!                    0: id's 16-pixel segments, D_DrawSpans16 / Turbulent8)
 //! --vrect x,y,w,h    render only the view r_refdef.vrect: a w x h image, placed at
 //!                    (x, y) of the --res screen (the sky is centred on the screen,
 //!                    D_Sky_uv_To_st); the output is the w x h view (default: the
@@ -36,7 +34,10 @@
 //!                    passes id's `cl_dlights`, in slot order)
 //! --d-mipscale X     the `d_mipscale` cvar (default 1; 0 = every surface at mip 0)
 //! --d-mipcap N       the `d_mipcap` cvar (default 0; the finest mip level allowed)
-//! --video, --fov-mode, --hires, --sky, --lightstyles  the port's video cvars (`video.rs`; default classic)
+//! --video, --fov-mode, --hires, --sky, --lightstyles, --exactpersp  the port's video cvars
+//!                    (`video.rs`; default classic). --exactpersp 1: exact perspective at every
+//!                    pixel, the port's extra (default 0: id's 16-pixel segments,
+//!                    D_DrawSpans16 / Turbulent8)
 //! ```
 //!
 //! The map's entities are still spawned (worldspawn's QuakeC sets the light-style
@@ -106,13 +107,6 @@ pub fn cmd_view(args: &[String]) -> CmdResult {
                 };
                 vrect = Some((x, y, vw, vh));
             }
-            "--exactpersp" => {
-                opts.exact_perspective = match val.as_str() {
-                    "0" => false,
-                    "1" => true,
-                    _ => return Err(format!("--exactpersp: expected 0 or 1, got {val:?}").into()),
-                }
-            }
             "--aspect" => {
                 opts.pixel_aspect = val.parse().map_err(|_| format!("--aspect: bad number {val:?}"))?;
                 if !(opts.pixel_aspect.is_finite() && opts.pixel_aspect > 0.0) {
@@ -153,6 +147,7 @@ pub fn cmd_view(args: &[String]) -> CmdResult {
     // used here: `--aspect` gives vid.aspect itself.)
     video.apply();
     opts.video = video.cvars;
+    opts.exact_perspective = video.exact_persp;
     if let Some(r) = res {
         (w, h) = parse_res(r, video.cvars)?;
     }

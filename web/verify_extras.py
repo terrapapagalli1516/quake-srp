@@ -4,7 +4,8 @@ page keeps across reloads, and Esc in fullscreen, end-to-end in headless
 Chromium. The page opens as `?classic` (every engine departure off):
 
   1. Options' 14th row, "Classic / 2026" (the port's): left/right switch the
-     whole profile (the 2026 one turns wasm_uncapped and wasm_scaled2d on),
+     whole profile (the 2026 one turns wasm_uncapped, wasm_exactpersp and
+     wasm_scaled2d on),
      Enter opens the settings page (menu_screen_id 10), whose rows switch
      each setting (Uncapped framerate row 1, Show FPS row 14, Exact
      perspective row 15: left/right/Enter), Esc returns to Options; the
@@ -14,8 +15,9 @@ Chromium. The page opens as `?classic` (every engine departure off):
   2. wasm_uncapped through the real program: a second of 1/144 s steps runs
      72 host frames with the cap (id's), 144 without.
   3. On frozen frames: wasm_showfps changes only the box in the top-left
-     corner, wasm_exactpersp redraws the walls, and
-     switching either off restores id's frame byte for byte.
+     corner, wasm_exactpersp redraws the walls, and switching either off
+     restores id's frame byte for byte (Classic). In 2026, where exact
+     perspective starts on, off redraws the walls and on is the frame again.
   4. Persistence: config.cfg keeps the profile and what differs from it
      (`wasm_showfps "1"`, `viewsize "80"`, ...), and a plain reload (no
      `?classic`) comes back Classic with them.
@@ -139,7 +141,8 @@ with sync_playwright() as p:
     time.sleep(0.3)
     pg.locator("#c").screenshot(path=os.path.join(WEB, "verify_extras_options.png"))
     key("ArrowRight")
-    check("...Classic / 2026: right switches to 2026", prof() == "2026" and ext() == 9, str(ext()))
+    # uncapped 1 + exact perspective 4 + scaled 2-D 8
+    check("...Classic / 2026: right switches to 2026", prof() == "2026" and ext() == 13, str(ext()))
     key("ArrowLeft")
     check("left: back to Classic", prof() == "classic" and ext() == 0)
     key("Enter")
@@ -240,6 +243,38 @@ with sync_playwright() as p:
           pg.evaluate(DIFF, ["_off", "_off2"]) is None)
     pg.evaluate("exp.set_extras(2)")
     pg.evaluate("quake.resume()")
+
+    # 3b. The 2026 default has exact perspective on (a fresh context, its own
+    #     storage: the address chooses the profile and the section below
+    #     still finds Classic in this one's). Off is id's 16-pixel spans, which
+    #     redraw the walls; on again is the same frame.
+    ctx3 = br.new_context(viewport={"width": 820, "height": 560})
+    pg3 = ctx3.new_page()
+    pg3.on("console", lambda m: errs.append(m.text) if m.type == "error" else None)
+    pg3.on("pageerror", lambda e: errs.append("PAGEERROR: " + str(e)))
+    boot_page(pg3, "?2026")
+    pg3.evaluate("document.getElementById('walkBtn').click()")
+    time.sleep(1.0)
+    pg3.keyboard.press("Escape")       # close the boot menu
+    isolated.wait_until(pg3, "exp.menu_visible().then(v => !v)", 5)
+    time.sleep(1.0)
+    ext3 = pg3.evaluate("exp.extras()")
+    check("?2026: wasm_exactpersp starts on (uncapped, exact perspective, scaled 2-D)",
+          ext3 == 13 and pg3.evaluate("quake.text('cvar', 'wasm_exactpersp')") == "1", str(ext3))
+    pg3.evaluate("quake.pause()")
+    pg3.evaluate(FROZEN)
+    pg3.evaluate(GRAB, "_x_on")
+    pg3.evaluate(f"exp.set_extras({ext3 & ~4})")
+    pg3.evaluate(FROZEN)
+    pg3.evaluate(GRAB, "_x_off")
+    d = pg3.evaluate(DIFF, ["_x_on", "_x_off"])
+    check("2026: wasm_exactpersp 0 redraws the walls with id's spans", d is not None and d["n"] > 1000, str(d))
+    pg3.evaluate(f"exp.set_extras({ext3})")
+    pg3.evaluate(FROZEN)
+    pg3.evaluate(GRAB, "_x_on2")
+    check("...and on again is the same frame, byte for byte",
+          pg3.evaluate(DIFF, ["_x_on", "_x_on2"]) is None)
+    ctx3.close()
 
     # 4. Persistence across a plain reload (no ?classic): the profile,
     #    viewsize, the settings, the resolution.

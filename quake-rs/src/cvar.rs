@@ -103,8 +103,9 @@ pub struct Cvars {
     pub uncapped: bool,
     /// `wasm_showfps`: QuakeWorld's frame-rate readout.
     pub show_fps: bool,
-    /// `wasm_exactpersp`: exact perspective at every pixel, not id's
-    /// 16-pixel spans.
+    /// `wasm_exactpersp`: exact perspective at every pixel of the walls and
+    /// liquids, not id's 16-pixel spans (`D_DrawSpans16`: exact every 16
+    /// pixels, affine between). Off in Classic, on in 2026.
     pub exact_persp: bool,
     /// `wasm_scaled2d`: the 2-D layer (status bar, menus, console) at the
     /// largest whole multiple of id's 320x200 that fits, where id draws it
@@ -258,9 +259,11 @@ impl Cvars {
     /// the crosshair, monsters that glide between their steps and whose
     /// animation blends between frames, clouds that glide across the sky,
     /// flickering lights that glide between their brightnesses, and touch
-    /// controls on a phone. Show FPS and exact perspective stay off: the
-    /// readout is clutter, and id's 16-pixel spans are part of the look.
-    /// (Always Run, mouse look, the gamepad and Space-swims-up are
+    /// controls on a phone, and perspective exact at every pixel of the
+    /// walls and liquids. That one is on because of the resolution: id's
+    /// 16-pixel affine spans were a pixel or so off at 320x200, but at
+    /// 1080p and above they show as a wobble along a wall seen at a grazing
+    /// angle. Show FPS stays off: the readout is clutter. (Always Run, mouse look, the gamepad and Space-swims-up are
     /// [`Cvars::classic`]'s too now — they are controls, not engine.) The
     /// edict pool grows past id's 600 (`max_edicts`, QuakeSpasm's own
     /// default) — invisible on every map id or the mission packs shipped,
@@ -269,6 +272,7 @@ impl Cvars {
         Cvars {
             crosshair: Crosshair::Cross,
             uncapped: true,
+            exact_persp: true,
             scaled_2d: true,
             sbar_layout: SbarLayout::Overlay,
             native: true,
@@ -687,6 +691,24 @@ mod tests {
         let mut out = String::new();
         write_changes(&c, &Cvars::classic(), &mut out);
         assert_eq!(out, "cl_forwardspeed \"200\"\ncl_backspeed \"200\"\nm_pitch \"-0.022\"\n");
+    }
+
+    /// Exact perspective is 2026's, and Classic's is id's 16-pixel spans: the
+    /// departure a player switches off in 2026 is the one `config.cfg` then
+    /// writes. (Show FPS, the other old "extra", is the one 2026 leaves off.)
+    #[test]
+    fn exact_perspective_is_on_in_2026_and_off_in_classic() {
+        let (id, modern) = (Cvars::classic(), Cvars::modern());
+        let c = find("wasm_exactpersp").expect("the cvar");
+        assert!(c.departure && c.archive);
+        assert_eq!((c.get(&id), c.get(&modern)), ("0".into(), "1".into()));
+        let fps = find("wasm_showfps").expect("the cvar");
+        assert_eq!((fps.get(&id), fps.get(&modern)), ("0".into(), "0".into()));
+        let mut spans = Cvars::modern();
+        c.set(&mut spans, "0");
+        let mut out = String::new();
+        write_changes(&spans, &Cvars::modern(), &mut out);
+        assert_eq!(out, "wasm_exactpersp \"0\"\n");
     }
 
     #[test]

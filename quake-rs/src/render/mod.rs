@@ -395,8 +395,10 @@ pub struct RenderOptions {
     /// EXTRA, not id (default off): exact perspective at every pixel of the
     /// surface-cached walls and the liquids. id's x86 renderer, what 1996
     /// players saw, is exact only every 16 pixels and affine in between
-    /// (`D_DrawSpans16`, `Turbulent8`); that is the default. The browser's
-    /// `wasm_exactpersp 1` sets this.
+    /// (`D_DrawSpans16`, `Turbulent8`); that is this struct's default, and
+    /// Classic's. The 2026 profile sets it (`wasm_exactpersp`, on there):
+    /// from 1080p up the spans' affine steps show as a wobble along a wall
+    /// seen at a grazing angle.
     pub exact_perspective: bool,
     /// The port's video cvars: Hor+ and views past id's largest
     /// ([`VideoCvars`]; Classic by default).
