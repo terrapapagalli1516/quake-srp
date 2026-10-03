@@ -18,16 +18,16 @@
 
 `stall_ms` makes a host frame slow on demand and exists only in a
 `--features bench` build (verify_audio_resilience.py says why and how to
-build one); pass a deploy dir made from it.
+build one). On a plain build the frames cannot be made slow, so the page is
+told to stop waiting instead (`quake.pacing.force`): the same checks of the
+relaxed refresh with quick frames, without the switch on the frame's time
+(said in the output).
 
-Usage: verify_pacing.py <deploy-dir>   (a `--features bench` build)
+Usage: verify_pacing.py [deploy-dir]   (a `--features bench` build checks it all)
 """
 import statistics, sys, time
 from playwright.sync_api import sync_playwright
 import isolated
-
-if len(sys.argv) < 2:
-    sys.exit("usage: verify_pacing.py <deploy-dir>   (a --features bench build)")
 
 WEB = isolated.webdir()
 PORT = isolated.port(8573)
@@ -60,8 +60,6 @@ def boot(pg):
     pg.wait_for_function("window.quake && quake.ready && quake.firstFrameAt > 0", timeout=120000)
     pg.evaluate("document.getElementById('overlay').click()")   # the first gesture
     time.sleep(0.3)
-    if pg.evaluate("quake.call('stall_ms', 0)") != 0:
-        sys.exit("this deploy answers no stall_ms: build it with --features bench (verify_audio_resilience.py)")
     # A small picture, so a frame is quick on any machine: the checks are
     # about who waits, not about the renderer.
     pg.evaluate("quake.callLine('exec vid_pixelsize 4')")
@@ -73,6 +71,13 @@ def window(pg, secs=3.0):
     w["turn"] = statistics.median(w["turns"]) if w["turns"] else 0.0
     w["fps"] = w["shown"] / secs
     return w
+
+def slow(pg, bench, on):
+    """Frames slow (a bench build: `stall_ms`), or the page told not to wait."""
+    if bench:
+        pg.evaluate(f"quake.call('stall_ms', {STALL_MS if on else 0})")
+    else:
+        pg.evaluate(f"quake.pacing.force = {'true' if on else 'null'}")
 
 def settle(pg, relaxed, secs=2.0):
     """Wait for the page to take the mode; true when it did within `secs`."""
@@ -93,6 +98,10 @@ with sync_playwright() as p:
 
     pg = page()
     refresh = pg.evaluate("quake.pacing.refresh")
+    # A bench build answers stall_ms with 0; a plain one knows no such call (NaN).
+    bench = pg.evaluate("quake.call('stall_ms', 0)") == 0
+    if not bench:
+        print("NOTE not a --features bench build: frames stay quick, the relaxed refresh is forced")
 
     # 1. Quick frames: waited for.
     check("quick frames: the refresh waits for its frame", settle(pg, False))
@@ -103,16 +112,17 @@ with sync_playwright() as p:
           f"wait {q['wait']:.2f} ms, frame {q['turn']:.2f} ms, refresh {refresh:.2f} ms")
 
     # 2. Slow frames: not waited for, drawn back to back.
-    pg.evaluate(f"quake.call('stall_ms', {STALL_MS})")
+    slow(pg, bench, True)
     check("slow frames: the refresh stops waiting within 2 s", settle(pg, True))
     s = window(pg)
     check("slow: every refresh ran relaxed", s["relaxed"] == s["refreshes"], f"{s['relaxed']} of {s['refreshes']}")
     check("slow: the main thread does not wait", s["wait"] < 1.0 and max(s["waits"]) < 5.0,
           f"median {s['wait']:.3f} ms, max {max(s['waits']):.2f} ms")
-    check("slow: a frame takes longer than a refresh", s["turn"] > refresh, f"{s['turn']:.1f} ms")
-    back_to_back = 1000.0 / s["turn"]
-    check("slow: frames come as fast as the program draws them",
-          s["fps"] >= 0.85 * back_to_back, f"{s['fps']:.1f} shown a second, {back_to_back:.1f} drawn back to back")
+    if bench:
+        check("slow: a frame takes longer than a refresh", s["turn"] > refresh, f"{s['turn']:.1f} ms")
+    back_to_back = min(1000.0 / s["turn"], 1000.0 / refresh)
+    check("slow: frames come as fast as the program draws them (a refresh each at most)",
+          s["fps"] >= 0.85 * back_to_back, f"{s['fps']:.1f} shown a second, {back_to_back:.1f} possible")
 
     # 4a. The latency probe in relaxed mode: a key reaches the canvas no
     # sooner than a frame takes.
@@ -131,7 +141,7 @@ with sync_playwright() as p:
           f"{len(lat)} samples, min {min(lat) if lat else 0:.1f} ms, frame {s['turn']:.1f} ms")
 
     # 3. Quick again.
-    pg.evaluate("quake.call('stall_ms', 0)")
+    slow(pg, bench, False)
     check("quick again: the wait is back within 2 s", settle(pg, False))
     q2 = window(pg)
     check("quick again: a frame a refresh, waited for", q2["relaxed"] == 0 and q2["shown"] >= 0.9 * q2["refreshes"]
@@ -143,12 +153,12 @@ with sync_playwright() as p:
 
     # 5. No Atomics.waitAsync: the old way, always.
     pg = page("Atomics.waitAsync = undefined;")
-    pg.evaluate(f"quake.call('stall_ms', {STALL_MS})")
+    slow(pg, bench, True)
     time.sleep(2.0)
     o = window(pg)
     check("no Atomics.waitAsync: slow frames are still waited for", o["relaxed"] == 0 and abs(o["wait"] - o["turn"]) < 1.0,
           f"wait {o['wait']:.1f} ms, frame {o['turn']:.1f} ms")
-    pg.evaluate("quake.call('stall_ms', 0)")
+    slow(pg, bench, False)
     pg.context.close()
 
     check("no console errors", not errs, "; ".join(errs[:3]))
