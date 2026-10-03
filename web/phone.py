@@ -21,6 +21,8 @@ paced by the page's own loop, and prints a row:
   timedemo    frames per second, back to back (the cores busy throughout)
   fps         frames shown per second in play; >20 the frames more than 20 ms apart
   wait        the page's wait for a frame, tick to answer: median / p95 / p99 ms
+              (nothing when the page does not wait for slow frames: then `turn` is
+              the program's time to answer, and `not waited` the share of refreshes)
   step        the program's own time for the frame, and its phases sim / 3-D /
               2-D (a `--features bench` build; else blank). wait - step is the
               wake-up of the program's worker and the turn around the frame
@@ -199,6 +201,8 @@ LIVE_STOP = """async () => {
                 wait: three(S.map(x => x.wait)), put: three(S.map(x => x.put)), copy: three(S.map(x => x.copy)) };
   // An instrumented page (the experiments' own) also says each turn's time and the worker's wake-up.
   for (const k of ['turn', 'wake']) if (S.length && S[0][k] !== undefined) out[k] = three(S.map(x => x[k]));
+  // This round's page says whether the refresh waited for its frame ("A frame", PLATFORM.md).
+  if (L.length && L[0].relaxed !== undefined) out.relaxed = +(L.filter(x => x.relaxed).length / L.length).toFixed(2);
   if (S.length > 1 && S[0].spawns !== undefined) out.spawns = +((S[S.length - 1].spawns - S[0].spawns) / (S.length - 1)).toFixed(1);
   if (names.length && values.length) {
     const col = (n) => { const i = names.indexOf(n); return values.map(v => v[i]); };
@@ -411,6 +415,8 @@ def show(r):
                 line += f"  {k} {fmt3(pl[k])}"
         if "spawns" in pl:
             line += f"  spawns {pl['spawns']}"
+        if "relaxed" in pl:
+            line += f"  not waited {pl['relaxed']:.0%}"
         line += f"  put {fmt3(pl['put'])}"
     print(line, flush=True)
     for name, part in (("timedemo", td), ("play", pl)):
