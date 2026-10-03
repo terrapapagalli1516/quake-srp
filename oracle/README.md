@@ -30,6 +30,7 @@ Needs docker (for the build only), uv, cargo, and the shareware pak at
 | `--crop name:x,y,w,h` | extra 6x C / port / diff PNG of a region |
 | `--spans 8\|16\|1` | id's span routine: 8 = `D_DrawSpans8`, id's portable C (default); 16 = the x86 asm's `D_DrawSpans16` in C, its integer steps included (what DOS/Win players saw, `d_subdiv16 1` — and what the port draws); 1 = exact per-pixel perspective (an experiment, not id) |
 | `--exactpersp` | the port's exact per-pixel perspective extra (`quaketool view --exactpersp 1`) instead of its default 16-pixel spans; pair it with `--spans 1` |
+| `--perspspan 16\|8\|4\|1` | the port's perspective span (`quaketool view --perspspan`, `r_perspspan`): 8 is id's C `D_DrawSpans8`, so `--spans 8 --perspspan 8` puts the port's 8 against id's portable C |
 | `--aspect A` | `vid.aspect` for both renderers (`-oracle_aspect` / `quaketool view --aspect`). Default 1.0, square pixels; `0.8333333` is id's DOS/Win 16:10 modes on a 4:3 monitor — and what the browser page shows (every preset is 16:10, presented at 4:3) |
 | `--c-cmd "d_mipscale 0"` | any console command for id's side before the map loads (repeatable); `d_mipscale` and `d_mipcap` are handed to the port too (`quaketool view --d-mipscale/--d-mipcap`). `--c-cmd +attack --settle 3` gives a frame lit by the shotgun's muzzle flash: id's live `cl_dlights` are written to the `.json` and handed to the port (`quaketool view --dlight`) |
 | `--bench N` | also time N warm re-renders of the view in both renderers |
