@@ -140,6 +140,12 @@ fn run(script: &str) {
             }
             "map" => {
                 assert_eq!(boot(), 1, "boot");
+                // id's own 1996 controls, explicitly: the test harness boots
+                // Classic (`app::START_PROFILE`), whose controls are the
+                // shared 2026 default now (`quake_rs::settings`'s module
+                // docs) — the C oracle has no WASD or gamepad to show, so
+                // the Keys screen must not either.
+                execute_console_command("idcontrols");
                 ensure_app(|a| a.menu.close());
                 execute_console_command(&format!("map {rest}"));
             }

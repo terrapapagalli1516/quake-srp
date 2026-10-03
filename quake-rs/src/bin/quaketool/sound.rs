@@ -353,7 +353,7 @@ pub fn cmd_sndwalk(pak_path: &str, map: &str, script_path: &str, log_path: &str,
     let pak = open_pak(pak_path)?;
     let text = std::fs::read_to_string(script_path).map_err(|e| format!("cannot read {script_path}: {e}"))?;
     let segs = parse_walk(&text).map_err(|e| format!("{script_path}: {e}"))?;
-    let settings = Settings::new(Profile::Classic);
+    let settings = Settings::id(Profile::Classic); // id's controls by name: the oracle pins against them explicitly
     let rand = Rc::new(QRand::new());
     let map_file = format!("maps/{map}.bsp");
     let mut calls = Vec::new();

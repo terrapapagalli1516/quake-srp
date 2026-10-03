@@ -887,6 +887,7 @@ mod tests {
         use quake_rs::keys::K_SPACE;
         assert_eq!(boot(), 1);
         close_menu();
+        crate::host_cmd::execute_console_command("idcontrols"); // cl_jumpswim is a shared control now; start from id's (off)
         key_down(i32::from(K_SPACE));
         step(0.0);
         let classic = walk_mut(|w| (w.key_move.jump, w.key_move.up));
@@ -907,6 +908,7 @@ mod tests {
         reset_queue();
         assert_eq!(boot(), 1);
         close_menu();
+        crate::host_cmd::execute_console_command("idcontrols"); // freelook is a shared control now; start from id's (off)
         walk_mut(|w| w.pitch = 0.0);
         mouse_move(0.0, -100.0);
         assert_eq!(player_pitch(), 0.0, "no mouse look: the pitch stays");
@@ -939,6 +941,7 @@ mod tests {
         reset_queue();
         assert_eq!(boot(), 1);
         close_menu();
+        crate::host_cmd::execute_console_command("idcontrols"); // freelook is a shared control now; start from id's (off)
         crate::host_cmd::execute_console_command("lookspring 1");
         mouse_move(0.0, -10.0);
         for k in [K_UPARROW, b'\\', K_SHIFT, K_MOUSE1] {
@@ -1042,15 +1045,18 @@ mod tests {
         walk_mut(|w| w.yaw)
     }
 
-    /// Classic is id's: `joystick 0` reads no pad; with `joystick 1` the
-    /// left stick is a 1996 joystick (X turns, Y walks) and the buttons are
-    /// id's unbound JOY/AUX keys.
+    /// id's own controls (`joystick` is a shared control now, on by
+    /// default even in Classic — `idcontrols` is the explicit way to id's):
+    /// `joystick 0` reads no pad; with `joystick 1` the left stick is a
+    /// 1996 joystick (X turns, Y walks) and the buttons are id's unbound
+    /// JOY/AUX keys.
     #[test]
     fn classic_reads_the_pad_only_with_joystick_1_as_ids_joystick() {
         use quake_rs::keys::K_JOY1;
         reset_queue();
         assert_eq!(boot(), 1);
         close_menu();
+        crate::host_cmd::execute_console_command("idcontrols");
         let yaw0 = yaw();
         for _ in 0..3 {
             pad_frame(1, [1.0, -1.0, 0.0, 0.0, 0.0, 0.0]);
@@ -1185,6 +1191,7 @@ mod tests {
         reset_queue();
         assert_eq!(boot(), 1);
         close_menu();
+        crate::host_cmd::execute_console_command("idcontrols"); // freelook is a shared control now; start from id's (off)
 
         // Default: mouse X turns (yaw changes, no sidemove accumulates).
         let yaw0 = walk_mut(|w| w.yaw);

@@ -473,7 +473,9 @@ mod tests {
     /// `Window` in device pixels, the picture at a whole fraction of it (Auto:
     /// the smallest pixel that keeps a 1080p frame's cost on one thread), and
     /// the `State` that tells the page to fill its box with that pixel size.
-    /// Classic shows its video mode in the 4:3 box whatever the window.
+    /// Classic shows its video mode in the 4:3 box whatever the window —
+    /// `STATE_ALT_ENTER` stays set even there, a shared control now, not the
+    /// engine (`quake_rs::settings`'s module docs).
     #[test]
     fn the_window_sets_a_native_picture_in_2026_and_nothing_in_classic() {
         let frame_and_state = |profile: &str, win: (u32, u32)| {
@@ -492,7 +494,7 @@ mod tests {
         assert_eq!(frame_and_state("2026", (3840, 2160)), (1920, 1080, STATE_NATIVE | STATE_ALT_ENTER, 2), "4K: 2x2 pixels");
         assert_eq!(frame_and_state("2026", (5120, 2880)), (1706, 960, STATE_NATIVE | STATE_ALT_ENTER, 3), "5K: 3x3");
         assert_eq!(frame_and_state("2026", (1300, 700)), (1300, 700, STATE_NATIVE | STATE_ALT_ENTER, 1), "any aspect");
-        assert_eq!(frame_and_state("classic", (1920, 1080)), (960, 600, 0, 0), "the mode, in the 4:3 box");
+        assert_eq!(frame_and_state("classic", (1920, 1080)), (960, 600, STATE_ALT_ENTER, 0), "the mode, in the 4:3 box; Alt+Enter is a shared control, on here too");
     }
 
     /// The flags the page's touch controls read: `in_touch` (on in 2026),

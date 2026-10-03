@@ -450,6 +450,17 @@ impl Bindings {
         self
     }
 
+    /// The wheel unbound, as `default.cfg` leaves it — over whatever these
+    /// two keys were bound to, like [`Bindings::with_wheel`] the other way.
+    /// Unlike WASD and the gamepad, the wheel's weapon cycle is not a
+    /// shared control (the user's call): [`crate::settings::Settings::set_profile`]
+    /// uses this to turn it off again on a switch back to Classic.
+    pub fn without_wheel(mut self) -> Bindings {
+        self.set(K_MWHEELUP, None);
+        self.set(K_MWHEELDOWN, None);
+        self
+    }
+
     /// `keybindings[key]`.
     pub fn get(&self, key: u8) -> Option<&Binding> {
         self.keys[key as usize].as_ref()
@@ -630,9 +641,12 @@ mod tests {
     fn the_wheel_switches_weapons_only_in_the_2026_profile() {
         let id = Bindings::default_cfg();
         assert_eq!((id.get(K_MWHEELUP), id.get(K_MWHEELDOWN)), (None, None));
-        let wheel = id.with_wheel();
+        let wheel = id.clone().with_wheel();
         assert_eq!(wheel.command(K_MWHEELUP), Some(BIND_CHANGEWEAPON), "notch up: next weapon");
         assert_eq!(wheel.get(K_MWHEELDOWN).map(Binding::text), Some("impulse 12"), "notch down: previous weapon");
+        let back = wheel.without_wheel();
+        assert_eq!((back.get(K_MWHEELUP), back.get(K_MWHEELDOWN)), (None, None), "a switch to Classic turns it off again");
+        assert_eq!(back, id, "and nothing else changed");
     }
 
     /// AUDIT.md's "Missing `default.cfg` binds: F1-F4, F6, F9, F10, F12":

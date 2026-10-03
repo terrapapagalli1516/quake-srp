@@ -16,12 +16,21 @@
 //! `Cvar_WriteVariables` go through.
 //!
 //! Two kinds of field. **id's cvars**, with id's defaults. And **the port's
-//! departures** from id's game, each marked [`Cvar::departure`], every one off
-//! in [`Cvars::classic`]; [`Cvars::modern`] is the 2026 profile
-//! ([`crate::settings::Profile`]). Some of id's own cvars are departures
-//! too, where the 2026 profile gives them another default: `cl_forwardspeed`
-//! and `cl_backspeed` (Always Run), `crosshair`, and the joystick's
-//! (`joystick` and in_win.c's advanced configuration: the 2026 pad layout).
+//! departures** from id's game, each marked [`Cvar::departure`]
+//! ([`crate::settings::Profile`] switches them: off in [`Cvars::classic`],
+//! on in [`Cvars::modern`]) — `crosshair`, the renderer and stepping
+//! extras, the 2026 mixer, the bigger edict pool.
+//!
+//! A departure can still be a *control* rather than the engine: Always Run
+//! (`cl_forwardspeed`/`cl_backspeed`), mouse look (`freelook`), the
+//! gamepad (`joystick` and in_win.c's advanced configuration, the 2026
+//! pad layout), Space-swims-up (`cl_jumpswim`) and Alt+Enter
+//! (`vid_altenter`) are departures from id's own defaults, but not from
+//! each other's — they are the player's, the same whichever profile is
+//! live, and [`crate::settings::Settings::set_profile`] leaves them alone
+//! on a switch, like id's own settings (Screen size, Mouse Speed). id's
+//! 1996 ones are one explicit step away, never a profile switch:
+//! [`Cvars::with_id_controls`], the console's `idcontrols`.
 
 use crate::client::in_win::JoyCvars;
 use crate::client::lerpmodels::LerpModels;
@@ -181,7 +190,12 @@ impl Default for Cvars {
 }
 
 impl Cvars {
-    /// id's defaults, every departure off: WinQuake.
+    /// id's WinQuake: every *engine* departure off (rendering, stepping,
+    /// timing — everything `oracle/classic_check.py` compares). The
+    /// *controls* — Always Run, mouse look, the gamepad, Space swims up,
+    /// Alt+Enter — are already the shared default here too (the module
+    /// docs say why); id's own 1996 ones (arrows, no mouse look, no
+    /// gamepad, Always Run off) are [`Cvars::with_id_controls`].
     pub fn classic() -> Cvars {
         Cvars {
             viewsize: VIEWSIZE_DEFAULT,
@@ -189,8 +203,8 @@ impl Cvars {
             volume: 0.7,
             bgmvolume: 1.0,
             sensitivity: 3.0,
-            cl_forwardspeed: 200.0,
-            cl_backspeed: 200.0,
+            cl_forwardspeed: 400.0,
+            cl_backspeed: 400.0,
             m_pitch: 0.022,
             lookspring: false,
             lookstrafe: false,
@@ -209,9 +223,9 @@ impl Cvars {
             native: false,
             pixel_size: 0,
             fov_adapt: false,
-            freelook: false,
-            jumpswim: false,
-            alt_enter: false,
+            freelook: true,
+            jumpswim: true,
+            alt_enter: true,
             lerpmove: LerpMove::Classic,
             lerpmodels: LerpModels::Classic,
             sky: SkyScroll::Classic,
@@ -220,7 +234,7 @@ impl Cvars {
             max_edicts: MAX_EDICTS as u32,
             touch: false,
             touch_accel: 0.0,
-            joy: JoyCvars::classic(),
+            joy: JoyCvars::modern(),
         }
     }
 
@@ -230,27 +244,21 @@ impl Cvars {
     /// layer at id's proportions with the world on beside the status bar,
     /// the crosshair, monsters that glide between their steps and whose
     /// animation blends between frames, clouds that glide across the sky,
-    /// Always Run, mouse look, Space to swim up, Alt+Enter for fullscreen and
-    /// touch controls on a phone. Show FPS and exact perspective stay off:
-    /// the readout is clutter, and id's 16-pixel spans are part of the look.
-    /// A gamepad works as a modern twin-stick pad ([`JoyCvars::modern`]). The
+    /// and touch controls on a phone. Show FPS and exact perspective stay
+    /// off: the readout is clutter, and id's 16-pixel spans are part of the
+    /// look. (Always Run, mouse look, the gamepad and Space-swims-up are
+    /// [`Cvars::classic`]'s too now — they are controls, not engine.) The
     /// edict pool grows past id's 600 (`max_edicts`, QuakeSpasm's own
     /// default) — invisible on every map id or the mission packs shipped,
     /// room for bigger ones.
     pub fn modern() -> Cvars {
         Cvars {
-            cl_forwardspeed: 400.0,
-            cl_backspeed: 400.0,
             crosshair: Crosshair::Cross,
             uncapped: true,
             scaled_2d: true,
             sbar_layout: SbarLayout::Overlay,
             native: true,
             fov_adapt: true,
-            freelook: true,
-            jumpswim: true,
-            alt_enter: true,
-            joy: JoyCvars::modern(),
             lerpmove: LerpMove::Smooth,
             lerpmodels: LerpModels::Smooth,
             sky: SkyScroll::Fluid,
@@ -259,6 +267,26 @@ impl Cvars {
             touch: true,
             ..Cvars::classic()
         }
+    }
+
+    /// `self` with every *control* at id's own 1996 `default.cfg`: Always
+    /// Run off (`cl_forwardspeed`/`cl_backspeed` 200), no mouse look
+    /// (`freelook` off), Space does not swim (`jumpswim` off), no
+    /// Alt+Enter, and id's joystick ([`JoyCvars::classic`]: `joystick` off,
+    /// no advanced axis layout, id's thresholds, no dead zone, curve, menu
+    /// keys or rumble). Every *engine* field — whatever profile `self` came
+    /// from — is untouched. The explicit, one console command (`idcontrols`)
+    /// back to id's controls, and what the oracle harness pins against
+    /// (`quaketool play`/`sound`: [`crate::settings::Settings::id`]) so it
+    /// keeps comparing id's controls whatever the shared default becomes.
+    pub fn with_id_controls(mut self) -> Cvars {
+        self.cl_forwardspeed = 200.0;
+        self.cl_backspeed = 200.0;
+        self.freelook = false;
+        self.jumpswim = false;
+        self.alt_enter = false;
+        self.joy = JoyCvars::classic();
+        self
     }
 
     /// Options > Always Run: `cl_forwardspeed > 200` (`M_Options_Draw`).
@@ -391,47 +419,47 @@ pub const CVARS: &[Cvar] = &[
         get: |c| number_string(c.joy.wwhack2), set: |c, v| c.joy.wwhack2 = atof(v) },
     Cvar { name: "joywwhack1", archive: false, departure: false, help: "WingMan Warrior U axis fix",
         get: |c| number_string(c.joy.wwhack1), set: |c, v| c.joy.wwhack1 = atof(v) },
-    Cvar { name: "joyyawsensitivity", archive: true, departure: true, help: "joystick turn scale (sign: way)",
+    Cvar { name: "joyyawsensitivity", archive: true, departure: false, help: "joystick turn scale (sign: way)",
         get: |c| number_string(c.joy.yaw_sensitivity), set: |c, v| c.joy.yaw_sensitivity = atof(v) },
-    Cvar { name: "joypitchsensitivity", archive: true, departure: true, help: "joystick look scale",
+    Cvar { name: "joypitchsensitivity", archive: true, departure: false, help: "joystick look scale",
         get: |c| number_string(c.joy.pitch_sensitivity), set: |c, v| c.joy.pitch_sensitivity = atof(v) },
-    Cvar { name: "joysidesensitivity", archive: true, departure: true, help: "joystick strafe scale",
+    Cvar { name: "joysidesensitivity", archive: true, departure: false, help: "joystick strafe scale",
         get: |c| number_string(c.joy.side_sensitivity), set: |c, v| c.joy.side_sensitivity = atof(v) },
-    Cvar { name: "joyforwardsensitivity", archive: true, departure: true, help: "joystick walk scale",
+    Cvar { name: "joyforwardsensitivity", archive: true, departure: false, help: "joystick walk scale",
         get: |c| number_string(c.joy.forward_sensitivity), set: |c, v| c.joy.forward_sensitivity = atof(v) },
-    Cvar { name: "joyyawthreshold", archive: true, departure: true, help: "joystick turn dead zone",
+    Cvar { name: "joyyawthreshold", archive: true, departure: false, help: "joystick turn dead zone",
         get: |c| number_string(c.joy.yaw_threshold), set: |c, v| c.joy.yaw_threshold = atof(v) },
-    Cvar { name: "joypitchthreshold", archive: true, departure: true, help: "joystick look dead zone",
+    Cvar { name: "joypitchthreshold", archive: true, departure: false, help: "joystick look dead zone",
         get: |c| number_string(c.joy.pitch_threshold), set: |c, v| c.joy.pitch_threshold = atof(v) },
-    Cvar { name: "joysidethreshold", archive: true, departure: true, help: "joystick strafe dead zone",
+    Cvar { name: "joysidethreshold", archive: true, departure: false, help: "joystick strafe dead zone",
         get: |c| number_string(c.joy.side_threshold), set: |c, v| c.joy.side_threshold = atof(v) },
-    Cvar { name: "joyforwardthreshold", archive: true, departure: true, help: "joystick walk dead zone",
+    Cvar { name: "joyforwardthreshold", archive: true, departure: false, help: "joystick walk dead zone",
         get: |c| number_string(c.joy.forward_threshold), set: |c, v| c.joy.forward_threshold = atof(v) },
-    Cvar { name: "joyadvaxisv", archive: true, departure: true, help: "axis V: 1 fwd 2 look 3 side 4 turn",
+    Cvar { name: "joyadvaxisv", archive: true, departure: false, help: "axis V: 1 fwd 2 look 3 side 4 turn",
         get: |c| number_string(c.joy.advaxis[5]), set: |c, v| c.joy.advaxis[5] = atof(v) },
-    Cvar { name: "joyadvaxisu", archive: true, departure: true, help: "axis U: 1 fwd 2 look 3 side 4 turn",
+    Cvar { name: "joyadvaxisu", archive: true, departure: false, help: "axis U: 1 fwd 2 look 3 side 4 turn",
         get: |c| number_string(c.joy.advaxis[4]), set: |c, v| c.joy.advaxis[4] = atof(v) },
-    Cvar { name: "joyadvaxisr", archive: true, departure: true, help: "axis R: 1 fwd 2 look 3 side 4 turn",
+    Cvar { name: "joyadvaxisr", archive: true, departure: false, help: "axis R: 1 fwd 2 look 3 side 4 turn",
         get: |c| number_string(c.joy.advaxis[3]), set: |c, v| c.joy.advaxis[3] = atof(v) },
-    Cvar { name: "joyadvaxisz", archive: true, departure: true, help: "axis Z: 1 fwd 2 look 3 side 4 turn",
+    Cvar { name: "joyadvaxisz", archive: true, departure: false, help: "axis Z: 1 fwd 2 look 3 side 4 turn",
         get: |c| number_string(c.joy.advaxis[2]), set: |c, v| c.joy.advaxis[2] = atof(v) },
-    Cvar { name: "joyadvaxisy", archive: true, departure: true, help: "axis Y: 1 fwd 2 look 3 side 4 turn",
+    Cvar { name: "joyadvaxisy", archive: true, departure: false, help: "axis Y: 1 fwd 2 look 3 side 4 turn",
         get: |c| number_string(c.joy.advaxis[1]), set: |c, v| c.joy.advaxis[1] = atof(v) },
-    Cvar { name: "joyadvaxisx", archive: true, departure: true, help: "axis X: 1 fwd 2 look 3 side 4 turn",
+    Cvar { name: "joyadvaxisx", archive: true, departure: false, help: "axis X: 1 fwd 2 look 3 side 4 turn",
         get: |c| number_string(c.joy.advaxis[0]), set: |c, v| c.joy.advaxis[0] = atof(v) },
-    Cvar { name: "joyadvanced", archive: true, departure: true, help: "axis maps from joyadvaxis*",
+    Cvar { name: "joyadvanced", archive: true, departure: false, help: "axis maps from joyadvaxis*",
         get: |c| flag(c.joy.advanced), set: |c, v| c.joy.advanced = on(v) },
     Cvar { name: "joyname", archive: false, departure: false, help: "the controller's name",
         get: |c| c.joy.name.clone(), set: |c, v| c.joy.name = v.to_string() },
-    Cvar { name: "joystick", archive: true, departure: true, help: "use the joystick / gamepad",
+    Cvar { name: "joystick", archive: true, departure: false, help: "use the joystick / gamepad",
         get: |c| flag(c.joy.enabled), set: |c, v| c.joy.enabled = on(v) },
     Cvar { name: "_cl_color", archive: true, departure: false, help: "shirt*16 + pants colour",
         get: |c| c.cl_color.to_string(), set: |c, v| c.cl_color = atof(v) as i32 },
     Cvar { name: "_cl_name", archive: true, departure: false, help: "the player's name",
         get: |c| c.cl_name.clone(), set: |c, v| c.cl_name = v.to_string() },
-    Cvar { name: "cl_forwardspeed", archive: true, departure: true, help: "walk speed (400: Always Run)",
+    Cvar { name: "cl_forwardspeed", archive: true, departure: false, help: "walk speed (400: Always Run)",
         get: |c| number_string(c.cl_forwardspeed), set: |c, v| c.cl_forwardspeed = atof(v) },
-    Cvar { name: "cl_backspeed", archive: true, departure: true, help: "backpedal speed",
+    Cvar { name: "cl_backspeed", archive: true, departure: false, help: "backpedal speed",
         get: |c| number_string(c.cl_backspeed), set: |c, v| c.cl_backspeed = atof(v) },
     Cvar { name: "lookspring", archive: true, departure: false, help: "re-level the view after mouse look",
         get: |c| flag(c.lookspring), set: |c, v| c.lookspring = on(v) },
@@ -478,11 +506,11 @@ pub const CVARS: &[Cvar] = &[
         set: |c, v| c.pixel_size = atof(v).clamp(0.0, f32::from(PIXEL_SIZE_MAX)) as u8 },
     Cvar { name: "fov_adapt", archive: true, departure: true, help: "wider screens see more (Hor+)",
         get: |c| flag(c.fov_adapt), set: |c, v| c.fov_adapt = on(v) },
-    Cvar { name: "freelook", archive: true, departure: true, help: "mouse look without +mlook",
+    Cvar { name: "freelook", archive: true, departure: false, help: "mouse look without +mlook",
         get: |c| flag(c.freelook), set: |c, v| c.freelook = on(v) },
-    Cvar { name: "cl_jumpswim", archive: true, departure: true, help: "+jump also swims up",
+    Cvar { name: "cl_jumpswim", archive: true, departure: false, help: "+jump also swims up",
         get: |c| flag(c.jumpswim), set: |c, v| c.jumpswim = on(v) },
-    Cvar { name: "vid_altenter", archive: true, departure: true, help: "Alt+Enter toggles fullscreen",
+    Cvar { name: "vid_altenter", archive: true, departure: false, help: "Alt+Enter toggles fullscreen",
         get: |c| flag(c.alt_enter), set: |c, v| c.alt_enter = on(v) },
     Cvar { name: "r_lerpmove", archive: true, departure: true, help: "monsters glide between steps",
         get: |c| flag(c.lerpmove == LerpMove::Smooth),
@@ -505,13 +533,13 @@ pub const CVARS: &[Cvar] = &[
         get: |c| flag(c.touch), set: |c, v| c.touch = on(v) },
     Cvar { name: "in_touchaccel", archive: true, departure: false, help: "touch look acceleration, 0 none",
         get: |c| number_string(c.touch_accel), set: |c, v| c.touch_accel = atof(v).clamp(0.0, 4.0) },
-    Cvar { name: "joy_deadzone", archive: true, departure: true, help: "round stick dead zone, 0 off",
+    Cvar { name: "joy_deadzone", archive: true, departure: false, help: "round stick dead zone, 0 off",
         get: |c| number_string(c.joy.deadzone), set: |c, v| c.joy.deadzone = atof(v) },
-    Cvar { name: "joy_exponent", archive: true, departure: true, help: "look stick curve, 1 straight",
+    Cvar { name: "joy_exponent", archive: true, departure: false, help: "look stick curve, 1 straight",
         get: |c| number_string(c.joy.exponent), set: |c, v| c.joy.exponent = atof(v) },
-    Cvar { name: "joy_menukeys", archive: true, departure: true, help: "pad A/B/D-pad work the menus",
+    Cvar { name: "joy_menukeys", archive: true, departure: false, help: "pad A/B/D-pad work the menus",
         get: |c| flag(c.joy.menu_keys), set: |c, v| c.joy.menu_keys = on(v) },
-    Cvar { name: "joy_rumble", archive: true, departure: true, help: "pad rumble strength, 0 off",
+    Cvar { name: "joy_rumble", archive: true, departure: false, help: "pad rumble strength, 0 off",
         get: |c| number_string(c.joy.rumble), set: |c, v| c.joy.rumble = atof(v) },
 ];
 
@@ -580,7 +608,32 @@ mod tests {
         for c in CVARS.iter().filter(|c| c.departure) {
             assert!(c.archive, "{}: a departure is kept in config.cfg", c.name);
         }
-        assert!(!id.always_run() && modern.always_run());
+        assert!(id.always_run() && modern.always_run(), "Always Run is a shared control, on by default in both");
+    }
+
+    /// The controls (module docs): departures from id, but not from each
+    /// other — [`Cvars::classic`] and [`Cvars::modern`] already agree on
+    /// them, so [`crate::settings::Settings::set_profile`] (which resets
+    /// only [`Cvar::departure`] fields to the new profile's) leaves them as
+    /// the player set them. [`Cvars::with_id_controls`] is the one way back
+    /// to id's own.
+    #[test]
+    fn the_controls_are_the_same_in_both_profiles() {
+        let (id, modern) = (Cvars::classic(), Cvars::modern());
+        for name in [
+            "cl_forwardspeed", "cl_backspeed", "freelook", "cl_jumpswim", "vid_altenter", "joystick", "joy_rumble",
+        ] {
+            let c = find(name).unwrap();
+            assert_eq!(c.get(&id), c.get(&modern), "{name}: the same in both profiles");
+        }
+        assert_eq!(id.joy, modern.joy, "the whole gamepad layout, not just `joystick`");
+        assert_eq!(id.joy, JoyCvars::modern(), "Cvars::classic already has the 2026 pad");
+
+        // with_id_controls touches only the controls: everything else stays
+        // whatever profile it came from.
+        let old = modern.clone().with_id_controls();
+        assert!(!old.freelook && !old.jumpswim && !old.alt_enter && !old.always_run() && old.joy == JoyCvars::classic());
+        assert_eq!((old.uncapped, old.native, old.crosshair), (modern.uncapped, modern.native, modern.crosshair), "the engine is untouched");
     }
 
     #[test]
@@ -607,11 +660,12 @@ mod tests {
         assert_eq!(c.m_pitch, -0.022);
         c.set_invert_mouse(true);
         assert_eq!(c.m_pitch, -0.022, "already inverted");
-        c.set_always_run(true);
-        assert_eq!((c.cl_forwardspeed, c.cl_backspeed), (400.0, 400.0));
+        assert!(c.always_run(), "on by default: it's a shared control now, not id's 200");
+        c.set_always_run(false);
+        assert_eq!((c.cl_forwardspeed, c.cl_backspeed), (200.0, 200.0));
         let mut out = String::new();
         write_changes(&c, &Cvars::classic(), &mut out);
-        assert_eq!(out, "cl_forwardspeed \"400\"\ncl_backspeed \"400\"\nm_pitch \"-0.022\"\n");
+        assert_eq!(out, "cl_forwardspeed \"200\"\ncl_backspeed \"200\"\nm_pitch \"-0.022\"\n");
     }
 
     #[test]

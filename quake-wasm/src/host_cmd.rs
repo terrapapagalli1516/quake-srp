@@ -6,7 +6,8 @@
 //! Help/Ordering screen), the key bindings (`bind`, `unbind`, `unbindall`),
 //! the view size, `map`, save/load, `pause`, the demo commands (cl_demo.c's
 //! `playdemo`/`timedemo`, host_cmd.c's demo loop control
-//! `startdemos`/`demos`/`stopdemo`), the port's `profile` and `wasm_help`,
+//! `startdemos`/`demos`/`stopdemo`), the port's `profile`, `idcontrols` and
+//! `wasm_help`,
 //! the cheats god/noclip/fly/kill/give/impulse, which act on the live
 //! [`Walk`](crate::app::Walk) through the client's host_cmd.c
 //! ([`quake_rs::client::host_cmd`], which also holds the level swaps
@@ -90,6 +91,7 @@ pub(crate) const COMMANDS: &[ConsoleCommand] = &[
     c("echo", "echo <text>", cmd_echo),
     c("exec", "exec <file>  run a file's lines", cmd_exec),
     c("profile", "profile classic|2026", cmd_profile),
+    c("idcontrols", "id's 1996 bindings and control cvars", cmd_idcontrols),
     c("wasm_help", "wasm_help [name]  the lists", cmd_wasm_help),
 ];
 
@@ -365,16 +367,33 @@ fn cmd_unbindall(_: &Args) {
     ensure_app(|a| a.settings.binds.unbind_all());
 }
 
-/// The port's `profile`: prints the profile, or switches to `classic`
-/// (every departure off, id's `default.cfg` keys) or `2026`
-/// ([`quake_rs::settings::Settings::set_profile`]).
+/// The port's `profile`: prints the profile, or switches the *engine* to
+/// `classic` (every departure off) or `2026`
+/// ([`quake_rs::settings::Settings::set_profile`]). The controls (WASD,
+/// mouse look, the gamepad, Space-swims-up, Alt+Enter, Always Run) are not
+/// among them — they are the player's, the same either way — so this
+/// leaves them as they are; `idcontrols` is the one step to id's own.
 fn cmd_profile(args: &Args) {
     ensure_app(|a| match args.argc() {
         1 => a.console.println(format!("\"profile\" is \"{}\"", a.settings.profile.name())),
         _ => match Profile::parse(args.argv(1)) {
             Some(p) => a.settings.set_profile(p),
-            None => a.console.println("profile classic|2026 : id's Quake, or the 2026 settings"),
+            None => a.console.println("profile classic|2026 : id's engine, or the port's"),
         },
+    });
+}
+
+/// The port's `idcontrols`: the one explicit step to id's own 1996 controls
+/// (`default.cfg`'s bindings, [`quake_rs::cvar::Cvars::with_id_controls`]
+/// — arrows, no mouse look, no gamepad, Space does not swim, no
+/// Alt+Enter, Always Run off), independent of `profile`: the engine stays
+/// whatever it was. What `exec default.cfg` would reach if the port shipped
+/// that file; it does not, so this is the console's own small command.
+fn cmd_idcontrols(_: &Args) {
+    ensure_app(|a| {
+        a.settings.binds = keys::Bindings::default_cfg();
+        a.settings.cvars = std::mem::take(&mut a.settings.cvars).with_id_controls();
+        a.console.println("id's 1996 controls: arrows, no mouse look, no gamepad, Always Run off");
     });
 }
 

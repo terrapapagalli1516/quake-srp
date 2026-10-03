@@ -256,7 +256,7 @@ pub fn cmd_play(pak_path: &str, workloads: &str, rest: &[String]) -> Result<Stri
     let vid = Vid { width: 0, height: 0, display_aspect: DISPLAY_ASPECT, exact_perspective: false, video: video.cvars, mip: render::MipCvars::DEFAULT };
     let mut host = Host {
         pak,
-        settings: Settings::new(Profile::Classic),
+        settings: Settings::id(Profile::Classic), // id's controls by name: the oracle pins against them explicitly
         keys: [false; 256],
         palette,
         gamma: render::build_gamma_table(1.0),
