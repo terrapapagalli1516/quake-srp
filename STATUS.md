@@ -146,8 +146,8 @@ branches, the renderer changes reviewed, every merge full-checked and deployed:
   `fleet/sprites` (id's `r_sprite.c`/`d_sprite.c`, every type, in id's list order: bullet
   holes lie on the wall, explosions' z-ties as id's; `play.demo1` re-recorded),
   `fleet/packend` (builtin #79 `finaleFinished` and `menu_credits`: a pack's ending reaches
-  the end screen), and `fleet/strings` (the re-release's `$qc_` keys as English — see the
-  ledger for its state).
+  the end screen), and `fleet/strings` (the re-release's `$qc_` keys with `{0}` arguments read as
+  English from the pack's own `loc_english.txt`, finale text included; both profiles).
 - **Found, left open** (`AUDIT.md` Open): `angle_vectors` in f64 where id's is float (a
   perpendicular facing test can flip), movement angles unrounded, particle origins
   unrounded, `cvar()` of client cvars (Hipnotic's footsteps), `sprint` to a non-client.
