@@ -126,8 +126,9 @@ impl Edge {
 struct Surf {
     next: u32,
     prev: u32,
-    /// Head of this surface's span list (`espan_t.pnext` links).
-    spans: u32,
+    /// Whether the scan gave it a span (id's `surf_t.spans` list is not
+    /// kept: [`ESpan`]).
+    has_spans: bool,
     /// Front-to-back order: smaller is nearer.
     key: i32,
     last_u: i32,
@@ -147,7 +148,7 @@ impl Surf {
     const ZERO: Surf = Surf {
         next: 0,
         prev: 0,
-        spans: NONE,
+        has_spans: false,
         key: 0,
         last_u: 0,
         spanstate: 0,
@@ -162,13 +163,19 @@ impl Surf {
     };
 }
 
-/// `espan_t`: `count` pixels from `(u, v)`.
+/// `espan_t`: `count` pixels from `u` of its row, of surface `surf`. id links
+/// each surface's spans into a list (`pnext`) and `D_DrawSurfaces` draws
+/// surface after surface; here the spans stay in the order the scan makes
+/// them, row after row and left to right, each naming its surface, and
+/// [`WorldDraw::rows`] says where each row's begin — so a band's spans are
+/// one run of the list, and its pixels are written in memory order. Every
+/// pixel is in exactly one span, so the order they are drawn in changes
+/// nothing.
 #[derive(Clone, Copy)]
 struct ESpan {
     u: i32,
-    v: i32,
     count: i32,
-    pnext: u32,
+    surf: u32,
 }
 
 /// `bedge_t` (`r_bsp.c`): a brush-model edge being clipped into the world's
@@ -296,7 +303,12 @@ pub(super) struct EdgeState {
     /// The frame's buffers.
     edges: Vec<Edge>,
     surfs: Vec<Surf>,
+    /// The scan's spans, and the index of each row's first (one more entry
+    /// than rows: the end): the frame's [`WorldDraw`] takes both.
     spans: Vec<ESpan>,
+    row_spans: Vec<u32>,
+    /// Span buffers handed back by drawn frames ([`EdgeState::recycle`]).
+    spare_spans: Vec<(Vec<ESpan>, Vec<u32>)>,
     newedges: Vec<u32>,
     removeedges: Vec<u32>,
     bedges: Vec<BEdge>,
@@ -370,6 +382,8 @@ impl EdgeState {
         edges: Vec::new(),
         surfs: Vec::new(),
         spans: Vec::new(),
+        row_spans: Vec::new(),
+        spare_spans: Vec::new(),
         newedges: Vec::new(),
         removeedges: Vec::new(),
         bedges: Vec::new(),
@@ -490,7 +504,7 @@ impl EdgeState {
     /// (`R_EdgeDrawing`: `R_RenderWorld`, `R_DrawBEntitiesOnList`,
     /// `R_ScanEdges`), and `D_DrawSurfaces`' choice for each surface that
     /// owns a span — the surface cache consulted, any block baked — so that
-    /// [`EdgeState::draw_band`] can draw any rows of the view from them. The
+    /// [`WorldDraw::draw_band`] can draw any rows of the view from them. The
     /// world is the one [`EdgeState::begin_map`] was last called for. `None`
     /// for a view larger than any setting allows (the caller clamps to the
     /// cvars' limit; this refuses the 8K limit's past).
@@ -575,7 +589,7 @@ impl EdgeState {
             let (edges, surfs, spans) = (
                 self.edges.len() as u64 - FIRST_EDGE as u64,
                 self.surfs.len() as u64 - 2,
-                self.spans.len() as u64,
+                world.spans.len() as u64,
             );
             prof.add(|s| {
                 // world = the whole pass but the brush entities' edge setup,
@@ -756,7 +770,16 @@ impl EdgeState {
         self.newedges.resize(self.h, NONE);
         self.removeedges.clear();
         self.removeedges.resize(self.h, NONE);
+        if let Some((spans, rows)) = self.spare_spans.pop() {
+            (self.spans, self.row_spans) = (spans, rows);
+        }
         self.spans.clear();
+        self.row_spans.clear();
+    }
+
+    /// Take back a drawn frame's span buffers for the next one.
+    pub(super) fn recycle(&mut self, world: WorldDraw) {
+        self.spare_spans.push((world.spans, world.rows));
     }
 
     // -----------------------------------------------------------------------
@@ -1220,7 +1243,7 @@ impl EdgeState {
         self.surfs.push(Surf {
             next: 0,
             prev: 0,
-            spans: NONE,
+            has_spans: false,
             key,
             last_u: 0,
             spanstate: 0,
@@ -1622,12 +1645,14 @@ impl EdgeState {
         }
         // the last scan (no need to step or sort or remove on the last scan)
         self.scan_line(bottom);
+        self.row_spans.push(self.spans.len() as u32);
     }
 
     /// One scanline of `R_ScanEdges`: add the new edges, generate the spans.
     fn scan_line(&mut self, iv: i32) {
         self.current_iv = iv;
         self.fv = iv as f32;
+        self.row_spans.push(self.spans.len() as u32);
         // mark that the head (background start) span is pre-included
         self.surfs[BACKGROUND as usize].spanstate = 1;
         let ne = self.newedges[iv as usize];
@@ -1719,10 +1744,8 @@ impl EdgeState {
     /// Add a span of `surf`: `count` pixels from `u` on the current scanline.
     #[inline]
     fn emit_span(&mut self, surf: u32, u: i32, count: i32) {
-        let idx = self.spans.len() as u32;
-        let s = &mut self.surfs[surf as usize];
-        self.spans.push(ESpan { u, v: self.current_iv, count, pnext: s.spans });
-        s.spans = idx;
+        self.surfs[surf as usize].has_spans = true;
+        self.spans.push(ESpan { u, count, surf });
     }
 
     /// `R_GenerateSpans`: walk the active edges left to right, keeping the
@@ -1919,11 +1942,12 @@ impl EdgeState {
         let (mut jobs, mut waiting) = (Vec::new(), Vec::new());
         for si in 0..self.surfs.len() {
             let s = self.surfs[si];
-            if si == 0 || s.spans == NONE {
+            if si == 0 || !s.has_spans {
                 surfs.push(None);
                 continue;
             }
-            let (paint, zi) = if s.flags & SURF_DRAWBACKGROUND != 0 {
+            let background = s.flags & SURF_DRAWBACKGROUND != 0;
+            let (paint, zi) = if background {
                 // the background: effectively at infinity
                 (Paint::Fill(clear), [BACKGROUND_ZI, 0.0, 0.0])
             } else {
@@ -1939,7 +1963,9 @@ impl EdgeState {
                 };
                 (paint, [s.d_ziorigin, s.d_zistepu, s.d_zistepv])
             };
-            surfs.push(Some(SurfDraw { paint, zi }));
+            // D_DrawZSpans' step along a row, the plane's for every span.
+            let izistep = c_ftoi((zi[1] * 32768.0 * 65536.0) as f64);
+            surfs.push(Some(SurfDraw { paint, zi, izistep, background }));
         }
         prof.add(|st| st.faces_drawn += faces);
         // The frame's bakes, on the render threads; then each waiting
@@ -1958,7 +1984,14 @@ impl EdgeState {
                 block.block = blocks[job].clone();
             }
         }
-        WorldDraw { surfs, sky, persp: opts.persp_span }
+        WorldDraw {
+            surfs,
+            spans: std::mem::take(&mut self.spans),
+            rows: std::mem::take(&mut self.row_spans),
+            w: self.w,
+            sky,
+            persp: opts.persp_span,
+        }
     }
 
     /// How one wall or liquid surface is painted (`D_DrawSurfaces`' turbulent
@@ -2083,40 +2116,34 @@ impl EdgeState {
             }
         }
     }
+}
 
-    /// `D_DrawSurfaces` and `D_DrawZSpans` for the rows of `band`: each
-    /// surface's spans in those rows, painted as [`EdgeState::build`] decided,
-    /// and their `1/z`. Returns the pixels drawn (the background's not
-    /// counted).
-    pub(super) fn draw_band(&self, band: &mut Band, frame: &Frame, world: &WorldDraw) -> u64 {
-        let (w, h) = (self.w, self.h);
-        let rows = band.rows();
+impl WorldDraw<'_> {
+    /// `D_DrawSurfaces` and `D_DrawZSpans` for the rows of `band`: the spans
+    /// of those rows, each painted as [`EdgeState::build`] decided for its
+    /// surface, and their `1/z`. Returns the pixels drawn (the background's
+    /// not counted).
+    pub(super) fn draw_band(&self, band: &mut Band, frame: &Frame) -> u64 {
+        let w = self.w as i32;
         let scene = frame.scene;
-        let (palette, colormap, persp) = (scene.palette, scene.colormap, world.persp);
+        let (palette, colormap, persp) = (scene.palette, scene.colormap, self.persp);
         let mut drawn = 0u64;
-        for (si, draw) in world.surfs.iter().enumerate() {
-            let Some(SurfDraw { paint, zi: [ziorigin, zistepu, zistepv] }) = draw else { continue };
-            let izistep = c_ftoi((zistepu * 32768.0 * 65536.0) as f64);
-            // A surface's spans run bottom to top (each new one is pushed on
-            // its list): skip those below the band, stop above it.
-            let mut p = self.surfs[si].spans;
-            while let Some(sp) = self.spans.get(p as usize) {
-                p = sp.pnext;
-                // clamp to the row (id's stepping keeps it there)
-                let v = sp.v.clamp(0, h as i32 - 1) as usize;
-                if v >= rows.end {
+        for v in band.rows() {
+            let (Some(&first), Some(&end)) = (self.rows.get(v), self.rows.get(v + 1)) else { break };
+            for sp in self.spans.get(first as usize..end as usize).unwrap_or(&[]) {
+                let Some(Some(SurfDraw { paint, zi: [ziorigin, zistepu, zistepv], izistep, background })) =
+                    self.surfs.get(sp.surf as usize)
+                else {
                     continue;
-                }
-                if v < rows.start {
-                    break;
-                }
-                let u = sp.u.clamp(0, w as i32) as usize;
-                let n = ((sp.u + sp.count).clamp(0, w as i32) as usize).saturating_sub(u);
+                };
+                // clamp to the row (id's stepping keeps it there)
+                let u = sp.u.clamp(0, w) as usize;
+                let n = ((sp.u + sp.count).clamp(0, w) as usize).saturating_sub(u);
                 let Some((row, zrow)) = band.span(u, v, n).filter(|_| n > 0) else { continue };
                 match paint {
                     Paint::Fill(c) => row.fill(*c),
                     Paint::Sky(mt) => {
-                        draw_sky_span(row, u as i32, v as i32, n as i32, &mt.pixels, mt.width as usize, &world.sky);
+                        draw_sky_span(row, u as i32, v as i32, n as i32, &mt.pixels, mt.width as usize, &self.sky);
                     }
                     Paint::Turb { grads, mt } => {
                         let (tw, th) = (mt.width as usize, mt.height as usize);
@@ -2133,7 +2160,7 @@ impl EdgeState {
                         span_tex(row, &span_at(grads, u, v), grads, std::slice::from_ref(colour), 1, 1, palette, *shade, Some(lightmap), colormap);
                     }
                 }
-                if self.surfs[si].flags & SURF_DRAWBACKGROUND == 0 {
+                if !background {
                     drawn += n as u64;
                 }
                 // D_DrawZSpans
@@ -2141,7 +2168,7 @@ impl EdgeState {
                 let mut izi = c_ftoi(zi * 32768.0 * 65536.0);
                 for z in zrow {
                     *z = (izi >> 16) as i16;
-                    izi = izi.wrapping_add(izistep);
+                    izi = izi.wrapping_add(*izistep);
                 }
             }
         }
@@ -2171,17 +2198,26 @@ enum Paint<'a> {
     Flat { grads: PolyGrads, colour: u8, shade: f32, lightmap: LightMap<'a> },
 }
 
-/// One surface ready for the bands: its paint and its `1/z` plane
-/// (`d_ziorigin`, `d_zistepu`, `d_zistepv`).
+/// One surface ready for the bands: its paint, its `1/z` plane
+/// (`d_ziorigin`, `d_zistepu`, `d_zistepv`) with `D_DrawZSpans`' step along
+/// a row, and whether it is the background.
 struct SurfDraw<'a> {
     paint: Paint<'a>,
     zi: [f32; 3],
+    izistep: i32,
+    background: bool,
 }
 
-/// The world's surfaces as the bands draw them ([`EdgeState::build`]):
-/// indexed like the edge state's surfaces, `None` for one without a span.
+/// The world as the bands draw it ([`EdgeState::build`]), the frame's own:
+/// the scan's spans row after row, and the surfaces they name (indexed like
+/// the edge state's, `None` for one without a span).
 pub(super) struct WorldDraw<'a> {
     surfs: Vec<Option<SurfDraw<'a>>>,
+    spans: Vec<ESpan>,
+    /// The index in `spans` of each row's first span, and their count last.
+    rows: Vec<u32>,
+    /// The view's width.
+    w: usize,
     sky: SkyView,
     persp: super::raster::PerspSpan,
 }

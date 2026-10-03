@@ -1215,11 +1215,11 @@ impl Renderer {
             self.prof.add(|s| s.entity_setup_ns += ns);
         }
         let t = self.prof.now();
-        let (edge, prof, workers) = (&self.edge, &self.prof, self.workers);
+        let (prof, workers) = (&self.prof, self.workers);
         let whole = band::Band::placed(w, rows, stride, x0, &mut self.zbuf[..pixels]);
         let bands = workers.run(whole, h, || prof.for_band(), |band, prof| {
             let tw = prof.now();
-            let drawn = edge.draw_band(band, &frame, &world);
+            let drawn = world.draw_band(band, &frame);
             if let Some(tw) = tw {
                 let ns = tw.elapsed().as_nanos() as u64;
                 prof.add(|s| {
@@ -1234,6 +1234,7 @@ impl Renderer {
         for b in &bands {
             self.prof.absorb(b);
         }
+        self.edge.recycle(world);
         if let Some(t) = t {
             let ns = t.elapsed().as_nanos() as u64;
             self.prof.add(|s| {
