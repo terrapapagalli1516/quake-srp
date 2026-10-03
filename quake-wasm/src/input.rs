@@ -427,12 +427,14 @@ pub(crate) struct MouseCount {
     pub(crate) turned: f64,
 }
 
-/// [`MouseCount`] and the host frames run (`host_framecount`), as the
-/// `mouse_count` call's text: `records counts turned frames`.
+/// [`MouseCount`], the host frames run (`host_framecount`) and the game's
+/// clock (`host_time`: the frames' `host_frametime`s summed), as the
+/// `mouse_count` call's text: `records counts turned frames host_time`.
 pub(crate) fn mouse_count() -> String {
     APP.with(|c| {
-        let (m, frames) = c.borrow().as_ref().map_or((MouseCount::default(), 0), |a| (a.mouse, a.host_framecount));
-        format!("{} {} {} {frames}", m.records, m.counts, m.turned)
+        let (m, frames, time) =
+            c.borrow().as_ref().map_or((MouseCount::default(), 0, 0.0), |a| (a.mouse, a.host_framecount, a.clock));
+        format!("{} {} {} {frames} {time}", m.records, m.counts, m.turned)
     })
 }
 

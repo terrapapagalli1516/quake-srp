@@ -565,7 +565,14 @@ mod tests {
     /// (`v_angle`: the camera turns by it, the listener faces it). A last
     /// host frame, past the 72 fps gate, draws the last records. Returns
     /// the drawn yaws, the boot frame's first.
-    fn drawn_yaws(profile: &str, hz: u32, mut records: impl FnMut(u32) -> Vec<f32>) -> Vec<f64> {
+    fn drawn_yaws(profile: &str, hz: u32, records: impl FnMut(u32) -> Vec<f32>) -> Vec<f64> {
+        drawn_yaws_clocked(profile, hz, 1.0, records)
+    }
+
+    /// [`drawn_yaws`] with the refreshes' clock off by `clock`: each tick
+    /// says `clock / hz` seconds passed (a clock running at half or twice
+    /// the real rate, as a wrong system clock would give the page).
+    fn drawn_yaws_clocked(profile: &str, hz: u32, clock: f64, mut records: impl FnMut(u32) -> Vec<f32>) -> Vec<f64> {
         APP.with(|c| *c.borrow_mut() = None);
         let mut input = Vec::new();
         input.extend(encode::call(1, &format!("exec profile {profile}; r_threads 1")));
@@ -576,7 +583,7 @@ mod tests {
             for dx in records(i) {
                 input.extend(encode::mouse(dx, 0.0));
             }
-            let dt = if i == 0 || i > hz { 0.1 } else { 1.0 / f64::from(hz) };
+            let dt = if i == 0 || i > hz { 0.1 } else { clock / f64::from(hz) };
             input.extend(encode::tick(1 + i, dt));
             input.extend(encode::call(5 + i, "player_field v_angle_y"));
         }
@@ -673,6 +680,33 @@ mod tests {
         }
     }
 
+    /// The frame clock is not in the turn: the same 1000 records (of 0.3
+    /// counts, and of 2) from a 1000 Hz mouse turn the view 48° (320°)
+    /// with the refreshes at 60, 240, 480 and 1000 Hz, and with each tick's
+    /// time reported at half and at twice the real one, in both profiles.
+    /// `IN_MouseMove` has no time in it (`viewangles[YAW] -= m_yaw *
+    /// mouse_x`, a record at a time); the clock decides only which frame
+    /// draws a record, and how many frames there are (at half the clock,
+    /// 1000 Hz ticks of 0.5 ms are under `host_filter_time_display`'s 1 ms,
+    /// and Classic's 60 Hz ones under its 72 fps gate: a frame every other
+    /// tick).
+    #[test]
+    fn the_turn_does_not_depend_on_the_frame_clock() {
+        for (counts, want) in [(0.3, 48.0), (2.0, 320.0)] {
+            for profile in ["2026", "classic"] {
+                for hz in [60, 240, 480, 1000] {
+                    for clock in [0.5, 1.0, 2.0] {
+                        let t: f64 = turns(&drawn_yaws_clocked(profile, hz, clock, mouse_1000hz(hz, counts, false))).iter().sum();
+                        assert!(
+                            (t + want).abs() < yaw_rounding(1000),
+                            "{profile} at {hz} Hz, the clock at {clock}x: 1000 events of {counts} counts turned {t}°, not {want}° right"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     /// What the drawn frame shows of a steady mouse: at 480 Hz in the 2026
     /// profile, one count (then two) before every refresh turns every
     /// drawn frame by exactly 0.16° (0.32°): the camera's yaw is the
@@ -723,7 +757,8 @@ mod tests {
 
     /// The `mouse_count` call the page's `?mousecheck` reads: every `Mouse`
     /// record, the counts the game took (`|dx|`), the turn they gave the
-    /// view (`|°|`, 0.16° a count), and the host frames run.
+    /// view (`|°|`, 0.16° a count), the host frames run and the game's
+    /// clock (`host_time`).
     #[test]
     fn mouse_count_says_what_the_mouse_did() {
         let mut input = Vec::new();
@@ -737,9 +772,9 @@ mod tests {
         let reply = recs.iter().rfind(|r| r.kind == Record::REPLY).expect("the count");
         let text = String::from_utf8_lossy(&reply.payload[12..]).into_owned();
         let v: Vec<f64> = text.split(' ').map(|s| s.parse().expect("numbers")).collect();
-        let [records, counts, turned, frames] = v[..] else { panic!("{text}") };
+        let [records, counts, turned, frames, time] = v[..] else { panic!("{text}") };
         assert_eq!((records, counts, frames), (2.0, 3.0, 1.0), "{text}");
-        assert!((turned - 0.48).abs() < 1e-5, "{text}");
+        assert!((turned - 0.48).abs() < 1e-5 && (time - 0.1).abs() < 1e-6, "{text}");
     }
 
     #[test]
