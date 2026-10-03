@@ -460,6 +460,25 @@ the way a position glide does. A `Frame::Group` pose (a torch's flicker, a
 flame) never blends — it is not a motion between two named poses — and
 neither does the view weapon across a model change (a weapon switch).
 
+A firing model's frames are not one motion either. QuakeC raises
+`EF_MUZZLEFLASH` for the frame a weapon discharges, and the fire frames carry
+the flare as geometry: `v_nail.mdl` alternates barrels, each pose with its
+own flare, so a blend slid the flare from one to the other and half-recoiled
+both; the shotguns' and a grunt's flare is full in the first fire pose, so a
+blend from the pose before grew it over a tenth of a second (it reached full
+size when the next pose began to take it away again, a 0.1 s late pulse
+instead of a flash). FitzQuake and QuakeSpasm have the rule the port left
+out: an entity with the flash this frame draws its pose as it is
+(`LERP_RESETANIM`, r_alias.c:430) and its next pose change snaps too
+(`LERP_RESETANIM2`, :439: "no lerping for two frames"), the player's flash
+being the view weapon's (`cl.viewent`, cl_main.c:531). The 2026 port does the
+same, in the live walk and in demo playback (`FrameLerps::muzzle_flash`);
+nothing else changes — a monster's walk, the axe's swing and the recoil
+frames after the flash blend as before. Not measured, and not worth it: a
+flash is a set insert and a snap, which draws one pose instead of two. What
+the rule costs a model that flashes without a flare of its own is two snapped
+changes (the ogre's grenade toss), as in QuakeSpasm.
+
 Stepping is unchanged: `quaketool framerate --check` passes with the extra
 on or off, because nothing about *when* a frame changes moves — only how it
 is drawn between the changes.

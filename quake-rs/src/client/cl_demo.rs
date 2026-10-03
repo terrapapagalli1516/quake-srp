@@ -18,6 +18,7 @@ use crate::cd_audio::CdCall;
 use crate::pak::Pak;
 use crate::particles::{ParticleSystem, TrailHead, TrailStep};
 use crate::render::{self, Camera, ModelInstance, Viewmodel};
+use crate::server::EF_MUZZLEFLASH;
 use crate::tent::BeamModel;
 use crate::wad::Qpic;
 
@@ -641,6 +642,11 @@ fn render_demo_frame(
             // 0`) never gets a new frame, so nothing to blend.
             let blend = if smooth_frames && e.num >= 0 {
                 let is_group = mdl.frame_is_group(e.frame);
+                // CL_RelinkEntities: the recorded effects byte, which holds
+                // for every frame drawn from the message that carried it.
+                if e.effects & EF_MUZZLEFLASH != 0 {
+                    d.frame_lerps.muzzle_flash(e.num);
+                }
                 d.frame_lerps.blend(e.num, e.modelindex, frame, is_group, e.origin, d.time)
             } else {
                 None
@@ -693,11 +699,6 @@ fn render_demo_frame(
                 models_before: owned.len(),
             });
         }
-    }
-    if smooth_frames {
-        d.frame_lerps.end_frame();
-    } else {
-        d.frame_lerps.clear();
     }
     // CL_UpdateTEnts: expand the recorded lightning beams into bolt-model
     // pieces, exactly like the live walk. The bolt models resolve through the
@@ -882,6 +883,10 @@ fn render_demo_frame(
                 let blend = if smooth_frames {
                     let model_id = client.weapon_model.max(0) as usize;
                     let is_group = mdl.frame_is_group(client.weaponframe);
+                    // The recorded player's flash is the gun's (`f.view_effects`).
+                    if f.view_effects & EF_MUZZLEFLASH != 0 {
+                        d.frame_lerps.muzzle_flash(lerpmodels::VIEWMODEL);
+                    }
                     d.frame_lerps.blend(lerpmodels::VIEWMODEL, model_id, weapon_frame, is_group, cam.pos, d.time)
                 } else {
                     None
@@ -897,6 +902,13 @@ fn render_demo_frame(
             _ => None,
         }
     };
+    // Every blend this frame draws has been asked for, the entities' and the
+    // view weapon's: forget the rest (and any flash nothing drew).
+    if smooth_frames {
+        d.frame_lerps.end_frame();
+    } else {
+        d.frame_lerps.clear();
+    }
     // SCR_CalcRefdef: the same viewsize framing as live play (the C's demo IS
     // the client rendering a recorded stream).
     lap(Phase::Sim);
@@ -1362,6 +1374,79 @@ mod tests {
         }
         let first = xs.iter().position(|&x| x > 0.0).expect("it moves");
         assert!(xs[first..].windows(2).all(|w| w[1] > w[0]), "forward every frame: {xs:?}");
+    }
+
+    /// A model with no poses at all: `r_lerpmodels` keys on the model index
+    /// and the frame number, and the frame-blend probes below never look
+    /// inside.
+    fn poseless_model() -> Mdl {
+        use crate::mdl::MdlHeader;
+        let header = MdlHeader {
+            ident: 0,
+            version: 6,
+            scale: [1.0; 3],
+            scale_origin: [0.0; 3],
+            boundingradius: 0.0,
+            eyeposition: [0.0; 3],
+            numskins: 0,
+            skinwidth: 0,
+            skinheight: 0,
+            numverts: 0,
+            numtris: 0,
+            numframes: 0,
+            synctype: 0,
+            flags: 0,
+            size: 0.0,
+        };
+        Mdl { header, skins: Vec::new(), stverts: Vec::new(), triangles: Vec::new(), frames: Vec::new() }
+    }
+
+    /// What the blend of `key` (entity number, or the view weapon's) is
+    /// right now, asked after the frame is drawn: the same call the draw
+    /// made, so it changes nothing. `Some` while blending.
+    fn blending(d: &mut DemoPlay, key: i32, frame: usize) -> bool {
+        d.frame_lerps.blend(key, 1, frame, false, [0.0; 3], d.time).is_some()
+    }
+
+    /// Playback of a recorded flash: the monster's attack frame (message 1)
+    /// and the recorded player's gun (`view_effects`) snap, and so does the
+    /// pose change after; the one after that blends. The flash is the
+    /// message's, so every frame drawn from it snaps, as `CL_RelinkEntities`
+    /// re-raises it each frame while the entity's effects byte holds it.
+    #[test]
+    fn a_recorded_muzzle_flash_snaps_the_animation_for_two_changes() {
+        use crate::demo::DemoClientData;
+        // Message k: the monster (entity 5) at frame `k`, flashing in message 1 only; the gun
+        // at weapon frame `k`, flashing with it.
+        let msg = |k: i32| {
+            let flash = if k == 1 { EF_MUZZLEFLASH } else { 0 };
+            DemoFrame {
+                time: 1.0 + 0.1 * k as f32,
+                prev_time: 0.9 + 0.1 * k as f32,
+                entities: vec![EntSnapshot { frame: k, effects: flash, ..moved(5, 0.0, 0.0) }],
+                view_effects: flash,
+                client: DemoClientData { health: 100, weapon_model: 1, weaponframe: k, ..Default::default() },
+                ..Default::default()
+            }
+        };
+        let mut d = playback((0..5).map(msg).collect());
+        d.models = vec![None, Some(poseless_model())];
+        d.lerpmodels = LerpModels::Smooth;
+        // (message, monster blending, gun blending) as each frame leaves them.
+        let mut seen: Vec<(usize, bool, bool)> = Vec::new();
+        for _ in 0..40 {
+            if d.idx + 1 >= d.demo.frames.len() {
+                break; // the loop wrap: not under test
+            }
+            render::recycle_image(demo_frame(&mut d, 1.0 / 72.0, false, &VID).image);
+            let k = d.idx as usize;
+            seen.push((k, blending(&mut d, 5, k), blending(&mut d, lerpmodels::VIEWMODEL, k)));
+        }
+        let of = |k: usize| -> Vec<(bool, bool)> { seen.iter().filter(|s| s.0 == k).map(|s| (s.1, s.2)).collect() };
+        assert!(of(1).len() > 3 && of(2).len() > 3 && of(3).len() > 3, "frames drawn from messages 1..=3: {seen:?}");
+        assert!(of(1).iter().all(|&b| b == (false, false)), "the flash message snaps: {seen:?}");
+        assert!(of(2).iter().all(|&b| b == (false, false)), "the change after it snaps: {seen:?}");
+        assert_eq!(of(3).first(), Some(&(true, true)), "the third blends, both: {seen:?}");
     }
 
     #[test]
