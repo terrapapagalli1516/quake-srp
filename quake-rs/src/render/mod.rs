@@ -1190,12 +1190,7 @@ impl Renderer {
         let torches = if video.torches.is_off() {
             None
         } else {
-            // HOTFIX: in the page the set is built on the calling thread. Its
-            // build on the host's thread workers trapped in `calloc` about one
-            // run in four (`verify_content.py`, the registered maps; a thread
-            // of `TorchSet::build`), cause not yet known. Natively it stays
-            // on the renderer's threads.
-            let threads = if cfg!(target_family = "wasm") { 1 } else { self.workers.threads() };
+            let threads = self.workers.threads();
             let set = self.torches.get_or_insert_with(|| torch::TorchSet::build(scene.world, threads));
             set.animate(scene.time, video.lightstyles, video.torches);
             Some(&*set)
