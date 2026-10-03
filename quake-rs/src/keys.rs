@@ -259,6 +259,21 @@ pub const BIND_PAUSE: usize = 30;
 /// menu.
 pub const BIND_TOGGLECONSOLE: usize = 31;
 
+/// The 2026 wheel's notch down (`W_CycleWeaponReverse`, the previous
+/// weapon): [`Bindings::with_wheel`].
+const WHEEL_DOWN_LINE: &str = "impulse 12";
+
+/// What the mouse wheel's two keys are bound to ([`Bindings::wheel`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Wheel {
+    /// 2026's weapon cycle: up `impulse 10`, down `impulse 12`.
+    Cycle,
+    /// Neither key bound, as `default.cfg` leaves them.
+    Unbound,
+    /// Anything else: the player bound one or both by hand.
+    Custom,
+}
+
 /// A key's binding: `keybindings[key]`, a command line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Binding {
@@ -446,8 +461,22 @@ impl Bindings {
     /// "previous weapon" row to rebind).
     pub fn with_wheel(mut self) -> Bindings {
         self.bind(K_MWHEELUP, BIND_CHANGEWEAPON);
-        self.set(K_MWHEELDOWN, Binding::parse("impulse 12"));
+        self.set(K_MWHEELDOWN, Binding::parse(WHEEL_DOWN_LINE));
         self
+    }
+
+    /// What the wheel's two keys do now: 2026's weapon cycle (exactly
+    /// [`Bindings::with_wheel`]'s pair), nothing (`default.cfg`, or
+    /// [`Bindings::without_wheel`]), or whatever else the player bound them
+    /// to by hand — the settings page's "Wheel weapons" row reads it.
+    pub fn wheel(&self) -> Wheel {
+        let up = self.command(K_MWHEELUP);
+        let down = self.get(K_MWHEELDOWN).map(Binding::text);
+        match (up, down) {
+            (Some(BIND_CHANGEWEAPON), Some(WHEEL_DOWN_LINE)) => Wheel::Cycle,
+            _ if self.get(K_MWHEELUP).is_none() && self.get(K_MWHEELDOWN).is_none() => Wheel::Unbound,
+            _ => Wheel::Custom,
+        }
     }
 
     /// The wheel unbound, as `default.cfg` leaves it — over whatever these
@@ -644,9 +673,20 @@ mod tests {
         let wheel = id.clone().with_wheel();
         assert_eq!(wheel.command(K_MWHEELUP), Some(BIND_CHANGEWEAPON), "notch up: next weapon");
         assert_eq!(wheel.get(K_MWHEELDOWN).map(Binding::text), Some("impulse 12"), "notch down: previous weapon");
-        let back = wheel.without_wheel();
+        assert_eq!((id.wheel(), wheel.wheel()), (Wheel::Unbound, Wheel::Cycle));
+        let back = wheel.clone().without_wheel();
         assert_eq!((back.get(K_MWHEELUP), back.get(K_MWHEELDOWN)), (None, None), "a switch to Classic turns it off again");
         assert_eq!(back, id, "and nothing else changed");
+
+        // Bound by hand, either key or both: neither the cycle nor unbound.
+        let mut one = id.clone();
+        one.bind(K_MWHEELUP, BIND_CHANGEWEAPON);
+        let mut swapped = id.clone();
+        swapped.set(K_MWHEELUP, Binding::parse("impulse 12"));
+        swapped.bind(K_MWHEELDOWN, BIND_CHANGEWEAPON);
+        let mut jump = wheel;
+        jump.bind(K_MWHEELDOWN, BIND_JUMP);
+        assert_eq!([one, swapped, jump].map(|b| b.wheel()), [Wheel::Custom; 3]);
     }
 
     /// AUDIT.md's "Missing `default.cfg` binds: F1-F4, F6, F9, F10, F12":

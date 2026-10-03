@@ -11,7 +11,7 @@ use crate::draw::{
 };
 use crate::cvar::{self, PIXEL_SIZE_MAX};
 use crate::keys::{
-    keynum_to_string, K_BACKSPACE, K_DEL, K_DOWNARROW, K_ENTER, K_ESCAPE, K_LEFTARROW,
+    keynum_to_string, Wheel, K_BACKSPACE, K_DEL, K_DOWNARROW, K_ENTER, K_ESCAPE, K_LEFTARROW,
     K_RIGHTARROW, K_UPARROW,
 };
 use crate::render::Image;
@@ -79,16 +79,63 @@ const ROW_LOOKSTRAFE: usize = 11;
 const ROW_VIDEO: usize = 12;
 /// PORT ROW (not in id's Quake): "Classic / 2026", the one switch between
 /// the profiles ([`crate::settings::Profile`]). Left and right flip it, as a
-/// checkbox; Enter opens [`MenuScreen::Extras`], the page of every setting
-/// the profiles switch.
+/// checkbox; Enter opens [`MenuScreen::Extras`], the hub of the settings
+/// pages: every setting the profiles switch, and the controls.
 const ROW_PROFILE: usize = 13;
 
 // ---------------------------------------------------------------------------
-// The 2026 settings page: every departure from id's Quake, one row each
+// The 2026 settings: a hub and three pages, every departure from id's Quake
+// a row
 // ---------------------------------------------------------------------------
+//
+// id's own idiom for more settings than a screen holds is a sub-page of
+// Options: Video Options (`M_Menu_Video_f`, back with Escape to Options on
+// its row). The port's settings are the same: Options > "Classic / 2026",
+// Enter, opens a hub ([`MenuScreen::Extras`]) — the profile, and a row for
+// each page ([`ExtrasPage`]) — and Enter on a page's row opens the page
+// ([`MenuScreen::ExtrasPage`]); Escape goes back a screen each time, onto
+// the row it came from (every screen's cursor is kept, like id's statics).
 
-/// What a row of the settings page shows and how left and right change it.
+/// The settings pages, the departures by kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExtrasPage {
+    /// How the game reaches the screen and the speakers: the frame's rate,
+    /// size and pixels, the 2-D layer, the perspective, the crosshair and
+    /// the readout — and the mixer's rate, the sound's counterpart of the
+    /// native resolution ([`PICTURE_ROWS`]).
+    Picture,
+    /// What moves between id's tenths of a second: the monsters, their
+    /// poses, the clouds, the flickering lights and the torches
+    /// ([`MOTION_ROWS`]).
+    Motion,
+    /// The controls ([`CONTROLS_ROWS`]): the player's, so a profile switch
+    /// keeps them — except the wheel's weapon cycle and the touch controls,
+    /// which are departures and go with the profile.
+    Controls,
+}
+
+impl ExtrasPage {
+    /// The pages, in the hub's order.
+    pub const ALL: [ExtrasPage; 3] = [ExtrasPage::Picture, ExtrasPage::Motion, ExtrasPage::Controls];
+
+    /// Its rows, top to bottom.
+    pub fn rows(self) -> &'static [SettingRow] {
+        match self {
+            ExtrasPage::Picture => &PICTURE_ROWS,
+            ExtrasPage::Motion => &MOTION_ROWS,
+            ExtrasPage::Controls => &CONTROLS_ROWS,
+        }
+    }
+
+    /// Its place in [`ExtrasPage::ALL`] (and its cursor's in [`Cursors`]).
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
+/// What a row of the settings hub or a page shows and how left and right
+/// change it.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum RowKind {
     /// The profile: `classic` / `2026`; any key flips it.
     Profile,
@@ -99,36 +146,69 @@ pub enum RowKind {
     /// `crosshair`: `off`, `cross` (the 2026 one), `id's +`; left and right
     /// step it.
     Crosshair,
+    /// A strength drawn as `M_DrawSlider` draws id's: left and right step
+    /// the cvar by `step` within `min..=max`, as `M_AdjustSliders` steps
+    /// Sound Volume.
+    Slider { min: f32, max: f32, step: f32 },
+    /// The mouse wheel's weapon cycle, 2026's binding
+    /// ([`crate::keys::Bindings::with_wheel`]): `on`, `off`, or `custom`
+    /// when the player has bound the wheel by hand ([`crate::keys::Wheel`]).
+    /// Any key turns the cycle on, over a hand-made binding too, and off
+    /// again when it is on.
+    Wheel,
+    /// A hub row that opens a page: Enter opens it; left and right change
+    /// nothing, as on id's Video Options row.
+    Page(ExtrasPage),
 }
 
-/// One row of the settings page (Options > Classic / 2026, Enter).
+/// One row of the settings hub or a page.
 #[derive(Debug, Clone, Copy)]
 pub struct SettingRow {
-    /// The console variable it shows ([`crate::cvar::CVARS`]); `profile`
-    /// for the profile row, which is a command.
+    /// The console word that sets it: its console variable
+    /// ([`crate::cvar::CVARS`]), or for a row that is none, the command —
+    /// `profile`, and `bind` for the wheel's two bindings; empty for a
+    /// hub's page row.
     pub cvar: &'static str,
-    /// Its label, right-justified to the Options label column like id's.
+    /// Its label, right-justified to the Options label column like id's,
+    /// at most 18 characters so it clears the plaque.
     pub label: &'static str,
     /// The two bronze help lines shown under the list while it is
-    /// highlighted (a third names the console variable), at most
-    /// `EXTRAS_NOTE_COLS` characters so they clear the plaque.
+    /// highlighted (a third names its console command: [`SettingRow::console_hint`]),
+    /// centred, at most [`EXTRAS_NOTE_COLS`] characters.
     pub help: [&'static str; 2],
     pub kind: RowKind,
 }
 
-/// The settings page's rows, in order: the profile, then each departure the
-/// profiles switch ([`crate::cvar::Cvars::modern`] says which are on in
-/// 2026) — plus five rows (Mouse look, Space swims up, the Fullscreen key,
-/// the Gamepad and Rumble) that are shared controls, on in both profiles by
-/// default and not reset by a profile switch (`quake_rs::settings`'s
-/// module docs say why); still toggled here like any other row.
-pub const SETTING_ROWS: [SettingRow; 19] = [
+/// The hub's rows: the profile, then a row for each page.
+pub const EXTRAS_HUB_ROWS: [SettingRow; 4] = [
     SettingRow {
         cvar: "profile",
         label: "               Profile",
         help: ["Classic: id's WinQuake engine,", "2026: the port's. Controls: both"],
         kind: RowKind::Profile,
     },
+    SettingRow {
+        cvar: "",
+        label: "     Picture and sound",
+        help: ["Frame rate, resolution, 2-D layer,", "crosshair, and the sound's rate"],
+        kind: RowKind::Page(ExtrasPage::Picture),
+    },
+    SettingRow {
+        cvar: "",
+        label: "      Motion and light",
+        help: ["Monsters, poses and clouds glide;", "lights glide and torches flicker"],
+        kind: RowKind::Page(ExtrasPage::Motion),
+    },
+    SettingRow {
+        cvar: "",
+        label: "              Controls",
+        help: ["Mouse look, the wheel, swimming,", "fullscreen, gamepad and touch"],
+        kind: RowKind::Page(ExtrasPage::Controls),
+    },
+];
+
+/// [`ExtrasPage::Picture`]'s rows: the frame, then the sound.
+pub const PICTURE_ROWS: [SettingRow; 10] = [
     SettingRow {
         cvar: "wasm_uncapped",
         label: "    Uncapped framerate",
@@ -166,6 +246,39 @@ pub const SETTING_ROWS: [SettingRow; 19] = [
         kind: RowKind::Toggle,
     },
     SettingRow {
+        cvar: "wasm_exactpersp",
+        label: "     Exact perspective",
+        help: ["Exact at every pixel; id's spans", "wobble on walls at 1080p and up"],
+        kind: RowKind::Toggle,
+    },
+    SettingRow {
+        cvar: "crosshair",
+        label: "             Crosshair",
+        help: ["A thin cross on your aim, or", "id's own + at the menus' scale"],
+        kind: RowKind::Crosshair,
+    },
+    SettingRow {
+        cvar: "wasm_showfps",
+        label: "              Show FPS",
+        help: ["Frames per second, top left, as", "QuakeWorld's show_fps counts"],
+        kind: RowKind::Toggle,
+    },
+    SettingRow {
+        cvar: "snd_modern",
+        label: "       Full-rate sound",
+        help: ["id's mixer at your device's rate", "and its bugs fixed (id: 11 kHz)"],
+        kind: RowKind::Toggle,
+    },
+];
+
+/// `r_torchflicker`'s slider: 0 (id's steady torches) to
+/// [`crate::render::TorchFlicker::MAX`], a tenth of the range a step as id's
+/// volume sliders step theirs, so 2026's 1 sits in the middle.
+const TORCH_SLIDER: RowKind = RowKind::Slider { min: 0.0, max: crate::render::TorchFlicker::MAX, step: 0.2 };
+
+/// [`ExtrasPage::Motion`]'s rows: the models, then the sky and the light.
+pub const MOTION_ROWS: [SettingRow; 5] = [
+    SettingRow {
         cvar: "r_lerpmove",
         label: "       Smooth monsters",
         help: ["Monsters glide between their", "steps, not 10 jumps a second"],
@@ -178,16 +291,42 @@ pub const SETTING_ROWS: [SettingRow; 19] = [
         kind: RowKind::Toggle,
     },
     SettingRow {
-        cvar: "crosshair",
-        label: "             Crosshair",
-        help: ["A thin cross on your aim, or", "id's own + at the menus' scale"],
-        kind: RowKind::Crosshair,
+        cvar: "r_fluidsky",
+        label: "             Fluid sky",
+        help: ["The clouds glide across the sky,", "not 8 one-texel jumps a second"],
+        kind: RowKind::Toggle,
     },
+    SettingRow {
+        cvar: "r_lerplightstyles",
+        label: "        Gliding lights",
+        help: ["Flickering lights fade between", "levels, not 10 snaps a second"],
+        kind: RowKind::Toggle,
+    },
+    SettingRow {
+        cvar: "r_torchflicker",
+        label: "         Torch flicker",
+        help: ["The torches id's maps keep steady", "flicker: none at 0, wild at 2"],
+        kind: TORCH_SLIDER,
+    },
+];
+
+/// [`ExtrasPage::Controls`]'s rows: the mouse and keys, the pad, the touch
+/// screen. Every one but the wheel and the touch controls is a shared
+/// control, on in both profiles by default and kept by a profile switch
+/// (`quake_rs::settings`' module docs say why); still switched here like
+/// any other row.
+pub const CONTROLS_ROWS: [SettingRow; 7] = [
     SettingRow {
         cvar: "freelook",
         label: "            Mouse look",
         help: ["The mouse looks around without", "holding +mlook (\\ or MOUSE3)"],
         kind: RowKind::Toggle,
+    },
+    SettingRow {
+        cvar: "bind",
+        label: "         Wheel weapons",
+        help: ["The mouse wheel changes weapon:", "a notch up next, down previous"],
+        kind: RowKind::Wheel,
     },
     SettingRow {
         cvar: "cl_jumpswim",
@@ -202,30 +341,6 @@ pub const SETTING_ROWS: [SettingRow; 19] = [
         kind: RowKind::Toggle,
     },
     SettingRow {
-        cvar: "snd_modern",
-        label: "       Full-rate sound",
-        help: ["id's mixer at your device's rate", "and its bugs fixed (id: 11 kHz)"],
-        kind: RowKind::Toggle,
-    },
-    SettingRow {
-        cvar: "wasm_showfps",
-        label: "              Show FPS",
-        help: ["Frames per second, top left, as", "QuakeWorld's show_fps counts"],
-        kind: RowKind::Toggle,
-    },
-    SettingRow {
-        cvar: "wasm_exactpersp",
-        label: "     Exact perspective",
-        help: ["Exact at every pixel; id's spans", "wobble on walls at 1080p and up"],
-        kind: RowKind::Toggle,
-    },
-    SettingRow {
-        cvar: "in_touch",
-        label: "        Touch controls",
-        help: ["On a touch screen: a stick, look", "by dragging, fire, jump, weapon"],
-        kind: RowKind::Toggle,
-    },
-    SettingRow {
         cvar: "joystick",
         label: "               Gamepad",
         help: ["Twin sticks: left moves, right", "looks; RT fires, Start = menu"],
@@ -237,10 +352,17 @@ pub const SETTING_ROWS: [SettingRow; 19] = [
         help: ["The pad, or a phone, shakes when", "you are hit or a big gun fires"],
         kind: RowKind::Toggle,
     },
+    SettingRow {
+        cvar: "in_touch",
+        label: "        Touch controls",
+        help: ["On a touch screen: a stick, look", "by dragging, fire, jump, weapon"],
+        kind: RowKind::Toggle,
+    },
 ];
 
 impl SettingRow {
-    /// The value it shows at x=220.
+    /// The value it shows at x=220 (empty for a slider, which draws its
+    /// knob there, and for a page row).
     pub fn value(&self, s: &Settings) -> String {
         match self.kind {
             RowKind::Profile => s.profile.name().to_string(),
@@ -258,13 +380,29 @@ impl SettingRow {
                 let on = cvar::find(self.cvar).is_some_and(|c| c.get(&s.cvars) != "0");
                 checkbox_text(on).to_string()
             }
+            RowKind::Wheel => match s.binds.wheel() {
+                Wheel::Cycle => checkbox_text(true),
+                Wheel::Unbound => checkbox_text(false),
+                Wheel::Custom => "custom",
+            }
+            .to_string(),
+            RowKind::Slider { .. } | RowKind::Page(_) => String::new(),
         }
     }
 
+    /// A slider's knob, as `M_DrawSlider`'s `range`: the cvar's place in
+    /// `min..=max` (0 to 1). None for any other row.
+    pub fn slider(&self, s: &Settings) -> Option<f32> {
+        let RowKind::Slider { min, max, .. } = self.kind else { return None };
+        let v = cvar::find(self.cvar).map_or(min, |c| cvar::atof(&c.get(&s.cvars)));
+        Some((v - min) / (max - min))
+    }
+
     /// Left (`step` -1) or right (+1) on it, as `M_AdjustSliders` does a
-    /// checkbox: a profile or a toggle flips whatever the direction, the pixel
-    /// size steps (auto, 1, 2, 3, 4, wrapping), and so does the crosshair
-    /// (off, cross, id's +).
+    /// checkbox or a slider: a profile, a toggle or the wheel flips whatever
+    /// the direction, the pixel size steps (auto, 1, 2, 3, 4, wrapping), and
+    /// so does the crosshair (off, cross, id's +); a slider steps, clamped
+    /// at its ends as id's are; a page row changes nothing.
     pub fn adjust(&self, s: &mut Settings, step: i32) {
         match self.kind {
             RowKind::Profile => s.set_profile(s.profile.toggled()),
@@ -282,16 +420,32 @@ impl SettingRow {
                     c.set(&mut s.cvars, if on { "0" } else { "1" });
                 }
             }
+            RowKind::Slider { min, max, step: by } => {
+                if let Some(c) = cvar::find(self.cvar) {
+                    let v = cvar::atof(&c.get(&s.cvars)) + step as f32 * by;
+                    c.set(&mut s.cvars, &cvar::number_string(v.clamp(min, max)));
+                }
+            }
+            RowKind::Wheel => {
+                let binds = std::mem::take(&mut s.binds);
+                s.binds = if binds.wheel() == Wheel::Cycle { binds.without_wheel() } else { binds.with_wheel() };
+            }
+            RowKind::Page(_) => {}
         }
     }
 
-    /// Its console line, the third help line.
+    /// Its console line, the third help line (none for a page row).
     pub fn console_hint(&self) -> String {
         match self.kind {
             RowKind::Profile => "console: profile classic|2026".to_string(),
             RowKind::PixelSize => format!("console: {} 0-{PIXEL_SIZE_MAX}", self.cvar),
             RowKind::Crosshair => format!("console: {} 0/1/2", self.cvar),
             RowKind::Toggle => format!("console: {} 0/1", self.cvar),
+            RowKind::Slider { min, max, .. } => {
+                format!("console: {} {}-{}", self.cvar, cvar::number_string(min), cvar::number_string(max))
+            }
+            RowKind::Wheel => "console: bind MWHEELUP/MWHEELDOWN".to_string(),
+            RowKind::Page(_) => String::new(),
         }
     }
 }
@@ -520,14 +674,29 @@ pub enum MenuScreen {
     /// The Quit confirmation prompt (`m_quit`): "Are you sure you want to quit?".
     Quit,
     /// PORT SCREEN (not in id's Quake): Options > Classic / 2026, Enter: the
-    /// profile and every departure the profiles switch ([`SETTING_ROWS`]),
-    /// as rows drawn in `M_Options_Draw`'s idiom. Left/right/Enter change a
-    /// row (`M_AdjustSliders`' checkbox rows); Escape returns to Options on
-    /// its row.
+    /// settings hub ([`EXTRAS_HUB_ROWS`]) — the profile, and a row for each
+    /// [`ExtrasPage`] — drawn in `M_Options_Draw`'s idiom. Left/right/Enter
+    /// flip the profile; Enter on a page's row opens it, as Options' Video
+    /// Options row opens its screen; Escape returns to Options on its row.
     Extras,
+    /// PORT SCREEN: a settings page, opened from the hub: its rows
+    /// ([`ExtrasPage::rows`]) in the hub's idiom. Left/right/Enter change a
+    /// row (`M_AdjustSliders`' checkbox and slider rows); Escape returns to
+    /// the hub on the page's row.
+    ExtrasPage(ExtrasPage),
 }
 
 impl MenuScreen {
+    /// The settings rows this screen lists: the hub's, or a page's. None for
+    /// every screen of id's.
+    pub fn setting_rows(self) -> Option<&'static [SettingRow]> {
+        match self {
+            MenuScreen::Extras => Some(&EXTRAS_HUB_ROWS),
+            MenuScreen::ExtrasPage(p) => Some(p.rows()),
+            _ => None,
+        }
+    }
+
     /// The number of selectable items on this screen (the cursor wraps within it).
     /// Help/Quit have no cursor list (1 item — the screen itself) so up/down are
     /// inert there; Help pages with left/right, Quit answers Y/N.
@@ -541,7 +710,8 @@ impl MenuScreen {
             MenuScreen::Options => OPTIONS_ITEMS,
             MenuScreen::Keys => NUM_BINDNAMES,
             MenuScreen::Video => RESOLUTION_PRESETS.len(),
-            MenuScreen::Extras => SETTING_ROWS.len(),
+            MenuScreen::Extras => EXTRAS_HUB_ROWS.len(),
+            MenuScreen::ExtrasPage(p) => p.rows().len(),
             MenuScreen::Help | MenuScreen::Quit => 1,
         }
     }
@@ -662,8 +832,10 @@ struct Cursors {
     /// on the live mode ([`Menu::res_preset`]) and later ones where the player
     /// left it. None until that first visit.
     video: Option<usize>,
-    /// PORT SCREEN: the settings page's, kept like `options_cursor`.
+    /// PORT SCREENS: the settings hub's, and each page's (by
+    /// [`ExtrasPage::index`]), kept like `options_cursor`.
     extras: usize,
+    extras_pages: [usize; ExtrasPage::ALL.len()],
     /// `setup_cursor`, which starts on Accept Changes (`int setup_cursor =
     /// 4;`).
     setup: usize,
@@ -680,6 +852,7 @@ impl Default for Cursors {
             keys: 0,
             video: None,
             extras: 0,
+            extras_pages: [0; ExtrasPage::ALL.len()],
             setup: 4,
         }
     }
@@ -904,6 +1077,7 @@ impl Menu {
             // switching screens); this fallback is defensive only.
             MenuScreen::Video => c.video.unwrap_or(self.res_preset),
             MenuScreen::Extras => c.extras,
+            MenuScreen::ExtrasPage(p) => c.extras_pages[p.index()],
             MenuScreen::Help | MenuScreen::Quit => 0,
         }
     }
@@ -921,6 +1095,7 @@ impl Menu {
             MenuScreen::Keys => c.keys = i,
             MenuScreen::Video => c.video = Some(i),
             MenuScreen::Extras => c.extras = i,
+            MenuScreen::ExtrasPage(p) => c.extras_pages[p.index()] = i,
             MenuScreen::Help | MenuScreen::Quit => {}
         }
     }
@@ -1116,8 +1291,10 @@ impl Menu {
     /// * Video > row: apply the highlighted preset, or (2026 only) turn
     ///   native resolution back on at the highlighted pixel size
     ///   ([`MenuAction::ResolutionChanged`]).
-    /// * Options > Classic / 2026 (port row): the settings page; a row there:
-    ///   change it (menu2 + menu3, like an Options checkbox).
+    /// * Options > Classic / 2026 (port row): the settings hub; there, a
+    ///   page's row opens the page (menu2, as Video Options opens), and the
+    ///   profile row or a page's row changes it (menu2 + menu3, like an
+    ///   Options checkbox).
     /// * Help and the Quit prompt: Enter is inert ([`MenuAction::None`]; only
     ///   y/Y answers the prompt, [`Menu::keydown`]).
     pub fn select(&mut self, s: &mut Settings) -> MenuAction {
@@ -1256,7 +1433,7 @@ impl Menu {
                     MenuAction::None
                 }
                 ROW_PROFILE => {
-                    // PORT ROW: open the settings page, entered like
+                    // PORT ROW: open the settings hub, entered like
                     // M_Menu_Video_f (m_entersound), on its own kept cursor.
                     self.snd(MenuSound::Menu2);
                     self.screen = MenuScreen::Extras;
@@ -1320,11 +1497,20 @@ impl Menu {
                 }
                 MenuAction::ResolutionChanged
             }
-            MenuScreen::Extras => {
-                // As an Options checkbox row: Enter latches m_entersound and
-                // falls through to the toggle (its own menu3).
+            MenuScreen::Extras | MenuScreen::ExtrasPage(_) => {
+                // Enter latches m_entersound (menu2) on every row, as
+                // M_Options_Key's does. A page's row opens it, as Options'
+                // Video Options row opens its screen (on the page's own kept
+                // cursor); any other row is an Options checkbox or slider
+                // row, which falls through to M_AdjustSliders (1), its own
+                // menu3.
                 self.snd(MenuSound::Menu2);
-                self.adjust(1, s);
+                let row = self.screen.setting_rows().and_then(|rows| rows.get(self.cursor()));
+                if let Some(&SettingRow { kind: RowKind::Page(p), .. }) = row {
+                    self.screen = MenuScreen::ExtrasPage(p);
+                } else {
+                    self.adjust(1, s);
+                }
                 MenuAction::None
             }
             // M_Help_Key ignores Enter; so does M_Quit_Key, where only y/Y
@@ -1499,7 +1685,8 @@ impl Menu {
     ///   branch's `K_ESCAPE`) — the screen stays;
     /// * SinglePlayer/Multiplayer/Options/Help return to Main; Load/Save return
     ///   to SinglePlayer; Keys/Video return to Options (each `M_Menu_*_f` plays
-    ///   `m_entersound`), Extras to Options on its own row — all
+    ///   `m_entersound`), the settings hub (Extras) to Options on its own
+    ///   row, a settings page to the hub on the page's row — all
     ///   [`MenuAction::Back`];
     /// * the Quit prompt answers "No" → restores the previous screen
     ///   ([`MenuAction::Back`]);
@@ -1559,6 +1746,14 @@ impl Menu {
                 // M_Menu_Options_f (menu2), back on the row that opened it —
                 // the C's options_cursor is a static that keeps its place.
                 self.screen = MenuScreen::Options;
+                self.snd(MenuSound::Menu2);
+                MenuAction::Back
+            }
+            MenuScreen::ExtrasPage(_) => {
+                // The hub again (m_entersound), on the page's row: its
+                // cursor kept, as options_cursor is when Video Options
+                // returns to Options.
+                self.screen = MenuScreen::Extras;
                 self.snd(MenuSound::Menu2);
                 MenuAction::Back
             }
@@ -1688,11 +1883,12 @@ impl Menu {
             let _ = self.setup_key(if step < 0 { K_LEFTARROW } else { K_RIGHTARROW }, None, s);
             return;
         }
-        // The settings page's rows: menu3, then each row's own change (a
-        // checkbox flips regardless of the direction, like M_AdjustSliders').
-        if self.screen == MenuScreen::Extras {
+        // The settings hub's and pages' rows: menu3 (M_AdjustSliders plays
+        // it on every row, a page's row too), then each row's own change (a
+        // checkbox flips regardless of the direction, a slider steps).
+        if let Some(rows) = self.screen.setting_rows() {
             self.snd(MenuSound::Menu3);
-            if let Some(row) = SETTING_ROWS.get(self.cursor()) {
+            if let Some(row) = rows.get(self.cursor()) {
                 row.adjust(s, step);
             }
             return;
@@ -1895,7 +2091,9 @@ impl MenuScreen {
             MenuScreen::Main | MenuScreen::SinglePlayer | MenuScreen::Multiplayer => {
                 even(PIC_ROW_Y0, PIC_ROW_STEP)
             }
-            MenuScreen::Options | MenuScreen::Extras => even(OPTIONS_ROW_Y0, OPTIONS_ROW_STEP),
+            MenuScreen::Options | MenuScreen::Extras | MenuScreen::ExtrasPage(_) => {
+                even(OPTIONS_ROW_Y0, OPTIONS_ROW_STEP)
+            }
             MenuScreen::Load | MenuScreen::Save => even(SLOT_ROW_Y0, TEXT_ROW_STEP),
             MenuScreen::Keys => even(KEYS_ROW_Y0, TEXT_ROW_STEP),
             MenuScreen::Video => even(VIDEO_ROW_Y0, TEXT_ROW_STEP),
@@ -1951,7 +2149,8 @@ impl Menu {
     /// - A text list's 8-line rows are smaller than a fingertip on a phone,
     ///   so it takes two: the first tap moves the cursor ([`Menu::point`]),
     ///   and a tap on the highlighted row acts on it — Enter, or on an
-    ///   Options slider left or right of its knob (on the label, nothing).
+    ///   Options slider (or a settings page's) left or right of its knob (on
+    ///   the label, nothing).
     /// - Help: the left half pages back, the right half on.
     /// - Nothing while the menu wants y or n (the Quit prompt, New Game's
     ///   question: the page offers them as buttons) or a key to bind.
@@ -1972,7 +2171,10 @@ impl Menu {
             self.point(x, y);
             return None;
         }
-        let slider = options_slider(row, &s.cvars).filter(|_| self.screen == MenuScreen::Options);
+        let slider = match self.screen.setting_rows() {
+            Some(rows) => rows.get(row).and_then(|r| r.slider(s)),
+            None => options_slider(row, &s.cvars).filter(|_| self.screen == MenuScreen::Options),
+        };
         match slider {
             // M_DrawSlider's left cap is one character left of the trough.
             Some(_) if x < OPTIONS_WIDGET_X - 8.0 => None,
@@ -2300,7 +2502,7 @@ fn draw_menu_inner(
     }
 
     // The plaque is shared by the Main / SinglePlayer / Multiplayer / Options
-    // screens (M_DrawTransPic (16,4)), and the port's settings page of Options.
+    // screens (M_DrawTransPic (16,4)), and the port's settings hub and pages.
     if let Some(p) = &pics.qplaque {
         blit_qpic_at(image, p, 16.0, 4.0, scale, ox, oy);
     }
@@ -2312,9 +2514,10 @@ fn draw_menu_inner(
         draw_options_screen(image, menu, settings, pics, conchars, scale, ox, oy, cursor);
         return;
     }
-    // The port's settings page: a page of Options (same plaque + title).
-    if menu.screen == MenuScreen::Extras {
-        draw_extras_screen(image, menu, settings, pics, conchars, scale, ox, oy, cursor);
+    // The port's settings hub and pages: pages of Options (same plaque +
+    // title).
+    if let Some(rows) = menu.screen.setting_rows() {
+        draw_extras_screen(image, menu, rows, settings, pics, conchars, scale, ox, oy, cursor);
         return;
     }
 
@@ -2471,68 +2674,66 @@ fn draw_options_screen(
     }
 }
 
-/// The settings page's layout is `M_Options_Draw`'s: the rows from y=32, 8
-/// px apart, the labels at x=16, the values at x=220, the cursor at x=200.
-/// Under them the notes, from x=[`EXTRAS_NOTE_X`] (right of the plaque,
-/// `qplaque` being 32 wide at x=16): the white [`EXTRAS_HEADER`] a row below
-/// the list — right under it once the rows leave no room for the gap in the
-/// 200-line screen (17 rows do not), and gone once they leave room for no
-/// more than the help's own two lines (19 do not: [`EXTRAS_HEADER_SHOWN`]) —
-/// and the highlighted row's help lines right under the header, at most
-/// [`EXTRAS_NOTE_COLS`] columns and [`EXTRAS_HELP_LINES`] of them.
+/// The settings hub's and pages' layout is `M_Options_Draw`'s: the rows
+/// from y=32, 8 px apart, the labels at x=16, the values (or a slider) at
+/// x=220, the cursor at x=200. The notes go under the plaque, not beside
+/// it: `qplaque` ends at y=[`PLAQUE_FOOT_Y`], where id's
+/// `M_MultiPlayer_Draw` prints its one line under it, and every list ends
+/// a line above that ([`EXTRAS_ROWS_MAX`]). There the white
+/// [`EXTRAS_HEADER`], a blank line, and the highlighted row's three bronze
+/// help lines ([`extras_help_lines`]), each centred on the menu's axis as id
+/// centres its titles and that line ([`centred_x`]). Under the plaque a
+/// centred line never meets it, however wide (up to [`EXTRAS_NOTE_COLS`]);
+/// and the notes sit in one place on every page, however long its list.
 const EXTRAS_ROW_Y0: f32 = OPTIONS_ROW_Y0;
-const EXTRAS_NOTE_X: f32 = 64.0;
-const EXTRAS_NOTE_COLS: usize = (MENU_VIRT_W as usize - EXTRAS_NOTE_X as usize) / 8;
-const EXTRAS_LIST_END: f32 = EXTRAS_ROW_Y0 + SETTING_ROWS.len() as f32 * OPTIONS_ROW_STEP;
-/// The header and the three help lines, when they fit (see
-/// [`EXTRAS_HELP_LINES`]): the budget this reserves no longer always holds
-/// once the list itself is long enough, so the header's own position
-/// ([`EXTRAS_HEADER_Y`]) does not wait on it.
-const EXTRAS_NOTES_H: f32 = 4.0 * OPTIONS_ROW_STEP;
-const EXTRAS_HEADER_Y: f32 = if EXTRAS_LIST_END + OPTIONS_ROW_STEP + EXTRAS_NOTES_H <= 200.0 {
-    EXTRAS_LIST_END + OPTIONS_ROW_STEP
-} else {
-    EXTRAS_LIST_END
-};
-/// Whether the page draws [`EXTRAS_HEADER`]: the last of the notes to go as
-/// the list grows, after the gap and the console line ([`EXTRAS_HELP_LINES`]),
-/// once the header and a row's two help lines no longer fit under the list.
-/// What it says the page says anyway: it opens from Options' "Classic / 2026"
-/// row, and its own first row's help is "Classic: id's WinQuake engine,
-/// 2026: the port's. Controls: both". (This round's `scr_sbaroverlay` makes 19 rows, and drops it.)
-const EXTRAS_HEADER_SHOWN: bool = EXTRAS_LIST_END + 3.0 * OPTIONS_ROW_STEP <= 200.0;
-const EXTRAS_HELP_Y: f32 = if EXTRAS_HEADER_SHOWN { EXTRAS_HEADER_Y + OPTIONS_ROW_STEP } else { EXTRAS_LIST_END };
-/// How many of a row's three help lines ([`extras_help_lines`]: its own
-/// two, then its console line) actually fit between [`EXTRAS_HELP_Y`] and
-/// the 200-line screen's bottom. Up to 17 rows in [`SETTING_ROWS`] all
-/// three do (so every row keeps showing its console command); past that —
-/// this round's `r_lerpmodels` makes 18 — the list alone has used the
-/// budget the gap and the notes shared, and the third line (the console
-/// command, the one a player can still find by opening the console and
-/// typing the cvar's name) goes first so the two that explain the setting
-/// in plain words still show.
-const EXTRAS_HELP_LINES: usize = {
-    let fit = ((200.0 - EXTRAS_HELP_Y) / OPTIONS_ROW_STEP) as usize;
-    if fit < 3 {
-        fit
-    } else {
-        3
-    }
-};
-/// The page's header (`M_PrintWhite`): what these rows are.
+/// `qplaque`'s foot: `M_DrawTransPic (16, 4, qplaque)`, 144 lines tall. id
+/// prints "No Communications Available" here (`M_MultiPlayer_Draw`, y=148).
+const PLAQUE_FOOT_Y: f32 = 148.0;
+const EXTRAS_HEADER_Y: f32 = PLAQUE_FOOT_Y;
+const EXTRAS_HELP_Y: f32 = EXTRAS_HEADER_Y + 2.0 * OPTIONS_ROW_STEP;
+/// A row's help lines: its two, then its console line.
+const EXTRAS_HELP_LINES: usize = 3;
+/// The widest note: the menu's 320 columns less the label column's margin
+/// (x=16) on either side, 36 characters.
+const EXTRAS_NOTE_COLS: usize = (MENU_VIRT_W as usize - 2 * OPTIONS_LABEL_X as usize) / 8;
+/// The most rows a hub or page lists and still ends a blank line above the
+/// header: 13.
+const EXTRAS_ROWS_MAX: usize = ((EXTRAS_HEADER_Y - OPTIONS_ROW_STEP - EXTRAS_ROW_Y0) / OPTIONS_ROW_STEP) as usize;
+/// The header (`M_PrintWhite`): what these rows are.
 const EXTRAS_HEADER: &str = "Not in id's Quake";
+// Every list ends a blank line above the notes, and the notes end on id's
+// 200-line screen.
+const _: () = assert!(
+    EXTRAS_HUB_ROWS.len() <= EXTRAS_ROWS_MAX
+        && PICTURE_ROWS.len() <= EXTRAS_ROWS_MAX
+        && MOTION_ROWS.len() <= EXTRAS_ROWS_MAX
+        && CONTROLS_ROWS.len() <= EXTRAS_ROWS_MAX,
+    "a settings list reaches the notes under the plaque"
+);
+const _: () = assert!(
+    EXTRAS_HELP_Y + EXTRAS_HELP_LINES as f32 * OPTIONS_ROW_STEP <= 200.0,
+    "the help fits the 200-line menu screen"
+);
 
-/// Draw the settings page as `M_Options_Draw` draws Options: qplaque (drawn
-/// by the caller) and the `p_option` title (it is a page of Options), each
-/// [`SETTING_ROWS`] row an Options row — the right-justified `M_Print` label
-/// at x=16, its value at x=220 (`M_DrawCheckbox`'s "on" / "off" for a
-/// toggle), the 4 Hz flashing cursor at x=200 — and under the rows the
-/// [`EXTRAS_HEADER`] in white (when it fits, [`EXTRAS_HEADER_SHOWN`]) and up
-/// to [`EXTRAS_HELP_LINES`] of the highlighted row's bronze help lines.
+/// The x that centres `text` (8 columns a character) on the menu's 320
+/// columns: `(320 - width)/2`, as `M_DrawPic` centres the titles and
+/// `M_MultiPlayer_Draw` its line.
+fn centred_x(text: &str) -> f32 {
+    (MENU_VIRT_W - 8.0 * text.len() as f32) * 0.5
+}
+
+/// Draw the settings hub or a page (`rows`) as `M_Options_Draw` draws
+/// Options: qplaque (drawn by the caller) and the `p_option` title (they are
+/// pages of Options), each row an Options row — the right-justified
+/// `M_Print` label at x=16, its value at x=220 (`M_DrawCheckbox`'s "on" /
+/// "off" for a toggle, `M_DrawSlider` for a slider), the 4 Hz flashing
+/// cursor at x=200 — and under the plaque the [`EXTRAS_HEADER`] in white and
+/// the highlighted row's bronze help lines, centred.
 #[allow(clippy::too_many_arguments)]
 fn draw_extras_screen(
     image: &mut Image,
     menu: &Menu,
+    rows: &[SettingRow],
     settings: &Settings,
     pics: &MenuPics,
     conchars: Option<&crate::wad::Qpic>,
@@ -2546,28 +2747,29 @@ fn draw_extras_screen(
         blit_qpic_at(image, t, tx, 4.0, scale, ox, oy);
     }
     let Some(cc) = conchars else { return };
-    for (i, row) in SETTING_ROWS.iter().enumerate() {
+    for (i, row) in rows.iter().enumerate() {
         let y = EXTRAS_ROW_Y0 + i as f32 * OPTIONS_ROW_STEP;
         m_print(image, cc, OPTIONS_LABEL_X, y, row.label, scale, ox, oy);
-        m_print(image, cc, OPTIONS_WIDGET_X, y, &row.value(settings), scale, ox, oy);
+        match row.slider(settings) {
+            Some(frac) => draw_slider(image, cc, OPTIONS_WIDGET_X, y, frac, scale, ox, oy),
+            None => m_print(image, cc, OPTIONS_WIDGET_X, y, &row.value(settings), scale, ox, oy),
+        }
     }
     let cy = EXTRAS_ROW_Y0 + menu.cursor() as f32 * OPTIONS_ROW_STEP;
     draw_char_scaled(image, cc, OPTIONS_CURSOR_X, cy, cursor_glyph, scale, ox, oy);
-    if EXTRAS_HEADER_SHOWN {
-        draw_string_scaled(image, cc, EXTRAS_NOTE_X, EXTRAS_HEADER_Y, EXTRAS_HEADER, scale, ox, oy);
-    }
-    if let Some(row) = SETTING_ROWS.get(menu.cursor()) {
-        for (i, line) in extras_help_lines(row).iter().take(EXTRAS_HELP_LINES).enumerate() {
-            let y = EXTRAS_HELP_Y + i as f32 * 8.0;
+    draw_string_scaled(image, cc, centred_x(EXTRAS_HEADER), EXTRAS_HEADER_Y, EXTRAS_HEADER, scale, ox, oy);
+    if let Some(row) = rows.get(menu.cursor()) {
+        for (i, line) in extras_help_lines(row).iter().enumerate() {
+            let y = EXTRAS_HELP_Y + i as f32 * OPTIONS_ROW_STEP;
             let line = &line[..line.len().min(EXTRAS_NOTE_COLS)];
-            m_print(image, cc, EXTRAS_NOTE_X, y, line, scale, ox, oy);
+            m_print(image, cc, centred_x(line), y, line, scale, ox, oy);
         }
     }
 }
 
-/// The three help lines under the settings page's list for `row`: its two,
-/// then its console line.
-fn extras_help_lines(row: &SettingRow) -> [String; 3] {
+/// The help lines under the settings list for `row`: its two, then its
+/// console line (empty on a hub's page row, which has none).
+fn extras_help_lines(row: &SettingRow) -> [String; EXTRAS_HELP_LINES] {
     [row.help[0].to_string(), row.help[1].to_string(), row.console_hint()]
 }
 
