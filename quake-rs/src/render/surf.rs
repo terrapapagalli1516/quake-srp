@@ -403,14 +403,22 @@ impl BakeJob<'_> {
     }
 }
 
-/// The texels of baking below which a frame's bakes stay on the calling
-/// thread, and the texels each further thread must have to be woken: a
-/// thread's start costs about 10 µs natively (a wake-up of a pooled worker
-/// in the page), and a texel about 0.7 ns, so a thread pays for itself from
-/// some 15,000 texels of work; twice that, so a few small bakes (a
-/// frame's usual: a dynamic light's few blocks, a light style's step)
-/// never wake one.
+/// The texels of baking each thread of a frame's bakes must have: a texel
+/// costs about 0.7 ns, and a round of threads (spawn, run, join) 30–80 µs
+/// natively when threads ran a moment before — the bands' round, right
+/// after, is then the warm one — and 150–400 µs after an idle gap (the
+/// page's pooled workers: 10–40 µs warm, 160–265 cold; the bakes' review),
+/// so a few small bakes (a frame's usual: a dynamic light's few blocks, a
+/// light style's step) never start one.
 const BAKE_TEXELS_PER_THREAD: usize = 32 * 1024;
+
+/// The fewest threads worth starting for the bakes: with the display's
+/// real time between frames (`framerate --bake --paced`), two threads won
+/// nothing on any view measured and lost up to 0.2 ms (e1m3's flames at 72
+/// Hz: 5.81 ms baking on one, 6.02 on two), where four and eight won up to
+/// 0.7 and 1.3 ms; a larger per-thread share (64K, 128K texels) changed
+/// nothing beyond the noise (PERF_PLAN.md §13).
+const BAKE_MIN_THREADS: usize = 3;
 
 /// Bake `jobs` ([`BakeJob::bake`]) on up to `threads` threads — one per
 /// [`BAKE_TEXELS_PER_THREAD`] of their texels — the largest first so the
@@ -432,9 +440,11 @@ pub(super) fn bake_all(jobs: &[BakeJob], threads: usize) -> Vec<Arc<Vec<u8>>> {
 }
 
 /// The threads to bake `texels` of blocks on, of the renderer's `threads`:
-/// one per [`BAKE_TEXELS_PER_THREAD`], at least one.
+/// one per [`BAKE_TEXELS_PER_THREAD`], and none but the calling thread
+/// unless that makes [`BAKE_MIN_THREADS`].
 fn bake_threads(texels: usize, threads: usize) -> usize {
-    threads.min(texels / BAKE_TEXELS_PER_THREAD).max(1)
+    let n = threads.min(texels / BAKE_TEXELS_PER_THREAD);
+    if n >= BAKE_MIN_THREADS { n } else { 1 }
 }
 
 /// What [`SurfaceCaches::surface`] found for a face.
@@ -546,7 +556,9 @@ impl SurfaceCaches {
         let texmins_i = [lm.texmins[0] as i32, lm.texmins[1] as i32];
         let texmins = [(texmins_i[0] >> mip) as f32, (texmins_i[1] >> mip) as f32];
         let made = |block| SurfBlock { block, bw, bh, texmins, mip };
-        let unbaked = self.unbaked.clone();
+        // What a block to be baked reads as until then (cloned only on the
+        // paths that bake or share a bake: a hit takes the cache's block).
+        let unbaked = &self.unbaked;
         let bake = |prof: &mut Profiler| -> usize {
             prof.add(|s| s.surf_texels_baked += total as u64);
             jobs.push(BakeJob { lightmap: lm, tex, smax, tmax, texmins: texmins_i, mip, bw, bh, colormap: req.colormap });
@@ -559,7 +571,7 @@ impl SurfaceCaches {
         let Some(slot) = req.slot else {
             prof.add(|s| s.surf_bypass_baked += 1);
             let job = bake(prof);
-            return Surface::Block(made(unbaked), Some(job));
+            return Surface::Block(made(unbaked.clone()), Some(job));
         };
         let spot = self.blocks.get_mut(slot).map(|spots| &mut spots[mip as usize]);
         if let Some(Some(e)) = spot.as_deref() {
@@ -572,7 +584,7 @@ impl SurfaceCaches {
             // This frame's own ask for the same block: share its bake.
             if let (true, Some(job)) = (same && e.dlight == req.dlit, e.pending) {
                 prof.add(|s| s.surf_cache_hits += 1);
-                return Surface::Block(made(unbaked), Some(job));
+                return Surface::Block(made(unbaked.clone()), Some(job));
             }
             // HIT (`D_CacheSurface`): no dynamic light now or in the bake,
             // same texture, same resolved style scales.
@@ -599,7 +611,7 @@ impl SurfaceCaches {
             });
             self.pending.push((slot, mip as usize));
         }
-        Surface::Block(made(unbaked), Some(job))
+        Surface::Block(made(unbaked.clone()), Some(job))
     }
 
     /// The frame's bakes are done: `blocks[job]` is job `job`'s block. Every
@@ -1339,8 +1351,9 @@ mod tests {
     #[test]
     fn small_bakes_stay_on_the_calling_thread() {
         assert_eq!(bake_threads(0, 16), 1);
-        assert_eq!(bake_threads(BAKE_TEXELS_PER_THREAD * 2 - 1, 16), 1);
+        assert_eq!(bake_threads(BAKE_TEXELS_PER_THREAD * 3 - 1, 16), 1);
         assert_eq!(bake_threads(BAKE_TEXELS_PER_THREAD * 3, 16), 3);
+        assert_eq!(bake_threads(BAKE_TEXELS_PER_THREAD * 100, 2), 1, "two threads: the calling one");
         assert_eq!(bake_threads(BAKE_TEXELS_PER_THREAD * 100, 8), 8);
         assert_eq!(bake_threads(BAKE_TEXELS_PER_THREAD * 100, 1), 1);
         let me = std::thread::current().id();

@@ -1411,11 +1411,22 @@ dynamic light every block it touches. At 1080p on 8 threads the torch-lit views 
   a face, would save the second round of thread starts but needs a lock or a once-cell
   per block in the span setup and bakes a face shared by two bands on whichever comes
   first; not built.
-- **When it pays.** A thread's start costs about 10 µs natively and a texel of baking
-  about 0.7 ns, so a thread pays for itself from about 15,000 texels. `bake_all` starts
-  one thread per 32K texels of the frame's bakes (`BAKE_TEXELS_PER_THREAD`): under 64K
-  texels — a frame's usual: a muzzle flash's few blocks, a light style's step — and with
-  one thread, the bakes stay on the calling thread with no thread started.
+- **When it pays.** A texel of baking costs about 0.7 ns, and a round of threads
+  (spawn, run, join) about 32, 61 and 77 µs natively for 1, 3 and 7 helpers when
+  threads ran a moment before, 145–415 µs after an idle gap (14 ms: a 72 Hz
+  frame's first round); in the page 10–40 µs warm and 160–265 cold (the bakes'
+  review, 2026-10-03). `bake_all` starts one thread per 32K texels of the frame's
+  bakes (`BAKE_TEXELS_PER_THREAD`), and none unless that makes three
+  (`BAKE_MIN_THREADS`): with the display's real time between frames
+  (`framerate --bake --paced`, 1080p, 72 and 480 Hz, the four views below, two
+  sittings), two threads won nothing on any view and lost up to 0.2 ms (e1m3's
+  flames at 72 Hz: 5.81 ms with the bakes on one thread, 6.02 on two), four and
+  eight won up to 0.7 and 1.3 ms (e1m3's flames at 8 threads 4.62 → 3.34 at 72
+  Hz, 2.36 → 1.75 at 480), and a share of 64K or 128K texels a thread instead of
+  32K changed nothing beyond the noise. Under three threads' worth of texels —
+  a frame's usual: a muzzle flash's few blocks, a light style's step — and with
+  one or two threads, the bakes stay on the calling thread, with no thread
+  started.
 
 **Identity.** The three goldens, `classic_check` (9 checks), and the `play` hashes of
 demo1–3, `walk_e1m1`, `fire_e1m2` and `walk_e1m3` at 640×400, Classic and `--video
