@@ -1,11 +1,11 @@
-# quake-rust
+# quake-srp
 
-id Software's *Quake* (1996), ported to Rust from the WinQuake C source. It uses only the
-standard library and has no `unsafe` code. It plays in a browser; natively, `quaketool`
-runs the same engine without a window.
+*srp: slop rust port* — a dare: read the [Proof](#proof).
 
-It can be id's game, checked against id's own code, or that same software renderer given a
-2026 machine.
+**Play it:** `DEMO-URL` (id's shareware episode, in the browser)
+
+**Browsers:** tested in Chromium and Firefox (headless and headed) and on an Android phone;
+not yet in Safari.
 
 | Classic | 2026 (the default) |
 |:---:|:---:|
@@ -13,6 +13,22 @@ It can be id's game, checked against id's own code, or that same software render
 | 320x200 in a 4:3 frame, id's status bar, id's 72 fps cap | the window's shape and size in whole pixels (here 960x540 shown at 2x), no frame-rate cap |
 
 Both are stills from `quaketool shot`, so the 2026 crosshair isn't drawn.
+
+id Software's *Quake* (1996), ported to Rust from the WinQuake C source, with only the
+standard library and no `unsafe` code. With every extra switched off it is id's game,
+checked against id's own C: 100.00% of the pixels in id's standard 3-D views, the sound
+mixer sample for sample, and demo playback frame for frame over 17,500 frames. Every check
+is one command. By default it is the same software renderer given a 2026 machine. It plays
+in a browser; natively, `quaketool` runs the same engine without a window.
+
+**How it was built.** Claude, Anthropic's model, wrote the code and the docs in Claude
+Code; the user set the rules, played it and reported what was wrong. Most of the work ran
+as fleets of agents, each on its own git branch with a written brief, and a chair agent
+that merged a branch only after the full check passed. The reference is id's own C,
+compiled headless from the WinQuake source (the "oracle"), so a claim that the port
+matches id is a comparison that anyone can re-run. The user's rules, in order: zero
+dependencies, no `unsafe`, and Classic is id's game, proven for anything touched.
+[STATUS.md](STATUS.md) keeps the history, round by round.
 
 ## What it is
 
@@ -23,10 +39,7 @@ Both are stills from `quaketool shot`, so the 2026 crosshair isn't drawn.
   - the status bar, the menus and the console;
   - the sound mixer.
 
-  It plays the shareware episode, the registered game with your own `pak1.pak`, and the
-  mission packs — Scourge of Armagon and Dissolution of Eternity — with your own
-  `hipnotic`/`rogue` game directory alongside `id1`'s, natively (`-hipnotic`/`-rogue`;
-  `AUDIT.md`, "The mission packs' own file layout and progs"). There is no multiplayer.
+  There is no multiplayer.
 - **Checked against id's code.** id's C, built headless (the "oracle", in `oracle/`), is the
   reference. With every extra switched off, the port and id's C agree on:
   - 100.00% of pixels in the standard 3-D views (two pixels differ on one map);
@@ -46,7 +59,7 @@ Both are stills from `quaketool shot`, so the 2026 crosshair isn't drawn.
   browser build: an ordinary `fn main()` program (WASI) in a Web Worker, with no exports of
   its own, no bindings and no JavaScript toolchain.
 
-## Play it
+## Build and run it
 
 The commands are for a POSIX shell (`sh`, `bash`, `zsh`), run from the repository's root.
 You need:
@@ -129,14 +142,9 @@ console (`profile classic`). The choice is saved in `config.cfg`, in the browser
 and that file keeps only what you changed. [AUDIT.md](AUDIT.md) ("The profiles and the
 departures") lists every setting and why it exists.
 
-Two extras sit outside the profiles:
-- drop your own `pak1.pak` onto the page to play episodes 2–4, and your CD tracks to hear
-  them as the CD played them — the mission packs the same way, each its own
-  `hipnotic`/`rogue` folder with its own `pak0.pak` and music, picked with `?game=hipnotic`/
-  `?game=rogue` or the start screen's own links — or, running your own server, put them
-  beside its `index.html` and it offers them itself, for every player on it
-  ([PLATFORM.md](web/PLATFORM.md), "A server's own files"; no game data is in this repo);
-- the page can be installed as an app, and it works offline.
+In either profile the page can be installed as an app, and it works offline. It also
+plays the registered game and the mission packs from your own copies
+([PLATFORM.md](web/PLATFORM.md), "Your files").
 
 ## How it works
 
@@ -255,5 +263,13 @@ Further reading:
 
 ## License
 
-Derived from id Software's GPLv2 Quake source (© 1996–1997 id Software), so
-GPL-2.0-or-later. No game data is included.
+GPL-2.0-or-later; the text is in [LICENSE](LICENSE). The port is derived from the Quake
+source that id Software released under the GPL (© 1996–1997 id Software, Inc.); the port's
+own code is © 2026 its authors, under the same licence.
+
+No game data is in this repository. The shareware data that a demo serves (`id1/pak0.pak`)
+is id's, unmodified, under id's own terms: the shareware licence (`SLICNSE.TXT` in
+`quake106.zip`), whose section 6, "Permitted Distribution", grants "the limited right to
+distribute, free of charge only, the Software as a whole". The registered game and the
+mission packs are not redistributable; the port plays them only from a player's own
+copies.
