@@ -739,7 +739,7 @@ mod tests {
         // The recorded style table reaches the renderer's scale law: style 0
         // is the steady 'm' world (264/256, what the seeded default used to
         // hardcode) and the flicker styles are present.
-        let scales = quake_rs::server::lightstyle_scales_at(&f0.lightstyles, f0.time);
+        let scales = quake_rs::server::lightstyle_scales_at(&f0.lightstyles, f0.time, quake_rs::server::LerpLightStyles::Classic);
         assert!((scales[0] - 264.0 / 256.0).abs() < 1e-6, "style 0 'm'");
         assert!(d.gfx_wad.is_some(), "sbar pics available for the demo HUD");
 

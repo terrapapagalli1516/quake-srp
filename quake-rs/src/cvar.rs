@@ -29,6 +29,7 @@ use crate::client::lerpmove::LerpMove;
 use crate::render::{Crosshair, SkyScroll, Threads};
 use crate::snd::SoundMode;
 use crate::screen::{VIEWSIZE_DEFAULT, VIEWSIZE_MAX, VIEWSIZE_MIN, VIEWSIZE_STEP};
+use crate::server::LerpLightStyles;
 use crate::vm::{MAX_EDICTS, MAX_EDICTS_LIMIT};
 
 /// The port's pixel sizes for [`Cvars::pixel_size`]: 0 is Auto, 1..=4 a
@@ -168,6 +169,11 @@ pub struct Cvars {
     /// The joystick's: in_win.c's `joystick` and `joy*`, and the port's
     /// `joy_*` (2026's pad layout, stick shaping, menu keys, rumble).
     pub joy: JoyCvars,
+    /// `r_lerplightstyles` (DarkPlaces' name): an animated light's brightness
+    /// glides between its pattern's letters ([`LerpLightStyles::Smooth`],
+    /// `server::lightstyle_scales_at`) instead of snapping ten times a second,
+    /// as id's `R_AnimateLight` does.
+    pub lightstyles: LerpLightStyles,
 }
 
 impl Default for Cvars {
@@ -216,6 +222,7 @@ impl Cvars {
             touch: false,
             touch_accel: 0.0,
             joy: JoyCvars::classic(),
+            lightstyles: LerpLightStyles::Classic,
         }
     }
 
@@ -224,7 +231,8 @@ impl Cvars {
     /// resolution in whole chunky pixels with a Hor+ field of view, the 2-D
     /// layer at id's proportions, the crosshair, monsters that glide between
     /// their steps and whose animation blends between frames, clouds that
-    /// glide across the sky, Always Run, mouse look, Space to swim up,
+    /// glide across the sky, flickering lights that glide between their
+    /// brightnesses, Always Run, mouse look, Space to swim up,
     /// Alt+Enter for fullscreen and touch controls on a phone. Show FPS and
     /// exact perspective stay off: the readout is clutter, and id's 16-pixel
     /// spans are part of the look. A gamepad works as a modern twin-stick pad
@@ -250,6 +258,7 @@ impl Cvars {
             sound: SoundMode::Modern,
             max_edicts: 8192,
             touch: true,
+            lightstyles: LerpLightStyles::Smooth,
             ..Cvars::classic()
         }
     }
@@ -503,6 +512,9 @@ pub const CVARS: &[Cvar] = &[
         get: |c| flag(c.joy.menu_keys), set: |c, v| c.joy.menu_keys = on(v) },
     Cvar { name: "joy_rumble", archive: true, departure: true, help: "pad rumble strength, 0 off",
         get: |c| number_string(c.joy.rumble), set: |c, v| c.joy.rumble = atof(v) },
+    Cvar { name: "r_lerplightstyles", archive: true, departure: true, help: "flickering lights glide, not snap",
+        get: |c| flag(c.lightstyles == LerpLightStyles::Smooth),
+        set: |c, v| c.lightstyles = if on(v) { LerpLightStyles::Smooth } else { LerpLightStyles::Classic } },
 ];
 
 /// A renamed cvar's old name, and the name it has now. A `config.cfg` saved

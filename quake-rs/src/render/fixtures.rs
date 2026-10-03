@@ -178,7 +178,7 @@ pub(crate) fn render_once(scene: &Scene) -> Image {
 /// `[0, 1]`) pointing into a uniform lighting lump. Rendering this with a
 /// non-neutral style-1 scale forces the OWNED multi-style combine on every
 /// face -> exercises the lightmap surface cache end-to-end.
-pub(super) fn lightmapped_demo_room(block0: u8, block1: u8) -> Bsp {
+pub(crate) fn lightmapped_demo_room(block0: u8, block1: u8) -> Bsp {
     let mut bsp = demo_room();
     // Two concatenated blocks per face, uniform so any face's grid (whatever
     // its extents) reads well-defined bytes. Lump is large enough for the

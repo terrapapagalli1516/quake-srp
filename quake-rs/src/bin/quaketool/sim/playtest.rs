@@ -490,7 +490,7 @@ pub fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> CmdRes
         // near explosions / muzzle flashes (the end-of-combat pool is empty).
         // Pass the server clock so liquids warp and sky scrolls in the POV shot,
         // and the animated light-style scales so torches flicker and lights pulse.
-        let light_styles = server.lightstyle_scales(server.time());
+        let light_styles = server.lightstyle_scales(server.time(), quake_rs::server::LerpLightStyles::Classic);
         let colormap = read("gfx/colormap.lmp").ok();
         let scene = render::Scene {
             colormap: colormap.as_deref(),

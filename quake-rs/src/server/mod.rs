@@ -76,7 +76,7 @@ mod sv_phys;
 mod sv_user;
 mod sv_world;
 
-pub use lightstyle::{lightstyle_scales_at, MAX_LIGHTSTYLES};
+pub use lightstyle::{lightstyle_scales_at, LerpLightStyles, GLIDE_STEP, MAX_LIGHTSTYLES};
 pub use msg::{
     te_consts, wire_angle, wire_coord, GameMessage, Outbox, ParticleBurst, SoundEvent, StaticEntity,
     StaticSound, SvcEvent, TempEntityEvent,
