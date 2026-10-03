@@ -1,12 +1,13 @@
 //! The video options `shot`, `view`, `play` and `timedemo` share: the port's video
-//! cvars ([`VideoCvars`]: Hor+ and hires), the display the frame is
-//! shown on (which with the mode's size gives `vid.aspect`), and the scaled
+//! cvars ([`VideoCvars`]: Hor+, hires and the fluid sky), the display the frame
+//! is shown on (which with the mode's size gives `vid.aspect`), and the scaled
 //! 2-D layer.
 //!
 //! ```text
-//! --video classic|modern   both cvars at once: id's, or Hor+ and hires (default classic)
+//! --video classic|modern   every cvar at once: id's, or Hor+, hires and the fluid sky (default classic)
 //! --fov-mode classic|horplus  how `fov` meets the display's shape
 //! --hires 0|1              views past 1280x1024, particles and the warp at 320x200 proportions
+//! --sky classic|fluid      the clouds in id's whole-texel steps, or gliding (`r_fluidsky`)
 //! --display W:H|square     the display's width:height (square: the mode's own,
 //!                          square pixels); the default is the command's
 //! --scaled2d 0|1           the status bar, menus and console blown up from 320x200
@@ -14,7 +15,7 @@
 //!                          the pixels are the same for any N)
 //! ```
 
-use quake_rs::render::{FovMode, VideoCvars};
+use quake_rs::render::{FovMode, SkyScroll, VideoCvars};
 
 /// The parsed video options (see the module docs).
 #[derive(Clone, Copy, Debug, Default)]
@@ -51,6 +52,13 @@ impl VideoArgs {
                 }
             }
             "--hires" => self.cvars.hires = bit(val)?,
+            "--sky" => {
+                self.cvars.sky = match val {
+                    "classic" => SkyScroll::Classic,
+                    "fluid" => SkyScroll::Fluid,
+                    _ => return Err(format!("--sky: expected classic or fluid, got {val:?}")),
+                }
+            }
             "--threads" => {
                 self.threads = val.parse().ok().filter(|&n| n > 0).ok_or_else(|| format!("--threads: expected a count, got {val:?}"))?;
             }
@@ -103,16 +111,22 @@ impl VideoArgs {
         match self.cvars {
             VideoCvars::CLASSIC => "classic".into(),
             VideoCvars::MODERN => "modern".into(),
-            v => format!("{}{}", if v.fov_mode == FovMode::HorPlus { "horplus" } else { "classicfov" }, if v.hires { "-hires" } else { "" }),
+            v => format!(
+                "{}{}{}",
+                if v.fov_mode == FovMode::HorPlus { "horplus" } else { "classicfov" },
+                if v.hires { "-hires" } else { "" },
+                if v.sky == SkyScroll::Fluid { "-fluidsky" } else { "" }
+            ),
         }
     }
 }
 
 /// The options as `quaketool --help` lists them (the module docs say more).
 pub const HELP: &[(&str, &str)] = &[
-    ("--video classic|modern", "both cvars at once: id's, or Hor+ and hires (default classic)"),
+    ("--video classic|modern", "every cvar at once: id's, or Hor+, hires and the fluid sky (default classic)"),
     ("--fov-mode classic|horplus", "how `fov` meets the display's shape"),
     ("--hires 0|1", "views past 1280x1024, particles and the warp at 320x200 proportions"),
+    ("--sky classic|fluid", "the clouds in id's whole-texel steps, or gliding (`r_fluidsky`)"),
     ("--display W:H|square", "the display's width:height (square: the mode's own); the default is the command's"),
     ("--scaled2d 0|1", "the status bar, menus and console blown up from 320x200"),
     ("--threads N", "draw each frame's 3-D view on N threads (default 1; the pixels are the same for any N)"),

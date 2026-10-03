@@ -1835,7 +1835,7 @@ mod tests {
         };
         let draw = |w, h, fov_deg| draw_as(w, h, fov_deg, VideoCvars::CLASSIC);
         let four_three = draw(144, 108, 90.0).expect("gun at 4:3");
-        let hor_plus = VideoCvars { fov_mode: FovMode::HorPlus, hires: false };
+        let hor_plus = VideoCvars { fov_mode: FovMode::HorPlus, ..VideoCvars::CLASSIC };
         let wide = draw_as(192, 108, 90.0, hor_plus).expect("gun under Hor+ at 16:9");
         assert_eq!(
             (wide.0, wide.1, wide.2, wide.3),

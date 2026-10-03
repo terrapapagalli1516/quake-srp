@@ -460,6 +460,25 @@ pub(crate) fn floor_bsp() -> Bsp {
     b
 }
 
+/// [`floor_bsp`] with a 16-unit stair step: in hull 1 (the player's box) the
+/// floor is at origin `z = 24` for `x < 84` and `z = 40` beyond, the riser of
+/// a step at `x = 100` pushed out by the box's 16-unit half width. Hull 0
+/// keeps the flat floor; only the player's box is traced here.
+pub(crate) fn step_bsp() -> Bsp {
+    use crate::bsp::{DClipNode, DPlane, CONTENTS_EMPTY, CONTENTS_SOLID};
+    let mut b = floor_bsp();
+    b.planes.push(DPlane { normal: [1.0, 0.0, 0.0], dist: 84.0, ptype: 0 }); // 2: the riser
+    b.planes.push(DPlane { normal: [0.0, 0.0, 1.0], dist: 40.0, ptype: 2 }); // 3: the step's top
+    // Clipnode 0 splits on the riser: in front (x >= 84) clipnode 1, the
+    // step's top; behind it clipnode 2, the floor below.
+    b.clipnodes = vec![
+        DClipNode { planenum: 2, children: [1, 2] },
+        DClipNode { planenum: 3, children: [CONTENTS_EMPTY as i16, CONTENTS_SOLID as i16] },
+        DClipNode { planenum: 1, children: [CONTENTS_EMPTY as i16, CONTENTS_SOLID as i16] },
+    ];
+    b
+}
+
 /// Build a progs for the player-physics tests. It declares every field the
 /// client movement code reads/writes and the engine globals it sets, plus a
 /// `PutClientInServer` function that sets `health = 100` and `origin =

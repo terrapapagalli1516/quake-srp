@@ -365,6 +365,60 @@ with sync_playwright() as p:
     check("pointer never locked during keyboard play",
           pg.evaluate("document.pointerLockElement === null"))
 
+    # (5b) The wheel (2026): a notch switches weapons, with no pointer lock.
+    # "impulse 3" (the super shotgun) sits between two owned weapons so next
+    # and previous land somewhere different (`W_ChangeWeapon`/
+    # `CycleWeaponCommand`/`CycleWeaponReverseCommand`): axe < shotgun < SUPER
+    # SHOTGUN < nailgun < ..., "impulse 9" gives every weapon and its ammo so
+    # none of them is skipped for want of ammo. Waited for throughout, not
+    # slept past: the two impulses share one scalar field (`self.impulse`),
+    # consumed by the next `W_WeaponFrame` tick rather than by the console
+    # call that sets it, and the system's load can be noisy (a sleep
+    # that outruns a slow tick races the next `exec` into the same field,
+    # unconsumed). Polled from Python, not `wait_for_function`: a
+    # Promise-returning predicate there is truthy before it resolves, in this
+    # Playwright, so it would not actually wait.
+    field = lambda name: pg.evaluate(f"quake.callLine('player_field {name}').then(r => r.value)")
+    def wait_weapon(want, timeout=5.0):
+        deadline = time.time() + timeout
+        w = field("weapon")
+        while w != want and time.time() < deadline:
+            time.sleep(0.05)
+            w = field("weapon")
+        return w
+
+    pg.evaluate("quake.callLine('exec impulse 9')")
+    wait_weapon(32)                         # CheatCommand's own pick, the rocket launcher
+    pg.evaluate("quake.callLine('exec impulse 3')")
+    w0 = wait_weapon(2)                     # impulse 3's own, the super shotgun
+    pg.mouse.move(410, 280)                 # over the view, not a bar button
+    pg.mouse.wheel(0, -120)                 # one notch up (negative deltaY): next
+    w1 = wait_weapon(4)
+    pg.mouse.wheel(0, 120)                  # one notch down: back to the previous
+    w2 = wait_weapon(2)
+    check("2026: a wheel notch up switches to the next weapon, down back to it",
+          (w0, w1, w2) == (2, 4, 2), f"{w0:.0f} -> {w1:.0f} -> {w2:.0f}")
+    # A trackpad's burst of small deltas (Chrome's own notch is ~100 px)
+    # accumulates and fires exactly once, not once per event.
+    for _ in range(12):
+        pg.mouse.wheel(0, -15)              # 12 x 15 = 180 px: one notch, up
+        time.sleep(0.02)
+    w3 = wait_weapon(4)
+    check("a trackpad-style burst of small deltas fires once", w3 == 4, f"{w3:.0f}")
+    # Classic leaves the wheel unbound, as id's default.cfg.
+    pg.evaluate("quake.callLine('exec profile classic')")
+    time.sleep(0.3)
+    pg.evaluate("quake.callLine('exec impulse 9')")
+    wait_weapon(32)
+    pg.evaluate("quake.callLine('exec impulse 3')")
+    wc = wait_weapon(2)
+    pg.mouse.wheel(0, -120)
+    pg.mouse.wheel(0, -120)
+    time.sleep(0.5)
+    check("Classic: the wheel is unbound, nothing changes", field("weapon") == wc, f"{wc:.0f} -> {field('weapon'):.0f}")
+    pg.evaluate("quake.callLine('exec profile 2026')")
+    time.sleep(0.2)
+
     # (2) The Esc pattern. A real canvas click captures the mouse...
     pg.locator("#c").click(position={"x": 320, "y": 240})
     try:

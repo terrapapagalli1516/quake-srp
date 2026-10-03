@@ -9,7 +9,7 @@ rerun the measurement. (Branch `q26/framerate`, 2026-09-26.)
 
 ## In short
 
-- **Measured:** `quaketool framerate` plays 22 scripted scenarios on the
+- **Measured:** `quaketool framerate` plays 23 scripted scenarios on the
   shareware maps through the browser's own client frame, at 72 Hz with id's
   code (the reference) and at 60, 144, 240, 480 Hz and a jittery 144 Hz
   display, each with id's per-frame code and with the fixed uncapped step. The
@@ -29,6 +29,16 @@ rerun the measurement. (Branch `q26/framerate`, 2026-09-26.)
   harness measures now matches 72 Hz within a stated tolerance, and every
   tolerance wider than a frame's sampling says what id's own game varies by
   (the phase of its 72 Hz frames) or which small drift is accepted.
+- **Stairs, found later** (`fleet/stairs`, 2026-10-02): above about 233 Hz
+  the uncapped game showed every stair step as a snap — the view rose 4 of a
+  16-unit step's units with the body, the rest one frame later, where id's
+  glides it up at 80 u/s over 0.15 s (the user found climbing stairs strange, the
+  view rising too fast); a lift's rider's view could jump the same way. Not the
+  smoothing: the server's `FL_ONGROUND` dropped for the frame after every step
+  up, because a frame that short falls less than the trace's 1/32-unit
+  standoff and so no longer touches the floor; the client's smoothing lets go
+  of the view whenever the flag is off, as id's does. Fixed in the uncapped
+  path ("Ground contact" below; the `step` table).
 - **Left, and why** — see "What is left": the ground acceleration and
   friction (a fixed 2–3 units over a run, 5% of a slide), swimming (2–3% over
   a second, QuakeC's drag), QuakeC timers that a frame rounds up (lava burns
@@ -54,6 +64,7 @@ covering the same time does in id's game:
 | what | id's per-frame code | uncapped | where |
 |---|---|---|---|
 | gravity (player, monsters' leaps, grenades, gibs, corpses) | semi-implicit Euler: a 72 Hz trajectory runs `g·t/144` below the parabola, a 480 Hz one `g·t/960` | the move leads the vertical velocity by `g·(dt − 1/72)/2`, which lands on id's 72 Hz curve at every rate; a bounce clips the led velocity, as a 72 Hz frame bounces with the speed its frame ends at | `server::sv_phys` (`gravity_lead`, `move_with_lead`) |
+| ground contact (the player standing on a floor) | `FL_ONGROUND` holds only while each frame's move touches the floor, which a step up or a landing leaves 1/32 unit below (the trace's standoff): a 72 Hz frame falls 0.15 units and does; past 160 Hz (233 with the gravity lead) the frame after a step up falls short and the flag drops for it | a walker that stood on the ground and whose move touched no floor looks 0.045 unit below — the standoff measured straight down on the steepest floor one can stand on (1/32 ÷ 0.7) — and stands on the floor it finds there | `server::sv_phys` (`keep_ground`), `Stepping::ground_probe` |
 | damage and bonus flashes | `int` percents lose a truncation every frame: at least 1 a frame | id's drop per whole 1/72 s tick (`Tick72`) | `client::view::fade_cshifts` |
 | trails (rockets, grenades, gibs, tracers) | `R_RocketTrail` drops at least one particle a frame | the particles one 72 Hz frame would drop at the entity's speed, spread evenly, the spacing carried from frame to frame | `particles::ParticleSystem::spawn_trail` |
 | `host_time` (notify, centre prints), pushers' `ltime` | `f32 += dt` | kept beside a double (`advance_clock`) | `client::cl_main`, `server::sv_phys` |
@@ -64,7 +75,8 @@ What needed nothing: QuakeC thinks (`SV_RunThink` runs each at its own
 every rate — the grunt's fight is identical), pushers' paths (`SV_Physics_Pusher`
 moves them exactly to their think times), everything drawn from `cl.time`
 (view bob and roll, light styles, sky and water, the intermission sway),
-linear fades (the view kick, dlights, stair smoothing, the punch angle),
+linear fades (the view kick, dlights, the punch angle, and the stair
+smoothing — 80 u/s times the frame's time — once its ground flag holds),
 the ambient sounds, which already step in 1/72 s ticks (`snd.rs`), and demo
 playback: id's `CL_LerpPoint` draws every frame between the two newest
 recorded messages at any rate (`client::cl_demo::demo_frame`; the port's
@@ -75,6 +87,49 @@ velocities (`pt_explode`'s `vel += vel·dvel`) and the ground and water
 friction stepped exactly. They moved an explosion cloud 1%, a slide 1.3 of
 its 3 units and a swim nothing measurable; "What is left" says why the rest
 can stay.
+
+## Ground contact: stairs (`fleet/stairs`)
+
+id's server steps the player up a stair at once (`SV_WalkMove`), and the
+client glides the view after it (`V_CalcRefdef`, "smooth out stair step
+ups"): while `cl.onground` and the body is above the view, the view rises at
+80 u/s, at most 12 units behind; when the flag is off it snaps to the body.
+The port's smoothing (`client::cl_main::walk_frame`) is id's, stepped by the
+frame's own time, and needed nothing. What broke it was the flag. A step up
+ends with a trace down onto the step, which stops the box 1/32 unit above it
+(`DIST_EPSILON`). The next frame's move falls `g·dt·(dt + 1/72)/2` (with the
+gravity lead): 0.15 units at 72 Hz, which crosses the standoff, touches the
+step and keeps `FL_ONGROUND`; 0.022 at 309 Hz, which does not. `SV_WalkMove`
+clears the flag before the move, so for that one frame the player is
+airborne, the client resets the smoothing, and the view jumps the 12 units
+it was still behind in one frame (3.2 ms at 309 Hz) — every step of every
+staircase, and on a lift whenever its rider is set down on it again (a
+jittery display's long frame does that). id's per-frame code at those
+rates drops the flag for two or three frames.
+
+The uncapped walker now feels for its floor: when it stood on the ground
+and its move touched none, a trace 0.045 unit down — the standoff measured
+straight down on the steepest floor one can stand on (`normal.z > 0.7`), so
+it finds a floor the walker was set down on at any frame length and no
+floor the move left further behind — sets it down there as a touch would,
+`FL_ONGROUND` and all (`Server::keep_ground`). Its touch function waits for
+the next frame, whose move starts inside the standoff and touches it.
+Classic is id's.
+
+The `step` table measures the view over e1m1's 16-unit step at the top of
+the first stairs. Without the probe the view was level with the body
+2–4 ms after the step at 240 Hz and up, rising at 2,900–5,800 u/s (12,000
+at 1000 Hz), uncapped and with id's code alike; with it the view is 8 units
+below at 0.05 s and 4 at 0.1 s, level at 0.15 s, rising at 80 u/s, as at
+72 Hz. Going down, id's smooths nothing, and neither does the port at any
+rate. The lift: the rider's view rises at the lift's 150 u/s at every rate
+(at most 12 units under it), where the jittery 144 Hz display's had jumped
+at 1575 u/s. The probe moved nothing else the harness measures (the stairs'
+"down 400 units" at 240 Hz by a millisecond). The lift's rider is still
+airborne for a frame or two at 240–480 Hz: the first frames, dropped onto
+the lift from the standoff, before it stood on anything.
+`server::sv_phys::tests::uncapped_walker_stays_on_the_ground_after_a_step_up`
+checks the flag on a synthetic step at 60 to 1000 Hz.
 
 ## What is left
 
@@ -100,6 +155,14 @@ higher rate, or a fixed offset under the size of a frame's travel.
   fall-damage threshold is 4.5 units lower (268.6 against 273.1) and the
   landing sound's the same (58.3). id's own threshold moves by up to 9 units
   with the fall's phase against the 72 Hz frames.
+- **Ground contact on gentle down slopes.** On a floor that falls away
+  under a running walker, the uncapped walker keeps touching it every frame
+  while it drops 10–13 u/s (speed × slope, 60 to 480 Hz; without the probe
+  6–7 above 233 Hz), id's 72 Hz walker while it drops 9 u/s (at a full run
+  a 1.8–2.3° slope against 1.6°); beyond that both touch on some frames.
+  Friction works on the frames that touch. Not measured (no slope in the
+  harness is that gentle); the numbers are the arithmetic of the fall and
+  the standoff.
 - **Pusher think transitions.** A pusher's think ends its frame's move, so
   each think (a door opening, its wait over, closed) delays what follows by
   up to a frame: up to 14 ms each at 72 Hz, 2 ms at 480. A door closes 20–30 ms
@@ -132,7 +195,8 @@ higher rate, or a fixed offset under the size of a frame's travel.
 
 ## The tables
 
-`quaketool framerate <pak> --markdown`, native, 2026-09-26. Each cell is id's
+`quaketool framerate <pak> --markdown`, native, 2026-10-02 (first 2026-09-26;
+`step` and the lift rider's eye added on `fleet/stairs`). Each cell is id's
 per-frame code at that rate → the uncapped step (its difference from 72 Hz);
 the last column is `--check`'s tolerance. 72 Hz is the reference (id's code at
 72 is WinQuake). `jitter` is a 144 Hz display whose refresh intervals wander
@@ -178,8 +242,19 @@ the last column is `--check`'s tolerance. 72 Hz is the reference (id's code at
 |---|---|---|---|---|---|---|---|
 | up 400 units (s) | 1.26 | 1.26 → 1.26 (+0.001) | 1.25 → 1.26 (−0.002) | 1.25 → 1.25 (−0.003) | 1.25 → 1.25 (−0.004) | 1.25 → 1.26 (−0.002) | ±0.030 |
 | view lag on the steps, max (u) | 12.0 | 12.0 → 12.0 (0) | 12.0 → 12.0 (0) | 12.0 → 12.0 (0) | 12.0 → 12.0 (0) | 12.0 → 12.0 (0) | ±1.0 |
-| down 400 units (s) | 1.28 | 1.28 → 1.28 (−0.004) | 1.30 → 1.30 (+0.012) | 1.30 → 1.30 (+0.016) | 1.31 → 1.30 (+0.020) | 1.30 → 1.29 (+0.010) | ±0.030 |
+| down 400 units (s) | 1.28 | 1.28 → 1.28 (−0.004) | 1.30 → 1.30 (+0.012) | 1.30 → 1.30 (+0.017) | 1.31 → 1.30 (+0.020) | 1.30 → 1.29 (+0.010) | ±0.030 |
 | fastest fall going down (u/s) | 144.4 | 146.7 → 146.7 (+2.22) | 155.6 → 150.0 (+5.56) | 156.7 → 146.7 (+2.22) | 158.3 → 150.0 (+5.56) | 151.9 → 151.9 (+7.50) | ±12.0 |
+
+**step** — the view over a 16-unit step: running up it (id's stair smoothing, 80 u/s) and off it
+
+| quantity | 72 (id) | 60 | 144 | 240 | 480 | jitter | tolerance |
+|---|---|---|---|---|---|---|---|
+| eye below the body as it steps (u) | 12.0 | 12.0 → 12.0 (0) | 12.0 → 12.0 (0) | 12.0 → 12.0 (0) | 12.0 → 12.0 (0) | 12.0 → 12.0 (0) | ±0.100 |
+| eye below the body at 0.05 s (u) | 8.00 | 8.00 → 8.00 (0) | 8.00 → 8.00 (0) | 0.0 → 7.97 (−0.030) | 0.0 → 7.97 (−0.027) | 0.0 → 7.97 (−0.030) | ±1.11 |
+| eye below the body at 0.1 s (u) | 4.00 | 4.00 → 4.00 (0) | 4.00 → 4.00 (0) | 0.0 → 3.97 (−0.030) | 0.0 → 3.97 (−0.026) | 0.0 → 3.97 (−0.030) | ±1.11 |
+| eye level again after (s) | 0.153 | 0.150 → 0.150 (−0.003) | 0.153 → 0.153 (0) | 0.004 → 0.150 (−0.003) | 0.002 → 0.150 (−0.003) | 0.004 → 0.155 (+0.002) | ±0.014 |
+| eye's fastest rise (u/s) | 80.00 | 80.00 → 80.00 (0) | 80.00 → 80.00 (0) | 2876.7 → 80.00 (0) | 5758.3 → 80.00 (−0.001) | 2863.9 → 80.00 (+0.001) | ±0.500 |
+| going down: eye off the body, max (u) | 0.0 | 0.0 → 0.0 (0) | 0.0 → 0.0 (0) | 0.0 → 0.0 (0) | 0.0 → 0.0 (0) | 0.0 → 0.0 (0) | ±0.010 |
 
 **fall** — the drop height (feet above floor) that makes the landing sound, and fall damage
 
@@ -210,7 +285,8 @@ the last column is `--check`'s tolerance. 72 Hz is the reference (id's code at
 |---|---|---|---|---|---|---|---|
 | lift reaches the top (s) | 1.03 | 1.03 → 1.03 (+0.006) | 1.02 → 1.02 (−0.007) | 1.02 → 1.02 (−0.007) | 1.02 → 1.02 (−0.011) | 1.03 → 1.03 (−0.002) | ±0.014 |
 | rider off the floor, max (u) | 0.000 | 0.0 → 0.0 (0) | 0.000 → 0.000 (0) | 0.028 → 0.030 (+0.030) | 0.964 → 0.030 (+0.030) | 0.022 → 0.030 (+0.030) | ±0.500 |
-| rider frames airborne | 0.0 | 0.0 → 0.0 (0) | 0.0 → 0.0 (0) | 2.0 → 1.0 (+1.0) | 33.0 → 2.0 (+2.0) | 1.0 → 1.0 (+1.0) | — |
+| rider frames airborne | 0.0 | 0.0 → 0.0 (0) | 0.0 → 0.0 (0) | 2.0 → 1.0 (+1.0) | 33.0 → 2.0 (+2.0) | 1.0 → 0.0 (0) | — |
+| rider's eye: fastest rise (u/s) | 150.0 | 150.0 → 150.0 (0) | 150.0 → 150.0 (+0.001) | 216.7 → 150.0 (0) | 6297.9 → 150.0 (+0.001) | 357.8 → 150.0 (+0.001) | ±1.0 |
 
 **door** — e1m1's first door: opens, waits 3 s, closes
 
@@ -319,7 +395,7 @@ the last column is `--check`'s tolerance. 72 Hz is the reference (id's code at
 
 | quantity | 72 (id) | 60 | 144 | 240 | 480 | jitter | tolerance |
 |---|---|---|---|---|---|---|---|
-| camera moves a second (/s) | 70.35 | 58.65 → 58.65 (−11.70) | 140.6 → 140.6 (+70.30) | 234.3 → 234.3 (+164.0) | 468.4 → 468.4 (+398.1) | 138.0 → 138.0 (+67.70) | — |
+| camera moves a second (/s) | 70.35 | 58.65 → 58.65 (−11.70) | 140.6 → 140.6 (+70.25) | 234.3 → 234.3 (+163.9) | 468.4 → 468.4 (+398.1) | 138.0 → 138.0 (+67.64) | — |
 | demo message at 20 s | 242.0 | 242.0 → 242.0 (0) | 242.0 → 242.0 (0) | 242.0 → 242.0 (0) | 242.0 → 242.0 (0) | 242.0 → 242.0 (0) | ±2.0 |
 
 (Since `q26/lerp` the demo plays as id's client does, one recorded message
@@ -473,6 +549,7 @@ Without the game data, `cargo test` checks the same things on synthetic
 worlds, at 60, 144 and 480 Hz against 72, with the tolerances stated in each
 test: `server::sv_phys::tests::uncapped_frames_jump_and_bounce_like_72_hz`
 (a jump and a bounce: apex to 0.05 units, landing to a 72 Hz frame),
+`server::sv_phys::tests::uncapped_walker_stays_on_the_ground_after_a_step_up`,
 `client::view::tests::uncapped_flashes_fade_like_72_hz`,
 `particles::tests::uncapped_trails_are_as_dense_as_72_hz`,
 `client::host::tests::host_filter_time_display_runs_every_refresh_and_never_outruns_the_clock`

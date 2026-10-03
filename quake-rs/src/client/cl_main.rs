@@ -897,6 +897,10 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
         // up each 16/18-unit step. The delta is relative to the raw origin Z (bob
         // layered on top); on first frame / not-climbing, oldz tracks origin exactly.
         let origin_z = w.server.vm.ent_vec(w.player, w.server.vm.fo().origin)[2];
+        // `cl.onground`: the server's FL_ONGROUND after this frame. One frame
+        // without it lets go of the smoothing and the eye jumps the rest of
+        // the step, so the uncapped server keeps it through frames too short
+        // to touch the floor (`Stepping::ground_probe`; FRAMERATE.md).
         let onground = w.server.vm.flags(w.player).contains(EntFlags::ONGROUND);
         // `steptime = cl.time - cl.oldtime`: nothing while the server is
         // paused (behind the menu, or by `pause`), so the eye stays put.
