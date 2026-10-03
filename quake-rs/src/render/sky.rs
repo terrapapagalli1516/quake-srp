@@ -3,6 +3,25 @@
 //! Ported from Quake (GPLv2). Copyright (C) 1996-1997 Id Software, Inc.
 //! Source: `WinQuake/r_sky.c` (`R_MakeSky`'s layer offsets) and `WinQuake/d_sky.c`
 //! (`D_Sky_uv_To_st`, `D_DrawSkyScans8`'s 32-pixel spans).
+//!
+//! **How id's sky moves.** Two layers of the sky miptexture scroll diagonally:
+//! the back (its right half) at `skyspeed` 8 texels a second and the front, the
+//! clouds (its left half, index 0 transparent), at twice that. They move in two
+//! different ways. `D_Sky_uv_To_st` adds `skytime*skyspeed` to every pixel's
+//! 16.16 `(s,t)` as a float, so the whole composite glides: its texel edges
+//! cross the screen at the true speed. `R_MakeSky` adds the front layer's own
+//! extra 8 texels a second as `xshift = (int)(skytime*skyspeed)`, whole texels,
+//! so on top of that glide the clouds jump a whole texel along the diagonal
+//! every eighth of a second. At 320x200 a sky texel is about a screen pixel; at
+//! 1080p looking up it is 6 pixels, at 4K 11, and the clouds lurch eight times
+//! a second. [`SkyScroll::Fluid`], the 2026 sky, gives the front layer the exact
+//! `skytime*skyspeed` instead: the clouds glide as the back layer always has,
+//! every pixel still one of the texture's own texels, nearest, unfiltered.
+//!
+//! The port draws id's composite without building it: [`sky_sample`] reads the
+//! front layer and, where that is transparent, the back, at each pixel, which is
+//! `newsky` texel for texel. That makes the fluid front layer free: the offset
+//! is added to the 16.16 coordinate before its texel is taken instead of after.
 
 use crate::bsp::Bsp;
 use crate::math::Vec3;
@@ -14,6 +33,21 @@ const SKYSIZE: i32 = 128;
 const SKYMASK: i32 = SKYSIZE - 1;
 /// `iskyspeed` (r_sky.c): the scroll, in texels per second.
 const SKY_SPEED: f32 = 8.0;
+
+/// How the front (cloud) layer's extra scroll is applied (the module docs): a
+/// video cvar, [`VideoCvars::sky`](super::VideoCvars::sky), the console's
+/// `r_fluidsky`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SkyScroll {
+    /// id's: `R_MakeSky`'s `xshift = (int)(skytime*skyspeed)`, whole texels,
+    /// so the clouds jump a texel eight times a second.
+    #[default]
+    Classic,
+    /// The exact `skytime*skyspeed` in 16.16, so the clouds glide at their
+    /// true speed. The same frame as id's whenever `skytime*skyspeed` is a
+    /// whole number.
+    Fluid,
+}
 
 /// The per-frame sky state a sky pixel needs, porting the globals
 /// `D_Sky_uv_To_st` and `R_MakeSky` read: the view basis (`vpn`/`vright`/
@@ -38,9 +72,11 @@ pub(super) struct SkyView {
     longest: f32,
     /// `skytime*skyspeed`, added to both `s` and `t` (`D_Sky_uv_To_st`).
     scroll: f32,
-    /// `R_MakeSky`'s `xshift`/`yshift` = `(int)(skytime*skyspeed)`: the extra
-    /// offset of the front (cloud) layer, so it moves at twice the back's speed.
-    shift: i32,
+    /// The front (cloud) layer's extra offset on both axes, 16.16, so it moves
+    /// at twice the back's speed: `R_MakeSky`'s `xshift`/`yshift` =
+    /// `(int)(skytime*skyspeed)` whole texels ([`SkyScroll::Classic`]), or
+    /// `skytime*skyspeed` itself ([`SkyScroll::Fluid`]).
+    front: i32,
 }
 
 /// `D_Sky_uv_To_st`'s `temp`, the dome's scale in pixels, for a `w x h` view
@@ -67,10 +103,11 @@ impl SkyView {
     /// The sky state for a view whose dome scale is `longest` pixels
     /// ([`sky_dome_scale`]) and whose screen's centre is `centre` in its own
     /// pixels ([`RenderOptions`](super::RenderOptions)`::sky_centre`), at game
-    /// `time`. `R_SetSkyFrame`
+    /// `time`, its clouds scrolled as `mode` says. `R_SetSkyFrame`
     /// (r_sky.c): `skytime = cl.time - (int)(cl.time/temp)*temp` with
     /// `temp = SKYSIZE*s1*s2` = 512, where `s1`/`s2` are `iskyspeed` 8 and
-    /// `iskyspeed2` 2 over their gcd.
+    /// `iskyspeed2` 2 over their gcd. Both modes wrap there with every layer
+    /// on a whole number of turns (4096 texels, 32 turns of 128).
     pub(super) fn new(
         forward: Vec3,
         right: Vec3,
@@ -78,11 +115,19 @@ impl SkyView {
         longest: f32,
         centre: (i32, i32),
         time: f32,
+        mode: SkyScroll,
     ) -> SkyView {
         const TEMP: f64 = 512.0;
         let t = time as f64;
         let skytime = (t - ((t / TEMP) as i32 as f64) * TEMP) as f32;
         let scroll = skytime * SKY_SPEED;
+        let front = match mode {
+            // R_MakeSky: xshift = skytime*skyspeed, truncated to int.
+            SkyScroll::Classic => (scroll as i32) << 16,
+            // Exact: scroll is at most 4096, so this is scroll * 2^16 to the
+            // f32's last bit.
+            SkyScroll::Fluid => (scroll * 65536.0) as i32,
+        };
         SkyView {
             forward,
             right,
@@ -91,7 +136,7 @@ impl SkyView {
             half_h: centre.1,
             longest,
             scroll,
-            shift: scroll as i32,
+            front,
         }
     }
 }
@@ -134,19 +179,23 @@ fn sky_uv_to_st(u: i32, v: i32, sky: &SkyView) -> (i32, i32) {
 /// ((s & R_SKY_SMASK) >> 16)]`, i.e. row `(t>>16)&127`, column `(s>>16)&127` of
 /// `newsky` — and what `R_MakeSky` composited there: the front layer (the
 /// miptexture's LEFT half, `R_InitSky`'s `bottomsky`, index 0 transparent)
-/// shifted by `shift` texels on both axes, over the back layer (the RIGHT half,
-/// unshifted).
+/// read `front` (16.16) further along on both axes, over the back layer (the
+/// RIGHT half, unshifted). With `front` a whole number of texels this is id's
+/// `newsky[y][x]` = front `[y+shift][x+shift]` over back `[y][x]` exactly; the
+/// fluid sky's fraction moves where the front's texel edges fall.
 ///
 /// `pixels` is the `tw`-wide sky miptexture (256x128 in every id map). Every read
 /// is `.get()`-guarded, so a malformed sky never panics (it yields index 0).
 #[inline]
-fn sky_sample(pixels: &[u8], tw: usize, s: i32, t: i32, shift: i32) -> u8 {
+fn sky_sample(pixels: &[u8], tw: usize, s: i32, t: i32, front: i32) -> u8 {
     let x = (s >> 16) & SKYMASK;
     let y = (t >> 16) & SKYMASK;
-    let fy = ((y + shift) & SKYMASK) as usize;
-    let fx = ((x + shift) & SKYMASK) as usize;
+    // Wrapping is harmless: the mask keeps bits 16..22, which a wrap of 2^32
+    // leaves as they are.
+    let fx = ((s.wrapping_add(front) >> 16) & SKYMASK) as usize;
+    let fy = ((t.wrapping_add(front) >> 16) & SKYMASK) as usize;
     match pixels.get(fy * tw + fx).copied() {
-        Some(front) if front != 0 => front,
+        Some(cloud) if cloud != 0 => cloud,
         _ => pixels.get(y as usize * tw + (tw / 2) + x as usize).copied().unwrap_or(0),
     }
 }
@@ -170,6 +219,14 @@ pub(super) fn draw_sky_span(
     tw: usize,
     view: &SkyView,
 ) {
+    sky_span(out, u, v, count, view, |s, t| sky_sample(pixels, tw, s, t, view.front));
+}
+
+/// [`draw_sky_span`]'s walk of the span's 16.16 coordinates, each pixel
+/// written as `sample(s, t)` (the tests sample other composites along the
+/// same walk).
+#[inline]
+fn sky_span(out: &mut [u8], u: i32, v: i32, count: i32, view: &SkyView, sample: impl Fn(i32, i32) -> u8) {
     let mut u = u;
     let mut count = count;
     let (mut s, mut t) = sky_uv_to_st(u, v, view);
@@ -195,7 +252,7 @@ pub(super) fn draw_sky_span(
         }
         for _ in 0..spancount {
             if let Some(p) = out.next() {
-                *p = sky_sample(pixels, tw, s, t, view.shift);
+                *p = sample(s, t);
             }
             s = s.wrapping_add(sstep);
             t = t.wrapping_add(tstep);
@@ -238,7 +295,7 @@ mod tests {
             // right = forward x worldup, up = right x forward (orthonormal-ish).
             let (right, _) = normalize(cross(f, [0.0, 0.0, 1.0]));
             let (up, _) = normalize(cross(right, f));
-            SkyView::new(f, right, up, w.max(h) as f32, ((w as i32) >> 1, (h as i32) >> 1), time)
+            SkyView::new(f, right, up, w.max(h) as f32, ((w as i32) >> 1, (h as i32) >> 1), time, SkyScroll::Classic)
         };
         // The view as D_DrawSurfaces draws a sky surface covering it: one span
         // per row (the sky uses the view ray, not a face's (s,t)).
@@ -271,7 +328,7 @@ mod tests {
     fn sky_sample_composites_the_shifted_front_over_the_back() {
         // R_MakeSky: where the front layer (left half) is transparent (index 0)
         // the back layer (right half, unshifted) shows through; where it is
-        // opaque it wins — read `shift` texels further along on both axes.
+        // opaque it wins — read `front` further along on both axes.
         let pixels = synthetic_sky_pixels();
         let tw = 256usize;
         let fx = |x: i32| x << 16; // a texel column as a 16.16 coordinate
@@ -280,26 +337,36 @@ mod tests {
         // Front column 64 is opaque: 200.
         assert_eq!(sky_sample(&pixels, tw, fx(64), fx(0), 0), 200);
         // Shifted by 50, column 0 reads the front's column 50 (opaque) ...
-        assert_eq!(sky_sample(&pixels, tw, fx(0), fx(0), 50), 200);
+        assert_eq!(sky_sample(&pixels, tw, fx(0), fx(0), fx(50)), 200);
         // ... and column 100 wraps to the front's 150 & 127 = 22 (transparent),
         // so the back shows at the UNSHIFTED (100, 3): 1 + (100+3)%200.
-        assert_eq!(sky_sample(&pixels, tw, fx(100), fx(3), 50), 104);
+        assert_eq!(sky_sample(&pixels, tw, fx(100), fx(3), fx(50)), 104);
+        // A fraction moves the front's texel edge: column 41.75 is the front's
+        // transparent 41 shifted by 0.2 and its opaque 42 shifted by 0.25.
+        assert_eq!(sky_sample(&pixels, tw, fx(41) + 0xC000, 0, 0x3333), 1 + 41);
+        assert_eq!(sky_sample(&pixels, tw, fx(41) + 0xC000, 0, 0x4000), 200);
         // Coordinates wrap at 128 texels (`R_SKY_SMASK`), negatives included.
         assert_eq!(sky_sample(&pixels, tw, fx(128 + 64), fx(-128), 0), 200);
         // A degenerate (too-small) sky texture never panics: index 0.
         let tiny = vec![0u8; 4];
-        assert_eq!(sky_sample(&tiny, 2, fx(1000), fx(-1000), 5), 0);
+        assert_eq!(sky_sample(&tiny, 2, fx(1000), fx(-1000), fx(5)), 0);
+        // Near i32's edge the offset wraps without changing the texel read.
+        assert_eq!(sky_sample(&pixels, tw, i32::MAX, 0, fx(1)), sky_sample(&pixels, tw, i32::MAX - fx(128), 0, fx(1)));
     }
 
     #[test]
     fn sky_view_front_layer_scrolls_twice_as_fast() {
         // R_SetSkyFrame + R_MakeSky: the whole sky scrolls skytime*8 texels
-        // (D_Sky_uv_To_st) and the front layer another (int)(skytime*8) on top.
-        let v = SkyView::new([1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, 1.0], 320.0, (160, 100), 1.6);
-        assert_eq!((v.scroll, v.shift), (12.8, 12));
+        // (D_Sky_uv_To_st) and the front layer another (int)(skytime*8) on top,
+        // or in the fluid sky skytime*8 itself.
+        let at = |time: f32, mode| SkyView::new([1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, 1.0], 320.0, (160, 100), time, mode);
+        let v = at(1.6, SkyScroll::Classic);
+        assert_eq!((v.scroll, v.front), (12.8, 12 << 16));
+        assert_eq!(at(1.6, SkyScroll::Fluid).front, (12.8f32 * 65536.0) as i32);
+        assert_eq!(at(1.625, SkyScroll::Fluid).front, 13 << 16, "whole texels: id's");
         // skytime wraps at SKYSIZE*4*1 = 512 s.
-        let w = SkyView::new([1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, 1.0], 320.0, (160, 100), 513.0);
-        assert_eq!((w.scroll, w.shift), (8.0, 8));
+        let w = at(513.0, SkyScroll::Classic);
+        assert_eq!((w.scroll, w.front), (8.0, 8 << 16));
         // D_Sky_uv_To_st at the integer screen centre, looking along +X: the ray
         // is +X, so s = (scroll + 378) * 0x10000 and t = scroll * 0x10000.
         assert_eq!((v.half_w, v.half_h), (160, 100));
@@ -312,7 +379,7 @@ mod tests {
         // A 40-pixel span: exact at u0 and u0+32, stepped by (next-cur)>>5 in
         // between, then the 8-pixel tail stepped by division over 7.
         let pixels = synthetic_sky_pixels();
-        let v = SkyView::new([0.6, 0.8, 0.0], [0.8, -0.6, 0.0], [0.0, 0.0, 1.0], 320.0, (160, 100), 3.3);
+        let v = SkyView::new([0.6, 0.8, 0.0], [0.8, -0.6, 0.0], [0.0, 0.0, 1.0], 320.0, (160, 100), 3.3, SkyScroll::Classic);
         let (u0, row, n) = (17, 60, 40);
         let mut out = vec![0u8; n as usize];
         draw_sky_span(&mut out, u0, row, n, &pixels, 256, &v);
@@ -322,11 +389,11 @@ mod tests {
         let mut want = Vec::new();
         let (ss, ts) = ((s1 - s0) >> 5, (t1 - t0) >> 5);
         for i in 0..32 {
-            want.push(sky_sample(&pixels, 256, s0 + i * ss, t0 + i * ts, v.shift));
+            want.push(sky_sample(&pixels, 256, s0 + i * ss, t0 + i * ts, v.front));
         }
         let (ss, ts) = ((s2 - s1) / 7, (t2 - t1) / 7);
         for i in 0..8 {
-            want.push(sky_sample(&pixels, 256, s1 + i * ss, t1 + i * ts, v.shift));
+            want.push(sky_sample(&pixels, 256, s1 + i * ss, t1 + i * ts, v.front));
         }
         assert_eq!(out, want);
     }
@@ -340,5 +407,134 @@ mod tests {
         assert_eq!(sky_dome_scale(200, 320, 90.0, 90.0), 320.0);
         let fov_x = crate::render::FovMode::HorPlus.fov_x(90.0, 1920, 1080, 1.0);
         assert!((sky_dome_scale(1920, 1080, 90.0, fov_x) - 1440.0).abs() < 0.01);
+    }
+
+    /// A 256x128 sky miptexture with both layers patterned on both axes: the
+    /// front (left half) transparent at about a third of its texels, the back
+    /// never 0.
+    fn patterned_sky() -> Vec<u8> {
+        let mut seed = 0x2545_F491u32;
+        let mut next = move || {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (seed >> 24) as u8
+        };
+        let mut px = vec![0u8; 256 * 128];
+        for row in px.chunks_mut(256) {
+            for (x, p) in row.iter_mut().enumerate() {
+                let r = next();
+                *p = if x < 128 { if r < 85 { 0 } else { r } } else { r.max(1) };
+            }
+        }
+        px
+    }
+
+    /// id's `R_InitSky` and `R_MakeSky` (r_sky.c) as written — the 131-wide
+    /// `bottomsky`/`bottommask` and `newsky = (top & mask) | bottom`, a byte at
+    /// a time (the `!UNALIGNED_OK` loop) — for the sky `pixels` with every
+    /// texel made an `m x m` block (`SKYSIZE` `128*m`), composited at
+    /// `xshift = yshift = shift` of those finer texels. Returns `newsky`,
+    /// `2*SKYSIZE` wide, and samples it as `D_DrawSkyScans8` does at a 16.16
+    /// `(s,t)` of the unmagnified sky (scaled by `m`).
+    fn id_newsky(pixels: &[u8], m: usize, shift: usize) -> impl Fn(i32, i32) -> u8 {
+        let size = 128 * m;
+        let mask = size - 1;
+        let wide = size + 3;
+        let src = |i: usize, j: usize| pixels[(i / m) * 256 + j / m];
+        let mut newsky = vec![0u8; size * 2 * size];
+        let (mut bottomsky, mut bottommask) = (vec![0u8; size * wide], vec![0u8; size * wide]);
+        for i in 0..size {
+            for j in 0..size {
+                newsky[i * 2 * size + j + size] = src(i, j + size);
+            }
+            for j in 0..wide {
+                let p = src(i, j & mask);
+                (bottomsky[i * wide + j], bottommask[i * wide + j]) = if p != 0 { (p, 0) } else { (0, 0xff) };
+            }
+        }
+        for y in 0..size {
+            let baseofs = ((y + shift) & mask) * wide;
+            for x in 0..size {
+                let ofs = baseofs + ((x + shift) & mask);
+                let p = y * 2 * size + x;
+                newsky[p] = (newsky[p + size] & bottommask[ofs]) | bottomsky[ofs];
+            }
+        }
+        move |s: i32, t: i32| {
+            let texel = |c: i32| ((i64::from(c) * m as i64) >> 16) as usize & mask;
+            newsky[texel(t) * 2 * size + texel(s)]
+        }
+    }
+
+    /// A `w x h` view's sky, looking along `forward`, every row one span.
+    fn sky_frame(forward: Vec3, w: usize, h: usize, sample: impl Fn(&mut [u8], i32, &SkyView), time: f32, mode: SkyScroll) -> Vec<u8> {
+        let (f, _) = normalize(forward);
+        let side = if f[2].abs() > 0.99 { [1.0, 0.0, 0.0] } else { [0.0, 0.0, 1.0] };
+        let (right, _) = normalize(cross(f, side));
+        let (up, _) = normalize(cross(right, f));
+        let view = SkyView::new(f, right, up, w.max(h) as f32, ((w as i32) >> 1, (h as i32) >> 1), time, mode);
+        let mut frame = vec![0u8; w * h];
+        for (v, row) in frame.chunks_mut(w).enumerate() {
+            sample(row, v as i32, &view);
+        }
+        frame
+    }
+
+    #[test]
+    fn each_sky_is_ids_composite_sampled_at_its_offset() {
+        // Classic is R_MakeSky's newsky at xshift = (int)(skytime*8), sampled
+        // along D_DrawSkyScans8's walk. Fluid, at any time whose skytime*8 is a
+        // multiple of 1/8 texel, is the same code's newsky for the sky with
+        // texels 8 times finer at xshift = 8*skytime*8 of them — the composite
+        // at the exact offset, every pixel still a texel of the sky's own.
+        let pixels = patterned_sky();
+        let (w, h) = (96usize, 60usize);
+        let looks: [Vec3; 3] = [[0.0, 0.0, 1.0], [1.0, 0.3, 0.05], [-0.5, 0.7, 0.6]];
+        // skytime*8 = 8 + j/8, 2400 + j/8, and past the 512 s wrap.
+        for base in [1.0f32, 300.0, 600.0] {
+            for j in 0..8 {
+                let time = base + j as f32 / 64.0;
+                let scroll = SkyView::new([1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, 1.0], 1.0, (0, 0), time, SkyScroll::Fluid).scroll;
+                assert_eq!((scroll * 8.0).fract(), 0.0, "{time}: a whole number of eighths");
+                let classic_ref = id_newsky(&pixels, 1, scroll as usize);
+                let fluid_ref = id_newsky(&pixels, 8, (scroll * 8.0) as usize);
+                for look in looks {
+                    let draw = |mode| sky_frame(look, w, h, |row, v, view| draw_sky_span(row, 0, v, w as i32, &pixels, 256, view), time, mode);
+                    let walk = |id: &dyn Fn(i32, i32) -> u8| sky_frame(look, w, h, |row, v, view| sky_span(row, 0, v, w as i32, view, id), time, SkyScroll::Classic);
+                    let (classic, fluid) = (draw(SkyScroll::Classic), draw(SkyScroll::Fluid));
+                    assert!(classic == walk(&classic_ref), "{time} {look:?}: Classic is id's newsky");
+                    assert!(fluid == walk(&fluid_ref), "{time} {look:?}: Fluid is id's newsky at the exact offset");
+                    if j == 0 {
+                        assert!(fluid == classic, "{time} {look:?}: at a whole texel the fluid sky is id's frame");
+                    } else {
+                        assert!(fluid != classic, "{time} {look:?}: between whole texels the clouds have moved on");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_fluid_clouds_change_as_many_pixels_every_frame() {
+        // A quarter second at 240 Hz, looking up: how many of the view's
+        // pixels change from one frame to the next. id's clouds glide with the
+        // back layer between their jumps (about 6% of this view a frame) and
+        // jump a texel when (int)(skytime*8) steps (89%, at 10.125 s and
+        // 10.25 s); the fluid clouds change the same share every frame (13%).
+        let pixels = patterned_sky();
+        let (w, h) = (160usize, 100usize);
+        let frame = |time: f32, mode| {
+            sky_frame([0.0, 0.0, 1.0], w, h, |row, v, view| draw_sky_span(row, 0, v, w as i32, &pixels, 256, view), time, mode)
+        };
+        let changed = |mode| -> Vec<usize> {
+            let frames: Vec<Vec<u8>> = (0..=60).map(|k| frame(10.0 + k as f32 / 240.0, mode)).collect();
+            frames.windows(2).map(|p| p[0].iter().zip(&p[1]).filter(|(a, b)| a != b).count()).collect()
+        };
+        let (classic, fluid) = (changed(SkyScroll::Classic), changed(SkyScroll::Fluid));
+        let cmax = classic.iter().max().copied().unwrap_or(0);
+        let (fmin, fmax) = (fluid.iter().min().copied().unwrap_or(0), fluid.iter().max().copied().unwrap_or(0));
+        let lurches = classic.iter().filter(|&&n| n * 4 > w * h).count();
+        assert_eq!(lurches, 2, "{classic:?}");
+        assert!(fmax * 3 < cmax, "the fluid sky's busiest frame {fmax} against id's lurch {cmax}");
+        assert!(fmax * 2 < fmin * 3, "the fluid sky changes a steady share: {fluid:?}");
     }
 }

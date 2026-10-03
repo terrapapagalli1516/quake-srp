@@ -191,7 +191,7 @@ fn extend_intsintable(tab: &mut Vec<i32>, n: usize, scale: f64) {
 //    time. See [`TurbTable`] / [`warp_st`].
 //  * **Sky** (miptex name begins with `sky`: `sky1`, `sky4`, …) gets the
 //    two-layer scroll of `R_MakeSky` (`r_sky.c`) sampled along the view ray by
-//    `D_DrawSkyScans8` (`d_sky.c`). See [`sky_texel_view`].
+//    `D_DrawSkyScans8` (`d_sky.c`): not the face's `(s,t)`, in `sky.rs`.
 
 /// WinQuake `R_InitTurb` constants (r_main.c / r_local.h / r_shared.h): the
 /// software liquid warp drives a 128-cycle sine table by the integer part of the
