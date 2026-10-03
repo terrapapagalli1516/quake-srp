@@ -198,6 +198,21 @@ pub struct StaticEntity {
     pub angles: [f32; 3],
 }
 
+impl StaticEntity {
+    /// The `svc_spawnstatic` `PF_makestatic` writes of edict `e`.
+    pub(crate) fn of_edict(vm: &Vm, e: i32) -> StaticEntity {
+        let fo = vm.fo();
+        let byte = |f: f32| f as i32 as u8; // MSG_WriteByte of a float: (int), low 8 bits
+        StaticEntity {
+            model: vm.ent_str(e, fo.model).to_string(),
+            frame: byte(vm.ent_float(e, fo.frame)),
+            skin: byte(vm.ent_float(e, fo.skin)),
+            origin: vm.ent_vec(e, fo.origin).map(wire_coord),
+            angles: vm.ent_vec(e, fo.angles).map(wire_angle),
+        }
+    }
+}
+
 /// Box centre of an entity: `origin + 0.5*(mins + maxs)`, the point
 /// `SV_StartSound`/`PF_ambientsound` wrote for the emission coordinate.
 fn entity_sound_origin(vm: &Vm, e: i32) -> [f32; 3] {

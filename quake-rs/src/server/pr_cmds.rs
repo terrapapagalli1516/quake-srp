@@ -26,7 +26,7 @@ use super::msg::{
 use super::pr_edict::parse_float;
 use super::sv_move::{bi_checkbottom, bi_movetogoal, bi_walkmove};
 use super::sv_world::{link_edict, sv_move};
-use super::{wire_angle, wire_coord, EntFlags, Solid, StaticEntity, SV_MAXVELOCITY};
+use super::{EntFlags, Solid, StaticEntity, SV_MAXVELOCITY};
 use crate::math::{add as v_add, angle_vectors, sub as v_sub, Vec3};
 use crate::vm::{Builtin, Vm};
 use crate::Result;
@@ -325,15 +325,7 @@ fn bi_noop(_vm: &mut Vm) -> Result<()> {
 /// modelled: this port's `setmodel` precaches what it is given.)
 fn bi_makestatic(vm: &mut Vm) -> Result<()> {
     let e = vm.arg_entity(0);
-    let fo = vm.fo();
-    let byte = |f: f32| f as i32 as u8; // MSG_WriteByte of a float: (int), low 8 bits
-    let st = StaticEntity {
-        model: vm.ent_str(e, fo.model).to_string(),
-        frame: byte(vm.ent_float(e, fo.frame)),
-        skin: byte(vm.ent_float(e, fo.skin)),
-        origin: vm.ent_vec(e, fo.origin).map(wire_coord),
-        angles: vm.ent_vec(e, fo.angles).map(wire_angle),
-    };
+    let st = StaticEntity::of_edict(vm, e);
     vm.with_host(|_, h| h.outbox().statics.push(st));
     vm.free_edict(e);
     Ok(())

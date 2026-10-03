@@ -619,7 +619,9 @@ mod tests {
     /// `ED_Write` writes each as an empty block, and `Host_Loadgame_f`'s
     /// `SV_SpawnServer` re-runs the map's spawn functions, whose makestatic
     /// calls rebuild the signon. The start map's torches and flames come back
-    /// from a save the same, and its file names none of them.
+    /// from a save the same, its file names none of them, and the load leaves
+    /// every slot as the save had it: the old-save migration
+    /// (`free_statics_an_old_save_kept`) never fires on a new save.
     #[test]
     fn a_save_holds_no_statics_and_its_load_rebuilds_them() {
         let w = crate::app::build_walk_map("maps/start.bsp").expect("start boots");
@@ -630,6 +632,59 @@ mod tests {
         }
         let loaded = build_walk_savegame(&text).expect("loads");
         assert_eq!(loaded.server.statics(), w.server.statics(), "the map's spawn rebuilt them");
-        assert_eq!(loaded.server.vm.num_edicts(), w.server.vm.num_edicts(), "the save's slots");
+        let (vm, lvm) = (&w.server.vm, &loaded.server.vm);
+        assert_eq!(lvm.num_edicts(), vm.num_edicts(), "the save's slots");
+        let freed: Vec<i32> = (0..vm.num_edicts() as i32).filter(|&e| lvm.is_free_edict(e) != vm.is_free_edict(e)).collect();
+        assert_eq!(freed, [], "every slot free or live as saved: nothing migrated");
+    }
+
+    /// A save the port wrote before 2026-10-02 (`fleet/makestatic`) holds
+    /// each static as a live edict, which the respawned map's signon
+    /// statics would double. Its load frees them: the torches draw once,
+    /// and the live edicts are the new save's (id's: the `edicts` check).
+    #[test]
+    fn an_old_save_s_kept_statics_are_freed_on_load() {
+        let mut w = crate::app::build_walk_map("maps/start.bsp").expect("start boots");
+        w.server.vm.ent_set_vector(w.player, "v_angle", [0.0, 90.0, 0.0]); // the torches ahead
+        let new_text = w.server.write_savegame();
+        let live = w.server.live_entities();
+
+        // The old port's save: every static still a live edict, as its
+        // makestatic left it (model, modelindex, frame, skin, origin, angles;
+        // SOLID_NOT, no think).
+        let statics = w.server.statics().to_vec();
+        for st in &statics {
+            let vm = &mut w.server.vm;
+            let e = vm.spawn();
+            vm.ent_set_string(e, "classname", "light_torch_small_walltorch");
+            vm.ent_set_string(e, "model", &st.model);
+            let index = vm.with_host(|_, h| h.find_model(&st.model)).flatten().expect("precached");
+            vm.ent_set_float(e, "modelindex", index as f32);
+            vm.ent_set_float(e, "frame", f32::from(st.frame));
+            vm.ent_set_float(e, "skin", f32::from(st.skin));
+            vm.ent_set_vector(e, "origin", st.origin);
+            vm.ent_set_vector(e, "angles", st.angles);
+        }
+        let old_text = w.server.write_savegame();
+        assert_eq!(old_text.matches("light_torch_small_walltorch").count(), statics.len(), "the old file's live statics");
+
+        let mut new = build_walk_savegame(&new_text).expect("the new save loads");
+        let mut old = build_walk_savegame(&old_text).expect("the old save loads");
+        assert_eq!(old.server.statics(), new.server.statics());
+        assert_eq!(old.server.live_entities(), live, "the live edicts are the new save's");
+        assert_eq!(new.server.live_entities(), live);
+        let vm = &old.server.vm;
+        assert_eq!(vm.live_edicts().filter(|&e| vm.ent_string_ref(e, "classname") == "light_torch_small_walltorch").count(), 0);
+
+        // Drawn once: the same alias models reach the renderer, the same pixels.
+        let draw = |w: &mut Walk| {
+            w.renderer.stats_begin();
+            let (img, _) = crate::cl_walk::step_walk(w, 0.0, true, &crate::vid::mode_vid(320, 200));
+            (img, w.renderer.stats_end().alias_models)
+        };
+        let ((new_img, new_models), (old_img, old_models)) = (draw(&mut new), draw(&mut old));
+        assert!(new_models > 1, "torches in view ({new_models} alias models)");
+        assert_eq!(old_models, new_models, "each torch drawn once");
+        assert!(new_img.pixels == old_img.pixels, "the same frame");
     }
 }

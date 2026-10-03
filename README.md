@@ -189,7 +189,7 @@ recorded from a tree known to be right. Five run id's C next to the port:
 | `play` | the browser's client run natively on id's demos and scripted walks (frame hashes) | recorded |
 | `timedemo` | id's benchmark: the frame counts | recorded |
 | `census` | a headless playthrough of all nine maps | recorded |
-| `edicts` | the entities' fields against id's server on all nine maps (the known differences, such as static flames and random numbers, are recorded) | id's C |
+| `edicts` | the entities' fields against id's server on all nine maps (the known differences, such as the player's edict number and random numbers, are recorded) | id's C |
 | `oracle` | the 3-D view, pixel by pixel | id's C |
 | `screen2d` | the status bar, menus and console | id's C |
 | `demolerp` | demo playback, 17,500 frames | id's C |

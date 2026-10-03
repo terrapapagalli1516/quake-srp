@@ -3450,7 +3450,16 @@ Rogue's `r2m6` overflowed id's 600 in Classic.
 - **Savegames.** A save writes the freed slots as empty blocks, so it holds no statics,
   as id's. A load re-runs the map's spawn functions (`Host_Loadgame_f`'s
   `SV_SpawnServer`), which rebuild the list before the save's edicts are read
-  (`a_save_holds_no_statics_and_its_load_rebuilds_them`).
+  (`a_save_holds_no_statics_and_its_load_rebuilds_them`, which also checks that a new
+  save's load leaves every slot as saved).
+- **The port's own older saves** (the user's, in IndexedDB) hold each static as a live
+  edict, which would draw on top of the respawned static. The load migrates them
+  (`save.rs` `free_statics_an_old_save_kept`): a loaded edict whose `svc_spawnstatic`
+  would be exactly one the spawn wrote, `SOLID_NOT` and with no `think`, is freed as a
+  newer save's `{}` block. No save id's engine or this port now writes holds one.
+  `an_old_save_s_kept_statics_are_freed_on_load` crafts such a save on the start map:
+  its load has the new save's live edicts and frame, 9 alias models drawn (14 without
+  the migration).
 
 **Proof.**
 - `classic_check`: ALL PASS. `census` and `edicts` re-recorded with a note: the census
@@ -3482,6 +3491,3 @@ past 600. No map of id1 or either pack needs it. Its docs and console help say s
 - `CL_ParseStatic`'s `MAX_STATIC_ENTITIES` (128, "Too many static entities") is not
   modelled. No map checked reaches it: `r1m1`'s 106 statics are the packs' most, and
   the shareware maps have at most 44 (`e1m3`).
-- A save the port wrote before this change holds its statics as live edicts. Loading it
-  draws each torch twice, as the static and as an entity, in the same place. id's
-  engine would do the same with that file.
