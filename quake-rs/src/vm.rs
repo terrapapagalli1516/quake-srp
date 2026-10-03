@@ -394,6 +394,14 @@ pub struct Vm {
     /// monsters' chase directions draw from: a VM's own fresh ones until the
     /// host hands it its session's ([`Vm::set_rand`]).
     rand: Rc<QRand>,
+    /// The mission packs' `$key` string table (AUDIT P6/B3), shared the same
+    /// way `rand` is: `None` for a bare VM or a plain id1 game (its progs has
+    /// no `$` string to look up), `Some` once a server built from a pak that
+    /// carries `localization/loc_english.txt` loads it
+    /// ([`Vm::set_loc_table`]). [`crate::builtins::var_string`] reads it
+    /// through [`Vm::loc_table`]; the client reads it the same way to
+    /// resolve `svc_finale`/`svc_cutscene`'s raw text.
+    loc: Option<Rc<crate::localization::LocTable>>,
     /// The program error this VM halted on ([`Vm::execute`]): id's
     /// `PR_RunError` ends the game, so the VM runs no more QuakeC once one has
     /// happened, until a harness resumes it ([`Vm::reset_execution`]).
@@ -447,6 +455,7 @@ impl Vm {
             edict_leafs: Vec::new(),
             edict_static: Vec::new(),
             rand: Rc::new(QRand::new()),
+            loc: None,
             halted: None,
             stack: Vec::new(),
             localstack: Vec::new(),
@@ -593,6 +602,21 @@ impl Vm {
     /// hands to each new server so they continue across level loads.
     pub fn set_rand(&mut self, rand: Rc<QRand>) {
         self.rand = rand;
+    }
+
+    /// The mission packs' `$key` string table, if one was loaded
+    /// ([`Vm::set_loc_table`]).
+    pub fn loc_table(&self) -> Option<&crate::localization::LocTable> {
+        self.loc.as_deref()
+    }
+
+    /// Resolve `$key` strings against `loc` from now on (AUDIT P6/B3):
+    /// [`crate::server::Server::with_pak`] calls this once, right after
+    /// loading the pak's `localization/loc_english.txt`, for every game —
+    /// id1's has none, so this is simply never called for it and
+    /// [`Vm::loc_table`] stays `None`.
+    pub fn set_loc_table(&mut self, loc: Rc<crate::localization::LocTable>) {
+        self.loc = Some(loc);
     }
 
     /// Run `f` with both `self` and the engine host borrowed mutably, by taking

@@ -52,14 +52,19 @@ fn pf_debug_noop(_vm: &mut Vm) -> Result<()> {
 }
 
 
-/// `PF_VarString(first)`: concatenate the string arguments from `first` to
-/// `pr_argc`. The C version uses a fixed 256-byte buffer; we build a `String`.
+/// `PF_VarString(first)`: the string arguments from `first` to `pr_argc`,
+/// joined. id's C (and this port, originally) just concatenated them — a
+/// fixed 256-byte buffer there, a `String` here. The mission packs' 2021
+/// re-release progs instead pass a `"$key"` localization immediate as the
+/// first of those arguments, with the rest as its `{0}`/`{1}`/… arguments
+/// (AUDIT P6/B3); [`crate::localization::format`] reads the VM's loaded
+/// table ([`Vm::loc_table`]) and does that lookup+substitution, falling back
+/// to the old plain concatenation when there is no table, no leading `$`,
+/// or no such key — so a plain id1 string (and any key the table doesn't
+/// carry) prints exactly as before.
 pub(crate) fn var_string(vm: &Vm, first: usize) -> String {
-    let mut out = String::new();
-    for i in first..vm.argc() {
-        out.push_str(&vm.arg_string(i));
-    }
-    out
+    let args: Vec<String> = (first..vm.argc()).map(|i| vm.arg_string(i)).collect();
+    crate::localization::format(vm.loc_table(), &args)
 }
 
 // ---------------------------------------------------------------- #1 makevectors
