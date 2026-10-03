@@ -328,12 +328,12 @@ mod tests {
 
         let mut renderer = crate::render::Renderer::new();
         renderer.begin_map(&bsp);
-        let closed = [BModelInstance { model_index: 1, origin: [-120.0, 0.0, 0.0], frame: 0 }];
+        let closed = [BModelInstance { model_index: 1, origin: [-120.0, 0.0, 0.0], angles: [0.0; 3], frame: 0 }];
         let frame1 = renderer.render(&Scene { bmodels: &closed, ..Scene::new(&bsp, cam, 160, 120, &pal) });
         // Same renderer, same camera, same map: only the submodel's origin
         // moves (a door opening), exactly as cl_main.rs's per-frame origin
         // read would hand the renderer on the next frame.
-        let opened = [BModelInstance { model_index: 1, origin: [-120.0, 120.0, 0.0], frame: 0 }];
+        let opened = [BModelInstance { model_index: 1, origin: [-120.0, 120.0, 0.0], angles: [0.0; 3], frame: 0 }];
         let frame2 = renderer.render(&Scene { bmodels: &opened, ..Scene::new(&bsp, cam, 160, 120, &pal) });
 
         let changed = frame1.pixels.iter().zip(frame2.pixels.iter()).filter(|(a, b)| a != b).count();
