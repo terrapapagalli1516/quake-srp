@@ -76,6 +76,8 @@ unzip quake106.zip resource.1 && bsdtar -xf resource.1 ID1/PAK0.PAK   # the zip 
 mkdir -p quake-data && mv ID1 quake-data/ && rm quake106.zip resource.1
 ```
 
+`ci/fetch_shareware.sh` does the same and checks both files' hashes.
+
 **2. Build and assemble** a directory with the page, the program and the pak:
 
 ```sh
@@ -103,6 +105,11 @@ The game uses shared memory, which browsers allow only on a *cross-origin isolat
 That needs those two headers and a secure context: `https://`, or `localhost`. To play from
 another device, put the server behind anything that serves https. If a host can't send the
 headers, the page's service worker adds them after one reload.
+
+**A public demo:** `web/publish.sh DIR` builds the threads program and assembles `DIR`
+with the page, the program and the shareware pak (with id's licence beside it), and a
+`_headers` file that Cloudflare Pages and Netlify read for the two headers and the
+caching. Upload `DIR` as it is.
 
 In the 2026 profile you play with WASD and the mouse (click the game to capture the mouse):
 
@@ -210,7 +217,9 @@ and docker to build the oracle once. Put the source at `quake-c/` (so that
 difference.
 
 Beyond Classic:
-- `cargo test` passes in both crates, and clippy shows zero warnings.
+- `cargo test` passes in both crates, and clippy shows zero warnings. CI runs both, and
+  both browser builds, on every push (`.github/workflows/check.yml`; `ci/local.sh` runs
+  the same commands on a checkout).
 - `quake-rs/target/release/quaketool framerate quake-data/ID1/PAK0.PAK --check` runs 22
   gameplay scenarios at high frame rates and compares them with id's 72 Hz.
 - 18 headless-browser checks (`web/verify_*.py`) cover everything from walking and the
@@ -251,6 +260,7 @@ display.
 | `oracle/` | id's WinQuake built headless from the C, and the scripts that compare it with the port |
 | `census/` | helpers for the gameplay census ([CENSUS.md](CENSUS.md)) |
 | `screenshots/` | the two renders at the top of this README |
+| `ci/`, `.github/workflows/` | the checks CI runs (`ci/local.sh` runs them here), and the shareware pak's fetch |
 
 Further reading:
 
