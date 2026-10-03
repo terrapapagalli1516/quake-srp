@@ -17,7 +17,7 @@ use crate::console::{
 use crate::host::step;
 use crate::host_cmd::execute_console_command;
 use crate::input::{
-    key_clear_states, key_down, key_event, key_is_down, key_up, look, mouse_move,
+    clear_all_states, key_down, key_event, key_is_down, key_up, keys_held, look, mouse_move,
     mouse_sensitivity, player_pitch, pointer_unlocked, set_attack, set_impulse, set_jump,
     set_move, set_movedown,
 };
@@ -129,8 +129,13 @@ pub(crate) fn call(line: &str) -> Answer {
         "key_event" => done(|| key_event(int(0), int(1), int(2))),
         "key_down" => done(|| key_down(int(0))),
         "key_up" => done(|| key_up(int(0))),
-        "key_clear_states" => done(key_clear_states),
+        "clear_all_states" => done(clear_all_states),
         "key_is_down" => key_is_down(int(0)).into(),
+        // The keys held down, by name ("w MOUSE1"), and how many.
+        "keys_held" => {
+            let (n, text) = keys_held();
+            Answer { value: n as f64, text }
+        }
         "mouse_move" => done(|| mouse_move(real(0), real(1))),
         "pointer_unlocked" => done(pointer_unlocked),
         "look" => done(|| look(real(0), real(1))),

@@ -2199,8 +2199,10 @@ each; the C followed and the evidence are in the commit messages.
   `M_Keys_Key` refuses it and ends the grab. The Quit prompt is `M_Quit_Key`:
   only y/Y quit, n/N/Escape go back, Enter and the rest do nothing. The page
   forwards the mouse buttons (K_MOUSE1..3) while a key is being grabbed, so
-  Customize controls binds them as id's does. Losing the window's focus runs
-  vid_win.c's `ClearAllStates` (`key_clear_states`: nothing stays held). The
+  Customize controls binds them as id's does. Losing the window's focus, the
+  pointer lock or fullscreen, or the tab hidden, runs vid_win.c's
+  `ClearAllStates` (`clear_all_states`: every key's release, nothing stays
+  held; web/PLATFORM.md, "Input"). The
   menu/console exports the tests and automation use (`menu_up`,
   `menu_select`, `console_enter`, ...) are one key each through the same
   path, and so is the 2-D oracle's `key` (the C's `oracle_key` is
