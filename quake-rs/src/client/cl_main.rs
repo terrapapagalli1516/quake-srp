@@ -435,16 +435,24 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
                 // cl.intermission = 2 + SCR_CenterPrint (scr_centertime_start).
                 // completed_time = cl.time = sv.time, as above; the reveal uses
                 // w.clock - finale_start (cl.time - scr_centertime_start in the C).
+                //
+                // AUDIT P6/B3: WriteString carries no var-args for
+                // PF_VarString/var_string to resolve, so a mission pack's
+                // finale text (e.g. "$qc_finale_hip1") arrives as the raw
+                // key; look it up here, at the client, right where it is
+                // about to be shown (id1's text is never a key, so this is a
+                // no-op for it — crate::localization::resolve falls back to
+                // the text itself).
                 w.intermission = 2;
                 w.completed_time = w.server.time();
-                w.finale_text = text;
+                w.finale_text = crate::localization::resolve(w.server.vm.loc_table(), &text);
                 w.finale_start = w.clock;
             }
             crate::server::SvcEvent::Cutscene(text) => {
                 // cl.intermission = 3 (text only, no plaque); times as per Finale.
                 w.intermission = 3;
                 w.completed_time = w.server.time();
-                w.finale_text = text;
+                w.finale_text = crate::localization::resolve(w.server.vm.loc_table(), &text);
                 w.finale_start = w.clock;
             }
             crate::server::SvcEvent::SellScreen => {

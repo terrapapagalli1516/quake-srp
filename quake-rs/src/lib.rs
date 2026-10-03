@@ -18,6 +18,7 @@
 //! |---|---|---|
 //! | [`pak`], [`common`], [`wad`], [`bsp`], [`mdl`], [`spr`], [`crc`] | `common.c`, `wad.c`, `model.c`, `crc.c` | the search path, the archives and the file formats |
 //! | [`progs`], [`vm`], [`builtins`] | `pr_*.c` | QuakeC: the program, the interpreter, the builtins |
+//! | [`localization`] | (the 2021 re-release) | the mission packs' `$key` strings |
 //! | [`server`], [`world`], [`save`] | `sv_*.c`, `world.c`, `host_cmd.c` | the server: physics, collision, savegames |
 //! | [`client`], [`demo`], [`particles`], [`tent`], [`dlight`], [`stepping`] | `cl_*.c`, `view.c`, `host.c` | the game client: the live frame, demos, effects, the host clock |
 //! | [`render`] | `r_*.c`, `d_*.c` | the software renderer |
@@ -53,6 +54,7 @@ pub mod progs;
 pub mod qrand;
 pub mod vm;
 pub mod builtins;
+pub mod localization;
 
 pub mod world;
 pub mod server;

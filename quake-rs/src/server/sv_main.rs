@@ -28,6 +28,7 @@ use crate::progs::Progs;
 use crate::stepping::Stepping;
 use crate::vm::Vm;
 use crate::Result;
+use std::rc::Rc;
 
 /// `EF_MUZZLEFLASH` (`quakedef.h`): the firing entity emits a brief, bright
 /// forward-offset light (`CL_RelinkEntities`).
@@ -83,7 +84,15 @@ impl Server {
         let mode = GameMode::detect(&progs);
         let mut vm = Vm::new(progs);
         install_engine_builtins(&mut vm);
+        // AUDIT P6/B3: a mission pack's own pak0.pak carries its
+        // localization/loc_english.txt (mission_paks.py); read it before
+        // `pak` moves into the host. id1 carries none (its progs has no `$`
+        // string), so this is `None` for a plain shareware/registered game.
+        let loc = pak.as_ref().and_then(crate::localization::load);
         vm.set_host(Box::new(WorldModel::with_pak(bsp, pak)));
+        if let Some(loc) = loc {
+            vm.set_loc_table(Rc::new(loc));
+        }
 
         // The world model starts with the cvars' defaults (skill 1, sv_gravity
         // 800, `ServerCvars`). A front-end that persists the player's chosen
