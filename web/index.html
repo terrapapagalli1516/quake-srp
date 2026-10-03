@@ -472,8 +472,22 @@ let exp = null;                    // the automation proxy (window.quake.call by
 let engineError = '';              // the program's last "quake: ..." line (the Sys_Error it stopped on)
 // The program's UI state as of its last turn (the STATE record).
 const gameState = { flags: 0, menuScreen: 0, pixelSize: 0 };
-// touch.js, on a touch screen: { state() on every STATE record, rumble() }.
+// touch.js, on a touch screen: { state() on every STATE record, rumble(),
+// portrait(), hold(on) }.
 let touch = null;
+
+// A touch screen held upright does not play (PLATFORM.md, "Touch"): touch.js's
+// "turn your phone sideways" covers the page, and the game waits behind it —
+// the frame loop below sends no ticks and shows no frame, which is all a
+// hidden tab ever did to it, so the game's time stands still and it goes on
+// where it was when the screen is turned back. `held` is the frame loop's
+// own copy of the answer (it acts on a change, once); everything else asks
+// the screen itself, which cannot be a refresh behind a resize.
+let held = false;
+const portraitNow = () => !!touch && touch.portrait();
+// The page is not being looked at: its tab hidden, or the prompt up. The
+// sound and the CD stop with it, and start again where they were.
+const awayNow = () => document.hidden || portraitNow();
 
 // Is the in-game menu up (capturing keyboard)?
 function menuVisible() { return !!(gameState.flags & ST.MENU); }
@@ -518,10 +532,12 @@ function fields(size, fill) { const b = new Uint8Array(size); fill(new DataView(
 // Quake, whether it goes to the menu, the console or its binding. `at` is the
 // event's timeStamp, for the latency measurement.
 function keyEvent(qk, down, ch, at) {
+  if (held) return;   // a keyboard beside a phone held upright: the game is not listening
   noteInput(at);
   sendRecord(IN.KEY, fields(8, d => { d.setUint8(0, qk); d.setUint8(1, down ? 1 : 0); d.setUint32(4, ch || 0, true); }));
 }
 function mouseMove(dx, dy, at) {
+  if (held) return;
   noteInput(at);
   if (sendRecord(IN.MOUSE, fields(8, d => { d.setFloat32(0, dx, true); d.setFloat32(4, dy, true); }))) mouseSent++;
 }
@@ -1468,7 +1484,7 @@ function cdSync() {
     cd.serial = w.serial;
     cd.el.currentTime = 0;
   }
-  const play = w.mode === CD_MODE.PLAYING && w.serial === cd.serial && !document.hidden && cd.hasFile;
+  const play = w.mode === CD_MODE.PLAYING && w.serial === cd.serial && !awayNow() && cd.hasFile;
   if (play && cd.el.paused) cd.el.play().catch(e => { cd.error = String(e); });
   else if (!play && !cd.el.paused) cd.el.pause();
 }
@@ -1655,18 +1671,20 @@ function updateSndUI() {
 updateSndUI();
 
 // A hidden tab stops the game (no refreshes, no ticks): its sound stops with
-// it, and goes on where it stopped when the tab comes back.
+// it, and goes on where it stopped when the tab comes back. So does a phone
+// held upright (`awayNow`).
 let audioHidden = false;
-document.addEventListener('visibilitychange', () => {
+function syncAudioAway() {
   if (!audioCtx) return;
-  if (document.hidden && audioCtx.state === 'running') {
+  if (awayNow() && audioCtx.state === 'running') {
     audioHidden = true;
     audioCtx.suspend().catch(() => {});
-  } else if (!document.hidden && audioHidden) {
+  } else if (!awayNow() && audioHidden) {
     audioHidden = false;
     audioCtx.resume().catch(() => {});
   }
-});
+}
+document.addEventListener('visibilitychange', syncAudioAway);
 
 // The sound device's counts (the program's Audio record, every tick). The
 // checks read them: window.__menuSounds is the menu's clicks.
@@ -2475,6 +2493,7 @@ function pictureBox() {
 // native resolution it renders at that size over its pixel size.
 let windowSent = '';
 function sendWindow() {
+  if (portraitNow()) return;   // the game waits for the screen to be turned (holdGame); releaseGame sends it
   const dpr = window.devicePixelRatio || 1, b = pictureBox();
   const w = Math.floor(b.w * dpr), h = Math.floor(b.h * dpr), key = w + 'x' + h + '@' + dpr;
   if (key === windowSent) return;
@@ -2814,8 +2833,38 @@ function startPresenting() {
   lastTick = performance.now();
   requestAnimationFrame(frame);
 }
+// The phone is turned upright (touch.js's prompt covers the page): the game
+// waits as it does in a hidden tab — and not by id's `pause`, which a demo
+// ignores, a server may refuse (`pausable 0`) and a menu or the console
+// would show as a plaque in a game the player is not looking at — so the
+// attract loop, the menus and a game in progress all stop alike, with no
+// state of the game's own changed. Every key and finger is let go (a
+// release may never come: the prompt takes the touches), the sound and the
+// CD stop (`awayNow`), and the window's size goes unreported: the tall box
+// would resize the frame for a picture nobody sees, and back.
+function holdGame() {
+  clearAllStates();
+  touch.hold(true);
+  syncAudioAway();
+  cdSync();
+}
+// Turned back: the clock starts over (no tick carries the wait), the sound
+// goes on, and the window's box is told if it changed while the game waited.
+function releaseGame(now) {
+  lastTick = now;
+  touch.hold(false);
+  syncAudioAway();
+  cdSync();
+  sendWindow();
+  fitCanvas();
+}
 function frame(now) {
   requestAnimationFrame(frame);
+  if (portraitNow() !== held) {
+    held = !held;
+    if (held) holdGame(); else releaseGame(now);
+  }
+  if (held) { audioT = now; return; }
   updateSndUI();
   advanceAudioClock(audioT === null ? 0 : now - audioT);
   audioT = now;
