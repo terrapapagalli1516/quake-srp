@@ -219,7 +219,7 @@ pub(super) fn draw_sky_span(
     tw: usize,
     view: &SkyView,
 ) {
-    // id's 256x128 sky reads its two layers with no check and no branch
+    // id's 256x128 sky reads its two layers with no bounds check
     // ([`sky_layers_sample`]); any other texture, never id's, the guarded way.
     match sky_layers(pixels, tw) {
         Some(layers) => sky_span(out, u, v, count, view, |s, t| sky_layers_sample(layers, s, t, view.front)),
@@ -244,18 +244,17 @@ fn sky_layers(pixels: &[u8], tw: usize) -> Option<&SkyLayers> {
 }
 
 /// [`sky_sample`] on id's 256x128 sky, for [`draw_sky_span`]'s pixel loop:
-/// the same two texels, both read at every pixel (each index is inside the
-/// array by its masks, so neither read is checked) and one of them taken
-/// without a branch. The guarded [`sky_sample`] reads the back layer only
-/// behind a transparent cloud texel: a branch at every pixel that a cloud's
-/// ragged edge makes unpredictable, and a sky pixel cost twice a wall's
-/// with it (PERF_PLAN.md, §14).
+/// the same two texels, read with no bounds check (each index is inside the
+/// array by its masks). A tenth off a sky pixel, which still costs about
+/// twice a wall's: two texel addresses a pixel, and `D_Sky_uv_To_st`'s
+/// square root and divisions every 32 (PERF_PLAN.md, §14).
 #[inline]
 fn sky_layers_sample(layers: &SkyLayers, s: i32, t: i32, front: i32) -> u8 {
     let texel = |c: i32| ((c >> 16) & SKYMASK) as usize;
-    let cloud = layers[texel(t.wrapping_add(front)) * LAYERS_WIDTH + texel(s.wrapping_add(front))];
-    let back = layers[texel(t) * LAYERS_WIDTH + LAYERS_WIDTH / 2 + texel(s)];
-    if cloud != 0 { cloud } else { back }
+    match layers[texel(t.wrapping_add(front)) * LAYERS_WIDTH + texel(s.wrapping_add(front))] {
+        0 => layers[texel(t) * LAYERS_WIDTH + LAYERS_WIDTH / 2 + texel(s)],
+        cloud => cloud,
+    }
 }
 
 /// [`draw_sky_span`]'s walk of the span's 16.16 coordinates, each pixel
@@ -393,8 +392,8 @@ mod tests {
         assert_eq!(sky_sample(&pixels, tw, i32::MAX, 0, fx(1)), sky_sample(&pixels, tw, i32::MAX - fx(128), 0, fx(1)));
     }
 
-    /// [`sky_layers_sample`], the span loop's unchecked and branch-free read of
-    /// id's 256x128 sky, is [`sky_sample`] for every coordinate and offset:
+    /// [`sky_layers_sample`], the span loop's unchecked read of id's 256x128
+    /// sky, is [`sky_sample`] for every coordinate and offset:
     /// 16.16 values over the whole `i32` range, the patterned sky's
     /// transparent and opaque cloud texels both. A sky of any other shape has
     /// no [`SkyLayers`] and its spans keep the guarded read.
