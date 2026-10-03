@@ -560,7 +560,7 @@ pub const CVARS: &[Cvar] = &[
     Cvar { name: "r_lerplightstyles", archive: true, departure: true, help: "flickering lights glide, not snap",
         get: |c| flag(c.lightstyles == LerpLightStyles::Smooth),
         set: |c, v| c.lightstyles = if on(v) { LerpLightStyles::Smooth } else { LerpLightStyles::Classic } },
-    Cvar { name: "r_torchflicker", archive: true, departure: true, help: "steady torches flicker, 0 off, to 2",
+    Cvar { name: "r_torchflicker", archive: true, departure: true, help: "torch flicker: 0 off, 1, 2 is noisy",
         get: |c| number_string(c.torches.value()), set: |c, v| c.torches = TorchFlicker::from_value(atof(v)) },
 ];
 

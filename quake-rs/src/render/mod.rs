@@ -1188,7 +1188,8 @@ impl Renderer {
         let torches = if video.torches.is_off() {
             None
         } else {
-            let set = self.torches.get_or_insert_with(|| torch::TorchSet::build(scene.world));
+            let threads = self.workers.threads();
+            let set = self.torches.get_or_insert_with(|| torch::TorchSet::build(scene.world, threads));
             set.animate(scene.time, video.lightstyles, video.torches);
             Some(&*set)
         };

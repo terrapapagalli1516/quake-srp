@@ -607,13 +607,21 @@ left the rest steady, style 0: all 143 torches and flames of e1m2–e1m7, 109
 on e2m6, 48 on e4m5. LIGHT.EXE baked a steady torch into each face's style-0
 lightmap with the room's other lights, so at run time it is just light. The
 2026 extra (`render::torch`; off in Classic) finds each one again: from the
-entity lump its origin and `light` (LIGHT.EXE's 300 without one), and for
-each face in front of it and within reach its share of each luxel as the
-tool computed it — `SingleLightFace`'s `(light - dist) * (0.5 + 0.5 cos)`,
-halved by `rangescale`, at `CalcPoints`' sample points — without the tool's
-shadows, and never more than the luxel holds (where a luxel holds less than
-the shares, the tool found the torch shadowed or clamped; on e1m2–e1m4 that
-is a third to a half of the luxels a torch could reach). Each frame adds
+entity lump its origin and `light` (any key starting `light`, or `_light`;
+LIGHT.EXE's 300 without one), and for each face in front of it and within
+reach its share of each luxel as the tool computed it. That is the tool's
+code ported: `SingleLightFace`'s `(light - dist) * (0.5 + 0.5 cos)`, halved
+by `rangescale`, at `CalcPoints`' sample points (pulled toward the face's
+middle where the middle cannot see them), four samples a luxel averaged, as
+`-extra` lights — and nothing where `TestLine`, the tool's trace through the
+world's nodes, finds a wall between the torch and the sample. id lit the
+shareware maps with `-extra`: re-derived so, every style-0 light traced,
+`start`'s style-0 lightmaps come out to the byte and e1m2–e1m6's on 85–97%
+of their luxels (one sample a luxel: a quarter). The registered maps in the
+pak tested here are not this tool's bake (3% of their luxels; held over
+re-derived spreads 0.4–1.4): their shares are the tool's light, not theirs.
+A luxel's shares are still never more than it holds, which only bites where
+the tool clamped a luxel at 255. Each frame adds
 
 ```text
 strength · depth · Σ_k (s_k(t)/s̄_k - 1)/√2 · share · d_lightstylevalue[0]/256
@@ -621,9 +629,15 @@ strength · depth · Σ_k (s_k(t)/s̄_k - 1)/√2 · share · d_lightstylevalue[
 
 to the luxel: `s_k` world.qc's two flicker strings through the light-style
 glide (stepped as id's with `r_lerplightstyles 0`), `s̄_k` their means, so the
-change is zero-mean and every luxel averages to id's over the strings'
-common period (`render::torch::tests`: to a hundredth of a luxel unit); the
-level is exactly as dark as id made it. Two strings, not one: either alone
+change is zero-mean and every luxel's light averages to id's over the
+strings' common period (`render::torch::tests`: to a hundredth of a luxel
+unit). The picture's mean brightness follows within about 2%, not exactly:
+the colormap's rows are not even steps (toward its dark end a rise
+brightens a texel more than a dip darkens it: +2.1% of luma on e1m3's
+flames close up), and a rise past the brightest row is clamped there while
+the dip is not (−1.1% on e1m2's torch wall), both in proportion to the
+strength. Two
+strings, not one: either alone
 comes round every 1.7 or 2.3 s, its one bright `q` a beat the eye finds; two
 at rates whose periods do not divide wander. The kinds differ, as fire does:
 the wall torch quick and shallow (style 6 at its own rate, style 1 at 0.75,
@@ -645,53 +659,65 @@ colormap row or two.
 
 **The cost.** As with the light styles it is the bakes: a block a torch
 lights rebakes when the torch's value moves. But a torch's light reaches 300
-units, so in a torch-lit room four in five of the surfaces drawn are
-torch-lit, and with two strings and several torches a face, the value moves
-nearly every frame: at 72 Hz every torch-lit block rebakes every frame, at
-480 Hz about half. `quaketool framerate <pak0>,<pak1> --torchflicker 1 --res
-WxH --threads 1|8 --reps 3 --secs 3`: the live game standing at each view
-(`framerate.rs`' `TORCH_VIEWS`: on each map, of standing 160 or 288 units
-from each torch facing it, where the most drawn surfaces are torch-lit), the
-2026 video settings in both, the counters from one run of each, the 3-D
-view's median ms a frame from three of each, interleaved, the counters off,
-native release build, 2026-10-03, load 2–7:
+units, so in a torch-lit room most of the surfaces drawn are torch-lit, and
+with two strings and several torches a face, the value moves nearly every
+frame: at 72 Hz every torch-lit block rebakes every frame, at 480 Hz about
+half. The shadows take 12–23% of those surfaces away (the faces the torch
+cannot see; across whole maps 20–41% of the torch-lit faces).
+`quaketool framerate <pak0>,<pak1> --torchflicker 1 --res WxH --threads 1|8
+--reps 3 --secs 3`: the live game standing at each view (`framerate.rs`'
+`TORCH_VIEWS`: on each map, of standing 160 or 288 units from each torch
+facing it, where the most drawn surfaces are torch-lit), the 2026 video
+settings in both, the counters from one run of each, the 3-D view's median
+ms a frame from three of each, interleaved, the counters off, native release
+build, 2026-10-03, load 0–5. Each cell is without the shadows (the first
+build, `b22ba40`) → with them, run in the same sitting; the time is what the
+flicker adds to id's view (1080p: 3.9–5.0 ms on one thread, 1.4–1.7 on
+eight; 1315x535: 1.6–2.0 and 0.8–1.1):
 
 1920x1080:
 
-| view | torch-lit surfaces | blocks rebaked a frame, 72 / 480 Hz | 1 thread, ms, 72 / 480 Hz | 8 threads, ms, 72 / 480 Hz |
+| view | torch-lit surfaces | blocks rebaked a frame, 72 / 480 Hz | 1 thread, ms added, 72 / 480 Hz | 8 threads, ms added, 72 / 480 Hz |
 |---|---|---|---|---|
-| e1m2's start | 130 | 129 / 79 | 3.93 → 4.49 / 3.90 → 4.28 | 1.36 → 2.26 / 1.46 → 2.12 |
-| e1m3's flames | 154 | 154 / 107 | 3.88 → 5.01 / 3.89 → 4.81 | 2.31 → 3.70 / 1.70 → 3.05 |
-| e1m4's torches | 141 | 140 / 74 | 3.92 → 4.71 / 3.92 → 4.49 | 1.57 → 2.76 / 1.44 → 2.15 |
-| e2m6's torches | 142 | 142 / 114 | 4.52 → 5.06 / 4.49 → 5.18 | 1.84 → 2.58 / 1.89 → 2.55 |
-| e4m5's flames | 221 | 217 / 88 | 4.75 → 6.17 / 4.74 → 5.26 | 2.01 → 3.78 / 2.20 → 2.88 |
+| e1m2's start | 130 → 111 | 129 → 110 / 79 → 61 | 0.55 → 0.46 / 0.36 → 0.29 | 0.85 → 0.85 / 0.57 → 0.33 |
+| e1m3's flames | 154 → 135 | 154 → 134 / 107 → 85 | 1.15 → 1.03 / 0.98 → 0.84 | 1.58 → 1.45 / 1.28 → 0.97 |
+| e1m4's torches | 141 → 109 | 140 → 108 / 74 → 52 | 0.82 → 0.64 / 0.48 → 0.35 | 1.19 → 0.74 / 0.60 → 0.50 |
+| e2m6's torches | 142 → 121 | 142 → 121 / 114 → 82 | 0.60 → 0.50 / 0.51 → 0.39 | 1.02 → 0.71 / 0.63 → 0.51 |
+| e4m5's flames | 221 → 192 | 217 → 188 / 88 → 76 | 1.30 → 1.25 / 0.71 → 0.55 | 1.76 → 1.76 / 0.80 → 0.68 |
 
 1315x535 (a wide frame):
 
-| view | torch-lit surfaces | blocks rebaked a frame, 72 / 480 Hz | 1 thread, ms, 72 / 480 Hz | 8 threads, ms, 72 / 480 Hz |
+| view | torch-lit surfaces | blocks rebaked a frame, 72 / 480 Hz | 1 thread, ms added, 72 / 480 Hz | 8 threads, ms added, 72 / 480 Hz |
 |---|---|---|---|---|
-| e1m2's start | 127 | 126 / 77 | 1.75 → 2.14 / 1.68 → 1.88 | 0.86 → 1.24 / 0.87 → 1.05 |
-| e1m3's flames | 174 | 174 / 120 | 1.74 → 2.51 / 1.76 → 2.42 | 0.97 → 1.89 / 0.94 → 1.57 |
-| e1m4's torches | 147 | 146 / 78 | 1.84 → 2.48 / 1.77 → 2.17 | 0.94 → 1.59 / 0.87 → 1.30 |
-| e2m6's torches | 144 | 144 / 115 | 1.86 → 2.24 / 1.86 → 2.17 | 1.02 → 1.41 / 0.95 → 1.36 |
-| e4m5's flames | 237 | 233 / 96 | 2.04 → 2.83 / 2.05 → 2.58 | 1.09 → 2.18 / 1.10 → 1.51 |
+| e1m2's start | 127 → 110 | 126 → 109 / 77 → 61 | 0.30 → 0.21 / 0.19 → 0.13 | 0.34 → 0.34 / 0.20 → 0.18 |
+| e1m3's flames | 174 → 154 | 174 → 154 / 120 → 98 | 0.70 → 0.62 / 0.52 → 0.44 | 0.79 → 0.62 / 0.59 → 0.50 |
+| e1m4's torches | 147 → 113 | 146 → 112 / 78 → 54 | 0.58 → 0.45 / 0.38 → 0.26 | 0.62 → 0.49 / 0.40 → 0.28 |
+| e2m6's torches | 144 → 121 | 144 → 121 / 115 → 82 | 0.37 → 0.32 / 0.33 → 0.22 | 0.41 → 0.34 / 0.39 → 0.25 |
+| e4m5's flames | 237 → 208 | 233 → 204 / 96 → 84 | 0.82 → 1.02 / 0.39 → 0.52 | 1.07 → 1.06 / 0.46 → 0.38 |
 
-So +0.4–1.4 ms a frame at 1080p on one thread (+9–29%), and about as much
-in milliseconds on eight, where it is a larger share (+27–96%): the bakes
-run in `D_DrawSurfaces`' setup, before the bands, on one thread. The
-rebakes are about 0.7 ns a texel, and a torch-lit room bakes about a texel a
-pixel of what it shows. demo1's timedemo (`quaketool timedemo demo1 --video
-modern --display 16:9 --res 1920x1080`, every message a frame, so 72 Hz's
-case; median of three, interleaved) runs 210 → 197 fps on one thread and
-673 → 507 on eight. The medians stay inside 240 Hz's 4.17 ms at 1080p on
-eight threads; at 480 Hz the torch-lit views go from 1.4–2.2 ms to 2.1–3.1
-(the e4m5 view was past 2.08 ms already). The lever is the serial bake:
-baking a frame's missed blocks on the band threads would divide this cost
-by about the thread count, for the dynamic lights and gliding styles too.
-(A cheaper flicker — each face's torches sampled at most 120 times a second,
-at the face's own phase — would cut the 480 Hz rebakes by four at the price
-of a second clock per face; not built.) The torch set is found the first
-frame the extra is on: 6–11 ms on the shareware maps, 39 on e2m6, 0.5–2.1 MB.
+So the flicker adds 0.3–1.3 ms a frame at 1080p on one thread and
+0.3–1.8 on eight, where it is a larger share: the bakes run in
+`D_DrawSurfaces`' setup, before the bands, on one thread. The shadows take
+about a sixth of it off (summed over the rows, 15% on one thread, 17% on
+eight; one row, e4m5 at 1315x535 on one thread, came out the other
+way in this noise). The rebakes are about 0.7 ns a texel, and a torch-lit
+room bakes about a texel a pixel of what it shows. demo1's timedemo
+(`quaketool timedemo demo1 --video modern --display 16:9 --res 1920x1080`,
+every message a frame, so 72 Hz's case; median of three, interleaved; before
+the shadows) ran 210 → 197 fps on one thread and 673 → 507 on eight. The
+lever is the serial bake: baking a frame's missed blocks on the band threads
+would divide this cost by about the thread count, for the dynamic lights and
+gliding styles too. (A cheaper flicker — each face's torches sampled at most
+120 times a second, at the face's own phase — would cut the 480 Hz rebakes
+by four at the price of a second clock per face; not built.)
+
+The torch set is found the first frame the extra is on, a map's load: the
+tool's traces, four samples a luxel and the samples pulled in, are most of
+it — 58–260 ms on the shareware maps on one thread, 431 on e2m6 — so it is
+built on the renderer's threads, 9–39 ms on eight (66 on e2m6), the same
+set for any count; 0.1–1.1 MB. In the page (a 16-thread desktop) the
+`map` command and its first frame take 40–80 ms with the flicker on and
+15–20 without.
 
 The flicker runs on the scene's `float` `cl.time`: after about 10 hours in
 one level it holds a value for two 480 Hz frames, which a flame's flicker
