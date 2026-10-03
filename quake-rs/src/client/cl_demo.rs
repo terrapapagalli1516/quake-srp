@@ -1,8 +1,9 @@
 //! cl_demo.c — playing a recorded `.dem`: `CL_PlayDemo_f`'s build of a
 //! [`DemoPlay`], quake.rc's demo loop, and the demo client frame rendered like
-//! live play: per-frame effect replay (svc_particle, temp entities,
-//! svc_sound/stopsound, svc_damage, prints — cl_parse.c / cl_tent.c / view.c
-//! `V_ParseDamage`) and [`demo_frame`], the recorded-POV `V_CalcRefdef` +
+//! live play: per-frame effect replay (svc_particle, temp entities and their
+//! lights, svc_sound/stopsound, svc_damage, prints — cl_parse.c / cl_tent.c /
+//! view.c `V_ParseDamage`; the entities' light effects and trails of
+//! `CL_RelinkEntities`) and [`demo_frame`], the recorded-POV `V_CalcRefdef` +
 //! `SCR_UpdateScreen` for one frame. `timedemo` (`CL_TimeDemo_f`) plays a
 //! demo one message per host frame ([`build_timedemo`], [`timedemo_frame`])
 //! and [`TimeDemoClock`] keeps `cls.td_*` and prints `CL_FinishTimeDemo`'s
@@ -604,9 +605,9 @@ fn cl_relink_entities(d: &mut DemoPlay, frac: f32, first_read: usize, lerpmove: 
 /// `d.idx`, read and its effects spawned): the recorded POV's
 /// `V_CalcRefdef`, `S_Update`, the 3-D view and `SCR_UpdateScreen`'s 2-D
 /// layer. `dt` is `host_frametime`; `cl_frametime` is `cl.time - cl.oldtime`,
-/// the particles' and the stair smoothing's step (the two are the same frame
-/// time in ordinary playback). `lerpmodels` is a parameter rather than read
-/// off `d` (like `lerpmove` above it) so [`timedemo_frame`] can hold it to
+/// the particles' and lights' decay and the stair smoothing's step (the two are
+/// the same frame time in ordinary playback). `lerpmodels` is a parameter rather
+/// than read off `d` (like `lerpmove` above it) so [`timedemo_frame`] can hold it to
 /// [`LerpModels::Classic`] regardless of `d.lerpmodels`.
 fn render_demo_frame(
     d: &mut DemoPlay,
