@@ -40,7 +40,8 @@
 //! (`server::GLIDE_STEP`), so a block rebakes at most once a step of either
 //! voice. A torch's light reaches 300 units, so in a torch-lit room most of
 //! the surfaces drawn are rebaked every frame at 72 Hz and about half of them
-//! at 480 Hz (`FRAMERATE.md`, "Steady torches that flicker"). A torch with an
+//! at 480 Hz (`FRAMERATE.md`, "Steady torches that flicker"); the shadows
+//! spare the faces a torch cannot see. A torch with an
 //! animated style of its own is left to it (no double flicker); one QuakeC
 //! switches (style 32 and up) is left alone.
 //!
