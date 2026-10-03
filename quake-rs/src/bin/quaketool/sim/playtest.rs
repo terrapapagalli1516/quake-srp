@@ -218,7 +218,7 @@ pub fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> CmdRes
     // here so it outlives the combat block).
     let mut peak_parts: Vec<([f32; 3], u8)> = Vec::new();
     // Dynamic lights (explosions, muzzle flashes, EF_* lights). Driven each
-    // combat frame from the drained temp entities + entity_dlights, decayed, and
+    // combat frame from the drained temp entities + lit_entities, decayed, and
     // snapshotted at peak so the POV render below lights up the walls.
     let mut dlights = DynamicLights::new();
     let mut peak_dlights: Vec<quake_rs::dlight::DynamicLight> = Vec::new();
@@ -299,16 +299,18 @@ pub fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> CmdRes
                 particles.spawn_burst(b.org, b.dir, b.color, b.count, now, &mut prng);
             }
             // Realise the temp entities (explosions, wall impacts) the QuakeC
-            // fired via the Write* builtins. Explosions also queue their sound
-            // AND spawn a decaying dynamic light (CL_ParseTEnt: radius 350, die
-            // now+0.5, decay 300, minlight 0, key 0 -> a fresh slot each one).
+            // fired via the Write* builtins. Explosions also queue their sound;
+            // the rocket's and the coloured one spawn a decaying dynamic light
+            // (CL_ParseTEnt, `DynamicLights::explosion`).
             for ev in server.drain_temp_entities() {
                 te_total += 1;
                 use quake_rs::server::te_consts::*;
                 match ev.te_type {
                     TE_EXPLOSION | TE_TAREXPLOSION | TE_EXPLOSION2 => {
                         te_explosions += 1;
-                        dlights.alloc(0, ev.pos, 350.0, now + 0.5, 300.0, 0.0, now);
+                        if ev.te_type != TE_TAREXPLOSION {
+                            dlights.explosion(ev.pos, now);
+                        }
                     }
                     TE_GUNSHOT => te_gunshots += 1,
                     _ => {}
@@ -318,24 +320,14 @@ pub fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> CmdRes
                 }
             }
             // Entity light effects (EF_MUZZLEFLASH / BRIGHTLIGHT / DIMLIGHT) from
-            // the in-use edicts; add the deterministic rand()&31 radius jitter
-            // here (entity_dlights keeps the base radius so the query is pure).
-            for ed in server.entity_dlights() {
-                let jitter = (prng.next_range(32)) as f32;
-                dlights.alloc(
-                    ed.key,
-                    ed.origin,
-                    ed.radius_base + jitter,
-                    now + ed.life,
-                    0.0,
-                    ed.minlight,
-                    now,
-                );
+            // the in-use edicts, as CL_RelinkEntities makes them.
+            for e in server.lit_entities() {
+                dlights.relink_effects(e.key, e.origin, e.angles, e.effects, now, &mut prng);
             }
             particles.advance(0.1, now, PARTICLE_GRAVITY);
-            // Decay + retire dynamic lights, then track the peak set for the POV.
+            // Decay dynamic lights, then track the peak set for the POV.
             dlights.advance(0.1, now);
-            let active = dlights.active();
+            let active = dlights.active(now);
             if active.len() > max_active_dlights {
                 max_active_dlights = active.len();
             }

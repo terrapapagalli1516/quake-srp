@@ -25,7 +25,7 @@ pub(crate) fn step_walk(w: &mut Walk, dt: f64, menu_up: bool, vid: &Vid) -> (ren
 mod tests {
     use super::*;
     use quake_rs::client::cl_main::{
-        client_items, client_punchangle, offset_box, pushed_dlights, static_is_visible,
+        client_items, client_punchangle, offset_box, static_is_visible,
         ALIAS_MODEL_HALF,
     };
     use quake_rs::client::host_cmd::{try_changelevel, try_restart};
@@ -436,12 +436,12 @@ mod tests {
         let now = w.clock;
         w.dlights.alloc(0, [0.0; 3], 350.0, now + 0.5, 300.0, 0.0, now);
         w.dlights.alloc(0, [64.0, 0.0, 0.0], 200.0, now - 0.01, 0.0, 0.0, now);
-        let drawn = pushed_dlights(&w.dlights, now);
+        let drawn = w.dlights.active(now);
         assert_eq!(drawn.len(), 1, "the dead light is not pushed");
         assert_eq!(drawn[0].radius, 350.0, "full radius on its first frame");
-        let before = w.dlights.active().iter().map(|d| d.radius).fold(0.0, f32::max);
+        let before = w.dlights.active(w.clock).iter().map(|d| d.radius).fold(0.0, f32::max);
         step_walk(&mut w, 0.05, false, &crate::vid::mode_vid(320, 200));
-        let after = w.dlights.active().iter().map(|d| d.radius).fold(0.0, f32::max);
+        let after = w.dlights.active(w.clock).iter().map(|d| d.radius).fold(0.0, f32::max);
         assert!((before - after - 0.05 * 300.0).abs() < 1e-3, "{before} -> {after}");
     }
 
@@ -905,7 +905,7 @@ mod tests {
         let rng = w.prng;
         w.server.vm.ent_set_float(e, "effects", quake_rs::server::EF_MUZZLEFLASH as f32);
         let (firing, firing_models) = rerender(&mut w, rng);
-        assert!(w.dlights.active().iter().all(|d| d.key() != e), "no light for an entity not sent");
+        assert!(w.dlights.active(w.clock).iter().all(|d| d.key() != e), "no light for an entity not sent");
         w.server.vm.ent_set_float(e, "effects", 0.0);
         let (quiet, quiet_models) = rerender(&mut w, rng);
         assert_eq!(pixels_differing(&firing, &quiet), 0, "the flash behind the wall lights nothing");
@@ -941,7 +941,7 @@ mod tests {
         let rng = w.prng;
         w.server.vm.ent_set_float(e, "effects", quake_rs::server::EF_MUZZLEFLASH as f32);
         let (shown, shown_models) = rerender(&mut w, rng);
-        assert!(w.dlights.active().iter().any(|d| d.key() == e), "its muzzle flash is made");
+        assert!(w.dlights.active(w.clock).iter().any(|d| d.key() == e), "its muzzle flash is made");
         w.server.vm.ent_set_float(e, "effects", 0.0);
         w.server.vm.ent_set_float(e, "modelindex", 0.0);
         let (hidden, hidden_models) = rerender(&mut w, rng);

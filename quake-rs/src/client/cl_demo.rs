@@ -13,6 +13,7 @@
 
 use crate::bsp::Bsp;
 use crate::demo::{parse_demo, EntSnapshot};
+use crate::dlight::{DynamicLight, DynamicLights};
 use crate::mdl::Mdl;
 use crate::cd_audio::CdCall;
 use crate::pak::Pak;
@@ -22,7 +23,7 @@ use crate::server::EF_MUZZLEFLASH;
 use crate::tent::BeamModel;
 use crate::wad::Qpic;
 
-use super::cl_tent::{rocket_trail_type, spawn_temp_entity};
+use super::cl_tent::{rocket_trail_type, spawn_temp_entity, TRAIL_ROCKET};
 use super::host_cmd::IT_INVISIBILITY;
 use super::lerpmodels::{self, LerpModels};
 use super::lerpmove::LerpMove;
@@ -234,7 +235,7 @@ fn spawn_demo_frame_effects(d: &mut DemoPlay, idx: usize, now: f32, sound: &mut 
         }
         // Reuse the live-walk mapping (explosion/impact/splash) — including
         // its client-side impact sound, exactly like walk_frame's te_sounds.
-        if let Some(name) = spawn_temp_entity(&mut d.particles, ev, now, &mut d.prng) {
+        if let Some(name) = spawn_temp_entity(&mut d.particles, &mut d.dlights, ev, now, &mut d.prng) {
             te_sounds.push(crate::server::SoundEvent {
                 entity: 0,
                 channel: 0,
@@ -358,6 +359,7 @@ fn restart_playback(d: &mut DemoPlay) {
     d.time = 0.0;
     d.oldtime = 0.0;
     d.particles = ParticleSystem::new();
+    d.dlights = DynamicLights::new(); // CL_ClearState: memset (cl_dlights, 0, ...)
     d.trail_org.clear();
     d.beams.clear();
     d.last_spawned_idx = None;
@@ -439,6 +441,9 @@ pub struct DemoView {
     pub view_origin: [f32; 3],
     /// The relinked view entity's origin.
     pub view_entity_origin: [f32; 3],
+    /// The relinked view entity's angles: the way the recorded player's model
+    /// faces, which aims its muzzle flash's light (not the camera's).
+    pub view_entity_angles: [f32; 3],
     /// `cl.viewangles`, lerped between the recorded angles (`cls.demoplayback`).
     pub view_angles: [f32; 3],
     /// `cl.velocity` (the bob and the strafe lean).
@@ -446,6 +451,10 @@ pub struct DemoView {
     /// The entities drawn: relinked ones where `CL_RelinkEntities` put them
     /// (`origin`, `angles`), statics as recorded.
     pub entities: Vec<EntSnapshot>,
+    /// The dynamic lights the frame was drawn with (`R_PushDlights`' set, each
+    /// with its slot in the pool), as they stood before `CL_DecayLights` took
+    /// the frame's time off them. Filled when the frame is drawn.
+    pub dlights: Vec<(usize, DynamicLight)>,
 }
 
 /// `CL_LerpPoint`: how far the frame at `cl.time` (`*time`) lies between the
@@ -550,9 +559,11 @@ fn cl_relink_entities(d: &mut DemoPlay, frac: f32, first_read: usize, lerpmove: 
     let view_entity = EntSnapshot {
         origin: f.view_entity_origin,
         prev_origin: f.view_prev_origin,
+        angles: f.view_entity_angles,
+        prev_angles: f.view_prev_entity_angles,
         ..EntSnapshot::default()
     };
-    v.view_entity_origin = relink(&view_entity, frac, view_forced).0;
+    (v.view_entity_origin, v.view_entity_angles) = relink(&view_entity, frac, view_forced);
     v.view_origin = v.view_entity_origin;
     v.view_origin[2] += f.viewheight;
 
@@ -608,25 +619,49 @@ fn render_demo_frame(
     let (render_w, render_h) = (vid.width, vid.height);
     // What moves — the clock, the POV, the entities — as the relink left it
     // (taken for the frame, so `d` stays free to mutate; put back at the end).
-    let v = std::mem::take(&mut d.view);
+    let mut v = std::mem::take(&mut d.view);
     let f = &d.demo.frames[d.idx];
 
-    // CL_RelinkEntities' model-flag trails (R_RocketTrail from the entity's
-    // previous origin: rocket/lavaball fire, grenade smoke, gib blood, zombie
-    // gibs, wizard/knight/vore tracers), exactly as in live play. A relinked
-    // entity's first sighting (forcelink) starts at its own origin, so an
-    // entity absent from this frame is forgotten. Statics never trail.
-    // (EF_ROCKET's dlight is not drawn: demo playback has no dlights yet.)
+    // CL_RelinkEntities' effects, entity by entity in the order of their
+    // numbers, exactly as in live play: the light effects (`EF_MUZZLEFLASH`,
+    // `EF_BRIGHTLIGHT`, `EF_DIMLIGHT`: [`DynamicLights::relink_effects`]), then
+    // the model-flag trail (R_RocketTrail from the entity's previous origin:
+    // rocket/lavaball fire, grenade smoke, gib blood, zombie gibs,
+    // wizard/knight/vore tracers) and a rocket's light. The lights are made at
+    // the origin and angles the entity is relinked at (a light follows its
+    // entity between messages) and at the clock `CL_LerpPoint` left. A
+    // relinked entity's first sighting (forcelink) starts its trail at its
+    // own origin, so an entity absent from this frame is forgotten. Statics
+    // are never relinked: no trail, no light.
     d.trail_org.retain(|num, _| v.entities.iter().any(|e| e.num == *num));
     let step = TrailStep { stepping: d.stepping, dt, now: v.time };
-    for e in v.entities.iter() {
+    // The view entity is relinked in its place among them (the recorded player
+    // is a lit entity like any other: its muzzle flash is the gun's flash), but
+    // not drawn, so it is not in `v.entities`. Its recorded `effects` are the
+    // newest message's: none when that did not update it. Its model is not
+    // recorded (`modelindex` 0: no flags, so no trail and no rocket light — id's
+    // player model has none).
+    let view_num = d.demo.viewentity as i32;
+    let view = (f.view_effects != 0).then(|| EntSnapshot {
+        num: view_num,
+        origin: v.view_entity_origin,
+        angles: v.view_entity_angles,
+        effects: f.view_effects,
+        ..EntSnapshot::default()
+    });
+    let (below, above) = v.entities.split_at(v.entities.partition_point(|e| e.num >= 0 && e.num < view_num));
+    for e in below.iter().chain(view.as_ref()).chain(above) {
         if e.num < 0 {
             continue;
         }
+        d.dlights.relink_effects(e.num, e.origin, e.angles, e.effects, v.time, &mut d.prng);
         let flags = d.models.get(e.modelindex).and_then(|m| m.as_ref()).map_or(0, |m| m.header.flags);
         if let Some(ttype) = rocket_trail_type(flags) {
             let head = d.trail_org.entry(e.num).or_insert(TrailHead::at(e.origin));
             d.particles.spawn_trail(head, e.origin, ttype, step, &mut d.tracercount, &mut d.prng);
+            if ttype == TRAIL_ROCKET {
+                d.dlights.relink_rocket(e.num, e.origin, v.time);
+            }
         }
     }
 
@@ -825,8 +860,13 @@ fn render_demo_frame(
     // The recorded server time animates the demo's liquids/sky too. The live
     // particle pool (replayed from the recorded svc_particle / temp-entity
     // stream) is passed as (world pos, palette index) so blood/puffs/explosions
-    // draw into the scene sharing its z-buffer. Demos carry no dynamic lights
-    // here (empty; a deferred LOW).
+    // draw into the scene sharing its z-buffer. The dynamic lights are the
+    // pool's (`R_PushDlights`: not past `die`, with a radius), at the radius
+    // they were made with: `CL_DecayLights` shrinks them after the frame is
+    // drawn (below), as in walk_frame.
+    v.dlights.clear();
+    v.dlights.extend(d.dlights.pushed(v.time));
+    let lights: Vec<DynamicLight> = v.dlights.iter().map(|&(_, l)| l).collect();
     // R_DrawParticles' order, as in walk_frame: retire (`die < cl.time`), draw,
     // then move and ramp.
     d.particles.retire(v.time);
@@ -927,6 +967,7 @@ fn render_demo_frame(
         colormap: d.colormap.as_deref(),
         time: v.time,
         light_styles: &demo_styles,
+        dlights: &lights,
         bmodels: &bmodels,
         models: &owned,
         sprites: &sprite_insts,
@@ -953,6 +994,10 @@ fn render_demo_frame(
         draw_world_below(&mut d.renderer, &scene, &refdef, &mut img);
         lap(Phase::Render3d);
     }
+    // Host_Frame runs CL_DecayLights after SCR_UpdateScreen: `radius -=
+    // (cl.time - cl.oldtime) * decay` — the clock the messages gave this
+    // frame, which is the host's step in ordinary playback.
+    d.dlights.advance(cl_frametime, v.time);
     // V_RenderView: the crosshair over the view, before the 2-D layer — but
     // not over an intermission or finale, which id's GLQuake leaves it off
     // (gl_screen.c's SCR_UpdateScreen draws it only outside them): WinQuake
@@ -1147,6 +1192,7 @@ mod tests {
     use super::*;
 
     use crate::demo::{Demo, DemoFrame};
+    use crate::server::{EF_BRIGHTLIGHT, EF_DIMLIGHT};
 
     /// A playback of `frames` over the test room, with no assets.
     fn playback(frames: Vec<DemoFrame>) -> DemoPlay {
@@ -1484,6 +1530,249 @@ mod tests {
         d.models = Vec::new();
         cl_relink_entities(&mut d, 1.0, 0, LerpMove::Classic);
         assert_eq!(d.view.entities[0].angles[1], 30.0, "no EF_ROTATE: the recorded yaw");
+    }
+
+    // ----- Dynamic lights in playback (CL_RelinkEntities, CL_ParseTEnt) -----
+
+    /// Entity `num` at `origin`, facing `angles`, carrying `effects`, unmoved.
+    fn lit(num: i32, origin: [f32; 3], angles: [f32; 3], effects: i32) -> EntSnapshot {
+        EntSnapshot {
+            num,
+            modelindex: 1,
+            origin,
+            prev_origin: origin,
+            angles,
+            prev_angles: angles,
+            effects,
+            ..Default::default()
+        }
+    }
+
+    /// The `n`th message, `n * 0.1 + 1.0` s, carrying `entities`.
+    fn message(n: usize, entities: Vec<EntSnapshot>) -> DemoFrame {
+        DemoFrame { time: 1.0 + 0.1 * n as f32, prev_time: 0.9 + 0.1 * n as f32, entities, ..Default::default() }
+    }
+
+    /// A playback of `frames` with the unflagged model on precache index 1, as
+    /// a fresh playback's generator (`DemoPlay::new`'s seed) would jitter it.
+    fn lit_playback(frames: Vec<DemoFrame>) -> DemoPlay {
+        let mut d = playback(frames);
+        d.models = vec![None, Some(poseless_model())];
+        d
+    }
+
+    fn draw(d: &mut DemoPlay) {
+        render::recycle_image(demo_frame(d, 1.0 / 72.0, false, &VID).image);
+    }
+
+    /// The light a recorded muzzle flash makes is the one the live client makes
+    /// for an entity in that state: `DynamicLights::relink_effects`, at the
+    /// origin and angles the entity is relinked at, with the clock the frame
+    /// is drawn at, and the same draw of `rand()` for its radius.
+    #[test]
+    fn a_recorded_muzzle_flash_lights_the_world_like_a_live_one() {
+        let mut d = lit_playback(vec![message(0, vec![lit(5, [100.0, 200.0, 50.0], [0.0, 90.0, 0.0], EF_MUZZLEFLASH)])]);
+        let mut seed = d.prng;
+        draw(&mut d);
+        let now = d.view.time;
+        let mut live = DynamicLights::new();
+        live.relink_effects(5, [100.0, 200.0, 50.0], [0.0, 90.0, 0.0], EF_MUZZLEFLASH, now, &mut seed);
+        assert_eq!(d.view.dlights, live.pushed(now).collect::<Vec<_>>(), "the same light, slot and all");
+        let (_, l) = d.view.dlights[0];
+        assert_eq!((l.key(), l.minlight, l.decay), (5, 32.0, 0.0));
+        assert!((200.0..232.0).contains(&l.radius), "200 + (rand()&31): {}", l.radius);
+        assert!((l.die - (now + 0.1)).abs() < 1e-6);
+        // 16 up and 18 along the way it faces (+y here).
+        assert!((l.origin[0] - 100.0).abs() < 1e-3 && (l.origin[1] - 218.0).abs() < 1e-3, "{:?}", l.origin);
+        assert!((l.origin[2] - 66.0).abs() < 1e-3);
+        // The pool carries it: the same light is what the next draw sees.
+        assert_eq!(d.dlights.active_count(now), 1);
+    }
+
+    /// The light follows its entity between messages: it is made at the
+    /// relinked (interpolated) origin, not where either message put it.
+    #[test]
+    fn a_light_follows_its_entity_between_messages() {
+        let walking = |n: usize, from: f32, to: f32| {
+            let mut e = lit(5, [to, 0.0, 0.0], [0.0; 3], EF_DIMLIGHT);
+            e.prev_origin = [from, 0.0, 0.0];
+            message(n, vec![e])
+        };
+        let mut d = lit_playback(vec![walking(0, 0.0, 0.0), walking(1, 0.0, 50.0), walking(2, 50.0, 100.0)]);
+        let mut seen = Vec::new();
+        for _ in 0..20 {
+            draw(&mut d);
+            let drawn = d.view.entities[0].origin[0];
+            let (_, l) = d.view.dlights.iter().find(|(_, l)| l.key() == 5).expect("a dim light each frame");
+            assert_eq!(l.origin, [drawn, 0.0, 0.0], "at the entity's relinked origin, not above it (EF_DIMLIGHT)");
+            seen.push(drawn);
+        }
+        assert!(seen.windows(2).any(|w| w[1] > w[0] && w[1] < 50.0), "it moved between messages: {seen:?}");
+    }
+
+    /// The recorded player (the view entity) is lit like any entity, from its
+    /// own angles, not the camera's, and takes its place among the others'
+    /// numbers: slots are handed out in entity order.
+    #[test]
+    fn the_view_entity_flashes_from_its_own_angles_in_its_place() {
+        let mut m = message(0, vec![lit(7, [0.0; 3], [0.0; 3], EF_DIMLIGHT), lit(3, [0.0; 3], [0.0; 3], EF_DIMLIGHT)]);
+        m.entities.sort_by_key(|e| e.num);
+        m.view_entity_origin = [10.0, 20.0, 30.0];
+        m.view_prev_origin = [10.0, 20.0, 30.0];
+        m.view_entity_angles = [0.0, 90.0, 0.0];
+        m.view_prev_entity_angles = [0.0, 90.0, 0.0];
+        m.view_angles = [0.0; 3]; // the camera looks down +x
+        m.prev_view_angles = [0.0; 3];
+        m.view_effects = EF_MUZZLEFLASH;
+        let mut d = lit_playback(vec![m]);
+        d.demo.viewentity = 5;
+        draw(&mut d);
+        let lights: Vec<_> = d.view.dlights.iter().map(|&(slot, l)| (slot, l.key())).collect();
+        assert_eq!(lights, vec![(0, 3), (1, 5), (2, 7)], "entity order: 3, the view entity 5, 7");
+        let flash = d.view.dlights[1].1;
+        assert!((flash.origin[0] - 10.0).abs() < 1e-3 && (flash.origin[1] - 38.0).abs() < 1e-3, "{:?}", flash.origin);
+        assert!((flash.origin[2] - 46.0).abs() < 1e-3);
+        assert_eq!(flash.minlight, 32.0);
+    }
+
+    /// No effects bit, no light; a static is never relinked, so its recorded
+    /// effects light nothing; a flash the message does not carry (the view
+    /// entity not updated) lights nothing.
+    #[test]
+    fn only_relinked_entities_with_effects_make_lights() {
+        let mut m = message(0, vec![lit(4, [0.0; 3], [0.0; 3], 0), lit(-1, [0.0; 3], [0.0; 3], EF_BRIGHTLIGHT | EF_DIMLIGHT)]);
+        m.view_effects = 0;
+        let mut d = lit_playback(vec![m]);
+        draw(&mut d);
+        assert!(d.view.dlights.is_empty(), "{:?}", d.view.dlights);
+    }
+
+    /// A flash is made again in every frame drawn from the message that
+    /// carries it, and lives 0.1 s past the last: the entity's next message,
+    /// without the bit, ends the making and the tail is the light's own.
+    #[test]
+    fn a_flash_is_made_every_frame_its_message_holds_it_and_outlives_it_by_a_tenth() {
+        let flash = lit(5, [0.0; 3], [0.0; 3], EF_MUZZLEFLASH);
+        let quiet = lit(5, [0.0; 3], [0.0; 3], 0);
+        let mut d = lit_playback(vec![message(0, vec![flash]), message(1, vec![quiet]), message(2, vec![quiet])]);
+        let (mut made_until, mut lit_frames) = (0.0f32, Vec::new());
+        for _ in 0..30 {
+            if d.idx + 1 >= d.demo.frames.len() {
+                break; // the loop wrap: not under test
+            }
+            draw(&mut d);
+            let drawn = !d.view.dlights.is_empty();
+            if d.idx == 0 {
+                assert!(drawn, "made again each frame message 0 holds it (t = {})", d.view.time);
+                made_until = d.view.time;
+            }
+            lit_frames.push((d.view.time, drawn));
+        }
+        // The first frame of message 1: still lit by what the frame before made.
+        assert!(lit_frames.iter().any(|&(t, lit)| lit && t > made_until), "the 0.1 s tail: {lit_frames:?}");
+        for &(t, lit) in &lit_frames {
+            assert_eq!(lit, t <= made_until + 0.1, "lit exactly while die >= cl.time, at {t} (made until {made_until})");
+        }
+    }
+
+    /// A rocket (a model flagged `EF_ROCKET`) lights its way: radius 200, 0.01 s,
+    /// each frame, at the origin it is relinked at, keyed by its entity number.
+    #[test]
+    fn a_rocket_in_flight_carries_a_light() {
+        let mut d = lit_playback(vec![message(0, vec![lit(9, [30.0, 40.0, 50.0], [0.0; 3], 0)])]);
+        let mut rocket = poseless_model();
+        rocket.header.flags = 1; // EF_ROCKET
+        d.models = vec![None, Some(rocket)];
+        draw(&mut d);
+        let now = d.view.time;
+        let lights: Vec<_> = d.view.dlights.iter().map(|&(slot, l)| (slot, l)).collect();
+        assert_eq!(lights.len(), 1, "{lights:?}");
+        let (slot, l) = lights[0];
+        assert_eq!(slot, 0);
+        assert_eq!((l.key(), l.origin, l.radius, l.minlight, l.decay), (9, [30.0, 40.0, 50.0], 200.0, 0.0, 0.0));
+        assert!((l.die - (now + 0.01)).abs() < 1e-6);
+        // A model with a grenade's flag (EF_GRENADE) leaves a trail but no light.
+        let mut d = lit_playback(vec![message(0, vec![lit(9, [30.0, 40.0, 50.0], [0.0; 3], 0)])]);
+        let mut grenade = poseless_model();
+        grenade.header.flags = 2;
+        d.models = vec![None, Some(grenade)];
+        draw(&mut d);
+        assert!(d.view.dlights.is_empty());
+    }
+
+    /// An explosion's light (`TE_EXPLOSION`, `TE_EXPLOSION2`) is made when the
+    /// message is read, at the clock it is read at: drawn at its full 350 that
+    /// frame, 300 a second less after each (`CL_DecayLights` runs after the
+    /// draw), gone 0.5 s on; the tarbaby's blob has none.
+    #[test]
+    fn an_explosion_lights_up_and_fades_over_half_a_second() {
+        use crate::server::{te_consts::*, TempEntityEvent};
+        let boom = |te_type| TempEntityEvent {
+            te_type,
+            pos: [5.0, 6.0, 7.0],
+            end: [5.0, 6.0, 7.0],
+            entity: 0,
+            color_start: 0,
+            color_length: 0,
+        };
+        for (te, lit) in [(TE_EXPLOSION, true), (TE_EXPLOSION2, true), (TE_TAREXPLOSION, false)] {
+            let mut messages: Vec<_> = (0..8).map(|n| message(n, Vec::new())).collect();
+            messages[1].temp_entities.push(boom(te));
+            let mut d = lit_playback(messages);
+            let mut frames = Vec::new(); // (clock, radius) of each frame that drew the light
+            while d.idx + 1 < d.demo.frames.len() {
+                draw(&mut d);
+                if let Some(&(_, l)) = d.view.dlights.first() {
+                    frames.push((d.view.time, l.radius, l.die, (d.time - d.oldtime) as f32));
+                }
+            }
+            assert_eq!(!frames.is_empty(), lit, "type {te}");
+            if !lit {
+                continue;
+            }
+            let (born, radius, die, _) = frames[0];
+            assert_eq!(radius, 350.0, "the full radius on the frame it was made in");
+            assert!((die - (born + 0.5)).abs() < 1e-6, "die = cl.time + 0.5");
+            // Each later frame is drawn 300 * the step of the frame before smaller.
+            for pair in frames.windows(2) {
+                let (before, after) = (pair[0], pair[1]);
+                assert!(after.1 < before.1, "shrinking: {frames:?}");
+                assert!((before.1 - after.1 - 300.0 * before.3).abs() < 0.01, "decay*dt: {before:?} -> {after:?}");
+            }
+            let last = frames.last().unwrap().0;
+            assert!(last <= die + 1e-6 && last > die - 0.05, "drawn until it dies: last {last}, die {die}");
+        }
+    }
+
+    /// The recorded explosion lights timedemo's frames too (each message is
+    /// its frame's), and the playback starting over clears the pool, as
+    /// `CL_ClearState` does.
+    #[test]
+    fn timedemo_and_the_loop_wrap_light_and_clear_the_same_pool() {
+        use crate::server::{te_consts::*, TempEntityEvent};
+        let mut m = message(1, Vec::new());
+        m.temp_entities.push(TempEntityEvent {
+            te_type: TE_EXPLOSION,
+            pos: [0.0; 3],
+            end: [0.0; 3],
+            entity: 0,
+            color_start: 0,
+            color_length: 0,
+        });
+        let mut d = lit_playback(vec![message(0, Vec::new()), m, message(2, Vec::new())]);
+        let mut radii = Vec::new();
+        while let Some(f) = timedemo_frame(&mut d, 1.0 / 72.0, false, &VID) {
+            radii.push(d.view.dlights.first().map(|&(_, l)| l.radius));
+            render::recycle_image(f.image);
+        }
+        // The first frame reads through message 1 and draws its explosion at
+        // 350; message 2 is 0.1 s on: 0.1 * 300 less.
+        assert_eq!(radii.len(), 2, "{radii:?}");
+        assert_eq!(radii[0], Some(350.0));
+        assert!((radii[1].unwrap() - 320.0).abs() < 0.01, "{radii:?}");
+        restart_playback(&mut d);
+        assert_eq!(d.dlights.active_count(1.0), 0);
+        assert!(d.dlights.pushed(0.0).next().is_none());
     }
 
     #[test]

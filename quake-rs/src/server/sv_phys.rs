@@ -988,7 +988,7 @@ impl Server {
             o.clear_requests();
         }
         // SV_CleanupEnts: clear last frame's one-frame EF_MUZZLEFLASH before this
-        // frame's thinks (the host already consumed it via entity_dlights()).
+        // frame's thinks (the host already consumed it via lit_entities()).
         self.cleanup_ents();
         // (float)sv.time, what every `pr_global_struct->time = sv.time` stores.
         let start_time = self.time();
