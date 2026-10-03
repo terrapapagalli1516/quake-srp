@@ -746,51 +746,87 @@ pub(super) fn draw_surface_block(
     bw: usize,
     bh: usize,
 ) {
-    let blocksize = 16usize >> mip;
-    let shift = 4 - mip;
-    let (nh, nv) = (bw >> shift, bh >> shift);
-    if smax == 0 || tmax == 0 || tex.len() < smax * tmax || out.len() < bw * bh || colormap.len() < COLORMAP_LEN {
+    let Some(colormap) = colormap.get(..COLORMAP_LEN).and_then(|c| <&[u8; COLORMAP_LEN]>::try_from(c).ok()) else { return };
+    if smax == 0 || tmax == 0 || tex.len() < smax * tmax || out.len() < bw * bh {
         return;
     }
-    // `soffset`/`basetoffset`: where the surface's first texel falls in the tiled
-    // texture ("+ (smax << 16)" in the C only keeps the % positive).
-    let soffset = (texmins[0] >> mip).rem_euclid(smax as i32) as usize;
-    let toffset = (texmins[1] >> mip).rem_euclid(tmax as i32) as usize;
-    let lux = |x: usize, y: usize| light.get(y * lmw + x).copied().unwrap_or(1 << 6);
-    for v in 0..nv {
-        for u in 0..nh {
-            // r_lightptr[0], r_lightptr[1], and the same one lightmap row down.
-            let mut lightleft = lux(u, v);
-            let mut lightright = lux(u + 1, v);
-            let lightleftstep = (lux(u, v + 1) - lightleft) >> shift;
-            let lightrightstep = (lux(u + 1, v + 1) - lightright) >> shift;
-            // The block's first texture column (the C wraps `soffset` a block at a
-            // time; id's textures are 16-aligned, so this is the same column).
-            let s0 = (soffset + u * blocksize) % smax;
-            for i in 0..blocksize {
-                let y = v * blocksize + i;
-                let trow = (toffset + y) % tmax * smax;
-                let src = &tex[trow..trow + smax];
-                let dst = &mut out[y * bw + u * blocksize..y * bw + (u + 1) * blocksize];
-                let lightstep = (lightleft - lightright) >> shift;
-                let mut l = lightright;
-                // 0 < l <= 16320: the luxels are clamped to 64..=16320 and the
-                // floor steps overshoot the lower one by less than 15 per edge,
-                // so the index stays inside the 64 x 256 colormap.
-                if s0 + blocksize <= smax {
-                    let seg = &src[s0..s0 + blocksize];
-                    for b in (0..blocksize).rev() {
-                        dst[b] = colormap[(l & 0xFF00) as usize + seg[b] as usize];
-                        l += lightstep;
+    let level = Level { tex, smax, tmax, texmins, light, lmw, colormap };
+    // id has a routine per mip level too: the block size is each one's constant.
+    match mip {
+        0 => level.draw_blocks::<16>(out, bw, bh),
+        1 => level.draw_blocks::<8>(out, bw, bh),
+        2 => level.draw_blocks::<4>(out, bw, bh),
+        _ => level.draw_blocks::<2>(out, bw, bh),
+    }
+}
+
+/// What a surface block is baked from ([`draw_surface_block`]): a mip
+/// level's texels, the face's `blocklights` and the colormap.
+struct Level<'a> {
+    tex: &'a [u8],
+    smax: usize,
+    tmax: usize,
+    /// `texturemins`, at mip 0.
+    texmins: [i32; 2],
+    light: &'a [i32],
+    lmw: usize,
+    colormap: &'a [u8; COLORMAP_LEN],
+}
+
+impl Level<'_> {
+    /// `R_DrawSurfaceBlock8_mipN` over the whole surface, for the level whose
+    /// blocks are `N = 16 >> mip` texels a side (a constant, so the row of
+    /// `N` texels is a loop the compiler unrolls, as id wrote four routines).
+    fn draw_blocks<const N: usize>(&self, out: &mut [u8], bw: usize, bh: usize) {
+        let Level { tex, smax, tmax, texmins, light, lmw, colormap } = *self;
+        let mip = 4 - N.trailing_zeros();
+        let shift = 4 - mip;
+        let (nh, nv) = (bw / N, bh / N);
+        // `soffset`/`basetoffset`: where the surface's first texel falls in the tiled
+        // texture ("+ (smax << 16)" in the C only keeps the % positive).
+        let soffset = (texmins[0] >> mip).rem_euclid(smax as i32) as usize;
+        let toffset = (texmins[1] >> mip).rem_euclid(tmax as i32) as usize;
+        let lux = |x: usize, y: usize| light.get(y * lmw + x).copied().unwrap_or(1 << 6);
+        for v in 0..nv {
+            // The texture row under each of the blocks' rows, once for the
+            // whole row of blocks.
+            let trow: [usize; N] = std::array::from_fn(|i| (toffset + v * N + i) % tmax * smax);
+            for u in 0..nh {
+                // r_lightptr[0], r_lightptr[1], and the same one lightmap row down.
+                let mut lightleft = lux(u, v);
+                let mut lightright = lux(u + 1, v);
+                let lightleftstep = (lux(u, v + 1) - lightleft) >> shift;
+                let lightrightstep = (lux(u + 1, v + 1) - lightright) >> shift;
+                // The block's first texture column (the C wraps `soffset` a block at a
+                // time; id's textures are 16-aligned, so this is the same column).
+                let s0 = (soffset + u * N) % smax;
+                for (i, &trow) in trow.iter().enumerate() {
+                    let y = v * N + i;
+                    let src = &tex[trow..trow + smax];
+                    let at = y * bw + u * N;
+                    let Some(dst) = out.get_mut(at..at + N).and_then(|o| <&mut [u8; N]>::try_from(o).ok()) else { return };
+                    let lightstep = (lightleft - lightright) >> shift;
+                    let mut l = lightright;
+                    // 0 < l <= 16320: the luxels are clamped to 64..=16320 and the
+                    // floor steps overshoot the lower one by less than 15 per edge,
+                    // so `l & 0xFF00` is one of the colormap's 64 rows — and
+                    // masked to them (`ROWS`) the index is in the colormap for
+                    // the compiler too, with no test at every texel.
+                    const ROWS: usize = COLORMAP_LEN - 256;
+                    if let Some(seg) = src.get(s0..s0 + N).and_then(|s| <&[u8; N]>::try_from(s).ok()) {
+                        for b in (0..N).rev() {
+                            dst[b] = colormap[((l & 0xFF00) as usize & ROWS) | seg[b] as usize];
+                            l += lightstep;
+                        }
+                    } else {
+                        for b in (0..N).rev() {
+                            dst[b] = colormap[((l & 0xFF00) as usize & ROWS) | src[(s0 + b) % smax] as usize];
+                            l += lightstep;
+                        }
                     }
-                } else {
-                    for b in (0..blocksize).rev() {
-                        dst[b] = colormap[(l & 0xFF00) as usize + src[(s0 + b) % smax] as usize];
-                        l += lightstep;
-                    }
+                    lightright += lightrightstep;
+                    lightleft += lightleftstep;
                 }
-                lightright += lightrightstep;
-                lightleft += lightleftstep;
             }
         }
     }
@@ -1727,6 +1763,106 @@ mod tests {
     /// `(left - right) >> 4`, flooring (-1000 >> 4 = -63), so texel 15 gets the
     /// right luxel exactly and texel 0 gets `right + 15 * step` — not the left
     /// luxel, which a bilinear sample (the port's old bake) gives it.
+    /// [`draw_surface_block`] as it was first written, the block size a
+    /// variable and every row finding its texture row: the reference the
+    /// unrolled one is held to.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_surface_block_as_written(
+        tex: &[u8],
+        smax: usize,
+        tmax: usize,
+        texmins: [i32; 2],
+        mip: u32,
+        light: &[i32],
+        lmw: usize,
+        colormap: &[u8],
+        out: &mut [u8],
+        bw: usize,
+        bh: usize,
+    ) {
+        let blocksize = 16usize >> mip;
+        let shift = 4 - mip;
+        let (nh, nv) = (bw >> shift, bh >> shift);
+        if smax == 0 || tmax == 0 || tex.len() < smax * tmax || out.len() < bw * bh || colormap.len() < COLORMAP_LEN {
+            return;
+        }
+        // `soffset`/`basetoffset`: where the surface's first texel falls in the tiled
+        // texture ("+ (smax << 16)" in the C only keeps the % positive).
+        let soffset = (texmins[0] >> mip).rem_euclid(smax as i32) as usize;
+        let toffset = (texmins[1] >> mip).rem_euclid(tmax as i32) as usize;
+        let lux = |x: usize, y: usize| light.get(y * lmw + x).copied().unwrap_or(1 << 6);
+        for v in 0..nv {
+            for u in 0..nh {
+                // r_lightptr[0], r_lightptr[1], and the same one lightmap row down.
+                let mut lightleft = lux(u, v);
+                let mut lightright = lux(u + 1, v);
+                let lightleftstep = (lux(u, v + 1) - lightleft) >> shift;
+                let lightrightstep = (lux(u + 1, v + 1) - lightright) >> shift;
+                // The block's first texture column (the C wraps `soffset` a block at a
+                // time; id's textures are 16-aligned, so this is the same column).
+                let s0 = (soffset + u * blocksize) % smax;
+                for i in 0..blocksize {
+                    let y = v * blocksize + i;
+                    let trow = (toffset + y) % tmax * smax;
+                    let src = &tex[trow..trow + smax];
+                    let dst = &mut out[y * bw + u * blocksize..y * bw + (u + 1) * blocksize];
+                    let lightstep = (lightleft - lightright) >> shift;
+                    let mut l = lightright;
+                    // 0 < l <= 16320: the luxels are clamped to 64..=16320 and the
+                    // floor steps overshoot the lower one by less than 15 per edge,
+                    // so the index stays inside the 64 x 256 colormap.
+                    if s0 + blocksize <= smax {
+                        let seg = &src[s0..s0 + blocksize];
+                        for b in (0..blocksize).rev() {
+                            dst[b] = colormap[(l & 0xFF00) as usize + seg[b] as usize];
+                            l += lightstep;
+                        }
+                    } else {
+                        for b in (0..blocksize).rev() {
+                            dst[b] = colormap[(l & 0xFF00) as usize + src[(s0 + b) % smax] as usize];
+                            l += lightstep;
+                        }
+                    }
+                    lightright += lightrightstep;
+                    lightleft += lightleftstep;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_unrolled_block_bake_is_the_one_as_written() {
+        // Every mip level, textures that are and are not 16-aligned (the
+        // wrap inside a block), texturemins either side of zero, lights
+        // across their whole range (64..=16320) and blocks at the tile's
+        // seams: the same bytes.
+        let (cm, _) = ramp_colormap();
+        let mut seed = 12345u32;
+        let mut next = move || {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            seed >> 8
+        };
+        let mut compared = 0;
+        for &(smax0, tmax0) in &[(64usize, 64usize), (16, 32), (128, 16), (24, 40), (48, 24)] {
+            for mip in 0..4u32 {
+                let (smax, tmax) = (smax0 >> mip, tmax0 >> mip);
+                let tex: Vec<u8> = (0..smax * tmax).map(|_| next() as u8).collect();
+                for &(lmw, lmh) in &[(2usize, 2usize), (5, 3), (9, 17)] {
+                    for &texmins in &[[0, 0], [-48, 16], [112, -160], [16 * 7, 16 * 3]] {
+                        let light: Vec<i32> = (0..lmw * lmh).map(|_| 64 + (next() % (16320 - 64 + 1)) as i32).collect();
+                        let (bw, bh) = (((lmw - 1) * 16) >> mip, ((lmh - 1) * 16) >> mip);
+                        let (mut want, mut got) = (vec![7u8; bw * bh], vec![7u8; bw * bh]);
+                        draw_surface_block_as_written(&tex, smax, tmax, texmins, mip, &light, lmw, &cm, &mut want, bw, bh);
+                        draw_surface_block(&tex, smax, tmax, texmins, mip, &light, lmw, &cm, &mut got, bw, bh);
+                        assert!(got == want, "{smax}x{tmax} mip {mip}, lightmap {lmw}x{lmh}, texturemins {texmins:?}");
+                        compared += bw * bh;
+                    }
+                }
+            }
+        }
+        assert!(compared > 500_000);
+    }
+
     #[test]
     fn surface_block_steps_light_like_r_draw_surface_block8() {
         let cm = row_colormap();
