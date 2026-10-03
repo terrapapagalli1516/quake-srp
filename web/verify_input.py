@@ -36,6 +36,12 @@
      its frame-rate limit off (several hundred refreshes a second; Firefox:
      `layout.frame_rate` 480). Synthetic `mousemove`s: headless Chromium's
      own lock cancels every real move (PLATFORM.md, "Input").
+ 10. THE MOUSE'S MOVEMENT, WHOLE — 1000 records of 0.3 counts (the page's
+     record path; Chromium's and Firefox's movementX is an integer) turn
+     48°; a pointermove and its mousemove count once; `?mousecheck`'s
+     summary adds up; a real drag counts the same through pointermove's
+     coalesced samples (what the page takes) as through mousemove's own
+     movement (what it took before).
 
 Headless fullscreen is approximate: the Alt+Enter/fullscreen checks are best-effort
 here (skipped with a note when the headless browser refuses) — see the manual
@@ -47,7 +53,7 @@ deploy dir — PLATFORM.md — to test changes without touching the deployed pag
 `exp.name()` asks the program (a Promise, answered between two frames), so
 the checks await it.
 """
-import os, sys, time
+import os, re, sys, time
 from playwright.sync_api import sync_playwright
 import isolated
 
@@ -111,6 +117,92 @@ def mouse_turn(pg):
     turned = (y0 - yaw() + 540) % 360 - 180
     want = 1000 * 0.16 * pg.evaluate("exp.mouse_sensitivity()")
     return hz, turned, want
+
+def yaw(pg):
+    """The drawn view's yaw, from the listener's facing (degrees)."""
+    return pg.evaluate("Promise.all([exp.listener_fwd_x(), exp.listener_fwd_y()])"
+                       ".then(([x, y]) => Math.atan2(y, x) * 180 / Math.PI)")
+
+def mouse_count(pg):
+    """The program's `mouse_count`: records read, their counts, the turn, frames."""
+    return [float(v) for v in pg.evaluate("quake.text('mouse_count')").split()]
+
+def turned_right(pg, y0):
+    time.sleep(0.3)
+    return (y0 - yaw(pg) + 540) % 360 - 180
+
+def mouse_paths(pg):
+    """(10) The mouse's movement through the page, after mouse_turn (the
+    walk, the pointer locked): fractional counts reach the game whole; a
+    pointermove and the mousemove that follows it count once; ?mousecheck's
+    lines add up; and a real drag (the browser's own events, the lock
+    refused) counts the same through pointermove's coalesced samples as
+    through mousemove's own movement."""
+    per = 0.16 * pg.evaluate("exp.mouse_sensitivity()")
+    frac = pg.evaluate("new MouseEvent('mousemove', { movementX: 0.3 }).movementX")
+    print(f"INFO this browser's movementX is {'a double' if frac == 0.3 else 'an integer'} (0.3 -> {frac})")
+    # A thousand records of 0.3 counts, a 1000 Hz mouse's pace through the
+    # refreshes (the page's own record path: a float, never rounded).
+    y0, c0 = yaw(pg), mouse_count(pg)
+    pg.evaluate("""() => new Promise(done => {
+        let sent = 0, t0 = null;
+        function refresh(t) {
+          if (t0 === null) t0 = t;
+          for (const due = Math.min(1000, Math.floor(t - t0)); sent < due; sent++) mouseMove(0.3, 0, 0);
+          if (sent < 1000) requestAnimationFrame(refresh); else done();
+        }
+        requestAnimationFrame(refresh);
+    })""")
+    t = turned_right(pg, y0)
+    c = [b - a for a, b in zip(c0, mouse_count(pg))]
+    check(f"mouse: 1000 records of 0.3 counts turn {300 * per:.0f}°", abs(t - 300 * per) < 0.05,
+          f"{t:.3f}° (the game read {c[0]:.0f} records, {c[1]:.2f} counts, turned {c[2]:.3f}° in {c[3]:.0f} frames)")
+    # A pointermove and its mousemove, as a browser sends them: once.
+    y0 = yaw(pg)
+    pg.evaluate("""() => { const c = document.getElementById('c');
+        for (let i = 0; i < 100; i++) {
+          c.dispatchEvent(new PointerEvent('pointermove', { pointerType: 'mouse', movementX: 1 }));
+          c.dispatchEvent(new MouseEvent('mousemove', { movementX: 1 }));
+        } }""")
+    t = turned_right(pg, y0)
+    check(f"mouse: 100 pointermoves and their mousemoves turn {100 * per:.0f}°, once",
+          abs(t - 100 * per) < 0.05, f"{t:.3f}°")
+    # The mouse check: its summary of 50 moves of 2 counts (and headless
+    # Chromium's own lock's moves of none, a refresh at a time).
+    summary = pg.evaluate("""async () => {
+        const c = document.getElementById('c'), done = quake.mousecheck(1);
+        for (let i = 0; i < 50; i++) c.dispatchEvent(new MouseEvent('mousemove', { movementX: -2 }));
+        return done; }""")
+    print("INFO", summary)
+    sent = re.search(r"records (\d+) sent, 0 dropped, (\d+) read", summary)
+    want = ("× 100.0 counts |", "read × 100.0 |", f"turned {100 * per:.2f}°, {per:.4f}°/count")
+    check("mousecheck: its summary adds up",
+          all(w in summary for w in want) and sent and sent.group(1) == sent.group(2), summary)
+    # A real drag, the lock refused: the browser's own pointermove (its
+    # coalesced samples) and mousemove, read side by side by the check.
+    pg.evaluate("expectUnlock = true; document.exitPointerLock()")
+    pg.wait_for_function("document.pointerLockElement === null", timeout=5000)
+    pg.evaluate("document.getElementById('c').requestPointerLock = () => Promise.resolve()")
+    box = pg.locator("#c").bounding_box()
+    x, y = box["x"] + 100, box["y"] + box["height"] / 2
+    pg.mouse.move(x, y)
+    pg.mouse.down()
+    time.sleep(0.3)
+    y0 = yaw(pg)
+    pg.evaluate("() => { window.mouseRun = quake.mousecheck(2); }")
+    for i in range(1, 41):
+        pg.mouse.move(x + 5 * i, y)
+    pg.mouse.up()
+    summary = pg.evaluate("window.mouseRun")
+    t = turned_right(pg, y0)
+    print("INFO", summary)
+    field = lambda pat: float(re.search(pat, summary).group(1))
+    moved = field(r"mousemove \d+ × ([\d.]+) counts")
+    sampled = field(r"pointermove \d+ × ([\d.]+) counts")
+    read = field(r"read × ([\d.]+)")
+    check("mouse: a real drag counts the same through pointermove's samples as mousemove's",
+          moved == 200 and sampled == moved and read == moved and abs(t - 200 * per) < 0.05,
+          f"mousemove {moved}, coalesced {sampled}, the game {read}; turned {t:.3f}°")
 
 with sync_playwright() as p:
     br = isolated.launch(p, [
@@ -492,6 +584,7 @@ with sync_playwright() as p:
     hz, turned, want = mouse_turn(pg)
     check(f"mouse: 1000 counts turn {want:.0f}° at a {hz:.0f} Hz refresh",
           abs(turned - want) < 0.05, f"{turned:.3f}°")
+    mouse_paths(pg)
 
     check("no console errors", not errs, str(errs[-5:]))
     br.close()
