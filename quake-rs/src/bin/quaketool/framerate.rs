@@ -1745,17 +1745,45 @@ fn torches_dump(pak: &Pak, views: &[StyleView], rate: Rate, res: (usize, usize),
 // ---------------------------------------------------------------------------
 
 /// The views `--exactpersp` measures without `--view`: e1m1's start (a lit
-/// corridor, the first thing a player sees), e1m1's hall seen at an angle to
-/// its walls (a corridor), e1m6's walls (of the views searched, the one where
-/// the two perspectives differ most: 5% of the frame at 1080p), and a
-/// liquid-heavy one, e1m4's lake from a ledge above it, looking down (the
-/// liquids take the exact path too: `Turbulent8`'s segments).
+/// corridor, the first thing a player sees), e1m1's flickering corridor, a
+/// wall-heavy view in e1m6 (the walls of the Door to Chthon's courtyard, where
+/// the two perspectives differ most of the legal views searched: 3% of the
+/// frame at 1080p), and a liquid-heavy one, e1m4's lake from a ledge above it,
+/// looking down (the liquids take the exact path too: `Turbulent8`'s
+/// segments). The player's origin, not the eye's, as `--view` gives it.
 const PERSP_VIEWS: &[&str] = &[
     "e1m1-start=e1m1:480,-352,88:90",
-    "e1m1-corridor=e1m1:480,300,88:75",
-    "e1m6-walls=e1m6:204,-100,220:100",
-    "e1m4-lake=e1m4:320,1284,950:0:35",
+    "e1m1-corridor=e1m1:600,140,88:270",
+    "e1m6-walls=e1m6:504,500,220:100",
+    "e1m4-lake=e1m4:320,1284,928:0:35",
 ];
+
+/// `secs` of the live game at `rate` with the camera at `view`, drawn at
+/// `vid`, after a second to settle: the 3-D view's time per frame in seconds.
+/// The player floats (noclip) so that a view over a lake stays where it is
+/// put; [`style_run`] is otherwise the same loop.
+fn persp_run(pak: &Pak, view: &StyleView, rate: Rate, vid: Vid, threads: usize, secs: f64) -> Vec<f64> {
+    let stepping = if rate == Rate::Hz(72) { Stepping::Classic } else { Stepping::Uncapped };
+    let mut s = Sim::new(pak, &view.map, rate, stepping);
+    s.w.renderer.set_threads(threads);
+    s.teleport(view.origin, view.yaw);
+    let player = s.player();
+    s.vm().ent_set_float(player, "movetype", MOVETYPE_NOCLIP);
+    s.w.pitch = view.pitch;
+    let mut view_s = Vec::new();
+    let (warm, end) = (s.t + 1.0, s.t + 1.0 + secs);
+    while s.t < end - 1e-9 {
+        let dt = s.clock.next();
+        lap_start();
+        let frame = cl_main::walk_frame(&mut s.w, dt, false, &vid);
+        render::recycle_image(frame.image);
+        if s.t >= warm {
+            view_s.push(lap_times()[1]);
+        }
+        s.t += dt;
+    }
+    view_s
+}
 
 /// `--exactpersp`: per view and rate, the 3-D view's time per frame (median,
 /// mean, p95 over `reps` runs of each, interleaved) with id's 16-pixel
@@ -1776,7 +1804,7 @@ fn persp_report(pak: &Pak, rates: &[Rate], views: &[StyleView], res: (usize, usi
             let mut times: [Vec<f64>; 2] = Default::default();
             for _ in 0..reps {
                 for (k, exact) in [false, true].into_iter().enumerate() {
-                    times[k].extend(style_run(pak, view, rate, vid_for(exact), threads, secs, false).view_s);
+                    times[k].extend(persp_run(pak, view, rate, vid_for(exact), threads, secs));
                 }
             }
             // (median, mean, p95) in ms.
