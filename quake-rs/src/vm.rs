@@ -104,6 +104,18 @@ pub trait Host {
     /// already precached, or `None` (id's errors, "model not precached").
     /// It is what `STAT_WEAPON` carries for the view weapon.
     fn find_model(&self, name: &str) -> Option<i32>;
+    /// The reverse of [`Host::find_model`]/[`Host::precache_model`]: the
+    /// precached name at index `idx` (as `sv.model_precache[idx]` reads in
+    /// the C), or `None` out of range. `PF_setmodel` sets a precached index
+    /// once and it never changes; QuakeC is free to overwrite the entity's
+    /// OWN `model` string field afterwards (a common idiom — e.g. hipnotic's
+    /// `func_movewall` blanks it right after `setmodel`, to not leak the
+    /// submodel name — a real asset the port has hit this on), so a SOLID_BSP
+    /// collision clip must resolve its hull from this stable table by
+    /// `modelindex`, exactly as `SV_HullForEntity` does (`sv.models[(int)
+    /// ent->v.modelindex]`), never by re-reading the entity's live `model`
+    /// field.
+    fn model_name(&self, idx: i32) -> Option<&str>;
     /// Bounding box `(mins, maxs)` for a model name. Brush submodels (`"*N"`)
     /// return the BSP submodel bounds; unknown models return `None`.
     fn model_bbox(&self, name: &str) -> Option<(Vec3, Vec3)>;

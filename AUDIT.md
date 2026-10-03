@@ -3188,3 +3188,91 @@ unreproduced on this build: either it predates a fix already on `main` (the miss
 round landed hours before this one), or it needs the exact phone/touch
 conditions this round's keyboard-driven automation does not cover. If it recurs, the
 `hip1m1_start_door.rs` test and the oracle flags above are the fastest way back in.
+
+## Round 2: the real map, found and fixed — `SV_ClipToLinks` re-read a brush entity's own `model` string instead of `modelindex` (2026-10-02, branch `fleet/startdoor`)
+
+The user meant Scourge of Armagon's actual `maps/start.bsp` (hipnotic's own, not
+hip1m1): the exit is a rotating door — a `rotate_object` (`*65`, purely visual, always
+`SOLID_NOT`) swung by a `func_rotate_door` controller (targetname `damndoor`), whose
+REAL collision is 30 `func_movewall` entities sharing targetname `t2`, opened by a
+floor-plate `func_button`. `review-rotate`'s own harness found the plate registers but
+`*65`'s angles never move, in id's C or the port — true, and faithful (below); it is not
+what the user hit.
+
+- ✅ **Root cause, found by disassembling hipnotic's own QC** (`quaketool dis`'s raw
+  output needed a quick annotator — offsets resolved to field/global names and their
+  actual stored float, since a disassembly's bare operand numbers collide constantly
+  with unrelated immediates at the same global cell; not kept, it did its job). The
+  chain: `func_movewall`'s spawn (`hiprot.qc`) calls `setmodel(self, self.model)` —
+  attaching the real hull and bounds — then, unconditionally for these movewalls
+  (`spawnflags` 2048), does `self.model = "";`: a common, legitimate QuakeC idiom (don't
+  leak the submodel name once `setmodel` has used it). `self.modelindex`, a SEPARATE
+  field `setmodel` also sets, is untouched. id's real `SV_HullForEntity` (`world.c`)
+  resolves a `SOLID_BSP` entity's hull as `sv.models[(int)ent->v.modelindex]` — an
+  integer, set once, never the live `model` string. `quake-rs/src/server/sv_world.rs`'s
+  `sv_move` (`SV_ClipToLinks`) instead re-parsed the entity's *current* `model` field
+  (`"*N"` → submodel `N`) on every single clip. The instant `func_movewall` blanked it —
+  at spawn, before the player ever approaches — the entity became silently uncollidable:
+  `solid` stayed `SOLID_BSP` (4), `absmin`/`absmax` stayed correct (from the real
+  `setmodel` bounds), but `sv_move`'s `None => continue` on a model string with no `*N`
+  dropped it from every trace. A closed, "solid"-looking door the player walked straight
+  through — reproduced natively: a real, untouched walk from `start.bsp`'s own
+  `info_player_start` (816 −704 216, +Y) sails to y=+559.97 with the movewalls
+  (y −353..−235) never slowing it at all.
+- ✅ **Fixed**: `Host` (`quake-rs/src/vm.rs`) gains `model_name(idx) -> Option<&str>`,
+  the reverse of `precache_model`/`find_model` — the precached name at a model index, an
+  immutable table QuakeC cannot touch (`server/mod.rs`'s `WorldModel` backs it with the
+  same `precache_models` table `model_names()` already exposed, concretely, for callers
+  that aren't behind the `Host` trait object). `sv_world.rs`'s `Solid::Bsp` branch now
+  resolves the submodel from `host.model_name(ent.modelindex)`, never `ent.model`. No
+  other collision path read the live field this way (checked every `fo().model` and
+  by-name `"model"` read in `server/`); the client's own renderer (`cl_main.rs`) reads
+  `model` by DESIGN each frame for a completely different reason (routing an entity to
+  the inline-submodel vs. external-bsp vs. alias-model draw path, not resolving a hull)
+  and was never part of this bug.
+- ✅ **Proven against id's own C oracle.** `census/oracle_run.py`'s new
+  `--hipnotic-pak`/`--id1-pak1` (round 1, above) plus its existing `oracle_walk`
+  (`oracle/c/walk_oracle.c`, newly landed on `main` from `fleet/telesound` this same day)
+  script a REAL walk — `cl.viewangles`, `+forward`, the ordinary `SV_Physics_Client` path
+  — through id's actual WinQuake. One caveat worth recording: `oracle_run.py` always
+  appends `oracle_quit` to the end of its script, which fires before `oracle_walk`'s own
+  queued frames ever run (the walk only drives through the engine's NORMAL per-frame
+  loop after the command buffer empties, same as any other script's trailing `wait`s) —
+  this round drove the oracle binary directly for the walk, bypassing that; the
+  `oracle_run.py` wrapper itself needs a small change (skip the auto-quit when a script's
+  last command is `oracle_walk`) to make this combination usable from it directly, not
+  done here. A real, untouched walk from `start.bsp`'s own spawn blocks at **y=−337.83**
+  in id's C (`oracle_sndlog`'s per-frame origin log, 30+ identical consecutive values)
+  and at **y=−368.03** in this port, post-fix (`server::client_frame_f64`, fixed 0.1 s
+  steps) — both well short of the movewalls' own span, both agreeing the door blocks.
+  Before the fix the port's own walk reached y=+559.97, clean through. The ~30-unit gap
+  between the two blocked positions is not resolved — likely the id C walk's real
+  wall-clock `host_frametime` vs. this harness's fixed 0.1 s steps giving a different
+  exact approach, not re-examined.
+- **Tested**: `quake-rs/src/server/sv_world.rs`'s
+  `sv_move_stops_at_solid_bsp_entity_even_once_its_model_field_is_cleared` — synthetic,
+  fast, no data dependency: a `SOLID_BSP` edict whose `model` field is blanked right
+  after a real `setmodel("*1")` (so `modelindex` resolves through the precache table
+  exactly as it would in play) must still block a trace; reverting the fix makes it fail
+  with `fraction=1` (checked). `quake-rs/tests/start_bsp_rotating_door.rs`
+  (`#[ignore]`d, `QUAKE_HIP1M1_PAK`) is the full real-data regression: every movewall
+  starts closed, solid, and with a blanked `model` field (so the synthetic test's setup
+  is not a strawman); the real player, walking from the real spawn, is blocked well short
+  of the door; triggering the controller's own `use` (the plate's effect) moves at least
+  one movewall off its closed origin, still solid throughout.
+- **Not explained, and faithful either way**: `*65`'s own angles never changing from a
+  single plate-touch — `RotateTargets`' rotate_object branch does copy the controller's
+  live angles onto it every tick it's called, so this is NOT a dead link; it matches id's
+  C too (`review-rotate`'s finding, not re-litigated here), so whatever makes a single
+  touch insufficient to visibly swing `*65` is either the map's own design (`wait 4`, a
+  button spawnflag, a second required trigger) or a genuinely separate QC question, out
+  of this round's scope — the collision bug was the one the user actually hit
+  (walking through the door), and it is fixed.
+- **Not verified**: whether the fixed movewalls' own group-reversal physics
+  (`movewall_blocked` → `rotate_door_group_reversedirection`, now reachable at all since
+  these entities finally collide with each other and the world) plays out identically to
+  id's C over the FULL open sequence — this round's native test only confirms at least
+  one movewall moves and stays solid by t≈5s post-trigger, not an exact id-C-matching
+  trajectory for the whole group; scripting the oracle walk all the way to the plate
+  itself (behind the now-correctly-blocking door, reached by a side path this round did
+  not map) would close that gap.
