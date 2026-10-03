@@ -50,10 +50,10 @@
 //! **A muzzle flash is not a motion either.** id's QuakeC raises
 //! `EF_MUZZLEFLASH` for the one frame a weapon discharges, and the fire
 //! frames that go with it carry the flare as geometry (`v_nail.mdl`'s eight
-//! fire frames alternate barrels, each with its own flare; a grunt's
-//! `soldier.mdl` has its flare in the attack frames): blended, the flare
-//! slides from barrel to barrel, or grows over a tenth of a second where it
-//! should flash. FitzQuake and QuakeSpasm know it — `CL_RelinkEntities`
+//! fire frames alternate barrels, each with its own flare; the shotguns' and
+//! a grunt's flare is full in the first fire pose): blended, the flare slides
+//! from barrel to barrel, or grows over a tenth of a second where it should
+//! flash. FitzQuake and QuakeSpasm know it — `CL_RelinkEntities`
 //! (cl_main.c:514-536) sets `LERP_RESETANIM|LERP_RESETANIM2` on an entity
 //! with `EF_MUZZLEFLASH` ("assume muzzle flash accompanied by muzzle flare,
 //! which looks bad when lerped"; on the view entity, on the view weapon
@@ -63,7 +63,9 @@
 //! [`FrameLerps::muzzle_flash`] is the first half (the client says which
 //! entities flashed, before drawing), [`FrameLerps::blend`] the second.
 //! Only the flash's own entity is touched: a monster's walk, the axe's swing
-//! and the weapon's recoil frames after the flash blend as ever.
+//! and the weapon's recoil frames after the flash blend as ever. (A model that
+//! flashes with no flare of its own — the ogre's grenade toss — loses two
+//! blended changes for it; QuakeSpasm pays the same.)
 //!
 //! **Snaps instead of blending**: first sighting (or seen again after a
 //! frame without it), a model change, either side of the change a group
