@@ -26,7 +26,7 @@
 use crate::client::in_win::JoyCvars;
 use crate::client::lerpmodels::LerpModels;
 use crate::client::lerpmove::LerpMove;
-use crate::render::Threads;
+use crate::render::{Crosshair, Threads};
 use crate::snd::SoundMode;
 use crate::screen::{VIEWSIZE_DEFAULT, VIEWSIZE_MAX, VIEWSIZE_MIN, VIEWSIZE_STEP};
 use crate::vm::{MAX_EDICTS, MAX_EDICTS_LIMIT};
@@ -68,9 +68,10 @@ pub struct Cvars {
     pub lookspring: bool,
     /// `lookstrafe` (cl_main.c): mouse X strafes while mouse-looking.
     pub lookstrafe: bool,
-    /// `crosshair` (view.c): `V_RenderView` draws a `+` at the view's centre.
-    /// A departure: on in the 2026 profile.
-    pub crosshair: bool,
+    /// `crosshair` (view.c): what `V_RenderView` draws at the view's centre
+    /// ([`Crosshair`]: 0 none, 1 the 2026 cross, 2 id's `+`). A departure:
+    /// the cross in the 2026 profile.
+    pub crosshair: Crosshair,
     /// `_cl_name` (cl_main.c): the player's name.
     pub cl_name: String,
     /// `_cl_color` (cl_main.c): shirt * 16 + pants.
@@ -185,7 +186,7 @@ impl Cvars {
             m_pitch: 0.022,
             lookspring: false,
             lookstrafe: false,
-            crosshair: false,
+            crosshair: Crosshair::Off,
             cl_name: "player".to_string(),
             cl_color: 0,
             hostname: "UNNAMED".to_string(),
@@ -229,7 +230,7 @@ impl Cvars {
         Cvars {
             cl_forwardspeed: 400.0,
             cl_backspeed: 400.0,
-            crosshair: true,
+            crosshair: Crosshair::Cross,
             uncapped: true,
             scaled_2d: true,
             native: true,
@@ -427,8 +428,8 @@ pub const CVARS: &[Cvar] = &[
         get: |c| number_string(c.sensitivity), set: |c, v| c.sensitivity = atof(v) },
     Cvar { name: "m_pitch", archive: true, departure: false, help: "negative: Invert Mouse",
         get: |c| number_string(c.m_pitch), set: |c, v| c.m_pitch = atof(v) },
-    Cvar { name: "crosshair", archive: true, departure: true, help: "a + at the view's centre",
-        get: |c| flag(c.crosshair), set: |c, v| c.crosshair = on(v) },
+    Cvar { name: "crosshair", archive: true, departure: true, help: "0 off, 1 a thin cross, 2 id's +",
+        get: |c| c.crosshair.cvar().to_string(), set: |c, v| c.crosshair = Crosshair::from_cvar(atof(v)) },
     Cvar { name: "gamma", archive: true, departure: false, help: "brightness (1 is none)",
         get: |c| number_string(c.gamma), set: |c, v| c.gamma = atof(v) },
     Cvar { name: "viewsize", archive: true, departure: false, help: "screen size, 30..120",

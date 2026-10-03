@@ -155,9 +155,9 @@ pub struct Walk {
     /// [`render::calc_refdef`] turns it into the 3-D view rectangle and how
     /// much status bar shows.
     pub viewsize: f32,
-    /// The `crosshair` cvar this frame: `V_RenderView` draws the `+` over
-    /// the finished view ([`render::draw_crosshair`]). Set like `viewsize`.
-    pub crosshair: bool,
+    /// The `crosshair` cvar this frame: `V_RenderView` draws it over the
+    /// finished view ([`render::draw_crosshair`]). Set like `viewsize`.
+    pub crosshair: render::Crosshair,
     /// How this frame steps the game ([`Stepping`]): Classic, id's per-frame
     /// code, unless the host runs uncapped. Set by the host each frame, like
     /// `key_move`.
@@ -410,7 +410,7 @@ pub struct DemoPlay {
     /// much status bar shows.
     pub viewsize: f32,
     /// The `crosshair` cvar this frame (see `Walk::crosshair`).
-    pub crosshair: bool,
+    pub crosshair: render::Crosshair,
     /// How this frame steps playback ([`Stepping`]), set by the host each
     /// frame like `viewsize`.
     pub stepping: Stepping,
@@ -508,7 +508,7 @@ impl DemoPlay {
             centerprint: None,
             notify: ConNotify::default(),
             viewsize: render::VIEWSIZE_DEFAULT,
-            crosshair: false,
+            crosshair: render::Crosshair::Off,
             stepping: Stepping::Classic,
             lerpmove: LerpMove::Classic,
             glides: StepGlides::default(),
@@ -631,7 +631,7 @@ pub fn assemble_walk(
         centerprint: None,
         notify: ConNotify::default(),
         viewsize: render::VIEWSIZE_DEFAULT,
-        crosshair: false,
+        crosshair: render::Crosshair::Off,
         stepping: Stepping::Classic,
         lerpmove: LerpMove::Classic,
         glides: StepGlides::default(),

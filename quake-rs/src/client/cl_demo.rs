@@ -938,8 +938,8 @@ fn render_demo_frame(
     // (gl_screen.c's SCR_UpdateScreen draws it only outside them): WinQuake
     // draws it there too, over the level's stats, with nothing to aim at.
     // (`crosshair` is a 2026 setting; Classic draws none.)
-    if let Some(cc) = d.conchars.as_ref().filter(|_| d.crosshair && f.intermission == 0) {
-        render::draw_crosshair(&mut img, cc, &vrect);
+    if f.intermission == 0 {
+        render::draw_crosshair(&mut img, d.crosshair, d.conchars.as_ref(), &vrect);
     }
     lap(Phase::Post3d);
     // A recorded intermission/finale frame draws its overlay exactly like the

@@ -17,7 +17,7 @@
 //!                    the underwater warp and tint
 //! --viewsize V       the `viewsize` cvar (default 100: the view above the full status bar)
 //! --fire N           hold +attack for the last N frames (muzzle flash, particles)
-//! --crosshair N      the `crosshair` cvar (default 0: none, so a shot shows the view alone)
+//! --crosshair N      the `crosshair` cvar: 1 the 2026 cross, 2 id's + (default 0: none, the view alone)
 //! plus the video options (`video.rs`): --video, --fov-mode, --hires, --display (default square), --scaled2d, --threads
 //! ```
 
@@ -40,7 +40,7 @@ pub fn cmd_shot(args: &[String]) -> Result<String, String> {
     let (mut yaw, mut pitch, mut origin): (Option<f32>, f32, Option<[f32; 3]>) = (None, 0.0, None);
     let mut liquid: Option<i32> = None;
     let mut viewsize = render::VIEWSIZE_DEFAULT;
-    let mut crosshair = false;
+    let mut crosshair = render::Crosshair::Off;
     let mut i = 3;
     while i < args.len() {
         let flag = args[i].as_str();
@@ -55,7 +55,7 @@ pub fn cmd_shot(args: &[String]) -> Result<String, String> {
                 "--yaw" => yaw = Some(num(flag)?),
                 "--pitch" => pitch = num(flag)?,
                 "--viewsize" => viewsize = num(flag)?,
-                "--crosshair" => crosshair = num(flag)? != 0.0,
+                "--crosshair" => crosshair = render::Crosshair::from_cvar(num(flag)?),
                 "--in-liquid" => {
                     liquid = Some(match val.as_str() {
                         "water" => quake_rs::bsp::CONTENTS_WATER,
