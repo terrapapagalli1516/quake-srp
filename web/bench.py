@@ -46,11 +46,14 @@ thread workers (`r_threads`, 0 = as many as the host offers: PLATFORM.md,
 (the program's `r_threads`), and `--build --threads-build` builds the bench
 program for that target. The page runs the Classic profile (`?classic`: id's
 game, the frames `quaketool play` hashes); `--video modern` switches to the
-2026 profile's native picture first (`set_video`: square pixels, Hor+, sizes
-past 1280x800), each --res then the size of the window it fills. The frames are the
-same at every count, but the runs of one page share the game's random stream
-(QuakeC's `random()`), so to compare hashes across counts run each count in
-a page of its own (one invocation per `--threads` value, the same workloads).
+2026 profile's video settings first (`set_video`: native picture with square
+pixels, Hor+, sizes past 1280x800, the fluid sky, gliding lights, flickering
+torches, and since 2026-10-03 exact perspective: an earlier `--video modern`
+run drew id's 16-pixel spans), each --res then the size of the window it
+fills. The frames are the same at every count, but the runs of one page share
+the game's random stream (QuakeC's `random()`), so to compare hashes across
+counts run each count in a page of its own (one invocation per `--threads`
+value, the same workloads).
 
 Usage:
   uv run web/bench.py --build                 # build the bench wasm, run the default set

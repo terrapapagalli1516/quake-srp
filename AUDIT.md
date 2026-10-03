@@ -1571,7 +1571,8 @@ world, e1m1/e1m2/e1m3/e1m7 unless stated).
     `compare.py --exactpersp`): byte-identical to before (the oracle's exact
     rows are unchanged). The uncached per-pixel wall path (faces over the
     surface-cache size cap, or no colormap — never in id's maps) stays exact.
-- ✅ **`wasm_exactpersp 0|1`** (an extra, not id; default 0). The browser
+- ✅ **`wasm_exactpersp 0|1`** (an extra, not id; default 0 — and on in the 2026 profile since
+  2026-10-03, the user's call; see the departures table). The browser
   reaches the exact-perspective renderer option through a console variable.
   All of the port's opt-in extras live in one place, `quake-wasm/src/
   extras.rs`: a table of `wasm_*` cvars that behave like id's (`wasm_x` prints
@@ -1629,7 +1630,7 @@ earlier verify scripts).
 |---|---|---|---|
 | Uncapped framerate | `wasm_uncapped 0\|1` | `Host_FilterTime` without its 72 fps gate (same [0.001, 0.1] clamps): a host frame per display refresh (120/144 Hz run 120/144 fps). The gate itself is unchanged. | departure, opt-in via Web extras, default off |
 | Show FPS | `wasm_showfps 0\|1` | QuakeWorld's `SCR_DrawFPS`: `"%3d FPS"` in white conchars at `vid.width - len*8 - 8`, `vid.height - sb_lines - 8`, not on intermission screens. The rate is presented frames over a window of at least 1 s of `realtime` (QW shows the raw count; count/window reads a steady 60 instead of 60/61). | departure, opt-in via Web extras, default off |
-| Exact perspective | `wasm_exactpersp 0\|1` | exact perspective at every pixel of the textured walls and liquids instead of id's 16-pixel spans (`RenderOptions::exact_perspective`, `quake/w2b`'s). | departure, opt-in via Web extras, default off |
+| Exact perspective | `wasm_exactpersp 0\|1` | exact perspective at every pixel of the textured walls and liquids instead of id's 16-pixel spans (`RenderOptions::exact_perspective`, `quake/w2b`'s). | departure, opt-in via Web extras, default off (on in the 2026 profile since 2026-10-03: "The profiles and the departures") |
 | Scaled 2-D layer | `wasm_scaled2d 0\|1` | the status bar, menus, console and text blown up from a 320x200 screen, the port's old layout, instead of WinQuake's 1:1 2-D layer (`draw::set_scaled_2d`, `quake/fid2d`'s). Added by the chair after this branch (`dafa2c7`, extras bit 8). | departure, opt-in via Web extras, default off |
 
 Faithful, same branch:
@@ -2589,7 +2590,9 @@ Both off is **Classic**, id's: views clamped to `MAXWIDTH`x`MAXHEIGHT`, `fov` ac
   and the view comes from a buffer of at most 320x200. At 4K that is a 12x blow-up with a
   faint shimmer; with hires it is 320x200's wobble at full resolution (id's to the pixel at
   320x200).
-- **Kept as they are (the look, or already fine at 4K).** The 16-pixel perspective spans:
+- **Kept as they are (the look, or already fine at 4K).** The 16-pixel perspective spans
+  *(since 2026-10-03 the 2026 profile draws exact perspective instead; Classic keeps the
+  spans — the departures table)*:
   they differ from exact perspective on 8.84 / 1.20 / 0.20% of the pixels of an e1m1 view at
   320x200 / 1280x800 / 3840x2400, so affine swim fades as the resolution grows.
   Mip levels follow `xscale`, so 4K draws finer mips further out, as id's formula

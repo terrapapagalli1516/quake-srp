@@ -13,6 +13,11 @@
 //! [--dump DIR [--strengths LIST]]` — the same for the steady torches'
 //! flicker (`r_torchflicker` at strength S), standing by torches; with
 //! `--dump`, every frame of each view at the first rate as raw RGB instead.
+//! `quaketool framerate <pak> --exactpersp [--rates LIST] [--res WxH]
+//! [--threads N] [--reps N] [--secs S] [--view NAME=MAP:X,Y,Z:YAW[:PITCH]]...`
+//! — what exact perspective (`wasm_exactpersp`) costs: the 3-D view's time
+//! per frame with id's 16-pixel spans and exact at every pixel, the rest the
+//! 2026 profile's.
 //!
 //! Each scenario is a scripted piece of play on the shareware maps — a jump,
 //! a fall, a grenade, a lift, a damage flash, a demo — run through the same
@@ -1736,6 +1741,63 @@ fn torches_dump(pak: &Pak, views: &[StyleView], rate: Rate, res: (usize, usize),
 }
 
 // ---------------------------------------------------------------------------
+// Exact perspective: what `wasm_exactpersp` costs
+// ---------------------------------------------------------------------------
+
+/// The views `--exactpersp` measures without `--view`: e1m1's start (a lit
+/// corridor, the first thing a player sees), e1m1's hall seen at an angle to
+/// its walls (a corridor), e1m6's walls (of the views searched, the one where
+/// the two perspectives differ most: 5% of the frame at 1080p), and a
+/// liquid-heavy one, e1m4's lake from a ledge above it, looking down (the
+/// liquids take the exact path too: `Turbulent8`'s segments).
+const PERSP_VIEWS: &[&str] = &[
+    "e1m1-start=e1m1:480,-352,88:90",
+    "e1m1-corridor=e1m1:480,300,88:75",
+    "e1m6-walls=e1m6:204,-100,220:100",
+    "e1m4-lake=e1m4:320,1284,950:0:35",
+];
+
+/// `--exactpersp`: per view and rate, the 3-D view's time per frame (median,
+/// mean, p95 over `reps` runs of each, interleaved) with id's 16-pixel
+/// spans → exact perspective at every pixel, every other video setting the
+/// 2026 profile's (the torches flicker, so the numbers are today's).
+fn persp_report(pak: &Pak, rates: &[Rate], views: &[StyleView], res: (usize, usize), threads: usize, reps: usize, secs: f64) -> String {
+    let mut o = String::new();
+    let vid_for = |exact_perspective| Vid { width: res.0, height: res.1, display_aspect: res.0 as f64 / res.1 as f64, exact_perspective, video: render::VideoCvars::MODERN, ..VID };
+    let _ = writeln!(o, "wasm_exactpersp at {}x{}, {threads} thread(s), {secs} s a run; id's spans → exact", res.0, res.1);
+    quake_rs::client::set_lap_hook(Some(lap));
+    for view in views {
+        if pak.read_file(&format!("maps/{}.bsp", view.map)).ok().flatten().is_none() {
+            let _ = writeln!(o, "{}: maps/{}.bsp is not in the pak (skipped)", view.name, view.map);
+            continue;
+        }
+        let _ = writeln!(o, "{} — maps/{}.bsp at {:?} looking {} pitch {}", view.name, view.map, view.origin, view.yaw, view.pitch);
+        for &rate in rates {
+            let mut times: [Vec<f64>; 2] = Default::default();
+            for _ in 0..reps {
+                for (k, exact) in [false, true].into_iter().enumerate() {
+                    times[k].extend(style_run(pak, view, rate, vid_for(exact), threads, secs, false).view_s);
+                }
+            }
+            // (median, mean, p95) in ms.
+            let stat = |xs: &mut Vec<f64>| {
+                let m = xs.iter().sum::<f64>() / xs.len().max(1) as f64 * 1000.0;
+                let (med, p95) = median_p95(xs);
+                (med, m, p95)
+            };
+            let (a, b) = (stat(&mut times[0]), stat(&mut times[1]));
+            let _ = writeln!(
+                o,
+                "  {:>6} Hz: 3-D view ms/frame median {:.3} → {:.3} ({:+.1}%), mean {:.3} → {:.3} ({:+.1}%), p95 {:.3} → {:.3}  ({} frames each)",
+                rate.label(), a.0, b.0, (b.0 / a.0 - 1.0) * 100.0, a.1, b.1, (b.1 / a.1 - 1.0) * 100.0, a.2, b.2, times[0].len()
+            );
+        }
+    }
+    quake_rs::client::set_lap_hook(None);
+    o
+}
+
+// ---------------------------------------------------------------------------
 // The command
 // ---------------------------------------------------------------------------
 
@@ -1770,6 +1832,8 @@ pub fn cmd_framerate(pak_path: &str, rest: &[String]) -> Result<String, String> 
     let (mut lightstyles, mut views, mut style_rates) = (false, Vec::new(), vec![Rate::Hz(72), Rate::Hz(480)]);
     // `--torchflicker`'s: the strength, and `--dump`'s directory and strengths.
     let (mut torchflicker, mut dump, mut strengths) = (None::<f32>, None::<String>, vec![0.0, 0.5, 1.0]);
+    // `--exactpersp`'s: spans against exact perspective.
+    let mut exactpersp = false;
     let (mut threads, mut reps, mut secs) = (1usize, 3usize, 4.6f64);
     let mut i = 0;
     while i < rest.len() {
@@ -1798,6 +1862,7 @@ pub fn cmd_framerate(pak_path: &str, rest: &[String]) -> Result<String, String> 
                 i += 1;
             }
             "--lightstyles" => lightstyles = true,
+            "--exactpersp" => exactpersp = true,
             "--torchflicker" => {
                 let v = rest.get(i + 1).ok_or("--torchflicker needs a strength")?;
                 torchflicker = Some(v.parse().map_err(|_| format!("--torchflicker: bad strength {v:?}"))?);
@@ -1843,6 +1908,14 @@ pub fn cmd_framerate(pak_path: &str, rest: &[String]) -> Result<String, String> 
         });
     }
     let pak = pak.ok_or("no pak")?;
+    if exactpersp {
+        style_rates.retain(|r| matches!(r, Rate::Hz(_)));
+        if views.is_empty() {
+            views = PERSP_VIEWS.iter().map(|v| StyleView::parse(v)).collect::<Result<_, _>>()?;
+        }
+        let size = super::parse_res(res.split(',').next().unwrap_or("1920x1080"), render::VideoCvars::MODERN)?;
+        return Ok(persp_report(&pak, &style_rates, &views, size, threads, reps, secs));
+    }
     if let Some(strength) = torchflicker {
         style_rates.retain(|r| matches!(r, Rate::Hz(_)));
         if views.is_empty() {
