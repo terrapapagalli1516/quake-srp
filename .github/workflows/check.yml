@@ -1,0 +1,70 @@
+# The checks every push and pull request must pass: both crates' tests and
+# clippy with warnings as errors, and the browser program's two builds.
+# ci/local.sh runs the same commands on a local checkout.
+#
+# Not here: the goldens and Classic's proof against id's C (oracle.yml, run
+# by hand), and `cargo fmt --check` (the tree is not rustfmt-formatted yet:
+# CODE_PLAN.md, W0a).
+name: check
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # The toolchain this tree is checked on. A newer stable's clippy has new
+  # lints (1.98 flags ~18 sites: `as_chunks`, byte strings, checked
+  # division); bump this together with their fixes.
+  RUST_TOOLCHAIN: "1.93.1"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Rust ${{ env.RUST_TOOLCHAIN }}, clippy and the two WASI targets
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal \
+            --component clippy --target wasm32-wasip1 --target wasm32-wasip1-threads
+          rustup default "$RUST_TOOLCHAIN"
+          rustc --version
+
+      # Most of quake-wasm's tests play id's shareware pak (no game data is
+      # in the repository); without it they fail, and quake-rs's skip.
+      - name: id's shareware pak
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends libarchive-tools
+          ci/fetch_shareware.sh
+
+      - name: quake-rs — tests
+        working-directory: quake-rs
+        run: cargo test --release
+
+      - name: quake-rs — clippy
+        working-directory: quake-rs
+        run: cargo clippy --release --all-targets -- -D warnings
+
+      - name: quake-wasm — tests
+        working-directory: quake-wasm
+        run: cargo test --release
+
+      - name: quake-wasm — clippy
+        working-directory: quake-wasm
+        run: |
+          cargo clippy --release --all-targets -- -D warnings
+          cargo clippy --release --target wasm32-wasip1 -- -D warnings
+
+      - name: quake-wasm — the browser program, single-threaded and threads
+        working-directory: quake-wasm
+        run: |
+          cargo build --release --target wasm32-wasip1
+          cargo build --release --target wasm32-wasip1-threads
+          ls -l target/wasm32-wasip1/release/quake.wasm target/wasm32-wasip1-threads/release/quake.wasm
