@@ -693,7 +693,7 @@ pub struct Vid {
     pub display_aspect: f64,
     /// How often walls and liquids find their texel exactly
     /// ([`render::PerspSpan`]): id's 16-pixel spans (`D_DrawSpans16`) in id's
-    /// Quake and in Classic, 8, 4, or every pixel — `r_perspspan`, exact in
+    /// Quake and in Classic, 64, 32, 8, 4, or every pixel — `r_perspspan`, exact in
     /// the 2026 profile.
     pub persp_span: render::PerspSpan,
     /// The port's video cvars (Hor+, views past id's largest mode): Classic

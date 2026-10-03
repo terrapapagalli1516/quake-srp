@@ -374,8 +374,8 @@ impl PolyGrads {
 /// same cost as f32 in wasm, and no drift worth a texel across 1280 pixels);
 /// the start is evaluated from the planes per span. The textured loops take
 /// `s`/`t` from it either at every pixel ([`PerspSpan::Exact`]) or at the
-/// ends of 16-, 8- or 4-pixel segments ([`Span::st_at`]).
-#[derive(Clone, Copy)]
+/// ends of segments of 4 to 64 pixels ([`Span::st_at`]).
+#[derive(Clone, Copy, Debug)]
 pub(super) struct Span {
     zi: f64,
     sz: f64,
@@ -406,14 +406,25 @@ impl Span {
 
 /// How often a textured brush span (a wall from the surface cache, a liquid)
 /// finds its texel exactly — the perspective divide — and steps affinely in
-/// between: the console's `r_perspspan 16|8|4|1`
+/// between: the console's `r_perspspan 64|32|16|8|4|1`
 /// ([`RenderOptions::persp_span`](super::RenderOptions::persp_span)). The
 /// affine error of a run grows with the square of its length, so 8's is a
-/// quarter of 16's and 4's a sixteenth; where it crosses a texel's edge the
-/// texel is taken a pixel off, which at a grazing angle shows as mortar lines
-/// stepped every segment, and in motion as their kinks swimming.
+/// quarter of 16's, 4's a sixteenth, 32's four times and 64's sixteen times;
+/// where it crosses a texel's edge the texel is taken a pixel off, which at a
+/// grazing angle shows as mortar lines stepped every segment, and in motion
+/// as their kinks swimming. What the eye takes in is the error in texels, and
+/// that goes with the square of the span's angle, not its pixels: id's 16 at
+/// 320x200 spanned what about 36 pixels do on a wide 1315x535 frame and 72
+/// at 1920x1080 (FRAMERATE.md, "The perspective span").
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PerspSpan {
+    /// Every 64 pixels: `D_DrawSpans8`'s arithmetic at 64 ([`span_c_cached`]),
+    /// and `Turbulent8`'s. Not id: at 1080p about what id's 16 was at
+    /// 320x200.
+    Spans64,
+    /// Every 32 pixels, the same arithmetic. Not id: on a wide 1315x535 frame
+    /// about what id's 16 was at 320x200.
+    Spans32,
     /// Every 16 pixels, what 1996 players saw: the x86 WinQuake's
     /// `D_DrawSpans16` (`d_draw16.s`, `d_subdiv16` 1) on the surface cache
     /// and `Turbulent8` on liquids. id's, and Classic's.
@@ -432,13 +443,18 @@ pub enum PerspSpan {
 }
 
 impl PerspSpan {
-    /// The four, from id's to exact: the order the settings page steps them.
-    pub const ALL: [PerspSpan; 4] = [PerspSpan::Spans16, PerspSpan::Spans8, PerspSpan::Spans4, PerspSpan::Exact];
+    /// The six, from the longest to exact: the order the settings page steps
+    /// them (right is finer).
+    pub const ALL: [PerspSpan; 6] =
+        [PerspSpan::Spans64, PerspSpan::Spans32, PerspSpan::Spans16, PerspSpan::Spans8, PerspSpan::Spans4, PerspSpan::Exact];
 
-    /// The pixels from one divide to the next: 16, 8, 4 or 1 (the cvar's value).
+    /// The pixels from one divide to the next: 64, 32, 16, 8, 4 or 1 (the
+    /// cvar's value).
     #[must_use]
     pub fn pixels(self) -> u8 {
         match self {
+            PerspSpan::Spans64 => 64,
+            PerspSpan::Spans32 => 32,
             PerspSpan::Spans16 => 16,
             PerspSpan::Spans8 => 8,
             PerspSpan::Spans4 => 4,
@@ -446,21 +462,16 @@ impl PerspSpan {
         }
     }
 
-    /// The span a cvar value names: the longest of 16, 8, 4 and 1 not longer
-    /// than `v` (12 is 8, 100 is 16, 2 is exact). Below 1 — 0, a word
-    /// (`atof` 0), a negative or NaN — is id's 16: the port's cvars read 0 as
-    /// the Classic value.
+    /// The span a cvar value names: the longest of 64, 32, 16, 8, 4 and 1
+    /// not longer than `v` (12 is 8, 100 is 64, 2 is exact). Below 1 — 0, a
+    /// word (`atof` 0), a negative or NaN — is id's 16: the port's cvars read
+    /// 0 as the Classic value.
     #[must_use]
     pub fn from_pixels(v: f32) -> PerspSpan {
-        if v >= 16.0 || v.is_nan() || v < 1.0 {
-            PerspSpan::Spans16
-        } else if v >= 8.0 {
-            PerspSpan::Spans8
-        } else if v >= 4.0 {
-            PerspSpan::Spans4
-        } else {
-            PerspSpan::Exact
+        if v.is_nan() || v < 1.0 {
+            return PerspSpan::Spans16;
         }
+        PerspSpan::ALL.into_iter().find(|p| v >= f32::from(p.pixels())).unwrap_or(PerspSpan::Exact)
     }
 }
 
@@ -567,7 +578,7 @@ fn span16_cached(
 
 /// `D_DrawSpans8` (d_scan.c: id's portable C, which the x86 build replaced
 /// with [`span16_cached`]) over one of id's spans of a surface-cache block,
-/// `N` pixels a segment: id's 8, or the same arithmetic at 4. The 16.16
+/// `N` pixels a segment: id's 8, or the same arithmetic at 64, 32 or 4. The 16.16
 /// texel coordinates are exact at the first pixel (clamped to `[0,
 /// bbextents]`) and at the end of every full segment (clamped to `[N,
 /// bbextents]`), stepped by `(snext - s) >> log2(N)` in between; the last
@@ -583,9 +594,21 @@ fn span16_cached(
 /// by `reciprocal_table_16`, toward minus infinity; and the segment ends'
 /// low clamp is `N`/65536 texel (the C's 8) where the asm's is 4096 (1/16
 /// texel). The clamp is the C's guard against a floored negative step
-/// running a segment below the surface's edge, and holds at 4 as at 8:
-/// pixel `i` of a segment from `s >= 0` to `snext >= N` is at least `i/N`
-/// in 16.16. Every position is inside the block, as in [`span16_cached`].
+/// running a segment below the surface's edge, and holds at any `N`: pixel
+/// `i` of a segment from `s >= 0` to `snext >= N` is at least `i/N` in
+/// 16.16. Every position is inside the block, as in [`span16_cached`].
+///
+/// Why this form and not the asm's at 32 and 64: the C is id's own pattern
+/// for any power of two (`>> 3` is the only 8 in it), where the asm is tied
+/// to 16 by `reciprocal_table_16` (1/2 to 1/15, for the last segment) and its
+/// 20-bit carry. Over 64 pixels the C's arithmetic still holds: the ends are
+/// clamped into `[N, bbextents]` (a block's at most 2^20 texels make that
+/// under 2^36) and the positions, in `i64`, stay between them; the floored
+/// step loses under one 16.16 unit a pixel, `63/65536` texel by a full
+/// segment's last pixel; the guard keeps the lowest position at `i/64 >= 0`;
+/// a span's two divides (the last segment's) are the only ones not by a
+/// power of two. (`render::raster`'s fuzz puts it against a literal
+/// transcription of the C at every `N`.)
 fn span_c_cached<const N: usize>(crow: &mut [u8], sp: &Span, fx: &BlockFixed, block: &[u8], bw: usize) {
     let (shift, low) = (N.trailing_zeros(), N as i64);
     let end = crow.len();
@@ -612,7 +635,7 @@ fn span_c_cached<const N: usize>(crow: &mut [u8], sp: &Span, fx: &BlockFixed, bl
         let n = end - k0;
         let (a, b) = sp.st_at(end - 1, fx.sadjust, fx.tadjust);
         let (snext, tnext) = (a.max(low).min(fx.bbextents), b.max(low).min(fx.bbextentt));
-        let (sstep, tstep) = (c_div_small(snext - s, n - 1), c_div_small(tnext - t, n - 1));
+        let (sstep, tstep) = (c_step(snext - s, n - 1), c_step(tnext - t, n - 1));
         for c in &mut crow[k0..] {
             *c = block.get((t >> 16) as usize * bw + (s >> 16) as usize).copied().unwrap_or(0);
             s += sstep;
@@ -621,31 +644,16 @@ fn span_c_cached<const N: usize>(crow: &mut [u8], sp: &Span, fx: &BlockFixed, bl
     }
 }
 
-/// The C's `x / d` (`int`, toward zero) for the `d` steps of a last segment
-/// (`spancount` less one: `0..16`, 0 for one pixel and no step), each `d` a
-/// constant so the compiler makes it a multiply and shifts: the same
-/// quotient, where a division by a variable is the slowest integer
-/// instruction there is.
+/// A last segment's step: the C's `(snext - s) / (spancount - 1)`, an
+/// `int` division toward zero, over `d = spancount - 1` steps (0 for a
+/// segment of one pixel, which never steps). (A match of constant divisors
+/// measured no faster: a span divides twice, not a pixel.)
 #[inline]
-fn c_div_small(x: i64, d: usize) -> i64 {
-    match d {
-        0 => 0,
-        1 => x,
-        2 => x / 2,
-        3 => x / 3,
-        4 => x / 4,
-        5 => x / 5,
-        6 => x / 6,
-        7 => x / 7,
-        8 => x / 8,
-        9 => x / 9,
-        10 => x / 10,
-        11 => x / 11,
-        12 => x / 12,
-        13 => x / 13,
-        14 => x / 14,
-        15 => x / 15,
-        d => x / d as i64,
+fn c_step(x: i64, d: usize) -> i64 {
+    if d == 0 {
+        0
+    } else {
+        x / d as i64
     }
 }
 
@@ -700,7 +708,7 @@ fn wrap_texel(v: i32, n: usize) -> usize {
 
 /// `Turbulent8` (d_scan.c; C in the x86 build too) over one of id's spans of a
 /// liquid (`crow`, its pixels), `N` pixels a segment: id's 16, or its
-/// arithmetic at 8 or 4 (`r_perspspan`; not id). The 16.16 coordinates exact
+/// arithmetic at 64, 32, 8 or 4 (`r_perspspan`; not id). The 16.16 coordinates exact
 /// at the span's first pixel (clamped to `[0, bbextents]`) and at each
 /// `N`-pixel segment's end (clamped to `[N, bbextents]`, id's 16 — the guard
 /// [`span_c_cached`] keeps at its `N` too), stepped by `(snext - s) >>
@@ -754,7 +762,7 @@ fn turb_span<const N: usize>(
         let n = end - k0;
         let (a, b) = sp.st_at(end - 1, sadjust, tadjust);
         let (sn, tn) = (a.clamp(low, BBEXTENTS), b.clamp(low, BBEXTENTS));
-        let (ss, ts) = (c_div_small(sn - s, n - 1) as i32, c_div_small(tn - t, n - 1) as i32);
+        let (ss, ts) = (c_step(sn - s, n - 1) as i32, c_step(tn - t, n - 1) as i32);
         let (mut a, mut b) = ((s as i32) & TURB_COORD_MASK, (t as i32) & TURB_COORD_MASK);
         for c in &mut crow[k0..] {
             let (sturb, tturb) = turb.texel(phase, a, b);
@@ -792,7 +800,7 @@ pub(super) fn span_at(grads: &PolyGrads, u: usize, v: usize) -> Span {
 }
 
 /// `(*d_drawspans)` on a surface-cache block, over one span: `D_DrawSpans16`
-/// (id's x86, the default), `D_DrawSpans8` at 8 or 4, or the texel of the
+/// (id's x86, the default), `D_DrawSpans8` at 64, 32, 8 or 4, or the texel of the
 /// exact perspective at every pixel ([`PerspSpan`]).
 pub(super) fn span_cached(
     crow: &mut [u8],
@@ -804,6 +812,8 @@ pub(super) fn span_cached(
     persp: PerspSpan,
 ) {
     match persp {
+        PerspSpan::Spans64 => span_c_cached::<64>(crow, sp, fx, block, bw),
+        PerspSpan::Spans32 => span_c_cached::<32>(crow, sp, fx, block, bw),
         PerspSpan::Spans16 => span16_cached(crow, sp, fx, block, bw),
         PerspSpan::Spans8 => span_c_cached::<8>(crow, sp, fx, block, bw),
         PerspSpan::Spans4 => span_c_cached::<4>(crow, sp, fx, block, bw),
@@ -811,7 +821,7 @@ pub(super) fn span_cached(
     }
 }
 
-/// `Turbulent8` ([`turb_span`]) at 16 (id's), 8 or 4, or the warp at the
+/// `Turbulent8` ([`turb_span`]) at 16 (id's), 64, 32, 8 or 4, or the warp at the
 /// exact perspective texel of every pixel, over one span of a liquid surface.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn span_turb(
@@ -832,6 +842,8 @@ pub(super) fn span_turb(
         let (sadjust, tadjust) = turb_adjust(grads);
         let phase = turb_phase(time);
         match persp {
+            PerspSpan::Spans64 => turb_span::<64>(crow, sp, sadjust, tadjust, pixels, tw, th, turb, phase),
+            PerspSpan::Spans32 => turb_span::<32>(crow, sp, sadjust, tadjust, pixels, tw, th, turb, phase),
             PerspSpan::Spans8 => turb_span::<8>(crow, sp, sadjust, tadjust, pixels, tw, th, turb, phase),
             PerspSpan::Spans4 => turb_span::<4>(crow, sp, sadjust, tadjust, pixels, tw, th, turb, phase),
             _ => turb_span::<16>(crow, sp, sadjust, tadjust, pixels, tw, th, turb, phase),
@@ -1083,6 +1095,12 @@ mod tests {
         let (q8, q4) = (e8 / e16, e4 / e8);
         assert!((0.15..0.35).contains(&q8), "8 against 16: {q8:.3} ({e16:.3} -> {e8:.3} texels)");
         assert!((0.15..0.35).contains(&q4), "4 against 8: {q4:.3} ({e8:.3} -> {e4:.3} texels)");
+        // And the longer ones, near four times each (10.34 and 31.09 texels:
+        // a 64-pixel segment is half this 128-pixel row, so 64's falls short).
+        let (e32, e64) = (err(PerspSpan::Spans32), err(PerspSpan::Spans64));
+        let (q32, q64) = (e16 / e32, e32 / e64);
+        assert!((0.15..0.35).contains(&q32), "16 against 32: {q32:.3} ({e32:.3} -> {e16:.3} texels)");
+        assert!((0.15..0.35).contains(&q64), "32 against 64: {q64:.3} ({e64:.3} -> {e32:.3} texels)");
     }
 
     #[test]
@@ -1247,6 +1265,196 @@ mod tests {
             // An eye on the plane sees it edge-on: no gradients.
             assert!(PolyGrads::for_plane(&view, [5.0, 7.0, 40.0], [0.0, 0.0, 1.0], 40.0, None).is_none());
         }
+    }
+
+    // -- The C span routines at every length, fuzzed against id's C ---------
+
+    /// A small deterministic generator (xorshift64*) for the fuzz below.
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 >> 12;
+            self.0 ^= self.0 << 25;
+            self.0 ^= self.0 >> 27;
+            self.0.wrapping_mul(0x2545_f491_4f6c_dd1d)
+        }
+        /// Uniform in `[lo, hi)`.
+        fn range(&mut self, lo: f64, hi: f64) -> f64 {
+            lo + (self.next() >> 11) as f64 / (1u64 << 53) as f64 * (hi - lo)
+        }
+        fn below(&mut self, n: u64) -> u64 {
+            self.next() % n
+        }
+    }
+
+    /// A random span over `len` pixels: its 1/z from far to near, now and
+    /// then zero or negative (rounding at a clipped edge), steps that turn
+    /// the texel coordinate by up to several blocks across the span, and now
+    /// and then huge ones.
+    fn random_span(r: &mut Rng, len: usize, texels: f64) -> Span {
+        let zi = match r.below(16) {
+            0 => 0.0,
+            1 => -r.range(0.0, 0.01),
+            _ => r.range(1e-4, 0.05),
+        };
+        let dzi = match r.below(8) {
+            0 => 0.0,
+            _ => r.range(-1.0, 1.0) * zi.abs().max(1e-4) / len as f64,
+        };
+        let scale = if r.below(32) == 0 { 1e6 } else { 1.0 };
+        let (s0, t0) = (r.range(-texels, 2.0 * texels), r.range(-texels, 2.0 * texels));
+        let (s1, t1) = (r.range(-3.0, 3.0) * texels * scale, r.range(-3.0, 3.0) * texels * scale);
+        let zi1 = zi + dzi * len as f64;
+        Span { zi, sz: s0 * zi, tz: t0 * zi, dzi, dsz: (s1 * zi1 - s0 * zi) / len as f64, dtz: (t1 * zi1 - t0 * zi) / len as f64 }
+    }
+
+    /// `D_DrawSpans8` as d_scan.c writes it, `n_px` for its 8 (`>> 3` its
+    /// shift, 8 its guard): one span of the block, reading `block[...]`
+    /// unchecked by anything but the slice's own bound — a position off the
+    /// block panics.
+    fn d_draw_spans8_as_written(n_px: i64, crow: &mut [u8], sp: &Span, fx: &BlockFixed, block: &[u8], bw: usize) {
+        let shift = n_px.trailing_zeros();
+        let clamp = |v: i64, lo: i64, hi: i64| if v > hi { hi } else if v < lo { lo } else { v };
+        let mut count = crow.len() as i64;
+        let (s0, t0) = sp.st_at(0, fx.sadjust, fx.tadjust);
+        let (mut s, mut t) = (clamp(s0, 0, fx.bbextents), clamp(t0, 0, fx.bbextentt));
+        let (mut sstep, mut tstep) = (0i64, 0i64);
+        let (mut k, mut pdest) = (0usize, 0usize);
+        loop {
+            let spancount = if count >= n_px { n_px } else { count };
+            count -= spancount;
+            let (snext, tnext);
+            if count != 0 {
+                let (a, b) = sp.st_at(k + n_px as usize, fx.sadjust, fx.tadjust);
+                (snext, tnext) = (clamp(a, n_px, fx.bbextents), clamp(b, n_px, fx.bbextentt));
+                (sstep, tstep) = ((snext - s) >> shift, (tnext - t) >> shift);
+            } else {
+                let (a, b) = sp.st_at(k + spancount as usize - 1, fx.sadjust, fx.tadjust);
+                (snext, tnext) = (clamp(a, n_px, fx.bbextents), clamp(b, n_px, fx.bbextentt));
+                if spancount > 1 {
+                    (sstep, tstep) = ((snext - s) / (spancount - 1), (tnext - t) / (spancount - 1));
+                }
+            }
+            let mut left = spancount;
+            loop {
+                crow[pdest] = block[(s >> 16) as usize + (t >> 16) as usize * bw];
+                pdest += 1;
+                s += sstep;
+                t += tstep;
+                left -= 1;
+                if left <= 0 {
+                    break;
+                }
+            }
+            (s, t) = (snext, tnext);
+            k += spancount as usize;
+            if count <= 0 {
+                break;
+            }
+        }
+    }
+
+    /// `Turbulent8` and `D_DrawTurbulent8Span` as d_scan.c writes them, at
+    /// `n_px` for its 16, in the C's `int`s from each segment's masked start.
+    #[allow(clippy::too_many_arguments)]
+    fn turbulent8_as_written(n_px: i64, crow: &mut [u8], sp: &Span, sadjust: i64, tadjust: i64, pixels: &[u8], turb: &TurbTable, phase: usize) {
+        const BB: i64 = (16384 << 16) - 1;
+        let shift = n_px.trailing_zeros();
+        let clamp = |v: i64, lo: i64, hi: i64| if v > hi { hi } else if v < lo { lo } else { v };
+        let mut count = crow.len() as i64;
+        let (s0, t0) = sp.st_at(0, sadjust, tadjust);
+        let (mut s, mut t) = (clamp(s0, 0, BB), clamp(t0, 0, BB));
+        let (mut sstep, mut tstep) = (0i64, 0i64);
+        let (mut k, mut pdest) = (0usize, 0usize);
+        loop {
+            let spancount = if count >= n_px { n_px } else { count };
+            count -= spancount;
+            let (snext, tnext);
+            if count != 0 {
+                let (a, b) = sp.st_at(k + n_px as usize, sadjust, tadjust);
+                (snext, tnext) = (clamp(a, n_px, BB), clamp(b, n_px, BB));
+                (sstep, tstep) = ((snext - s) >> shift, (tnext - t) >> shift);
+            } else {
+                let (a, b) = sp.st_at(k + spancount as usize - 1, sadjust, tadjust);
+                (snext, tnext) = (clamp(a, n_px, BB), clamp(b, n_px, BB));
+                if spancount > 1 {
+                    (sstep, tstep) = ((snext - s) / (spancount - 1), (tnext - t) / (spancount - 1));
+                }
+            }
+            let (mut a, mut b) = ((s as i32) & TURB_COORD_MASK, (t as i32) & TURB_COORD_MASK);
+            let mut left = spancount;
+            loop {
+                let (sturb, tturb) = turb.texel(phase, a, b);
+                crow[pdest] = pixels[(((tturb & 63) << 6) + (sturb & 63)) as usize];
+                pdest += 1;
+                a = a.wrapping_add(sstep as i32);
+                b = b.wrapping_add(tstep as i32);
+                left -= 1;
+                if left <= 0 {
+                    break;
+                }
+            }
+            (s, t) = (snext, tnext);
+            k += spancount as usize;
+            if count <= 0 {
+                break;
+            }
+        }
+    }
+
+    /// The C span routines at every length the setting has — the walls'
+    /// `D_DrawSpans8` at 4, 8, 32 and 64, the liquids' `Turbulent8` at 4, 8,
+    /// 16, 32 and 64 — against literal transcriptions of id's C over random
+    /// spans (lengths 1 to 1400, blocks 1 to 300 texels a side, 1/z zero or
+    /// negative now and then, huge steps): the same pixels, and no position
+    /// off the block (the transcription's unchecked read panics). A debug
+    /// build (`cargo test --lib fuzz`) checks every add for overflow too.
+    #[test]
+    fn the_c_spans_at_every_length_are_ids_c_and_stay_in_the_block() {
+        let mut r = Rng(0x9e37_79b9_7f4a_7c15);
+        let turb = TurbTable::new();
+        let liquid: Vec<u8> = (0..64 * 64).map(|i| (i * 7 + i / 64) as u8).collect();
+        // QUAKE_FUZZ_SPANS=N runs N spans instead (2026-10-03: 2,000,000).
+        let spans = std::env::var("QUAKE_FUZZ_SPANS").ok().and_then(|v| v.parse().ok())
+            .unwrap_or(if cfg!(debug_assertions) { 1000 } else { 20_000 });
+        let mut in_block = 0usize;
+        for _ in 0..spans {
+            let longest = if r.below(4) == 0 { 1400 } else { 200 };
+            let len = 1 + r.below(longest) as usize;
+            let (bw, bh) = (1 + r.below(300) as usize, 1 + r.below(300) as usize);
+            let block: Vec<u8> = (0..bw * bh).map(|i| (i * 13 + i / bw) as u8).collect();
+            let sp = random_span(&mut r, len, bw.max(bh) as f64);
+            let fx = BlockFixed {
+                sadjust: r.range(-1.0, 2.0) as i64 * ((bw as i64) << 16) + r.below(1 << 16) as i64,
+                tadjust: r.range(-1.0, 2.0) as i64 * ((bh as i64) << 16) + r.below(1 << 16) as i64,
+                bbextents: ((bw as i64) << 16) - 1,
+                bbextentt: ((bh as i64) << 16) - 1,
+            };
+            let (mut port, mut c) = (vec![0u8; len], vec![0u8; len]);
+            for (persp, n) in [(PerspSpan::Spans4, 4), (PerspSpan::Spans8, 8), (PerspSpan::Spans32, 32), (PerspSpan::Spans64, 64)] {
+                span_cached(&mut port, &sp, &fx, &block, bw, bh, persp);
+                d_draw_spans8_as_written(n, &mut c, &sp, &fx, &block, bw);
+                assert_eq!(port, c, "{persp:?}, {len} pixels on {bw}x{bh}, {sp:?}");
+            }
+            // A span whose texels vary: it ran through the block, not only
+            // along one clamped edge.
+            in_block += usize::from(port.iter().any(|&p| p != port[0]));
+            let (sadjust, tadjust) = (r.range(-1e9, 1e9) as i64, r.range(-1e9, 1e9) as i64);
+            let phase = turb_phase(r.range(0.0, 100.0) as f32);
+            for n in [4usize, 8, 16, 32, 64] {
+                match n {
+                    4 => turb_span::<4>(&mut port, &sp, sadjust, tadjust, &liquid, 64, 64, &turb, phase),
+                    8 => turb_span::<8>(&mut port, &sp, sadjust, tadjust, &liquid, 64, 64, &turb, phase),
+                    16 => turb_span::<16>(&mut port, &sp, sadjust, tadjust, &liquid, 64, 64, &turb, phase),
+                    32 => turb_span::<32>(&mut port, &sp, sadjust, tadjust, &liquid, 64, 64, &turb, phase),
+                    _ => turb_span::<64>(&mut port, &sp, sadjust, tadjust, &liquid, 64, 64, &turb, phase),
+                }
+                turbulent8_as_written(n as i64, &mut c, &sp, sadjust, tadjust, &liquid, &turb, phase);
+                assert_eq!(port, c, "Turbulent8 at {n}, {len} pixels, {sp:?}");
+            }
+        }
+        assert!(in_block * 2 > spans, "most spans run through their block: {in_block} of {spans}");
     }
 
     /// [`wrap_texel`] against `rem_euclid` directly, across power-of-two
