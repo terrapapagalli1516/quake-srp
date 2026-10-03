@@ -17,8 +17,8 @@ use crate::console::{
 use crate::host::step;
 use crate::host_cmd::execute_console_command;
 use crate::input::{
-    clear_all_states, key_down, key_event, key_is_down, key_up, keys_held, look, mouse_move,
-    mouse_sensitivity, player_pitch, pointer_unlocked, set_attack, set_impulse, set_jump,
+    clear_all_states, key_down, key_event, key_is_down, key_up, keys_held, look, mouse_count,
+    mouse_move, mouse_sensitivity, player_pitch, pointer_unlocked, set_attack, set_impulse, set_jump,
     set_move, set_movedown,
 };
 use crate::menu::{
@@ -142,6 +142,7 @@ pub(crate) fn call(line: &str) -> Answer {
         "player_pitch" => player_pitch().into(),
         "player_field" => player_field(rest.trim()).into(),
         "mouse_sensitivity" => mouse_sensitivity().into(),
+        "mouse_count" => Answer { value: 0.0, text: mouse_count() },
         "set_move" => done(|| set_move(real(0), real(1))),
         "set_attack" => done(|| set_attack(int(0))),
         "set_jump" => done(|| set_jump(int(0))),

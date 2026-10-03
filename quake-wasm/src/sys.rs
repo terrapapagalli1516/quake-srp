@@ -560,56 +560,223 @@ mod tests {
         assert_eq!(states.last().map(|s| s & STATE_MENU), Some(STATE_MENU), "Start opened it: {states:?}");
     }
 
+    /// The live game in `profile` (320x200, one render thread), then a
+    /// second of `hz` display refreshes. Before refresh `i`'s tick (1-based;
+    /// 0 is the boot frame's) go the `Mouse` records `records(i)` gives, a
+    /// `dx` each, and after every tick a call reads the yaw the frame drew
+    /// (`v_angle`: the camera turns by it, the listener faces it). A last
+    /// host frame, past the 72 fps gate, draws the last records. Returns
+    /// the drawn yaws, the boot frame's first.
+    fn drawn_yaws(profile: &str, hz: u32, records: impl FnMut(u32) -> Vec<f32>) -> Vec<f64> {
+        drawn_yaws_clocked(profile, hz, 1.0, records)
+    }
+
+    /// [`drawn_yaws`] with the refreshes' clock off by `clock`: each tick
+    /// says `clock / hz` seconds passed (a clock running at half or twice
+    /// the real rate, as a wrong system clock would give the page).
+    fn drawn_yaws_clocked(profile: &str, hz: u32, clock: f64, mut records: impl FnMut(u32) -> Vec<f32>) -> Vec<f64> {
+        APP.with(|c| *c.borrow_mut() = None);
+        let mut input = Vec::new();
+        input.extend(encode::call(1, &format!("exec profile {profile}; r_threads 1")));
+        input.extend(encode::call(2, "boot"));
+        input.extend(encode::call(3, "menu_cancel"));
+        input.extend(encode::call(4, "set_resolution 320 200"));
+        for i in 0..=hz + 1 {
+            for dx in records(i) {
+                input.extend(encode::mouse(dx, 0.0));
+            }
+            let dt = if i == 0 || i > hz { 0.1 } else { clock / f64::from(hz) };
+            input.extend(encode::tick(1 + i, dt));
+            input.extend(encode::call(5 + i, "player_field v_angle_y"));
+        }
+        let recs = run_on(&input);
+        recs.iter().filter(|r| r.kind == Record::REPLY).skip(4).map(|r| r.f64_at(4)).collect()
+    }
+
+    /// The degrees from each drawn yaw to the next, the short way round
+    /// (positive: left).
+    fn turns(yaws: &[f64]) -> Vec<f64> {
+        yaws.windows(2).map(|w| (w[1] - w[0] + 540.0).rem_euclid(360.0) - 180.0).collect()
+    }
+
+    /// The counts a 1000 Hz mouse has moved by the end of refresh `i` of a
+    /// second at `hz` (a count a millisecond, 1000 in all).
+    fn counts_by(i: u32, hz: u32) -> u32 {
+        (i * 1000 / hz).min(1000)
+    }
+
+    /// A 1000 Hz mouse's events of `counts` each, over a second, delivered
+    /// at `hz`: the events due by the end of refresh `i`, a record each
+    /// (`coalesce` false: a browser that sends every sample, or
+    /// `pointerrawupdate`), or summed into one (a browser that coalesces a
+    /// refresh's samples into one `mousemove`, as Chromium and Firefox do;
+    /// the sum in a double, as `movementX` is, then the record's f32).
+    fn mouse_1000hz(hz: u32, counts: f64, coalesce: bool) -> impl Fn(u32) -> Vec<f32> {
+        move |i| {
+            let n = if i == 0 { 0 } else { counts_by(i, hz) - counts_by(i - 1, hz) };
+            match (n, coalesce) {
+                (0, _) => Vec::new(),
+                (_, true) => vec![(f64::from(n) * counts) as f32],
+                (_, false) => vec![counts as f32; n as usize],
+            }
+        }
+    }
+
+    /// How far the drawn view may be from the exact turn after `events`
+    /// mouse records: half the f32 yaw's step a record. The yaw stays within
+    /// a turn of 0 ([`quake_rs::math::angle_wrap`]), where the step is at
+    /// most 2^-16° (below 256°): a 2^-17° rounding per record, nothing more.
+    fn yaw_rounding(events: u32) -> f64 {
+        f64::from(events) * 2f64.powi(-17)
+    }
+
     /// The same hand motion turns the drawn view as far at any refresh rate:
     /// a 1000 Hz mouse moving 1000 counts in a second, as a browser delivers
     /// it — the counts since the last refresh summed into one `mousemove`
     /// (or split over three), a whole number each, then the refresh's tick —
     /// at 60 to 480 Hz with the 2026 profile's uncapped frames, and in
-    /// Classic behind id's 72 fps gate. The view the frames draw (the
-    /// listener's facing, from the server's `v_angle`) turns 160° each time:
-    /// 0.16° a count at `sensitivity 3`. Nothing on the mouse path is per
-    /// frame: `IN_MouseMove` adds each record as it comes.
+    /// Classic behind id's 72 fps gate. The view the frames draw turns 160°
+    /// each time: 0.16° a count at `sensitivity 3`. Nothing on the mouse
+    /// path is per frame: `IN_MouseMove` adds each record as it comes.
     #[test]
     fn the_mouse_turns_the_view_the_same_at_any_refresh_rate() {
-        let turn = |profile: &str, hz: u32, split: u32| {
-            APP.with(|c| *c.borrow_mut() = None);
-            let mut input = Vec::new();
-            input.extend(encode::call(1, &format!("exec profile {profile}; r_threads 1")));
-            input.extend(encode::call(2, "boot"));
-            input.extend(encode::call(3, "menu_cancel"));
-            input.extend(encode::call(4, "set_resolution 320 200"));
-            input.extend(encode::tick(1, 0.1));
-            input.extend(encode::call(5, "listener_fwd_x"));
-            input.extend(encode::call(6, "listener_fwd_y"));
-            let mut sent = 0;
-            for i in 1..=hz {
-                let due = i * 1000 / hz; // the mouse's counts by the end of this refresh
-                let counts = due - sent;
-                for part in 0..split {
-                    let n = counts / split + u32::from(part == split - 1) * (counts % split);
-                    if n > 0 {
-                        input.extend(encode::mouse(n as f32, 0.0));
-                    }
-                }
-                sent = due;
-                input.extend(encode::tick(1 + i, 1.0 / f64::from(hz)));
-            }
-            // A last host frame past the 72 fps gate draws the last counts.
-            input.extend(encode::tick(hz + 2, 0.1));
-            input.extend(encode::call(7, "listener_fwd_x"));
-            input.extend(encode::call(8, "listener_fwd_y"));
-            let replies: Vec<f64> =
-                run_on(&input).iter().filter(|r| r.kind == Record::REPLY).map(|r| r.f64_at(4)).collect();
-            let [.., x0, y0, x1, y1] = replies[..] else { panic!("the facing replies: {replies:?}") };
-            let degrees = (y1.atan2(x1) - y0.atan2(x0)).to_degrees();
-            (degrees + 540.0).rem_euclid(360.0) - 180.0
-        };
         for (profile, hz, split) in
             [("2026", 60, 1), ("2026", 144, 1), ("2026", 240, 1), ("2026", 480, 1), ("2026", 480, 3), ("classic", 60, 1), ("classic", 480, 1)]
         {
-            let t = turn(profile, hz, split);
+            let yaws = drawn_yaws(profile, hz, |i| {
+                let counts = if i == 0 { 0 } else { counts_by(i, hz) - counts_by(i - 1, hz) };
+                (0..split)
+                    .map(|part| counts / split + u32::from(part == split - 1) * (counts % split))
+                    .filter(|&n| n > 0)
+                    .map(|n| n as f32)
+                    .collect()
+            });
+            let t: f64 = turns(&yaws).iter().sum();
             assert!((t + 160.0).abs() < 0.01, "{profile} at {hz} Hz, {split} event(s) a refresh: turned {t}°, not 160° right");
         }
+    }
+
+    /// Fractional and tiny deltas arrive whole, as a high-DPI screen or a
+    /// fast mouse at a high refresh rate gives them (`movementX` is in CSS
+    /// pixels: a count is 0.8 of one at 125%; macOS reports points): 1000
+    /// events of 0.3 counts from a 1000 Hz mouse turn the view 48° (0.16° a
+    /// count) at 60 and at 480 Hz, a record per event or a refresh's events
+    /// summed, in both profiles, and 1000 of a hundredth of a count 1.6°.
+    /// Nothing on the path rounds: the record is an f32, `IN_MouseMove`
+    /// multiplies it in f32 (no `(int)` mickeys, no `m_filter`), and the
+    /// yaw only rounds to its own step ([`yaw_rounding`]).
+    #[test]
+    fn fractional_mouse_counts_turn_the_view_in_full_at_any_refresh_rate() {
+        for (counts, want) in [(0.3, 48.0), (0.01, 1.6)] {
+            for profile in ["2026", "classic"] {
+                for hz in [60, 480] {
+                    for coalesce in [false, true] {
+                        let t: f64 = turns(&drawn_yaws(profile, hz, mouse_1000hz(hz, counts, coalesce))).iter().sum();
+                        assert!(
+                            (t + want).abs() < yaw_rounding(1000),
+                            "{profile} at {hz} Hz, 1000 events of {counts} counts (coalesced: {coalesce}): turned {t}°, not {want}° right"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The frame clock is not in the turn: the same 1000 records (of 0.3
+    /// counts, and of 2) from a 1000 Hz mouse turn the view 48° (320°)
+    /// with the refreshes at 60, 240, 480 and 1000 Hz, and with each tick's
+    /// time reported at half and at twice the real one, in both profiles.
+    /// `IN_MouseMove` has no time in it (`viewangles[YAW] -= m_yaw *
+    /// mouse_x`, a record at a time); the clock decides only which frame
+    /// draws a record, and how many frames there are (at half the clock,
+    /// 1000 Hz ticks of 0.5 ms are under `host_filter_time_display`'s 1 ms,
+    /// and Classic's 60 Hz ones under its 72 fps gate: a frame every other
+    /// tick).
+    #[test]
+    fn the_turn_does_not_depend_on_the_frame_clock() {
+        for (counts, want) in [(0.3, 48.0), (2.0, 320.0)] {
+            for profile in ["2026", "classic"] {
+                for hz in [60, 240, 480, 1000] {
+                    for clock in [0.5, 1.0, 2.0] {
+                        let t: f64 = turns(&drawn_yaws_clocked(profile, hz, clock, mouse_1000hz(hz, counts, false))).iter().sum();
+                        assert!(
+                            (t + want).abs() < yaw_rounding(1000),
+                            "{profile} at {hz} Hz, the clock at {clock}x: 1000 events of {counts} counts turned {t}°, not {want}° right"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// What the drawn frame shows of a steady mouse: at 480 Hz in the 2026
+    /// profile, one count (then two) before every refresh turns every
+    /// drawn frame by exactly 0.16° (0.32°): the camera's yaw is the
+    /// frame's `cl.viewangles`, never a 72 Hz step or an interpolation of
+    /// it. Classic, behind id's 72 fps gate, draws at most 72 of the 480
+    /// refreshes, each turned by the counts since the last it drew.
+    #[test]
+    fn every_frame_draws_the_mouse_turn_so_far() {
+        for per_refresh in [1, 2] {
+            let yaws = drawn_yaws("2026", 480, |i| if (1..=480).contains(&i) { vec![1.0; per_refresh] } else { Vec::new() });
+            let want = -0.16 * per_refresh as f64;
+            for (i, t) in turns(&yaws)[..480].iter().enumerate() {
+                assert!((t - want).abs() < 1e-4, "2026, {per_refresh} count(s) a refresh: frame {} turned {t}°, not {want}°", i + 1);
+            }
+        }
+        let yaws = drawn_yaws("classic", 480, |i| if (1..=480).contains(&i) { vec![1.0] } else { Vec::new() });
+        let (mut since, mut drawn) = (0, 0);
+        for (i, t) in turns(&yaws)[..480].iter().enumerate() {
+            since += 1;
+            if *t != 0.0 {
+                assert!((t + 0.16 * f64::from(since)).abs() < 1e-3, "Classic: refresh {} drew {t}° for {since} counts", i + 1);
+                (since, drawn) = (0, drawn + 1);
+            }
+        }
+        assert!((60..=72).contains(&drawn), "Classic draws at most 72 frames a second: {drawn}");
+    }
+
+    /// However far the player has turned, a small delta turns the view in
+    /// full: after 100 turns to the right (36000°: 225 records of 1000
+    /// counts), 1000 events of a tenth of a count still turn it 16°, and of
+    /// a hundredth 1.6°, in both profiles. Left at -36000°, an f32 yaw's
+    /// step is 2^-8°: the tenths turned it 15.6° (2% short) and the
+    /// hundredths not at all.
+    #[test]
+    fn a_small_mouse_delta_turns_the_view_after_any_number_of_turns() {
+        for (counts, want) in [(0.1, 16.0), (0.01, 1.6)] {
+            for profile in ["2026", "classic"] {
+                let fine = mouse_1000hz(480, counts, false);
+                let yaws = drawn_yaws(profile, 480, |i| if i == 0 { vec![1000.0; 225] } else { fine(i) });
+                let t: f64 = turns(&yaws).iter().sum();
+                assert!(
+                    (t + want).abs() < yaw_rounding(1000),
+                    "{profile}, 100 turns in: 1000 events of {counts} counts turned {t}°, not {want}° right"
+                );
+            }
+        }
+    }
+
+    /// The `mouse_count` call the page's `?mousecheck` reads: every `Mouse`
+    /// record, the counts the game took (`|dx|`), the turn they gave the
+    /// view (`|°|`, 0.16° a count), the host frames run and the game's
+    /// clock (`host_time`).
+    #[test]
+    fn mouse_count_says_what_the_mouse_did() {
+        let mut input = Vec::new();
+        input.extend(encode::call(1, "boot"));
+        input.extend(encode::call(2, "menu_cancel"));
+        input.extend(encode::mouse(-2.5, 1.0));
+        input.extend(encode::mouse(0.5, 0.0));
+        input.extend(encode::tick(1, 0.1));
+        input.extend(encode::call(3, "mouse_count"));
+        let recs = run_on(&input);
+        let reply = recs.iter().rfind(|r| r.kind == Record::REPLY).expect("the count");
+        let text = String::from_utf8_lossy(&reply.payload[12..]).into_owned();
+        let v: Vec<f64> = text.split(' ').map(|s| s.parse().expect("numbers")).collect();
+        let [records, counts, turned, frames, time] = v[..] else { panic!("{text}") };
+        assert_eq!((records, counts, frames), (2.0, 3.0, 1.0), "{text}");
+        assert!((turned - 0.48).abs() < 1e-5 && (time - 0.1).abs() < 1e-6, "{text}");
     }
 
     #[test]

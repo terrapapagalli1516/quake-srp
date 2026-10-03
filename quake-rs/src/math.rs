@@ -213,6 +213,27 @@ pub fn anglemod(a: f32) -> f32 {
     ((360.0 / 65536.0) * f64::from(masked)) as f32
 }
 
+/// An angle in degrees brought within a turn of 0, `[-180, 180)`, and still
+/// the same angle to the bit: the remainder (`%`, `fmod`) is exact in IEEE
+/// arithmetic, and so is the one ±360 that can follow it (the operands are
+/// within a factor of two, Sterbenz's lemma). Not id's: `CL_AdjustAngles`
+/// keeps `cl.viewangles[YAW]` within a turn with [`anglemod`], which also
+/// truncates it to 1/65536 of a turn every frame. The port's view angles
+/// take fractional mouse counts, and an f32 yaw that kept every turn the
+/// player made would lose them: at 36000° (a hundred turns) its step is
+/// 2^-8°, and a tenth of a count (0.016°) turned the view 2% short.
+#[must_use]
+pub fn angle_wrap(a: f32) -> f32 {
+    let r = a % 360.0;
+    if r >= 180.0 {
+        r - 360.0
+    } else if r < -180.0 {
+        r + 360.0
+    } else {
+        r
+    }
+}
+
 /// `AngleVectors(angles, forward, right, up)`.
 ///
 /// Returns `(forward, right, up)`. Trig is done in `double` (libm `sin`/`cos`)
@@ -606,6 +627,26 @@ mod tests {
         assert!(approx(anglemod(-90.0), 270.0));
         // anglemod(90.0) ~= 90
         assert!(approx(anglemod(90.0), 90.0));
+    }
+
+    /// [`angle_wrap`] lands in `[-180, 180)` and moves an angle by whole
+    /// turns only, exactly: its result plus the turns it took off is the
+    /// angle again, in f64 (where no sum here rounds).
+    #[test]
+    fn angle_wrap_keeps_the_angle_to_the_bit() {
+        assert_eq!([angle_wrap(180.0), angle_wrap(-180.0), angle_wrap(540.0), angle_wrap(-0.0)], [-180.0, -180.0, -180.0, -0.0]);
+        let mut a = -40000.0f32;
+        while a < 40000.0 {
+            let w = angle_wrap(a);
+            assert!((-180.0..180.0).contains(&w), "{a} -> {w}");
+            let turns = ((f64::from(a) - f64::from(w)) / 360.0).round();
+            assert_eq!(f64::from(w) + turns * 360.0, f64::from(a), "{a} -> {w}: not whole turns");
+            a += 0.37;
+        }
+        for a in [f32::MAX, f32::MIN, 1e-30, 179.99998, -180.00002] {
+            let w = angle_wrap(a);
+            assert!((-180.0..180.0).contains(&w), "{a} -> {w}");
+        }
     }
 
     #[test]

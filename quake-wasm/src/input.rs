@@ -375,12 +375,14 @@ pub(crate) fn key_is_down(keynum: i32) -> i32 {
 /// (`m_forward`). Gated behind the menu/console like `look`.
 pub(crate) fn mouse_move(dx: f32, dy: f32) {
     ensure_app(|a| {
+        a.mouse.records += 1;
         if a.menu.visible || a.console.open {
             return;
         }
         if !dx.is_finite() || !dy.is_finite() {
             return;
         }
+        a.mouse.counts += f64::from(dx.abs());
         // mouse_x *= sensitivity.value (the raw 1..11 cvar, like the C — the
         // 0.16/3 port calibration lives in M_YAW_PORT/M_PITCH_PORT).
         let c = &a.settings.cvars;
@@ -394,6 +396,7 @@ pub(crate) fn mouse_move(dx: f32, dy: f32) {
                 w.mouse_side += M_SIDE * mx;
             } else {
                 w.yaw -= M_YAW_PORT * mx;
+                a.mouse.turned += f64::from((M_YAW_PORT * mx).abs());
             }
             // if (in_mlook) V_StopPitchDrift() — every mlook mouse move.
             if mlook {
@@ -410,6 +413,29 @@ pub(crate) fn mouse_move(dx: f32, dy: f32) {
             }
         }
     });
+}
+
+/// What the page's mouse has done since the program started, for its
+/// `?mousecheck` (`web/PLATFORM.md`, "The mouse at any frame rate"): the
+/// `Mouse` records read, the horizontal counts of those the game took
+/// (`|dx|`; it takes none behind the menu or console) and the yaw they
+/// turned the view (`|°|`).
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct MouseCount {
+    pub(crate) records: u64,
+    pub(crate) counts: f64,
+    pub(crate) turned: f64,
+}
+
+/// [`MouseCount`], the host frames run (`host_framecount`) and the game's
+/// clock (`host_time`: the frames' `host_frametime`s summed), as the
+/// `mouse_count` call's text: `records counts turned frames host_time`.
+pub(crate) fn mouse_count() -> String {
+    APP.with(|c| {
+        let (m, frames, time) =
+            c.borrow().as_ref().map_or((MouseCount::default(), 0, 0.0), |a| (a.mouse, a.host_framecount, a.clock));
+        format!("{} {} {} {frames} {time}", m.records, m.counts, m.turned)
+    })
 }
 
 /// The pointer lock was released. With `freelook` (2026) `+mlook` is held
