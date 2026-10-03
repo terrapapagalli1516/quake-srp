@@ -294,8 +294,11 @@ marked *(2026-06)* were not re-checked since. Struck items were closed on 2026-0
   `joysidesensitivity` serves both axes; input, not fixed).
 
 **Demo playback**
-- No dynamic lights in demo playback: explosions and rockets light nothing (Round 4;
-  fix-client F13).
+- ~~No dynamic lights in demo playback: explosions and rockets light nothing (Round 4;
+  fix-client F13)~~ — ✅ demolights: a recorded demo makes the lights id's client makes,
+  slot for slot over the whole attract loop ("Demo playback draws id's dynamic lights",
+  below). What stays the port's own: the `rand()&31` in a flash's radius (id's draw is
+  stirred every host frame and differs from run to run).
 - Demo statics are drawn without the efrag test (same pixels, more work) (sim).
 - The loop wrap keeps the ambient ramp warm where id restarts it from 0 (2026-06,
   deliberate; not re-checked since the loop moved to `CL_NextDemo` on `quake/timedemo`
@@ -633,7 +636,7 @@ Deferred (confirmed, with concrete plans, lower frequency / higher effort):
 - ✅ **R_MarkLights dlight BSP gating** (MED) — fixed in the ship push: per-face
   dlightbits via the faithful node recursion (+ a port-specific luxel-extent
   cache-path gate; see the session entry).
-- ⬜ **Demo explosion dlight** (LOW) — the demo path emits no dynamic lights.
+- ✅ **Demo explosion dlight** (LOW) — the demo path emitted no dynamic lights; closed on `fleet/demolights` ("Demo playback draws id's dynamic lights", below).
 
 ### Render-perf pass + Rounds 5-6
 
@@ -776,7 +779,7 @@ All HIGHs and the actionable MEDs are closed as of the 2026-06-10 ship push
 
 - **Lightless maps** (no lighting lump): Lambert instead of id's fullbright row 0
   (narrow; test maps only). Sample-less faces in lit maps: ✅ Session 7.
-- Demo explosion dlight. (~~Sound channel override only dedups within a
+- ~~Demo explosion dlight~~ (closed, `fleet/demolights`). (~~Sound channel override only dedups within a
   frame~~ — ✅ closed in Session 6: cross-frame (entity,channel) override +
   S_StopSound in the page registry, live + demo.)
 - ~~Minor sbar polish (pain-frame face anim)~~ — ✅ census F16 below; the
