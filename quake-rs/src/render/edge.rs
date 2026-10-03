@@ -823,7 +823,7 @@ impl EdgeState {
 
     /// `R_RecursiveWorldNode`.
     fn recursive_world_node(&mut self, bsp: &Bsp, node: i32, mut clipflags: u32, depth: u32) {
-        if depth > MAX_DEPTH {
+        if depth > MAX_DEPTH || self.visframe_of(node) != self.visframecount {
             return;
         }
         let (minmaxs, leaf) = if node < 0 {
@@ -840,9 +840,6 @@ impl EdgeState {
             let Some(n) = bsp.nodes.get(node as usize) else { return };
             ([n.mins[0], n.mins[1], n.mins[2], n.maxs[0], n.maxs[1], n.maxs[2]].map(|v| v as f32), None)
         };
-        if self.visframe_of(node) != self.visframecount {
-            return;
-        }
         // Cull against the clip planes unless trivially accepted.
         if clipflags != 0 {
             for i in 0..4 {
