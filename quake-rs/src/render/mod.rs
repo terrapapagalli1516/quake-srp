@@ -1174,6 +1174,7 @@ impl Renderer {
         if w == 0 || h == 0 {
             return;
         }
+        let t_view = self.prof.now();
         if self.map != Some(MapShape::of(scene.world)) {
             self.begin_map(scene.world);
         }
@@ -1190,10 +1191,19 @@ impl Renderer {
             Some(&*set)
         };
         let frame = Frame::with_torches(scene, w, h, torches);
+        if let Some(t) = t_view {
+            let ns = t.elapsed().as_nanos() as u64;
+            self.prof.add(|s| s.view_setup_ns += ns);
+        }
         let Some(world) = self.edge.build(&frame, &mut self.surfaces, &mut self.prof, self.workers.threads()) else {
             return;
         };
+        let t_entities = self.prof.now();
         let entities = Entities::prepare(&frame, &mut self.prof);
+        if let Some(t) = t_entities {
+            let ns = t.elapsed().as_nanos() as u64;
+            self.prof.add(|s| s.entity_setup_ns += ns);
+        }
         let t = self.prof.now();
         let (edge, prof, workers) = (&self.edge, &self.prof, self.workers);
         let whole = band::Band::placed(w, rows, stride, x0, &mut self.zbuf);
@@ -1219,6 +1229,13 @@ impl Renderer {
             self.prof.add(|s| {
                 s.bands_ns += ns;
                 s.band_threads += threads;
+            });
+        }
+        if let Some(t) = t_view {
+            let ns = t.elapsed().as_nanos() as u64;
+            self.prof.add(|s| {
+                s.views += 1;
+                s.view_ns += ns;
             });
         }
     }

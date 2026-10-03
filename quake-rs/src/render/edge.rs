@@ -1913,6 +1913,7 @@ impl EdgeState {
         let pass = FacePass { frame, sview: &sview, mipview: &mipview, ents, bits, light_dir, clear };
         let mut faces = 0u64;
         let mut surfs = Vec::with_capacity(self.surfs.len());
+        let t_lookup = prof.now();
         // The blocks to bake, and the surfaces waiting for one.
         caches.begin_frame();
         let (mut jobs, mut waiting) = (Vec::new(), Vec::new());
@@ -1944,6 +1945,9 @@ impl EdgeState {
         // The frame's bakes, on the render threads; then each waiting
         // surface and cache entry takes its block.
         let t = prof.now();
+        if let (Some(t0), Some(t)) = (t_lookup, t) {
+            prof.add(|st| st.surf_lookup_ns += (t - t0).as_nanos() as u64);
+        }
         let blocks = bake_all(&jobs, threads);
         if let Some(t) = t {
             prof.add(|st| st.surf_bake_ns += t.elapsed().as_nanos() as u64);
