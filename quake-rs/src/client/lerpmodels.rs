@@ -47,15 +47,34 @@
 //! more and more; blending only for the time since the last change (as
 //! `StepGlides` does for a mover stepped every frame) keeps it caught up.
 //!
+//! **A muzzle flash is not a motion either.** id's QuakeC raises
+//! `EF_MUZZLEFLASH` for the one frame a weapon discharges, and the fire
+//! frames that go with it carry the flare as geometry (`v_nail.mdl`'s eight
+//! fire frames alternate barrels, each with its own flare; a grunt's
+//! `soldier.mdl` has its flare in the attack frames): blended, the flare
+//! slides from barrel to barrel, or grows over a tenth of a second where it
+//! should flash. FitzQuake and QuakeSpasm know it — `CL_RelinkEntities`
+//! (cl_main.c:514-536) sets `LERP_RESETANIM|LERP_RESETANIM2` on an entity
+//! with `EF_MUZZLEFLASH` ("assume muzzle flash accompanied by muzzle flare,
+//! which looks bad when lerped"; on the view entity, on the view weapon
+//! instead), and `R_SetupAliasFrame` (r_alias.c:430-447) spends them: the
+//! first kills the blend in progress and shows the pose as it is, the second
+//! makes the next pose change snap too — "no lerping for two frames".
+//! [`FrameLerps::muzzle_flash`] is the first half (the client says which
+//! entities flashed, before drawing), [`FrameLerps::blend`] the second.
+//! Only the flash's own entity is touched: a monster's walk, the axe's swing
+//! and the weapon's recoil frames after the flash blend as ever.
+//!
 //! **Snaps instead of blending**: first sighting (or seen again after a
 //! frame without it), a model change, either side of the change a group
-//! frame (above), the clock going back (a new level, a demo played again),
-//! and — like `StepGlides` — a move of more than 100 units on an axis
-//! between calls (`StepGlides`' own teleport test, `TELEPORT`): a blend has
-//! no view of the world beyond the entity it is given, so it keeps its own
-//! copy of that same test rather than trust the position glide to share one.
+//! frame (above), the frame of a muzzle flash and the pose change after it
+//! (above), the clock going back (a new level, a demo played again), and —
+//! like `StepGlides` — a move of more than 100 units on an axis between
+//! calls (`StepGlides`' own teleport test, `TELEPORT`): a blend has no view
+//! of the world beyond the entity it is given, so it keeps its own copy of
+//! that same test rather than trust the position glide to share one.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::math::Vec3;
 
@@ -101,6 +120,10 @@ struct Lerp {
     /// `cur_frame` is a group frame: the next change snaps too (a group's
     /// pose is the clock's, not one the next frame can be blended from).
     group: bool,
+    /// A muzzle flash was drawn and no pose change has come since:
+    /// QuakeSpasm's `LERP_RESETANIM2`, "defer lerping one more time" — the
+    /// next change snaps too.
+    defer: bool,
     /// [`FrameLerps::frame`] when this entry was last asked for, so a frame
     /// it is not asked for in is forgotten (the next sighting snaps).
     seen: u32,
@@ -112,6 +135,9 @@ struct Lerp {
 #[derive(Clone, Debug, Default)]
 pub struct FrameLerps {
     lerps: HashMap<i32, Lerp>,
+    /// The entities [`FrameLerps::muzzle_flash`] named this frame, until
+    /// [`FrameLerps::blend`] draws them (QuakeSpasm's `LERP_RESETANIM`).
+    flashed: HashSet<i32>,
     /// Counts [`FrameLerps::end_frame`]s.
     frame: u32,
 }
@@ -127,10 +153,17 @@ impl FrameLerps {
     /// ([`crate::mdl::Mdl::frame_is_group`]): a group frame always snaps.
     pub fn blend(&mut self, num: i32, model: usize, frame: usize, is_group: bool, origin: Vec3, time: f64) -> Option<(usize, f32)> {
         let seen = self.frame;
-        let snap = Lerp { model, origin, prev_frame: frame, cur_frame: frame, start: time, length: 0.0, group: is_group, seen };
+        let flashed = self.flashed.remove(&num);
+        let snap = Lerp { model, origin, prev_frame: frame, cur_frame: frame, start: time, length: 0.0, group: is_group, defer: false, seen };
         let entry = self.lerps.entry(num).or_insert(snap);
         let jumped = (0..3).any(|i| (origin[i] - entry.origin[i]).abs() > TELEPORT);
-        if is_group || entry.group || entry.model != model || time < entry.start || jumped {
+        if is_group || entry.group || entry.model != model || time < entry.start || jumped || flashed {
+            // A flash also arms the deferral, whether or not the pose changed
+            // with it (`LERP_RESETANIM` kills the blend and `LERP_RESETANIM2`
+            // is set whatever the pose does).
+            *entry = Lerp { defer: flashed, ..snap };
+        } else if frame != entry.cur_frame && entry.defer {
+            // The pose change a flash deferred: snap (`LERP_RESETANIM2`).
             *entry = snap;
         } else if frame != entry.cur_frame {
             // A frame change: blend for GLIDE_FRAME from the frame that was
@@ -145,7 +178,7 @@ impl FrameLerps {
             let changed_before = entry.length > 0.0 || entry.prev_frame != entry.cur_frame;
             let since = (time - entry.start) as f32;
             let length = if changed_before && since < GLIDE_FRAME / 2.0 { since.max(0.0) } else { GLIDE_FRAME };
-            *entry = Lerp { model, origin, prev_frame: entry.cur_frame, cur_frame: frame, start: time, length, group: false, seen };
+            *entry = Lerp { model, origin, prev_frame: entry.cur_frame, cur_frame: frame, start: time, length, group: false, defer: false, seen };
         } else {
             entry.origin = origin;
         }
@@ -160,10 +193,23 @@ impl FrameLerps {
         Some((entry.prev_frame, frac))
     }
 
-    /// The frame's entities are drawn: forget any not asked for in it (the
-    /// next sighting snaps).
+    /// `CL_RelinkEntities`' `EF_MUZZLEFLASH` rule (cl_main.c:514-536): entity
+    /// `num` flashed this frame, so [`FrameLerps::blend`] — which the client
+    /// calls for it later in the same frame — draws its pose as it is, with no
+    /// blend in progress, and snaps the next pose change too (the module
+    /// doc's "A muzzle flash is not a motion either"). The player's own flash
+    /// is the view weapon's, [`VIEWMODEL`]: the player's body is not drawn in
+    /// first person, and the weapon is what fires. A flag no `blend` spends
+    /// by [`FrameLerps::end_frame`] is dropped.
+    pub fn muzzle_flash(&mut self, num: i32) {
+        self.flashed.insert(num);
+    }
+
+    /// The frame's entities and the view weapon are drawn: forget any not
+    /// asked for in it (the next sighting snaps), and any flash nothing drew.
     pub fn end_frame(&mut self) {
         let frame = self.frame;
+        self.flashed.clear();
         self.lerps.retain(|_, l| l.seen == frame);
         self.frame = frame.wrapping_add(1);
     }
@@ -171,6 +217,7 @@ impl FrameLerps {
     /// Forget every blend (the extra is off, or a new level).
     pub fn clear(&mut self) {
         self.lerps.clear();
+        self.flashed.clear();
     }
 }
 
@@ -237,6 +284,108 @@ mod tests {
         l.end_frame();
         l.end_frame(); // a frame without this entity: forgotten
         assert_eq!(l.blend(1, 7, 1, false, [0.0; 3], 0.5), None, "forgotten, so a fresh snap");
+    }
+
+    /// A flash on a frame change, as `CL_RelinkEntities` + `R_SetupAliasFrame`
+    /// have it: that change snaps, the next one does too ("no lerping for two
+    /// frames"), and the third blends again.
+    #[test]
+    fn a_flash_snaps_the_change_and_the_next_one_and_the_third_blends() {
+        let mut l = FrameLerps::default();
+        l.blend(1, 7, 0, false, [0.0; 3], 0.0); // first sighting
+        l.muzzle_flash(1);
+        assert_eq!(l.blend(1, 7, 1, false, [0.0; 3], 0.1), None, "the flash's own change snaps");
+        assert_eq!(l.blend(1, 7, 1, false, [0.0; 3], 0.15), None, "and stays snapped");
+        // No flash this time, but the one before deferred this change.
+        assert_eq!(l.blend(1, 7, 2, false, [0.0; 3], 0.2), None, "the next change snaps too");
+        let third = l.blend(1, 7, 3, false, [0.0; 3], 0.3).expect("the third blends again");
+        assert_eq!(third.0, 2, "from the pose it was showing");
+        assert!(third.1.abs() < 1e-6, "{third:?}");
+        let mid = l.blend(1, 7, 3, false, [0.0; 3], 0.35).expect("still blending");
+        assert!((mid.1 - 0.5).abs() < 1e-5, "{mid:?}");
+    }
+
+    /// `LERP_RESETANIM` kills the lerp in progress: a flash while a blend is
+    /// running shows the pose as it is, and the next change is still deferred.
+    #[test]
+    fn a_flash_kills_the_blend_in_progress() {
+        let mut l = FrameLerps::default();
+        l.blend(1, 7, 0, false, [0.0; 3], 0.0);
+        assert!(l.blend(1, 7, 1, false, [0.0; 3], 0.01).is_some(), "an ordinary change blends");
+        l.muzzle_flash(1);
+        // The flash frame, with no pose change of its own, mid-blend.
+        assert_eq!(l.blend(1, 7, 1, false, [0.0; 3], 0.04), None, "the blend in progress is killed");
+        assert_eq!(l.blend(1, 7, 1, false, [0.0; 3], 0.05), None, "and does not come back");
+        // The deferral is armed whether or not the flash came with a change.
+        assert_eq!(l.blend(1, 7, 2, false, [0.0; 3], 0.1), None, "the next change snaps");
+        assert!(l.blend(1, 7, 3, false, [0.0; 3], 0.2).is_some(), "then it blends");
+    }
+
+    /// A weapon that flashes on every pose change (the nailgun, 0.1 s a
+    /// barrel) never blends while it fires; the pose it returns to when the
+    /// trigger is let go is deferred like any change after a flash, and the
+    /// ones after that blend.
+    #[test]
+    fn a_weapon_that_flashes_on_every_change_never_blends() {
+        let mut l = FrameLerps::default();
+        l.blend(1, 7, 0, false, [0.0; 3], 0.0);
+        for k in 1..=8 {
+            l.muzzle_flash(1);
+            assert_eq!(l.blend(1, 7, k, false, [0.0; 3], f64::from(k as u32) * 0.1), None, "shot {k}");
+        }
+        assert_eq!(l.blend(1, 7, 0, false, [0.0; 3], 0.9), None, "the change after the last flash snaps");
+        assert!(l.blend(1, 7, 1, false, [0.0; 3], 1.0).is_some(), "the one after that blends");
+    }
+
+    /// A flash is one entity's: the others in the same frame keep blending
+    /// (QuakeSpasm sets the flags on the one `entity_t`).
+    #[test]
+    fn a_flash_touches_only_its_entity() {
+        let mut l = FrameLerps::default();
+        l.blend(1, 7, 0, false, [0.0; 3], 0.0);
+        l.blend(2, 7, 0, false, [0.0; 3], 0.0);
+        l.blend(VIEWMODEL, 9, 0, false, [0.0; 3], 0.0);
+        l.muzzle_flash(1);
+        assert_eq!(l.blend(1, 7, 1, false, [0.0; 3], 0.1), None, "the flashing entity snaps");
+        assert!(l.blend(2, 7, 1, false, [0.0; 3], 0.1).is_some(), "its neighbour blends");
+        assert!(l.blend(VIEWMODEL, 9, 1, false, [0.0; 3], 0.1).is_some(), "so does the view weapon");
+        // And the other way round: the player's flash, keyed VIEWMODEL, is
+        // the gun's alone (the live walk and the demo both name it so).
+        l.muzzle_flash(VIEWMODEL);
+        assert_eq!(l.blend(VIEWMODEL, 9, 2, false, [0.0; 3], 0.2), None, "the gun follows the player's flash");
+        assert!(l.blend(2, 7, 2, false, [0.0; 3], 0.2).is_some(), "the monsters do not");
+    }
+
+    /// A flash is spent by the frame it is raised in: one that nothing drew
+    /// (the entity was culled from the list, the gun was hidden) does not
+    /// snap a change a frame later.
+    #[test]
+    fn a_flash_nothing_drew_is_dropped_at_the_frames_end() {
+        let mut l = FrameLerps::default();
+        l.blend(1, 7, 0, false, [0.0; 3], 0.0);
+        l.muzzle_flash(1);
+        l.end_frame();
+        l.blend(1, 7, 0, false, [0.0; 3], 0.01);
+        assert!(l.blend(1, 7, 1, false, [0.0; 3], 0.1).is_some(), "an unspent flash does not defer anything");
+        // `clear` forgets it too (the extra went off).
+        l.muzzle_flash(1);
+        l.clear();
+        l.blend(1, 7, 0, false, [0.0; 3], 0.2);
+        assert!(l.blend(1, 7, 1, false, [0.0; 3], 0.3).is_some());
+    }
+
+    /// The deferral is the entity's, not the clock's: the change it waits for
+    /// can come any time later (a monster fires, then stands a while).
+    #[test]
+    fn the_deferred_change_snaps_however_late_it_comes() {
+        let mut l = FrameLerps::default();
+        l.blend(1, 7, 0, false, [0.0; 3], 0.0);
+        l.muzzle_flash(1);
+        l.blend(1, 7, 1, false, [0.0; 3], 0.1);
+        l.end_frame();
+        assert_eq!(l.blend(1, 7, 1, false, [0.0; 3], 3.0), None);
+        assert_eq!(l.blend(1, 7, 2, false, [0.0; 3], 3.1), None, "late, but still the one the flash deferred");
+        assert!(l.blend(1, 7, 3, false, [0.0; 3], 3.2).is_some());
     }
 
     #[test]

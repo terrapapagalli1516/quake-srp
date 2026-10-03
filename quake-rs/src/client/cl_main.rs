@@ -620,9 +620,16 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
     // 2d. Entity light effects (EF_MUZZLEFLASH / BRIGHTLIGHT / DIMLIGHT) from the
     //     relinked edicts. The rand()&31 radius jitter is added here (entity_dlights
     //     stays a pure query). Then decay + retire the whole pool for this frame.
+    let smooth_frames = w.lerpmodels == LerpModels::Smooth;
     for ed in w.server.entity_dlights() {
         if !is_relinked(ed.key) {
             continue;
+        }
+        // r_lerpmodels: the same relink keeps a flashing entity's animation
+        // from blending across the flare (`FrameLerps::muzzle_flash`) — the
+        // player's flash is the view weapon's.
+        if smooth_frames && ed.muzzleflash {
+            w.frame_lerps.muzzle_flash(if ed.key == w.player { lerpmodels::VIEWMODEL } else { ed.key });
         }
         let jitter = w.prng.next_range(32) as f32;
         w.dlights.alloc(
@@ -702,7 +709,6 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
             .retain(|&e, _| !vm.is_free_edict(e));
     }
     let smooth = w.lerpmove == LerpMove::Smooth;
-    let smooth_frames = w.lerpmodels == LerpModels::Smooth;
     for e in 0..n {
         let ent = e as i32;
         if ent == w.player || w.server.vm.is_free_edict(ent) {
@@ -821,11 +827,6 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
         w.glides.end_frame();
     } else {
         w.glides.clear();
-    }
-    if smooth_frames {
-        w.frame_lerps.end_frame();
-    } else {
-        w.frame_lerps.clear();
     }
 
     // The signon's statics (cl_static_entities), each hung on the leaves its
@@ -1094,6 +1095,13 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
             _ => None,
         }
     };
+    // Every blend this frame draws has been asked for, the entities' and the
+    // view weapon's: forget the rest (and any flash nothing drew).
+    if smooth_frames {
+        w.frame_lerps.end_frame();
+    } else {
+        w.frame_lerps.clear();
+    }
     // R_DrawParticles: free the particles whose `die < cl.time`, draw the rest
     // as (world pos, palette index) — they share the scene z-buffer, so any
     // behind a wall are hidden — and only then move each one and step its

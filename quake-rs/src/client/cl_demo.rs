@@ -18,6 +18,7 @@ use crate::cd_audio::CdCall;
 use crate::pak::Pak;
 use crate::particles::{ParticleSystem, TrailHead, TrailStep};
 use crate::render::{self, Camera, ModelInstance, Viewmodel};
+use crate::server::EF_MUZZLEFLASH;
 use crate::tent::BeamModel;
 use crate::wad::Qpic;
 
@@ -641,6 +642,11 @@ fn render_demo_frame(
             // 0`) never gets a new frame, so nothing to blend.
             let blend = if smooth_frames && e.num >= 0 {
                 let is_group = mdl.frame_is_group(e.frame);
+                // CL_RelinkEntities: the recorded effects byte, which holds
+                // for every frame drawn from the message that carried it.
+                if e.effects & EF_MUZZLEFLASH != 0 {
+                    d.frame_lerps.muzzle_flash(e.num);
+                }
                 d.frame_lerps.blend(e.num, e.modelindex, frame, is_group, e.origin, d.time)
             } else {
                 None
@@ -693,11 +699,6 @@ fn render_demo_frame(
                 models_before: owned.len(),
             });
         }
-    }
-    if smooth_frames {
-        d.frame_lerps.end_frame();
-    } else {
-        d.frame_lerps.clear();
     }
     // CL_UpdateTEnts: expand the recorded lightning beams into bolt-model
     // pieces, exactly like the live walk. The bolt models resolve through the
@@ -882,6 +883,10 @@ fn render_demo_frame(
                 let blend = if smooth_frames {
                     let model_id = client.weapon_model.max(0) as usize;
                     let is_group = mdl.frame_is_group(client.weaponframe);
+                    // The recorded player's flash is the gun's (`f.view_effects`).
+                    if f.view_effects & EF_MUZZLEFLASH != 0 {
+                        d.frame_lerps.muzzle_flash(lerpmodels::VIEWMODEL);
+                    }
                     d.frame_lerps.blend(lerpmodels::VIEWMODEL, model_id, weapon_frame, is_group, cam.pos, d.time)
                 } else {
                     None
@@ -897,6 +902,13 @@ fn render_demo_frame(
             _ => None,
         }
     };
+    // Every blend this frame draws has been asked for, the entities' and the
+    // view weapon's: forget the rest (and any flash nothing drew).
+    if smooth_frames {
+        d.frame_lerps.end_frame();
+    } else {
+        d.frame_lerps.clear();
+    }
     // SCR_CalcRefdef: the same viewsize framing as live play (the C's demo IS
     // the client rendering a recorded stream).
     lap(Phase::Sim);

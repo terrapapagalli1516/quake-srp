@@ -392,6 +392,11 @@ pub struct DemoFrame {
     pub view_prev_origin: [f32; 3],
     /// The view entity's update set `ent->forcelink` (see [`EntSnapshot::forcelink`]).
     pub view_forcelink: bool,
+    /// The view entity's `ent->effects` (see [`EntSnapshot::effects`]; the
+    /// view entity is not among [`DemoFrame::entities`]): 0 when this
+    /// message did not update it. Its `EF_MUZZLEFLASH` is the recorded
+    /// player's weapon discharging — the view weapon's flash.
+    pub view_effects: i32,
     /// `cl.viewheight` (`svc_clientdata`'s `SU_VIEWHEIGHT`).
     pub viewheight: f32,
     /// `cl.mvelocity[1]`: the player's velocity in the message before
@@ -1055,6 +1060,13 @@ fn snapshot(cl: &mut ClientState) -> DemoFrame {
         .map_or(([0.0; 3], [0.0; 3], true), |ve| (ve.msg_origins[0], ve.msg_origins[1], ve.forcelink));
     let mut view_origin = view_entity_origin;
     view_origin[2] += cl.viewheight;
+    // CL_RelinkEntities reads `effects` of an entity the newest message
+    // updated (the same test the list below applies to the others).
+    let view_effects = cl
+        .entities
+        .get(cl.viewentity)
+        .filter(|ve| ve.active && ve.modelindex > 0 && ve.msgtime == cl.mtime[0])
+        .map_or(0, |ve| ve.effects);
 
     let mut entities: Vec<EntSnapshot> = Vec::new();
     for (i, e) in cl.entities.iter().enumerate() {
@@ -1126,6 +1138,7 @@ fn snapshot(cl: &mut ClientState) -> DemoFrame {
         view_entity_origin,
         view_prev_origin,
         view_forcelink,
+        view_effects,
         viewheight: cl.viewheight,
         prev_velocity: cl.mvelocity[1],
         entities,

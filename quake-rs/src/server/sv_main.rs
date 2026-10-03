@@ -61,6 +61,11 @@ pub struct EntityDlight {
     pub minlight: f32,
     /// Seconds until the light dies (`die = now + life`).
     pub life: f32,
+    /// The light is an `EF_MUZZLEFLASH`'s: the entity discharged a weapon this
+    /// frame. `CL_RelinkEntities` does more than light it — the client keeps
+    /// the entity's animation from blending across the flare
+    /// ([`crate::client::lerpmodels::FrameLerps::muzzle_flash`]).
+    pub muzzleflash: bool,
 }
 
 impl Server {
@@ -403,6 +408,7 @@ impl Server {
                     radius_base: 200.0,
                     minlight: 32.0,
                     life: 0.1,
+                    muzzleflash: true,
                 });
             }
             if effects & EF_BRIGHTLIGHT != 0 {
@@ -412,6 +418,7 @@ impl Server {
                     radius_base: 400.0,
                     minlight: 0.0,
                     life: 0.001,
+                    muzzleflash: false,
                 });
             }
             if effects & EF_DIMLIGHT != 0 {
@@ -421,6 +428,7 @@ impl Server {
                     radius_base: 200.0,
                     minlight: 0.0,
                     life: 0.001,
+                    muzzleflash: false,
                 });
             }
         }
@@ -582,6 +590,7 @@ mod tests {
         let d = dls[0];
         assert_eq!(d.key, e, "keyed to the firing entity");
         assert_eq!(d.minlight, 32.0);
+        assert!(d.muzzleflash, "the flash light says so (r_lerpmodels keys on it)");
         assert!((d.radius_base - 200.0).abs() < 1e-4, "base radius excludes jitter");
         assert!((d.life - 0.1).abs() < 1e-6);
         // origin + [18,0,0] + [0,0,16] = [118, 200, 66].
@@ -612,11 +621,13 @@ mod tests {
         assert_eq!(b.minlight, 0.0);
         assert_eq!(b.origin, [10.0, 20.0, 46.0]); // +16 z
         assert!((b.life - 0.001).abs() < 1e-7);
+        assert!(!b.muzzleflash, "only the muzzle flash's light is a flash");
 
         let d = dls.iter().find(|d| d.key == dim).expect("dimlight");
         assert!((d.radius_base - 200.0).abs() < 1e-4);
         assert_eq!(d.minlight, 0.0);
         assert_eq!(d.origin, [40.0, 50.0, 60.0]); // origin unchanged
+        assert!(!d.muzzleflash);
     }
 
     #[test]
