@@ -13,6 +13,12 @@
 //! [the same options]` — what the frame's lit-surface bakes cost on 1 to 16
 //! threads: the 3-D view's time and its serial part where many blocks
 //! rebake; `--paced` keeps the display's real time between frames.
+//! `quaketool framerate <pak>[,<pak>...] --serial [--threads LIST] [--paced]
+//! [the same options]` — the page's 2026 frame (exact perspective, the
+//! status bar overlay with the world in its corners, the scaled 2-D layer)
+//! at the same views: the whole frame's time, and what it does on the
+//! calling thread alone, piece by piece (`--overlay 0` after it: id's
+//! status bar, one view a frame).
 //! `quaketool framerate <pak>[,<pak>...] --torchflicker S [the same options]
 //! [--dump DIR [--strengths LIST]]` — the same for the steady torches'
 //! flicker (`r_torchflicker` at strength S), standing by torches; with
@@ -1611,6 +1617,14 @@ struct StyleRun {
     baked: Vec<f64>,
     texels: Vec<f64>,
     view_s: Vec<f64>,
+    /// The whole client frame, in seconds, with the counters off, and its
+    /// parts beside the 3-D view: the game before it, and the 2-D layer
+    /// after it.
+    frame_s: Vec<f64>,
+    game_s: Vec<f64>,
+    layer2d_s: Vec<f64>,
+    /// The renderer's counters, frame by frame, with them on.
+    stats: Vec<render::RenderStats>,
 }
 
 /// `secs` of the live game at `rate` standing at `view`, drawn at `vid`,
@@ -1620,6 +1634,11 @@ struct StyleRun {
 /// the render threads idle between frames, and a frame's first round of
 /// threads starts cold. Without it the frames run back to back.
 static PACED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// `--serial`: the runs draw the page's 2026 frame — the status bar overlay
+/// with the world in the corners beside it ([`render::SbarLayout::Overlay`]),
+/// over the video settings the caller hands in.
+static OVERLAY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn style_run(pak: &Pak, view: &StyleView, rate: Rate, vid: Vid, threads: usize, secs: f64, counters: bool) -> StyleRun {
     let stepping = if rate == Rate::Hz(72) { Stepping::Classic } else { Stepping::Uncapped };
@@ -1635,6 +1654,9 @@ fn style_run(pak: &Pak, view: &StyleView, rate: Rate, vid: Vid, threads: usize, 
     if view.fire {
         s.arm(IT_ROCKET_LAUNCHER);
         s.w.in_attack = true;
+    }
+    if OVERLAY.load(std::sync::atomic::Ordering::Relaxed) {
+        s.w.sbar_layout = render::SbarLayout::Overlay;
     }
     let mut run = StyleRun::default();
     let (warm, end) = (s.t + 1.0, s.t + 1.0 + secs);
@@ -1664,8 +1686,13 @@ fn style_run(pak: &Pak, view: &StyleView, rate: Rate, vid: Vid, threads: usize, 
             run.serial_s.push((lap_times()[1] - st.bands_ns as f64 * 1e-9).max(0.0));
             run.baked.push(st.surf_baked as f64);
             run.texels.push(st.surf_texels_baked as f64);
+            run.stats.push(st);
         } else {
-            run.view_s.push(lap_times()[1]);
+            let [game, view, post, hud] = lap_times();
+            run.view_s.push(view);
+            run.frame_s.push(game + view + post + hud);
+            run.game_s.push(game);
+            run.layer2d_s.push(post + hud);
         }
     }
     run
@@ -1733,6 +1760,73 @@ fn bake_report(pak: &Pak, rates: &[Rate], views: &[StyleView], res: (usize, usiz
                 let (serial, _) = median_p95(&mut counts[k].serial_s.clone());
                 let _ = writeln!(o, "    {t:>2} threads: 3-D view ms/frame median {med:.3}, p95 {p95:.3}; serial {serial:.3} ms ({:.0}%)  ({} frames)",
                     100.0 * serial / med.max(1e-9), times[k].len());
+            }
+        }
+    }
+    quake_rs::client::set_lap_hook(None);
+    o
+}
+
+/// `--serial [--rates LIST] [--res WxH] [--threads LIST] [--paced] [--reps N]
+/// [--secs S] [--view ...]`: the page's 2026 frame — the 2026 video
+/// settings with exact perspective, the status bar overlay (the world drawn
+/// on in the corners beside the bar: two more views a frame) and the scaled
+/// 2-D layer — at each view, rate and thread count: the whole client frame's
+/// and the 3-D view's median ms (over `reps` runs of each thread count,
+/// interleaved, the counters off), and from a run with the counters on the
+/// mean ms a frame of each piece the calling thread does alone, beside the
+/// bands' wall time. Where a native-resolution frame's serial time goes.
+fn serial_report(pak: &Pak, rates: &[Rate], views: &[StyleView], res: (usize, usize), threads: &[usize], reps: usize, secs: f64) -> String {
+    let mut o = String::new();
+    let vid = Vid {
+        width: res.0,
+        height: res.1,
+        display_aspect: res.0 as f64 / res.1 as f64,
+        persp_span: render::PerspSpan::Exact,
+        video: render::VideoCvars::MODERN,
+        ..VID
+    };
+    quake_rs::draw::set_scaled_2d(true);
+    let bar = if OVERLAY.load(std::sync::atomic::Ordering::Relaxed) { "the status bar overlay" } else { "id's status bar (--overlay 0)" };
+    let _ = writeln!(o, "the page's 2026 frame at {}x{}, {bar}, {secs} s a run, threads {threads:?}", res.0, res.1);
+    quake_rs::client::set_lap_hook(Some(lap));
+    for view in views {
+        if pak.read_file(&format!("maps/{}.bsp", view.map)).ok().flatten().is_none() {
+            let _ = writeln!(o, "{}: maps/{}.bsp is not in the pak (skipped)", view.name, view.map);
+            continue;
+        }
+        let _ = writeln!(o, "{} — maps/{}.bsp at {:?} looking {}{}", view.name, view.map, view.origin, view.yaw, if view.fire { ", firing rockets" } else { "" });
+        for &rate in rates {
+            let counts: Vec<StyleRun> = threads.iter().map(|&t| style_run(pak, view, rate, vid, t, secs, true)).collect();
+            let mut times: Vec<[Vec<f64>; 4]> = vec![Default::default(); threads.len()];
+            for _ in 0..reps {
+                for (k, &t) in threads.iter().enumerate() {
+                    let run = style_run(pak, view, rate, vid, t, secs, false);
+                    for (all, new) in times[k].iter_mut().zip([run.frame_s, run.view_s, run.game_s, run.layer2d_s]) {
+                        all.extend(new);
+                    }
+                }
+            }
+            let _ = writeln!(o, "  {:>6} Hz", rate.label());
+            for (k, &t) in threads.iter().enumerate() {
+                let [(frame, frame95), (view3d, _), (game, _), (layer2d, _)] = [0, 1, 2, 3].map(|i| median_p95(&mut times[k][i]));
+                let st = &counts[k].stats;
+                let ms = |f: &dyn Fn(&render::RenderStats) -> u64| st.iter().map(|s| f(s) as f64).sum::<f64>() / 1e6 / st.len().max(1) as f64;
+                let _ = writeln!(
+                    o,
+                    "    {t:>2} threads: frame {frame:.3} ms (p95 {frame95:.3}) = game {game:.3} + 3-D {view3d:.3} + 2-D {layer2d:.3}; counted: {:.1} views, {:.3} ms, alone {:.3} = setup {:.3} + walk {:.3} + brush {:.3} + scan {:.3} + lookups {:.3} + bakes {:.3} + entities {:.3}; bands {:.3}",
+                    ms(&|s| s.views) * 1e6,
+                    ms(&|s| s.view_ns),
+                    ms(&|s| s.view_ns.saturating_sub(s.bands_ns)),
+                    ms(&|s| s.view_setup_ns),
+                    ms(&|s| s.world_sort_ns),
+                    ms(&|s| s.submodel_ns),
+                    ms(&|s| s.world_setup_ns),
+                    ms(&|s| s.surf_lookup_ns),
+                    ms(&|s| s.surf_bake_ns),
+                    ms(&|s| s.entity_setup_ns),
+                    ms(&|s| s.bands_ns),
+                );
             }
         }
     }
@@ -2045,7 +2139,7 @@ pub fn cmd_framerate(pak_path: &str, rest: &[String]) -> Result<String, String> 
     // `--lightstyles`' own: 72 Hz is a rate like any other there.
     let (mut lightstyles, mut views, mut style_rates) = (false, Vec::new(), vec![Rate::Hz(72), Rate::Hz(480)]);
     // `--bake`'s: the thread counts.
-    let (mut bake, mut thread_list) = (false, vec![1usize, 2, 4, 8, 16]);
+    let (mut bake, mut serial, mut thread_list) = (false, false, vec![1usize, 2, 4, 8, 16]);
     // `--torchflicker`'s: the strength, and `--dump`'s directory and strengths.
     let (mut torchflicker, mut dump, mut strengths) = (None::<f32>, None::<String>, vec![0.0, 0.5, 1.0]);
     // `--perspspan`'s: the spans compared, and `--dump`'s camera motion and
@@ -2101,6 +2195,15 @@ pub fn cmd_framerate(pak_path: &str, rest: &[String]) -> Result<String, String> 
                 i += 1;
             }
             "--bake" => bake = true,
+            "--serial" => {
+                serial = true;
+                OVERLAY.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            "--overlay" => {
+                let on = rest.get(i + 1).ok_or("--overlay needs 0 or 1")? != "0";
+                OVERLAY.store(on, std::sync::atomic::Ordering::Relaxed);
+                i += 1;
+            }
             "--paced" => PACED.store(true, std::sync::atomic::Ordering::Relaxed),
             "--torchflicker" => {
                 let v = rest.get(i + 1).ok_or("--torchflicker needs a strength")?;
@@ -2164,6 +2267,14 @@ pub fn cmd_framerate(pak_path: &str, rest: &[String]) -> Result<String, String> 
             return persp_dump(&pak, &views, rate, size, secs, &spans, motion, crop, &dir);
         }
         return Ok(persp_report(&pak, &style_rates, &views, size, &spans, threads, reps, secs));
+    }
+    if serial {
+        style_rates.retain(|r| matches!(r, Rate::Hz(_)));
+        if views.is_empty() {
+            views = BAKE_VIEWS.iter().map(|v| StyleView::parse(v)).collect::<Result<_, _>>()?;
+        }
+        let size = super::parse_res(res.split(',').next().unwrap_or("1920x1080"), render::VideoCvars::MODERN)?;
+        return Ok(serial_report(&pak, &style_rates, &views, size, &thread_list, reps, secs));
     }
     if bake {
         style_rates.retain(|r| matches!(r, Rate::Hz(_)));
