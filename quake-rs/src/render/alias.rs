@@ -1807,7 +1807,7 @@ mod tests {
         let bsp = Bsp::parse(&pak.read_file("maps/e1m2.bsp").expect("read").expect("e1m2")).expect("parse");
         let mut styles = NEUTRAL_LIGHTSTYLE_SCALES;
         styles[0] = 264.0 / 256.0;
-        let mut torches = super::super::torch::TorchSet::build(&bsp);
+        let mut torches = super::super::torch::TorchSet::build(&bsp, 1);
         let origin = [1488.0, 1100.0, 296.0];
         let (r, hit) = super::super::light::r_light_point_hit(&bsp, origin, &styles);
         let (face, luxel) = hit.expect("a lit floor");

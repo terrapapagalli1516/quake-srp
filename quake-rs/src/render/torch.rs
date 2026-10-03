@@ -8,9 +8,11 @@
 //! the rest of the room's light, so nothing at run time knows it is there.
 //! This module finds it again. From the entity lump, each steady torch's
 //! origin and `light`; for each face it reaches, its share of each luxel as
-//! the light tool computed it ([`share`]: `(light - dist)` times the tool's
-//! angle and range scales, without the tool's shadows, never more than the
-//! luxel holds). Each frame moves that share by the torch's flicker:
+//! the light tool computed it, LIGHT.EXE's own sample points and shadow trace
+//! ported ([`sample_points`], [`test_line`], [`share`]: `(light - dist)`
+//! times the tool's angle and range scales where the line from the torch
+//! reaches the point, never more than the luxel holds). Each frame moves that
+//! share by the torch's flicker:
 //!
 //! ```text
 //! luxel(t) = id's luxel + strength · depth · Σ_k (s_k(t)/s̄_k - 1)/√2 · share · d_lightstylevalue[0] / 256
@@ -21,8 +23,11 @@
 //! it is off), each at a rate and a depth the kind of flame gives
 //! ([`TorchKind::flicker`]) and each torch at its own phases from its origin,
 //! so a row of torches never pulses as one; `s̄_k` is each pattern's mean, so
-//! the change is zero-mean: over the patterns' periods every luxel averages
-//! to id's, and the level is exactly as dark as id made it, only alive. It is
+//! the change is zero-mean: over the patterns' periods every luxel's light
+//! averages to id's. The picture's mean brightness follows to within about
+//! 2%, not exactly: the colormap's rows are not even steps of light (a dip
+//! darkens a dark texel more than a rise brightens it), and a rise past the
+//! brightest row is clamped there while the dip is not. It is
 //! the light the torch would have given had the mapper set its style to a
 //! flicker (what `start`'s torches do), brought back to the steady torch's
 //! average — two flickers rather than one so that it wanders like a flame
@@ -50,8 +55,8 @@
 //! fastest moves take tens of milliseconds, cannot show it, so it is not
 //! worth a second clock in the [`Scene`](super::Scene).
 
-use crate::bsp::{Bsp, DFace, TEX_SPECIAL};
-use crate::math::{dot, Vec3};
+use crate::bsp::{Bsp, DFace, CONTENTS_SOLID, TEX_SPECIAL};
+use crate::math::{add, cross, dot, mul_add, normalize, scale, sub, Vec3};
 use crate::server::{lightstyle_value_at, LerpLightStyles, Tokenizer};
 
 use super::light::{surface_extents, STYLE_NONE};
@@ -59,7 +64,9 @@ use super::surf::face_world_poly;
 
 /// `r_torchflicker`: how much the steady torches flicker, in hundredths of
 /// the flicker style's own swing — 0 off (id's: Classic), 100 as if the
-/// mapper had given each torch its flicker style, at most 200.
+/// mapper had given each torch its flicker style, at most 200, which reads
+/// as noise more than fire (about three times the movement of id's own
+/// flickering torches).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TorchFlicker(u8);
 
@@ -237,43 +244,67 @@ impl Torch {
     }
 }
 
-/// LIGHT.EXE's `DEFAULTLIGHTLEVEL` (`light.h`): a `light*` entity without a
-/// `light` key (or with 0) shines at 300, the torches too (misc.qc's "Default
-/// light value is 200" is the editor's note, not the tool's).
+/// LIGHT.EXE's `DEFAULTLIGHTLEVEL` (`entities.h`): a `light*` entity without
+/// a `light` key (or with 0) shines at 300, the torches too (misc.qc's
+/// "Default light value is 200" is the editor's note, not the tool's).
 const DEFAULT_LIGHT: f32 = 300.0;
 
-/// The steady torches in an entity lump: every flame class with no `style`
-/// (or style 0). A torch with an animated style is the light style's to
-/// animate; one with a switched style (32 and up) is QuakeC's.
-pub(super) fn steady_torches(entities: &str) -> Vec<Torch> {
+/// An entity as LIGHT.EXE's `LoadEntities` (`entities.c`) reads it, for the
+/// fields its lighting uses: the class, the origin, the light — any key
+/// starting `light`, or `_light`, the last one given; `DEFAULTLIGHTLEVEL` for
+/// a `light*` class without one — and the style (`atof` into an `int`). The
+/// tool lights every entity whose light is not 0 (`LightFace`).
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct LightEntity {
+    pub(super) class: String,
+    pub(super) origin: Vec3,
+    pub(super) light: f32,
+    pub(super) style: i32,
+}
+
+/// The entities of an entity lump with what LIGHT.EXE reads of them
+/// ([`LightEntity`]); an entity without an origin is at the origin, as the
+/// tool's zeroed entity is.
+pub(super) fn light_entities(entities: &str) -> Vec<LightEntity> {
     let mut out = Vec::new();
     let mut tok = Tokenizer::new(entities);
     while let Some(open) = tok.next_token() {
         if open != "{" {
             break;
         }
-        let (mut class, mut origin, mut light, mut style) = (String::new(), None, 0.0f32, 0i32);
+        let mut e = LightEntity { class: String::new(), origin: [0.0; 3], light: 0.0, style: 0 };
         while let Some(key) = tok.next_token() {
             if key == "}" {
                 break;
             }
             let Some(value) = tok.next_token() else { break };
             match key.as_str() {
-                "classname" => class = value,
-                "origin" => origin = Some(crate::server::parse_vector(&value)),
-                "light" => light = crate::server::parse_float(&value),
-                "style" => style = crate::server::parse_int(&value),
+                "classname" => e.class = value,
+                "origin" => e.origin = crate::server::parse_vector(&value),
+                k if k.starts_with("light") || k == "_light" => e.light = crate::server::parse_float(&value),
+                "style" => e.style = crate::server::parse_float(&value) as i32,
                 _ => {}
             }
         }
-        let (Some(kind), Some(origin)) = (TorchKind::of_classname(&class), origin) else { continue };
-        if style != 0 {
-            continue;
+        if e.class.starts_with("light") && e.light == 0.0 {
+            e.light = DEFAULT_LIGHT;
         }
-        let light = if light == 0.0 { DEFAULT_LIGHT } else { light };
-        out.push(Torch::new(origin, light, kind));
+        out.push(e);
     }
     out
+}
+
+/// The steady torches in an entity lump: every flame class with no `style`
+/// (or style 0). A torch with an animated style is the light style's to
+/// animate; one with a switched style (32 and up) is QuakeC's. (A torch with
+/// a `target` would be a spotlight to the tool; no torch of id's maps has
+/// one, and this lights it as a point.)
+pub(super) fn steady_torches(entities: &str) -> Vec<Torch> {
+    light_entities(entities)
+        .into_iter()
+        .filter(|e| e.style == 0)
+        .filter_map(|e| Some(Torch::new(e.origin, e.light, TorchKind::of_classname(&e.class)?)))
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -293,10 +324,9 @@ const MIN_SHARE: f32 = 0.5;
 /// `SingleLightFace`'s add for one sample point, times the tool's
 /// `rangescale`: what a torch of `light` at `origin` gave the luxel whose
 /// sample point is `p` on a face facing `normal` — `(light - dist)` scaled by
-/// `(1 - scalecos) + scalecos * cos(angle)`, nothing past `light` — without
-/// `CastRay`'s shadow test: the dumb robust option, as id's dynamic lights
-/// also shine through walls; [`TorchSet::build`] bounds the shares by what the
-/// luxel holds, so a torch never lights more than the tool did.
+/// `(1 - scalecos) + scalecos * cos(angle)`, nothing past `light` — where the
+/// tool's `CastRay` reached the point ([`test_line`]; [`TorchSet::build`]
+/// asks it).
 pub(super) fn share(origin: Vec3, light: f32, p: Vec3, normal: Vec3) -> f32 {
     let d = [origin[0] - p[0], origin[1] - p[1], origin[2] - p[2]];
     let dist = dot(d, d).sqrt();
@@ -320,9 +350,8 @@ struct TorchLit {
 /// ([`TorchSet::build`]), animated every frame ([`TorchSet::animate`]).
 pub(super) struct TorchSet {
     torches: Vec<Torch>,
-    /// Per world face (`bsp.faces`), its range of `lit`.
-    faces: Vec<(u32, u32)>,
-    lit: Vec<TorchLit>,
+    /// Per world face (`bsp.faces`), the torches that light it.
+    faces: Vec<Box<[TorchLit]>>,
     /// Each torch's scale this frame ([`Torch::scale`]).
     scales: Vec<f32>,
 }
@@ -332,25 +361,31 @@ impl TorchSet {
     /// world and its brush models one reaches, its shares of the face's
     /// luxels, as the light tool lit it: the faces it is in front of
     /// (`SingleLightFace`: `dist <= 0` or `dist > light` skip the face), at
-    /// the tool's sample points (`CalcPoints`: each luxel's texture
-    /// coordinates on the face's plane, a unit in front of it). The shares of
-    /// a luxel are bounded by the luxel its style-0 block holds — a torch the
-    /// tool found shadowed, or whose light another clamped, gives no more
-    /// than is there, and a face without a style-0 block gets nothing.
-    pub(super) fn build(world: &Bsp) -> TorchSet {
+    /// the tool's sample points ([`sample_points`]), each where the line from
+    /// the torch reaches it through the world's nodes ([`test_line`]) and
+    /// nothing where a wall is in the way. The shares of a luxel are bounded
+    /// by the luxel its style-0 block holds — where the tool clamped the sum
+    /// at 255, a torch gives no more than is there — and a face without a
+    /// style-0 block gets nothing.
+    ///
+    /// The tool's traces are most of the work (tens to hundreds of
+    /// milliseconds a map on one thread), so the faces are shared out over
+    /// `threads` threads, the calling thread one of them; each face's shares
+    /// are its own, so the set is the same for any count.
+    pub(super) fn build(world: &Bsp, threads: usize) -> TorchSet {
         let torches = steady_torches(&world.entities);
-        let mut faces = vec![(0u32, 0u32); world.faces.len()];
-        let mut lit = Vec::new();
+        let mut faces: Vec<Box<[TorchLit]>> = Vec::new();
+        faces.resize_with(world.faces.len(), Default::default);
         if !torches.is_empty() && !world.lighting.is_empty() {
-            let mut poly = Vec::new();
-            for (fi, face) in world.faces.iter().enumerate() {
-                let start = lit.len() as u32;
-                face_shares(world, face, &torches, &mut poly, &mut lit);
-                faces[fi] = (start, lit.len() as u32);
-            }
+            super::band::for_rows(threads, faces.len(), &mut faces, 1, |first, run| {
+                let mut poly = Vec::new();
+                for (k, lit) in run.iter_mut().enumerate() {
+                    *lit = face_shares(world, &world.faces[first + k], &torches, &mut poly).into_boxed_slice();
+                }
+            });
         }
         let scales = vec![0.0; torches.len()];
-        TorchSet { torches, faces, lit, scales }
+        TorchSet { torches, faces, scales }
     }
 
     /// Set every torch's scale for the frame at `time` (`cl.time`).
@@ -362,14 +397,14 @@ impl TorchSet {
 
     /// The torches lighting world face `fi`, at this frame's scales.
     pub(super) fn face(&self, fi: usize) -> FaceTorches<'_> {
-        let (a, b) = self.faces.get(fi).copied().unwrap_or((0, 0));
-        FaceTorches { lit: &self.lit[a as usize..b as usize], scales: &self.scales }
+        let lit = self.faces.get(fi).map_or(&[][..], |l| &l[..]);
+        FaceTorches { lit, scales: &self.scales }
     }
 
     /// The steady torches found, and the (face, torch) pairs that light.
     #[cfg(test)]
     pub(super) fn counts(&self) -> (usize, usize) {
-        (self.torches.len(), self.lit.len())
+        (self.torches.len(), self.faces.iter().map(|l| l.len()).sum())
     }
 
     #[cfg(test)]
@@ -378,27 +413,26 @@ impl TorchSet {
     }
 }
 
-/// [`TorchSet::build`] for one face: push a [`TorchLit`] onto `lit` for each
-/// torch that lights it, its shares bounded by what each luxel holds.
-fn face_shares(bsp: &Bsp, face: &DFace, torches: &[Torch], poly: &mut Vec<Vec3>, lit: &mut Vec<TorchLit>) {
-    let Some(FaceShares { block, grids }) = unbounded_shares(bsp, face, torches, poly) else { return };
-    let first = lit.len();
-    for (torch, shares) in grids {
-        if shares.iter().any(|&s| s >= MIN_SHARE) {
-            lit.push(TorchLit { torch, shares: shares.into_boxed_slice() });
-        }
-    }
-    let mine = &mut lit[first..];
+/// [`TorchSet::build`] for one face: a [`TorchLit`] for each torch that
+/// lights it, its shares bounded by what each luxel holds.
+fn face_shares(bsp: &Bsp, face: &DFace, torches: &[Torch], poly: &mut Vec<Vec3>) -> Vec<TorchLit> {
+    let Some(FaceShares { block, grids }) = unbounded_shares(bsp, face, torches, poly) else { return Vec::new() };
+    let mut lit: Vec<TorchLit> = grids
+        .into_iter()
+        .filter(|(_, shares)| shares.iter().any(|&s| s >= MIN_SHARE))
+        .map(|(torch, shares)| TorchLit { torch, shares: shares.into_boxed_slice() })
+        .collect();
     for (j, &held) in block.iter().enumerate() {
-        let total: f32 = mine.iter().map(|l| l.shares[j]).sum();
+        let total: f32 = lit.iter().map(|l| l.shares[j]).sum();
         let held = f32::from(held);
         if total > held {
             let k = if total > 0.0 { held / total } else { 0.0 };
-            for l in mine.iter_mut() {
+            for l in lit.iter_mut() {
                 l.shares[j] *= k;
             }
         }
     }
+    lit
 }
 
 /// A face's style-0 block and, for each torch in front of it and in reach,
@@ -442,52 +476,168 @@ fn unbounded_shares<'a>(bsp: &'a Bsp, face: &DFace, torches: &[Torch], poly: &mu
         .ok()
         .and_then(|o| o.checked_add(slot * n))
         .and_then(|o| bsp.lighting.get(o..o.checked_add(n)?))?;
-    // The sample point of each luxel: on the plane a unit in front
-    // (`CalcFaceVectors`' texorg), at the texture coordinates
-    // `texturemins + 16 * (s, t)` (`CalcPoints` without `-extra`): solve
-    // `vecs[0]·p + vecs[0][3] = s`, `vecs[1]·p + vecs[1][3] = t`,
-    // `normal·p = facedist + 1` for p.
-    let rows = [
-        [ti.vecs[0][0], ti.vecs[0][1], ti.vecs[0][2]],
-        [ti.vecs[1][0], ti.vecs[1][1], ti.vecs[1][2]],
-        normal,
-    ];
-    let inv = invert3(rows)?;
-    let point = |s: usize, t: usize| {
-        let b = [
-            (texmins[0] + 16 * s as i32) as f32 - ti.vecs[0][3],
-            (texmins[1] + 16 * t as i32) as f32 - ti.vecs[1][3],
-            facedist + 1.0,
-        ];
-        [dot(inv[0], b), dot(inv[1], b), dot(inv[2], b)]
-    };
+    let points = sample_points(bsp, ti, (normal, facedist), poly, texmins, (lmw, lmh))?;
+    let mut sub = vec![0.0f32; points.len()];
     let grids = reaching
         .iter()
         .map(|&i| {
             let t = &torches[i as usize];
-            (i, (0..n).map(|j| share(t.origin, t.light, point(j % lmw, j / lmw), normal)).collect())
+            for (cell, &p) in sub.iter_mut().zip(&points) {
+                let s = share(t.origin, t.light, p, normal);
+                // `CastRay(light->origin, surf)`: blocked, nothing.
+                *cell = if s > 0.0 && test_line(bsp, t.origin, p) { s } else { 0.0 };
+            }
+            // `LightFace`'s "extra filtering": a luxel is its four samples'
+            // mean.
+            let w = lmw * 2;
+            let luxel = |j: usize| {
+                let (s, t) = (j % lmw, j / lmw);
+                let at = |k: usize| sub[k];
+                (at(t * 2 * w + s * 2) + at(t * 2 * w + s * 2 + 1) + at((t * 2 + 1) * w + s * 2) + at((t * 2 + 1) * w + s * 2 + 1)) * 0.25
+            };
+            (i, (0..n).map(luxel).collect())
         })
         .collect();
     Some(FaceShares { block, grids })
 }
 
-/// The inverse of the 3x3 matrix `m` (rows), or `None` when it is singular
-/// (a texture axis along the face's normal: the tool's "Texture axis
-/// perpendicular to face").
-fn invert3(m: [Vec3; 3]) -> Option<[Vec3; 3]> {
-    let c = |a: Vec3, b: Vec3| [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
-    let (r0, r1, r2) = (c(m[1], m[2]), c(m[2], m[0]), c(m[0], m[1]));
-    let det = dot(m[0], r0);
-    if det.is_nan() || det.abs() <= 1e-9 {
+// ---------------------------------------------------------------------------
+// LIGHT.EXE's sample points and shadows (LTFACE.C, TRACE.C)
+// ---------------------------------------------------------------------------
+
+/// `ON_EPSILON` (`light.h`): a segment within this of a plane at both ends is
+/// on that side of it whole, not split.
+const ON_EPSILON: f32 = 0.1;
+
+/// `TestLine` (`trace.c`): whether the segment from `start` to `stop` crosses
+/// no solid leaf of the world's node tree (`MakeTnodes(&dmodels[0])`: brush
+/// models are traced against the world alone, and only `CONTENTS_SOLID`
+/// blocks — water and sky let light through). id's walks the tree with a
+/// stack of back halves; this recursion is the same walk: the near side of a
+/// split first, then the far side from the split point. A world without
+/// nodes (the synthetic test rooms) blocks nothing.
+///
+/// The game's own trace (`world::trace_world`, `SV_RecursiveHullCheck`) is
+/// not the tool's: it splits at every plane the segment crosses, where the
+/// tool keeps a segment within [`ON_EPSILON`] of a plane at both ends on one
+/// side, and it rebuilds the hull and finds the impact, which a yes or no
+/// does not need.
+pub(super) fn test_line(bsp: &Bsp, start: Vec3, stop: Vec3) -> bool {
+    let head = bsp.models.first().map_or(0, |m| m.headnode[0]);
+    bsp.nodes.is_empty() || line_clear(bsp, head, start, stop, bsp.nodes.len())
+}
+
+/// One node of [`test_line`]'s walk; `depth` bounds it (a malformed tree).
+fn line_clear(bsp: &Bsp, node: i32, front: Vec3, back: Vec3, depth: usize) -> bool {
+    if node < 0 {
+        // A leaf: `-(leaf + 1)`.
+        let leaf = usize::try_from(-(node + 1)).ok().and_then(|l| bsp.leafs.get(l));
+        return leaf.map_or(true, |l| l.contents != CONTENTS_SOLID);
+    }
+    let Some(n) = usize::try_from(node).ok().and_then(|i| bsp.nodes.get(i)) else { return true };
+    let Some(plane) = usize::try_from(n.planenum).ok().and_then(|i| bsp.planes.get(i)) else { return true };
+    if depth == 0 {
+        return true;
+    }
+    let child = |k: usize| i32::from(n.children[k]);
+    // The axial planes by their coordinate, as `MakeTnode`'s `type`.
+    let (f, b) = match plane.ptype {
+        t @ 0..=2 => (front[t as usize] - plane.dist, back[t as usize] - plane.dist),
+        _ => (dot(front, plane.normal) - plane.dist, dot(back, plane.normal) - plane.dist),
+    };
+    if f > -ON_EPSILON && b > -ON_EPSILON {
+        return line_clear(bsp, child(0), front, back, depth - 1);
+    }
+    if f < ON_EPSILON && b < ON_EPSILON {
+        return line_clear(bsp, child(1), front, back, depth - 1);
+    }
+    let side = usize::from(f < 0.0);
+    let frac = f / (f - b);
+    let mid = [0, 1, 2].map(|j| front[j] + frac * (back[j] - front[j]));
+    line_clear(bsp, child(side), front, mid, depth - 1) && line_clear(bsp, child(1 - side), mid, back, depth - 1)
+}
+
+/// The world points LIGHT.EXE lit a face's luxels at: `CalcFaceVectors`,
+/// `CalcFaceExtents` and `CalcPoints` (`ltface.c`) with `-extra`, which id
+/// lit its maps with (the shareware episode's style-0 lightmaps are this
+/// re-derivation's to the byte on 85–100% of their luxels, `start` on all;
+/// without `-extra`, on a quarter): four samples a luxel, `2 lmw x 2 lmh`
+/// row-major, sample `(s, t)` at texture point `texturemins - 8 + 8 * (s,
+/// t)`, so luxel `(s, t)` is the mean of its samples `(2s, 2t)` to `(2s + 1,
+/// 2t + 1)`. Each projected back along the texture axes' normal onto the
+/// face's plane a unit in front of it (`plane`, turned to the face's side) —
+/// and, where
+/// the face's middle cannot see that point (a grid point past the face's edge,
+/// inside a wall), moved 8 texels toward the middle in t, then s, up to six
+/// times, the last time also 8 units toward the middle ("this doesn't
+/// completely work", the tool's comment says: light bleeds under walls a
+/// little, and the bake has it). `None` for a texture axis along the plane
+/// (the tool's "Texture axis perpendicular to face").
+fn sample_points(
+    bsp: &Bsp,
+    ti: &crate::bsp::TexInfo,
+    (normal, facedist): (Vec3, f32),
+    poly: &[Vec3],
+    texmins: [i32; 2],
+    (lmw, lmh): (usize, usize),
+) -> Option<Vec<Vec3>> {
+    let axis = |k: usize| [ti.vecs[k][0], ti.vecs[k][1], ti.vecs[k][2]];
+    let (s_axis, t_axis) = (axis(0), axis(1));
+    // CalcFaceVectors: the normal to the texture axes, turned to the plane's
+    // side; `distscale`, the distance along it per unit along the normal.
+    let (mut texnormal, len) = normalize(cross(t_axis, s_axis));
+    let mut distscale = dot(texnormal, normal);
+    if len == 0.0 || distscale == 0.0 || distscale.is_nan() {
         return None;
     }
-    // The inverse's columns are the cofactor rows over the determinant.
-    let k = 1.0 / det;
-    Some([
-        [r0[0] * k, r1[0] * k, r2[0] * k],
-        [r0[1] * k, r1[1] * k, r2[1] * k],
-        [r0[2] * k, r1[2] * k, r2[2] * k],
-    ])
+    if distscale < 0.0 {
+        distscale = -distscale;
+        texnormal = scale(texnormal, -1.0);
+    }
+    let distscale = 1.0 / distscale;
+    let textoworld = [s_axis, t_axis].map(|v| {
+        let l = dot(v, v).sqrt();
+        scale(mul_add(v, -dot(v, normal) * distscale, texnormal), (1.0 / l) * (1.0 / l))
+    });
+    let texorg = add(scale(textoworld[0], -ti.vecs[0][3]), scale(textoworld[1], -ti.vecs[1][3]));
+    let d = (dot(texorg, normal) - facedist - 1.0) * distscale;
+    let texorg = mul_add(texorg, -d, texnormal);
+    let at = |us: f32, ut: f32| add(texorg, add(scale(textoworld[0], us), scale(textoworld[1], ut)));
+    // CalcFaceExtents' exact extents, and the face's middle.
+    let (mut mins, mut maxs) = ([f32::MAX; 2], [f32::MIN; 2]);
+    for p in poly {
+        for (j, v) in [s_axis, t_axis].iter().enumerate() {
+            let val = dot(*p, *v) + ti.vecs[j][3];
+            (mins[j], maxs[j]) = (mins[j].min(val), maxs[j].max(val));
+        }
+    }
+    let (mids, midt) = ((maxs[0] + mins[0]) / 2.0, (maxs[1] + mins[1]) / 2.0);
+    let facemid = at(mids, midt);
+    // A step of 8 toward the middle, never past it.
+    let toward = |u: f32, mid: f32| if u > mid { (u - 8.0).max(mid) } else { (u + 8.0).min(mid) };
+    let (w, h) = (lmw * 2, lmh * 2);
+    let mut points = Vec::with_capacity(w * h);
+    for t in 0..h {
+        for s in 0..w {
+            let mut us = (texmins[0] - 8 + 8 * s as i32) as f32;
+            let mut ut = (texmins[1] - 8 + 8 * t as i32) as f32;
+            let mut surf = at(us, ut);
+            for i in 0..6 {
+                if test_line(bsp, facemid, surf) {
+                    break;
+                }
+                if i & 1 != 0 {
+                    us = toward(us, mids);
+                } else {
+                    ut = toward(ut, midt);
+                }
+                // The next try; after the last, this one moved 8 units on.
+                surf = if i < 5 { at(us, ut) } else { mul_add(surf, 8.0, normalize(sub(facemid, surf)).0) };
+            }
+            points.push(surf);
+        }
+    }
+    Some(points)
 }
 
 /// The torches lighting one face, at this frame's scales
@@ -606,7 +756,9 @@ mod tests {
 
     /// The steady torches are the four flame classes with style 0 (or none):
     /// an animated style (start's 1 and 6) is the light style's, a switched
-    /// one (32 and up) QuakeC's; no `light` key, or 0, is LIGHT.EXE's 300.
+    /// one (32 and up) QuakeC's. The light is ENTITIES.C's: any key starting
+    /// `light`, or `_light`, the last one given; none, or 0, is 300. No
+    /// origin is the tool's zeroed origin.
     #[test]
     fn the_steady_torches_are_the_flames_without_a_style() {
         let e = lump(&[
@@ -621,6 +773,9 @@ mod tests {
             "\"classname\" \"light\" \"origin\" \"0 0 0\"",
             "\"classname\" \"light_fluoro\" \"origin\" \"0 0 0\"",
             "\"classname\" \"light_torch_small_walltorch\"",
+            "\"classname\" \"light_flame_small_yellow\" \"origin\" \"1 1 1\" \"_light\" \"150\"",
+            "\"classname\" \"light_flame_small_yellow\" \"origin\" \"2 2 2\" \"light\" \"150\" \"lightlevel\" \"175\"",
+            "\"classname\" \"light_flame_small_yellow\" \"origin\" \"3 3 3\" \"style\" \"0.7\"",
         ]);
         let got: Vec<(Vec3, f32, TorchKind)> = steady_torches(&e).iter().map(|t| (t.origin, t.light, t.kind)).collect();
         assert_eq!(
@@ -630,8 +785,16 @@ mod tests {
                 ([4.0, 5.0, 6.0], 300.0, TorchKind::LargeFlame),
                 ([7.0, 8.0, 9.0], 300.0, TorchKind::SmallFlame),
                 ([-10.0, -11.0, -12.0], 250.0, TorchKind::SmallFlame),
+                ([0.0, 0.0, 0.0], 300.0, TorchKind::WallTorch),
+                ([1.0, 1.0, 1.0], 150.0, TorchKind::SmallFlame),
+                ([2.0, 2.0, 2.0], 175.0, TorchKind::SmallFlame),
+                ([3.0, 3.0, 3.0], 300.0, TorchKind::SmallFlame),
             ]
         );
+        // The tool lights every entity with a light: a plain `light` too.
+        let all = light_entities(&e);
+        assert_eq!(all.iter().filter(|l| l.class == "light" || l.class == "light_fluoro").map(|l| l.light).collect::<Vec<_>>(), [300.0, 300.0]);
+        assert_eq!(all[0].light, 0.0, "worldspawn has no light");
         assert!(steady_torches("").is_empty() && steady_torches("garbage { \"").is_empty());
     }
 
@@ -731,24 +894,27 @@ mod tests {
     #[test]
     fn the_shares_are_the_tools_and_bounded_by_the_luxel() {
         let bsp = torch_room(&lump(&[FLAME]), 255);
-        let set = TorchSet::build(&bsp);
+        let set = TorchSet::build(&bsp, 1);
         assert_eq!(set.counts().0, 1);
         let floor = set.face(0);
         assert!(!floor.is_empty(), "the floor is lit");
         assert!(set.face(1).is_empty() || set.face(1).lit.iter().all(|l| l.torch == 0), "the ceiling, if lit, by the flame");
         // The floor's luxel under the flame (x = 0, y = 128 -> luxel (16, 24)
-        // of 33 from texmins -256) is 128 + 1 units below it.
+        // of 33 from texmins -256) is the mean of its four samples, 8 units
+        // apart below and left of it, a unit above the floor.
         let lit = &floor.lit[0];
         let under = 24 * 33 + 16;
-        assert!((lit.shares[under] - share([0.0, 128.0, 0.0], 300.0, [0.0, 128.0, -127.0], [0.0, 0.0, 1.0])).abs() < 1e-3);
-        assert!((lit.shares[under] - (300.0 - 127.0) * 0.5).abs() < 1e-3);
+        let at = |x: f32, y: f32| share([0.0, 128.0, 0.0], 300.0, [x, y, -127.0], [0.0, 0.0, 1.0]);
+        let want = (at(-8.0, 120.0) + at(0.0, 120.0) + at(-8.0, 128.0) + at(0.0, 128.0)) * 0.25;
+        assert!((lit.shares[under] - want).abs() < 1e-3, "{} vs {want}", lit.shares[under]);
+        assert!((at(0.0, 128.0) - (300.0 - 127.0) * 0.5).abs() < 1e-3);
         // A far corner of the floor is out of reach.
         assert_eq!(lit.shares[0], 0.0);
 
         // A dim room: no share is more than the luxel holds, two torches
         // together neither.
         let two = lump(&[FLAME, "\"classname\" \"light_flame_large_yellow\" \"origin\" \"0 100 -100\""]);
-        let dim = TorchSet::build(&torch_room(&two, 10));
+        let dim = TorchSet::build(&torch_room(&two, 10), 1);
         let lits = dim.face(0).lit;
         assert_eq!(lits.len(), 2);
         for j in 0..lits[0].shares.len() {
@@ -760,17 +926,162 @@ mod tests {
         // Behind the floor, or past its reach above it: nothing.
         for far in ["0 0 -200", "0 0 400"] {
             let e = lump(&[&format!("\"classname\" \"light_flame_large_yellow\" \"origin\" \"{far}\"")]);
-            assert!(TorchSet::build(&torch_room(&e, 200)).face(0).is_empty(), "{far}");
+            assert!(TorchSet::build(&torch_room(&e, 200), 1).face(0).is_empty(), "{far}");
         }
         // No style-0 block (lit only by a switched light), or no samples.
         let mut bsp = torch_room(&lump(&[FLAME]), 200);
         bsp.faces[0].styles = [32, STYLE_NONE, STYLE_NONE, STYLE_NONE];
         bsp.faces[1].lightofs = -1;
-        let set = TorchSet::build(&bsp);
+        let set = TorchSet::build(&bsp, 1);
         assert!(set.face(0).is_empty() && set.face(1).is_empty());
         // The style-0 block where it is the second.
         bsp.faces[0].styles = [32, 0, STYLE_NONE, STYLE_NONE];
-        assert!(!TorchSet::build(&bsp).face(0).is_empty());
+        assert!(!TorchSet::build(&bsp, 1).face(0).is_empty());
+    }
+
+    /// `torch_room` with a wall across it: the world's node tree cuts the
+    /// slab `x0 <= x <= x1` out solid, the rest empty (two planes, a solid
+    /// and an empty leaf).
+    fn walled_room(entities: &str, luxel: u8, x0: f32, x1: f32) -> Bsp {
+        use crate::bsp::{DLeaf, DNode, DPlane, CONTENTS_EMPTY};
+        let mut bsp = torch_room(entities, luxel);
+        let p = bsp.planes.len() as i32;
+        for dist in [x0, x1] {
+            bsp.planes.push(DPlane { normal: [1.0, 0.0, 0.0], dist, ptype: 0 });
+        }
+        let leaf = |contents| DLeaf {
+            contents, visofs: -1, mins: [0; 3], maxs: [0; 3], firstmarksurface: 0, nummarksurfaces: 0, ambient_level: [0; 4],
+        };
+        bsp.leafs = vec![leaf(CONTENTS_SOLID), leaf(CONTENTS_EMPTY)];
+        // Children: a node's number, or -(leaf + 1): -1 solid, -2 empty.
+        let node = |planenum, children| DNode { planenum, children, mins: [0; 3], maxs: [0; 3], firstface: 0, numfaces: 0 };
+        bsp.nodes = vec![node(p, [1, -2]), node(p + 1, [-2, -1])];
+        bsp
+    }
+
+    /// `TestLine`: a segment through the slab is blocked, one on either side
+    /// of it is not, nor one that only touches a plane within `ON_EPSILON`;
+    /// a world without nodes blocks nothing.
+    #[test]
+    fn test_line_is_the_tools() {
+        let bsp = walled_room(&lump(&[]), 100, 60.0, 70.0);
+        assert!(test_line(&bsp, [0.0, 0.0, 0.0], [50.0, 90.0, -100.0]));
+        assert!(test_line(&bsp, [80.0, 0.0, 0.0], [200.0, -90.0, 100.0]));
+        assert!(!test_line(&bsp, [0.0, 0.0, 0.0], [100.0, 0.0, 0.0]));
+        assert!(!test_line(&bsp, [100.0, 50.0, 3.0], [0.0, 0.0, 0.0]), "either way");
+        assert!(!test_line(&bsp, [65.0, 0.0, 0.0], [65.0, 10.0, 0.0]), "inside the wall");
+        assert!(test_line(&bsp, [0.0, 0.0, 0.0], [60.05, 0.0, 0.0]), "within 0.1 of the plane: still in front");
+        assert!(!test_line(&bsp, [0.0, 0.0, 0.0], [60.2, 0.0, 0.0]));
+        assert!(test_line(&torch_room(&lump(&[]), 100), [0.0; 3], [1000.0, 0.0, 0.0]));
+    }
+
+    /// The shadows: a torch behind a wall gives the floor past it nothing,
+    /// and where the floor sees it the shares are the open room's, bit for
+    /// bit — the trace takes light away, it never moves it. (The luxels by
+    /// the wall's foot keep a little: the tool pulled their samples toward
+    /// the face's middle, out from under the wall, and baked them so.)
+    #[test]
+    fn a_torch_behind_a_wall_lights_nothing_past_it() {
+        let e = lump(&["\"classname\" \"light_flame_large_yellow\" \"origin\" \"0 0 0\""]);
+        let open = TorchSet::build(&torch_room(&e, 255), 1);
+        let walled = TorchSet::build(&walled_room(&e, 255, 60.0, 70.0), 1);
+        // The floor: 33 x 33 luxels from texmins -256, luxel s at x = 16 s - 256.
+        let (open, walled) = (&open.face(0).lit[0].shares, &walled.face(0).lit[0].shares);
+        let x = |j: usize| (j % 33) as f32 * 16.0 - 256.0;
+        let (mut kept, mut gone) = (0, 0);
+        for j in 0..open.len() {
+            if x(j) <= 48.0 {
+                assert_eq!(walled[j].to_bits(), open[j].to_bits(), "luxel {j} at x {}: in sight, as before", x(j));
+                kept += usize::from(open[j] > 0.0);
+            } else if x(j) >= 112.0 {
+                assert_eq!(walled[j], 0.0, "luxel {j} at x {}: behind the wall", x(j));
+                gone += usize::from(open[j] > 0.0);
+            }
+        }
+        assert!(kept > 300 && gone > 100, "{kept} kept, {gone} taken away");
+        // A face wholly behind the wall: none of it.
+        let far = lump(&["\"classname\" \"light_flame_large_yellow\" \"origin\" \"-150 0 120\""]);
+        let behind = walled_room(&far, 255, -100.0, -90.0);
+        let set = TorchSet::build(&behind, 1);
+        assert!(set.face(10).is_empty(), "the pillar's top, past the wall");
+        assert!(!TorchSet::build(&torch_room(&far, 255), 1).face(10).is_empty(), "lit without it");
+    }
+
+    /// The review's worst view, e1m2 from (864, -312, 464) looking north: a
+    /// dark room's wall with a wall torch behind it, which flickered all
+    /// over (94% of the view at 640x400) — and e1m2's arch at the start,
+    /// lit by its two flames in sight. In each, every pixel that differs from
+    /// id's frame at some time must show a surface a torch in reach can see:
+    /// the pixel's ray traced to the first solid, two units back toward the
+    /// eye, and a clear `TestLine` from the torch (when id's pak is here) —
+    /// but along a shadow's edge, where a luxel 16 units off is lit and the
+    /// lightmap's interpolation carries some of it over (as the bake does):
+    /// 3.5% of the arch's flickering pixels, a line along each shadow's edge.
+    #[test]
+    fn no_light_through_walls_in_the_reviews_worst_view() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../quake-data/ID1/PAK0.PAK");
+        let Ok(pak) = crate::pak::Pak::open(&path) else {
+            eprintln!("skipped: no shareware pak at {}", path.display());
+            return;
+        };
+        let read = |n: &str| pak.read_file(n).expect("read").expect(n);
+        let bsp = Bsp::parse(&read("maps/e1m2.bsp")).expect("e1m2");
+        let palette = crate::render::parse_palette(&read("gfx/palette.lmp")).expect("palette");
+        let colormap = read("gfx/colormap.lmp");
+        let mut styles = crate::render::NEUTRAL_LIGHTSTYLE_SCALES;
+        styles[0] = 264.0 / 256.0;
+        let torches = steady_torches(&bsp.entities);
+        let (w, h) = (320usize, 200usize);
+        // (pixels that flicker, of them those whose surface no torch sees)
+        let audit = |eye: Vec3, yaw: f32| {
+            let cam = Camera { pos: eye, yaw, pitch: 0.0, roll: 0.0, fov_deg: 90.0 };
+            let frame = |r: &mut Renderer, time: f32, torches| {
+                let options = RenderOptions { video: VideoCvars { torches, ..VideoCvars::CLASSIC }, ..RenderOptions::default() };
+                let scene = Scene { time, colormap: Some(&colormap), light_styles: &styles, options, ..Scene::new(&bsp, cam, w, h, &palette) };
+                r.render(&scene).pixels
+            };
+            let (mut lit, mut id) = (Renderer::new(), Renderer::new());
+            let base = frame(&mut id, 0.0, TorchFlicker::OFF);
+            let mut moved = vec![false; w * h];
+            for k in 0..24 {
+                let f = frame(&mut lit, 5.0 + 3.17 * k as f32, TorchFlicker::STYLE);
+                for (m, (a, b)) in moved.iter_mut().zip(f.iter().zip(&base)) {
+                    *m |= a != b;
+                }
+            }
+            // A pixel's ray (`R_ViewChanged`'s centre and scale at fov 90,
+            // square pixels) to its first solid point, by halving.
+            let (yr, up) = (yaw.to_radians(), [0.0, 0.0, 1.0]);
+            let (fwd, right) = ([yr.cos(), yr.sin(), 0.0], [yr.sin(), -yr.cos(), 0.0]);
+            let sees_a_torch = |p: usize| {
+                let (sx, sy) = (((p % w) as f32 - 159.5) / 160.0, ((p / w) as f32 - 99.5) / 160.0);
+                let (d, _) = normalize(add(fwd, add(scale(right, sx), scale(up, -sy))));
+                let at = |t: f32| mul_add(eye, t, d);
+                let (mut lo, mut hi) = (0.0f32, 4096.0f32);
+                if test_line(&bsp, eye, at(hi)) {
+                    return true; // nothing solid: nothing to judge
+                }
+                for _ in 0..24 {
+                    let mid = 0.5 * (lo + hi);
+                    if test_line(&bsp, eye, at(mid)) {
+                        lo = mid;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                let q = at(lo - 2.0);
+                torches.iter().any(|t| dot(sub(t.origin, q), sub(t.origin, q)).sqrt() < t.light && test_line(&bsp, t.origin, q))
+            };
+            let flickering: Vec<usize> = (0..w * h).filter(|&p| moved[p]).collect();
+            let through = flickering.iter().filter(|&&p| !sees_a_torch(p)).count();
+            (flickering.len(), through)
+        };
+        let (worst, through) = audit([864.0, -312.0, 464.0], 90.0);
+        assert!(through * 100 <= w * h, "the worst view: {through} of its {worst} flickering pixels see no torch");
+        let (arch, through) = audit([1488.0, 1240.0, 296.0], 270.0);
+        assert!(arch > w * h / 20, "the arch's flames light it ({arch} pixels)");
+        assert!(through * 100 <= arch * 5, "the arch: {through} of its {arch} flickering pixels see no torch");
+        eprintln!("worst view: {worst} pixels flicker; the arch: {arch}, {through} unseen");
     }
 
     /// The floor's lightmap at `time`, with the torches at `strength` (style
@@ -798,7 +1109,7 @@ mod tests {
     #[test]
     fn the_time_average_is_ids_light() {
         let bsp = torch_room(&lump(&[FLAME]), 120);
-        let mut set = TorchSet::build(&bsp);
+        let mut set = TorchSet::build(&bsp, 1);
         let id = floor_luxels(&bsp, &mut set, 0.0, TorchFlicker::OFF);
         assert!(id.iter().all(|&l| l == 120.0 * 264.0 / 256.0), "strength 0 is id's");
         // The big flame's two voices (4.6 s and 2.83 s) come round together
@@ -908,14 +1219,15 @@ mod tests {
         let bsp = |m: &str| Bsp::parse(&pak.read_file(&format!("maps/{m}.bsp")).expect("read").expect(m)).expect(m);
         for (map, torches) in [("e1m1", 0), ("e1m2", 24), ("start", 22)] {
             let world = bsp(map);
-            let set = TorchSet::build(&world);
+            let set = TorchSet::build(&world, 1);
             let (n, pairs) = set.counts();
             assert_eq!(n, torches, "{map}");
             let lit: std::collections::BTreeSet<u32> = (0..world.faces.len()).flat_map(|f| set.face(f).lit.iter().map(|l| l.torch)).collect();
             assert_eq!(lit.len(), n, "{map}: every torch lights a face");
             assert_eq!(pairs == 0, n == 0, "{map}");
         }
-        let start = TorchSet::build(&bsp("start"));
+        let start = TorchSet::build(&bsp("start"), 1);
         assert_eq!(start.torches().iter().filter(|t| t.kind == TorchKind::LargeFlame).count(), 10);
     }
 }
+
