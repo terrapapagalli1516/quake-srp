@@ -31,7 +31,7 @@ use crate::automation;
 use crate::cl_demo::timedemo_running;
 use crate::config::{exec_config, write_if_changed};
 use crate::host::step;
-use crate::input::{gamepad, key_clear_states, key_event, mouse_move, pointer_unlocked};
+use crate::input::{clear_all_states, gamepad, key_event, mouse_move, pointer_unlocked};
 use crate::proto::{
     read_event, AudioCounts, Event, Msg, PCM_CLEAR, STATE_ASK, STATE_BIND_GRAB, STATE_CONSOLE,
     STATE_ALT_ENTER, STATE_MENU, STATE_NATIVE, STATE_PAUSED, STATE_TIMEDEMO, STATE_TOUCH, STATE_WALK,
@@ -160,7 +160,7 @@ impl<W: Write> Sys<W> {
                     }
                 }
                 Event::Mouse { dx, dy } => mouse_move(dx, dy),
-                Event::ClearKeys => key_clear_states(),
+                Event::ClearKeys => clear_all_states(),
                 Event::PointerUnlocked => pointer_unlocked(),
                 Event::AudioReady { running, rate } => self.audio.device(running, rate),
                 Event::AudioClock(pos) => self.audio.clock(pos),

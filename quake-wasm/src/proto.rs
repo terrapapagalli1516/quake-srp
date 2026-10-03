@@ -12,7 +12,7 @@
 //! | 1 | `Tick` | `seq u32`, `dt f64` (seconds since the last tick: the page's display refresh) |
 //! | 2 | `Key` | `keynum u8`, `down u8`, `0 u16`, `ch u32` (the character the layout typed, 0 none) |
 //! | 3 | `Mouse` | `dx f32`, `dy f32` (raw `movementX`/`movementY` counts) |
-//! | 4 | `ClearKeys` | — (the window lost the keyboard) |
+//! | 4 | `ClearKeys` | — (a key's release may never come: `ClearAllStates`) |
 //! | 5 | `PointerUnlocked` | — |
 //! | 6 | `AudioReady` | `ready u8`, `0 u8 ×3`, `rate u32` (the device's sample rate; 0 unknown) |
 //! | 7 | `Call` | `id u32`, then a UTF-8 line `name arg...` (automation, [`crate::automation`]) |
@@ -75,7 +75,8 @@ pub(crate) enum Event {
     Key { keynum: u8, down: bool, ch: u32 },
     /// Raw mouse motion (in_win.c `IN_MouseMove`).
     Mouse { dx: f32, dy: f32 },
-    /// vid_win.c `ClearAllStates`: the window lost the keyboard.
+    /// vid_win.c `ClearAllStates`: the page lost the keyboard, the pointer
+    /// lock or fullscreen, or was hidden, so a key's release may never come.
     ClearKeys,
     /// The pointer lock ended (the port's `+mlook` release).
     PointerUnlocked,
