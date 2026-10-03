@@ -11,7 +11,8 @@ place), quake.wasm and id1/pak0.pak; `webdir()` finds the one to serve:
 the script's argument, or `web/` itself
 (with the engine and the pak put in place by PLATFORM.md's deploy recipe).
 `launch()` starts the browser the checks run in: Chromium, or
-$QUAKE_BROWSER. And the game data a check needs beyond id's shareware pak
+$QUAKE_BROWSER. `wait_until` is how a check waits on a state only the
+program knows. And the game data a check needs beyond id's shareware pak
 is synthesized here (`write_pak`, `POP_LMP`): a registered pak1, a mission
 pack's pak0.
 """
@@ -25,6 +26,7 @@ import socketserver
 import struct
 import sys
 import threading
+import time
 
 
 class Handler(http.server.SimpleHTTPRequestHandler):
@@ -153,6 +155,34 @@ def write_pak(files):
         out += name.encode().ljust(56, b"\0") + struct.pack("<ii", pos, len(b))
         pos += len(b)
     return out
+
+
+def wait_until(pg, expr, timeout=5.0, *, raising=True, poll=0.05):
+    """Wait until the JavaScript expression `expr` is truthy in page `pg`,
+    polling it from Python every `poll` seconds, for at most `timeout`
+    seconds. Returns the last value polled; if the expression never turned
+    truthy, raises TimeoutError, or with `raising=False` returns that falsy
+    value, for a `check(name, wait_until(..., raising=False))`.
+
+    Use this, never `pg.wait_for_function`, whenever `expr` asks the program
+    (`exp.menu_visible().then(v => !v)`, `quake.kept(path).then(...)`, anything
+    that returns a Promise): `wait_for_function` takes a Promise object for
+    truthy, stops polling at the first sample, awaits that one Promise, and
+    returns whatever it resolved to, true or false, so the "wait" lasts one
+    round trip and can never fail on the state (seen in Playwright 1.63).
+    `evaluate` awaits a returned
+    Promise and hands back its value, which is what the poll needs. A
+    synchronous predicate (`quake.state.flags & 1`, a DOM property) is fine in
+    `wait_for_function`, which polls it on every animation frame."""
+    deadline = time.monotonic() + timeout
+    while True:
+        v = pg.evaluate(expr)
+        if v or time.monotonic() >= deadline:
+            break
+        time.sleep(poll)
+    if not v and raising:
+        raise TimeoutError(f"{expr!r} still {v!r} after {timeout:g} s")
+    return v
 
 
 def webdir():
