@@ -69,7 +69,7 @@ SAME = """([a, b]) => {
 }"""
 
 def boot_page(pg):
-    # Classic: id's 72 fps cap to come back to, id's keys, the 2-D layer 1:1
+    # Classic: id's 72 fps cap to come back to, the 2-D layer 1:1
     # (the plaque is read at id's coordinates).
     pg.goto(f"http://127.0.0.1:{PORT}/index.html?classic", wait_until="load")
     pg.wait_for_function("window.quake && quake.ready && quake.firstFrameAt > 0", timeout=120000)

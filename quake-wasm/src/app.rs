@@ -27,8 +27,11 @@ pub(crate) use quake_rs::client::{DemoPlay, Walk};
 const WALK_MAP: &str = "maps/e1m1.bsp";
 
 /// The profile a session starts in, before `config.cfg`: 2026. (The tests
-/// start in Classic: most of them pin id's game, and the ones about the 2026
-/// settings switch to it.)
+/// start in Classic: most of them pin id's game, and the ones about the
+/// 2026-only engine switch to it — the controls are the shared default in
+/// both now, so a test that specifically wants id's 1996 ones, not just
+/// Classic's engine, names them: `Settings::id(Profile::Classic)`, or the
+/// console's `idcontrols`.)
 const START_PROFILE: Profile = if cfg!(test) { Profile::Classic } else { Profile::Modern };
 
 /// quake.rc's `startdemos demo1 demo2 demo3`: the attract loop.

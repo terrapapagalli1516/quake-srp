@@ -111,7 +111,7 @@ with the page, the program and the shareware pak (with id's licence beside it), 
 `_headers` file that Cloudflare Pages and Netlify read for the two headers and the
 caching. Upload `DIR` as it is.
 
-In the 2026 profile you play with WASD and the mouse (click the game to capture the mouse):
+You play with WASD and the mouse (click the game to capture the mouse), in either profile:
 
 | key or input | does |
 |---|---|
@@ -124,13 +124,16 @@ In the 2026 profile you play with WASD and the mouse (click the game to capture 
 | Alt+Enter | fullscreen (and the bar's button, or the browser's F11); in fullscreen Esc is the menu, hold Esc to leave |
 | F6 / F9 | quicksave / quickload (id's F-keys: F1 help, F2/F3 save/load, F4 options, F10 quit) |
 
-A gamepad or a touch screen also works. Classic uses id's own `default.cfg` keys. The
-page's **keys** button lists them all.
+A gamepad or a touch screen also works. The mouse wheel switches weapons in 2026 only (id's
+`default.cfg` leaves it unbound). The page's **keys** button lists them all. For id's own
+1996 controls (the arrows, no mouse look, no gamepad, Always Run off) type `idcontrols` in
+the console.
 
 ## Classic and 2026
 
-Every difference from id's game is a named setting. Classic turns them all off; 2026, the
-default, turns most of them on.
+Every difference from id's game is a named setting. Classic turns the engine ones off; 2026,
+the default, turns most of them on. The controls are not part of the choice: both profiles
+play with the same ones, and a switch leaves them as they are.
 
 | | Classic | 2026 |
 |---|---|---|
@@ -138,7 +141,7 @@ default, turns most of them on.
 | picture | a fixed mode (960x600 by default) in a 4:3 frame, id's 90° field of view | the window's own size and shape in whole pixels (pixel size Auto or 1–4), a wider view on wide screens |
 | status bar, menus, console | 1:1, as id drew them | scaled up by a whole number |
 | monsters | move in id's 0.1 s steps, and change pose ten times a second | glide between the steps, and blend between poses (the gun too) |
-| controls | id's `default.cfg` | WASD, mouse look, Always Run, a crosshair, a twin-stick gamepad with rumble, touch controls |
+| controls | WASD, mouse look, Always Run, a twin-stick gamepad with rumble (the same in both; `idcontrols` is id's `default.cfg`) | the same, plus the mouse wheel for weapons, a crosshair and touch controls |
 | sound | id's mixer at 11025 Hz | id's mixer at the device's rate, with four of id's bugs fixed |
 
 In both profiles the renderer splits each frame across all CPU cores, and the picture is the

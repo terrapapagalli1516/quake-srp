@@ -6,7 +6,8 @@
 //! Help/Ordering screen), the key bindings (`bind`, `unbind`, `unbindall`),
 //! the view size, `map`, save/load, `pause`, the demo commands (cl_demo.c's
 //! `playdemo`/`timedemo`, host_cmd.c's demo loop control
-//! `startdemos`/`demos`/`stopdemo`), the port's `profile` and `wasm_help`,
+//! `startdemos`/`demos`/`stopdemo`), the port's `profile`, `idcontrols` and
+//! `wasm_help`,
 //! the cheats god/noclip/fly/kill/give/impulse, which act on the live
 //! [`Walk`](crate::app::Walk) through the client's host_cmd.c
 //! ([`quake_rs::client::host_cmd`], which also holds the level swaps
@@ -90,6 +91,7 @@ pub(crate) const COMMANDS: &[ConsoleCommand] = &[
     c("echo", "echo <text>", cmd_echo),
     c("exec", "exec <file>  run a file's lines", cmd_exec),
     c("profile", "profile classic|2026", cmd_profile),
+    c("idcontrols", "id's 1996 bindings and control cvars", cmd_idcontrols),
     c("wasm_help", "wasm_help [name]  the lists", cmd_wasm_help),
 ];
 
@@ -365,16 +367,33 @@ fn cmd_unbindall(_: &Args) {
     ensure_app(|a| a.settings.binds.unbind_all());
 }
 
-/// The port's `profile`: prints the profile, or switches to `classic`
-/// (every departure off, id's `default.cfg` keys) or `2026`
-/// ([`quake_rs::settings::Settings::set_profile`]).
+/// The port's `profile`: prints the profile, or switches the *engine* to
+/// `classic` (every departure off) or `2026`
+/// ([`quake_rs::settings::Settings::set_profile`]). The controls (WASD,
+/// mouse look, the gamepad, Space-swims-up, Alt+Enter, Always Run) are not
+/// among them — they are the player's, the same either way — so this
+/// leaves them as they are; `idcontrols` is the one step to id's own.
 fn cmd_profile(args: &Args) {
     ensure_app(|a| match args.argc() {
         1 => a.console.println(format!("\"profile\" is \"{}\"", a.settings.profile.name())),
         _ => match Profile::parse(args.argv(1)) {
             Some(p) => a.settings.set_profile(p),
-            None => a.console.println("profile classic|2026 : id's Quake, or the 2026 settings"),
+            None => a.console.println("profile classic|2026 : id's engine, or the port's"),
         },
+    });
+}
+
+/// The port's `idcontrols`: the one explicit step to id's own 1996 controls
+/// (`default.cfg`'s bindings, [`quake_rs::cvar::Cvars::with_id_controls`]
+/// — arrows, no mouse look, no gamepad, Space does not swim, no
+/// Alt+Enter, Always Run off), independent of `profile`: the engine stays
+/// whatever it was. What `exec default.cfg` would reach if the port shipped
+/// that file; it does not, so this is the console's own small command.
+fn cmd_idcontrols(_: &Args) {
+    ensure_app(|a| {
+        a.settings.binds = keys::Bindings::default_cfg();
+        a.settings.cvars = std::mem::take(&mut a.settings.cvars).with_id_controls();
+        a.console.println("id's 1996 controls: arrows, no mouse look, no gamepad, Always Run off");
     });
 }
 
@@ -1095,6 +1114,39 @@ mod tests {
         run_console_line("god");
         // Echoed line + "no active game".
         assert!(console_scrollback() >= 2, "god with no walk prints a guard message");
+    }
+
+    /// The controls are the player's, the profile the engine: `profile`
+    /// leaves the controls alone (and the wheel, the one control that is a
+    /// departure, follows it), and `idcontrols` is the one step to id's own
+    /// 1996 ones — the engine untouched, whichever profile is live.
+    #[test]
+    fn idcontrols_is_ids_1996_controls_and_the_profile_leaves_the_controls_alone() {
+        use quake_rs::keys::{BIND_FORWARD, BIND_LOOKUP, K_MWHEELUP};
+        let live = || APP.with(|c| c.borrow().as_ref().unwrap().settings.clone());
+        assert_eq!(boot(), 1);
+        execute_console_command("profile 2026");
+        let s = live();
+        assert!(s.binds.get(K_MWHEELUP).is_some() && s.cvars.uncapped && s.cvars.freelook);
+
+        execute_console_command("profile classic"); // the engine: the wheel off, the controls kept
+        let s = live();
+        assert!(!s.cvars.uncapped && s.binds.get(K_MWHEELUP).is_none(), "the wheel is 2026's alone");
+        assert!(s.cvars.freelook && s.cvars.always_run() && s.cvars.joy.enabled, "the controls are kept");
+        assert_eq!(s.binds.command(b'w'), Some(BIND_FORWARD));
+
+        execute_console_command("profile 2026");
+        execute_console_command("idcontrols");
+        let s = live();
+        assert_eq!(s.binds, quake_rs::keys::Bindings::default_cfg(), "default.cfg's, the wheel unbound too");
+        assert_eq!(s.binds.command(b'a'), Some(BIND_LOOKUP));
+        assert!(!s.cvars.freelook && !s.cvars.jumpswim && !s.cvars.alt_enter && !s.cvars.always_run());
+        assert_eq!(s.cvars.joy, quake_rs::client::in_win::JoyCvars::classic(), "id's joystick: off");
+        assert!(s.cvars.uncapped && s.profile == Profile::Modern, "the engine untouched");
+
+        execute_console_command("profile classic"); // and a switch keeps id's controls as they are
+        let s = live();
+        assert!(!s.cvars.freelook && s.binds.command(b'w').is_none() && !s.cvars.uncapped);
     }
 
     /// `Host_Quit_f`'s branch: `quit` with the console NOT the keyboard's

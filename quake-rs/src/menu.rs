@@ -117,12 +117,16 @@ pub struct SettingRow {
 }
 
 /// The settings page's rows, in order: the profile, then each departure the
-/// profiles switch ([`crate::cvar::Cvars::modern`] says which are on in 2026).
+/// profiles switch ([`crate::cvar::Cvars::modern`] says which are on in
+/// 2026) — plus five rows (Mouse look, Space swims up, the Fullscreen key,
+/// the Gamepad and Rumble) that are shared controls, on in both profiles by
+/// default and not reset by a profile switch (`quake_rs::settings`'s
+/// module docs say why); still toggled here like any other row.
 pub const SETTING_ROWS: [SettingRow; 19] = [
     SettingRow {
         cvar: "profile",
         label: "               Profile",
-        help: ["Classic: id's Quake, every row", "off. 2026: the port's defaults"],
+        help: ["Classic: id's WinQuake engine,", "2026: the port's. Controls: both"],
         kind: RowKind::Profile,
     },
     SettingRow {
@@ -2494,8 +2498,8 @@ const EXTRAS_HEADER_Y: f32 = if EXTRAS_LIST_END + OPTIONS_ROW_STEP + EXTRAS_NOTE
 /// the list grows, after the gap and the console line ([`EXTRAS_HELP_LINES`]),
 /// once the header and a row's two help lines no longer fit under the list.
 /// What it says the page says anyway: it opens from Options' "Classic / 2026"
-/// row, and its own first row's help is "Classic: id's Quake, every row
-/// off". (This round's `scr_sbaroverlay` makes 19 rows, and drops it.)
+/// row, and its own first row's help is "Classic: id's WinQuake engine,
+/// 2026: the port's. Controls: both". (This round's `scr_sbaroverlay` makes 19 rows, and drops it.)
 const EXTRAS_HEADER_SHOWN: bool = EXTRAS_LIST_END + 3.0 * OPTIONS_ROW_STEP <= 200.0;
 const EXTRAS_HELP_Y: f32 = if EXTRAS_HEADER_SHOWN { EXTRAS_HEADER_Y + OPTIONS_ROW_STEP } else { EXTRAS_LIST_END };
 /// How many of a row's three help lines ([`extras_help_lines`]: its own
@@ -4121,20 +4125,24 @@ mod tests {
         assert_eq!(m.take_sounds(), vec![MenuSound::Menu2], "entered with m_entersound");
 
         // Each toggle row flips its cvar whatever the direction; Enter too,
-        // with menu2 + menu3 like an Options checkbox row.
+        // with menu2 + menu3 like an Options checkbox row. Most rows are
+        // off in Classic (the engine); the shared controls (freelook,
+        // cl_jumpswim, vid_altenter, joystick, joy_rumble) start on there
+        // too — either way, four flips return to the row's own start.
         for (i, row) in SETTING_ROWS.iter().enumerate().filter(|(_, r)| r.kind == RowKind::Toggle) {
             let c = cvar::find(row.cvar).unwrap();
             m.set_cursor(i);
-            assert_eq!(c.get(&s.cvars), "0", "{}: off in Classic", row.cvar);
+            let base = c.get(&s.cvars);
+            let (other, other_word) = if base == "0" { ("1", "on") } else { ("0", "off") };
             m.adjust(1, &mut s);
-            assert_eq!((c.get(&s.cvars).as_str(), row.value(&s).as_str()), ("1", "on"), "right turns {} on", row.cvar);
+            assert_eq!((c.get(&s.cvars).as_str(), row.value(&s).as_str()), (other, other_word), "right flips {}", row.cvar);
             m.adjust(1, &mut s);
-            assert_eq!(c.get(&s.cvars), "0", "the direction is ignored");
+            assert_eq!(c.get(&s.cvars), base, "the direction is ignored");
             m.adjust(-1, &mut s);
-            assert_eq!(c.get(&s.cvars), "1", "left flips it too");
+            assert_eq!(c.get(&s.cvars), other, "left flips it too");
             assert_eq!(m.take_sounds(), vec![MenuSound::Menu3; 3]);
             m.select(&mut s);
-            assert_eq!(c.get(&s.cvars), "0", "Enter flips it");
+            assert_eq!(c.get(&s.cvars), base, "Enter flips it");
             assert_eq!(m.take_sounds(), vec![MenuSound::Menu2, MenuSound::Menu3]);
         }
         assert_eq!(s, Settings::new(Profile::Classic));
@@ -4191,24 +4199,30 @@ mod tests {
 
     #[test]
     fn the_settings_page_lists_every_departure_once_in_the_page_idiom() {
+        // freelook, cl_jumpswim, vid_altenter, joystick and joy_rumble are
+        // departures from id, but not from each other — the shared controls
+        // (`quake_rs::settings`' module docs), no longer something `profile`
+        // switches, but still worth a row on this page.
+        let shared_control = |n: &str| matches!(n, "freelook" | "cl_jumpswim" | "vid_altenter" | "joystick" | "joy_rumble");
         for row in &SETTING_ROWS {
             if row.kind != RowKind::Profile {
                 let c = cvar::find(row.cvar).unwrap_or_else(|| panic!("{}: a cvar", row.cvar));
-                assert!(c.departure && c.archive, "{}: a departure, kept in config.cfg", row.cvar);
+                assert!(c.archive && (c.departure || shared_control(c.name)),
+                    "{}: a departure or a shared control, kept in config.cfg", row.cvar);
             }
             assert_eq!(row.label.len(), OPTIONS_LABELS[ROW_VIDEO].len(), "{}: label column", row.cvar);
             for line in extras_help_lines(row) {
                 assert!(line.len() <= EXTRAS_NOTE_COLS, "{line:?} fits right of the plaque");
             }
         }
-        // Every departure has its row, but Always Run's two speeds (id's own
-        // Options row), the pad's layout under the Gamepad row (id's
-        // advanced configuration and the port's stick shaping and menu keys,
-        // tuned on the console as id's joy* were), and sv_max_edicts: there
-        // is nothing to CHOOSE (raising the edict pool changes nothing a
-        // player can see or feel on any map id or the mission packs
-        // shipped, only whether a map past id's 600-edict ceiling spawns
-        // at all), so a console cvar
+        // Every departure (or shared control) has its row, but Always Run's
+        // two speeds (id's own Options row), the pad's layout under the
+        // Gamepad row (id's advanced configuration and the port's stick
+        // shaping and menu keys, tuned on the console as id's joy* were),
+        // and sv_max_edicts: there is nothing to CHOOSE (raising the edict
+        // pool changes nothing a player can see or feel on any map id or
+        // the mission packs shipped, only whether a map past id's
+        // 600-edict ceiling spawns at all), so a console cvar
         // (like id's own `sv_gravity`, which also has no menu row) is the
         // whole interface. And r_fluidsky: the page is full (a 20th row
         // would leave room for one help line, which the const assert below
@@ -4219,7 +4233,7 @@ mod tests {
         // second, gliding between.
         let pad_layout = |n: &str| n.starts_with("joy") && n != "joystick" && n != "joy_rumble";
         let listed = |c: &&cvar::Cvar| {
-            (c.departure && !c.name.starts_with("cl_") && !pad_layout(c.name) || c.name == "cl_jumpswim")
+            ((c.departure || shared_control(c.name)) && !c.name.starts_with("cl_") && !pad_layout(c.name) || c.name == "cl_jumpswim")
                 && c.name != "sv_max_edicts"
                 && c.name != "r_fluidsky"
                 && c.name != "r_lerplightstyles"

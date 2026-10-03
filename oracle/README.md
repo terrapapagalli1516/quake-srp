@@ -398,9 +398,11 @@ after the map loads:
   header). The client's view hook (`quake_rs::client::set_view_hook`) paints the view the same flat colour,
   and each shot is handed the C frame's clocks (`realtime` for the flashing
   cursors, `host_time` for the menu's spinning dot, the finale's reveal time).
-- The port runs its Classic profile (every departure off, id's
-  `default.cfg` bindings: `quake_rs::settings`), id's side its own defaults,
-  so the Options and Customize screens compare values and bindings too.
+- The port runs its Classic profile (every engine departure off) with id's own
+  controls, `default.cfg`'s bindings and id's cvars (the harness runs the console's
+  `idcontrols` after booting: the controls are the same in both profiles by
+  default now, `quake_rs::settings`), id's side its own defaults, so the Options
+  and Customize screens compare values and bindings too.
   (Before the profiles both sides were given the port's two input defaults
   then, Always Run and the WASD binds.)
 
@@ -635,8 +637,9 @@ uv run oracle/classic_check.py --only goldens,play    # some of it
 uv run oracle/classic_check.py --record --note "..."  # re-record, saying why
 ```
 
-The port's Classic profile (`quake_rs::settings`: every departure off, id's
-`default.cfg` bindings) must stay WinQuake. One command runs every check of
+The port's Classic profile (`quake_rs::settings`: every engine departure off; the
+controls are the player's, shared with 2026, and the harnesses pin id's own by name:
+`Settings::id`, `idcontrols`) must stay WinQuake. One command runs every check of
 that and writes a report (`oracle/build/classic-check/classic_check.txt`, next
 to each tool's own output):
 

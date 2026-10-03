@@ -14,8 +14,10 @@ asked for):
      the pad kicks ("dual-rumble", 150 ms); a rocket at the player's own feet
      hurts, and the damage shakes it too (a longer rumble).
   5. A LOST PAD — unplugged with the trigger held, nothing stays held.
-  6. CLASSIC (`?classic`) — id's `joystick 0` reads no pad; after `joystick
-     1` the left stick is id's joystick (Y walks).
+  6. CLASSIC (`?classic`) — the gamepad is a shared control now: the
+     twin-stick layout works by default there too. `idcontrols` is the one
+     step to id's own: `joystick 0` reads no pad; after `joystick 1` the
+     left stick is id's joystick (Y walks), A is JOY1, unbound.
   7. PAD AND TOUCH (`?touch`: the touch controls, `navigator.vibrate`
      recorded) — a rumble goes to whichever was used last, never both: the
      pad after a pad button, the phone's vibration after a touch, and the
@@ -187,23 +189,32 @@ with sync_playwright() as p:
     check("no page errors (2026)", not errs, str(errs[-3:]))
     pg.close()
 
-    # ---- Classic: id's joystick ----------------------------------------------
+    # ---- Classic: the gamepad is shared by default; id's is one step away ----
     pg, errs = boot_page(br, "?classic")
     pg.evaluate("hideOverlayForever()")
     call(pg, "boot")
     call(pg, "menu_cancel")
     time.sleep(0.5)
     x0, y0 = where(pg)
-    pad(pg, [A], (0, -1, 0, 0), hold=1.0)
+    pad(pg, [], (0, -1, 0, 0), hold=1.0)
     pad(pg, [])
     x1, y1 = where(pg)
-    check("6. Classic: joystick 0 reads no pad", math.hypot(x1 - x0, y1 - y0) < 1 and call(pg, "key_is_down", 203) == 0)
+    check("6. Classic: the gamepad is shared by default, the left stick walks",
+          math.hypot(x1 - x0, y1 - y0) > 100, f"{math.hypot(x1 - x0, y1 - y0):.0f} units")
+    call(pg, "exec", "idcontrols")
+    time.sleep(0.8)                 # the walk's momentum dies away
+    x1, y1 = where(pg)
+    pad(pg, [A], (0, -1, 0, 0), hold=1.0)
+    pad(pg, [])
+    x2, y2 = where(pg)
+    check("   idcontrols: id's own joystick 0 reads no pad",
+          math.hypot(x2 - x1, y2 - y1) < 1 and call(pg, "key_is_down", 203) == 0)
     call(pg, "exec", "joystick 1")
     pad(pg, [], (0, -1, 0, 0), hold=1.5)
     pad(pg, [])
-    x2, y2 = where(pg)
-    check("   joystick 1: Y walks, as id's joystick", math.hypot(x2 - x1, y2 - y1) > 100,
-          f"{math.hypot(x2 - x1, y2 - y1):.0f} units")
+    x3, y3 = where(pg)
+    check("   joystick 1: Y walks, as id's joystick", math.hypot(x3 - x2, y3 - y2) > 100,
+          f"{math.hypot(x3 - x2, y3 - y2):.0f} units")
     press(pg, A)
     check("   A is JOY1, unbound in default.cfg", "JOY1 is unbound" in pg.evaluate("quake.text('console_text')"))
     check("no page errors (Classic)", not errs, str(errs[-3:]))

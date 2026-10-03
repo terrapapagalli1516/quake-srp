@@ -2,9 +2,11 @@
 //! `Joy_AdvancedUpdate_f`, `IN_ReadJoystick`, `IN_Commands` and `IN_JoyMove`,
 //! reading a pad the platform hands it ([`Pad`]: the browser's Gamepad API)
 //! the way WinQuake read winmm's first joystick. And the port's additions for
-//! a 2026 pad, each a setting in [`JoyCvars`] and off in Classic: a round
-//! dead zone and a response curve for the sticks, the pad's buttons in the
-//! menus, and rumble.
+//! a 2026 pad, each a setting in [`JoyCvars`]: a round dead zone and a
+//! response curve for the sticks, the pad's buttons in the menus, and
+//! rumble. The gamepad is a *control* ([`crate::settings`]'s module docs):
+//! on by default in both profiles, off only with id's own 1996 controls
+//! ([`JoyCvars::classic`], [`crate::cvar::Cvars::with_id_controls`]).
 //!
 //! Ported from Quake (GPLv2). Copyright (C) 1996-1997 Id Software, Inc.
 //! Source: `WinQuake/in_win.c`. Its mouse half (`IN_MouseMove`) is the
@@ -725,8 +727,11 @@ mod tests {
         Pad { standard: true, num_buttons: 17, ..Pad::default() }
     }
 
+    /// id's own joystick (the pad is a shared control, on by default in
+    /// both profiles now, so this forces id's 1996 one — [`JoyCvars::classic`]
+    /// — on explicitly, as [`Cvars::with_id_controls`] leaves it).
     fn classic_on() -> Cvars {
-        let mut c = Cvars::classic();
+        let mut c = Cvars::classic().with_id_controls();
         c.joy.enabled = true;
         c
     }
@@ -778,9 +783,9 @@ mod tests {
 
     #[test]
     fn nothing_is_keyed_with_joystick_off_and_a_lost_pad_lets_go() {
-        let classic = Cvars::classic();
+        let id = Cvars::classic().with_id_controls();
         let mut j = detected(Pad { pressed: 1, ..pad() });
-        assert!(j.commands(&classic.joy, PadKeys::Game).is_empty(), "id's default: joystick 0");
+        assert!(j.commands(&id.joy, PadKeys::Game).is_empty(), "id's own controls: joystick 0");
         let on = classic_on();
         assert_eq!(j.commands(&on.joy, PadKeys::Game), [(K_JOY1, true)]);
         j.set_pad(None);
@@ -835,8 +840,8 @@ mod tests {
         let mut inv = cv.clone();
         inv.m_pitch = -inv.m_pitch;
         assert_eq!(j.joy_move(&inv, Profile::Classic, Held { mlook: true, ..held }, 0.1).pitch, -7.5, "Invert Mouse");
-        let classic = Cvars::classic();
-        assert_eq!(j.joy_move(&classic, Profile::Classic, held, 0.1), JoyMove::default(), "joystick 0");
+        let id = Cvars::classic().with_id_controls();
+        assert_eq!(j.joy_move(&id, Profile::Classic, held, 0.1), JoyMove::default(), "id's own controls: joystick 0");
     }
 
     /// joyadvanced: the maps come from joyadvaxis* (bits 0..3, 16 relative)

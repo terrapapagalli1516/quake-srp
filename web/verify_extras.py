@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --with playwright --script
 """Verify Options > Classic / 2026 and its settings page, the settings the
 page keeps across reloads, and Esc in fullscreen, end-to-end in headless
-Chromium. The page opens as `?classic` (every departure off, id's keys):
+Chromium. The page opens as `?classic` (every engine departure off):
 
   1. Options' 14th row, "Classic / 2026" (the port's): left/right switch the
      whole profile (the 2026 one turns wasm_uncapped and wasm_scaled2d on),
@@ -20,7 +20,8 @@ Chromium. The page opens as `?classic` (every departure off, id's keys):
      (`wasm_showfps "1"`, `viewsize "80"`, ...), and a plain reload (no
      `?classic`) comes back Classic with them.
   5. The fullscreen key and Esc in fullscreen (PLATFORM.md, "Fullscreen").
-     Classic leaves Alt+Enter to the game (id's strafe and jump);
+     Alt+Enter is the fullscreen key in Classic too (a shared control); with
+     id's own controls (`idcontrols`) it is the game's (strafe and jump), and
      `vid_fkey 1`, the setting's old name, switches on vid_altenter, and the
      button's title names the key. Alt+Enter enters fullscreen and locks
      Escape, and F12 alongside it (navigator.keyboard.lock(['Escape',
@@ -263,15 +264,20 @@ with sync_playwright() as p:
     frames(pg)
 
     # 5. The fullscreen key, and Esc in fullscreen with Escape keyboard-locked.
-    #    Classic: Alt+Enter is the game's (id's ALT +strafe, ENTER +jump).
+    #    Classic has it too (a shared control: the State says so); with id's own
+    #    controls, `idcontrols`, Alt+Enter is the game's (ALT +strafe, ENTER +jump).
     fs_on = lambda: pg.evaluate("!!document.fullscreenElement")
     pg.evaluate("document.getElementById('walkBtn').click()")
     time.sleep(1.0)
     key("Escape")
     pg.wait_for_function("exp.menu_visible().then(v => !v)", timeout=5000)
+    check("Classic: Alt+Enter is the fullscreen key by default (the State says so)",
+          pg.evaluate("!!(quake.state.flags & 64)"))
+    pg.evaluate("quake.callLine('exec idcontrols')")
+    pg.wait_for_function("!(quake.state.flags & 64)", timeout=5000)
     key("Alt+Enter")
     time.sleep(0.3)
-    check("Classic: Alt+Enter is the game's, no fullscreen", not fs_on())
+    check("idcontrols: Alt+Enter is the game's, no fullscreen", not fs_on())
     # vid_altenter switches it, and a config.cfg's old name for it, vid_fkey
     # (when the key was F), still does.
     pg.evaluate("quake.callLine('exec vid_fkey 1')")

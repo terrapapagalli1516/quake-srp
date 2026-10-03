@@ -74,7 +74,8 @@ pub(crate) fn walk_mut<R>(f: impl FnOnce(&mut Walk) -> R) -> R {
 /// up (`key_dest != key_game`) the gameplay buttons IntermissionThink polls
 /// are gated to 0 — the player must dismiss it, and so must these tests.
 /// Switch the session to the 2026 profile (the tests start in Classic): its
-/// departures and its WASD keys.
+/// departures and its wheel — the controls (WASD, mouse look, ...) are the
+/// same in both, and a switch leaves them alone.
 pub(crate) fn use_2026() {
     crate::app::ensure_app(|a| a.settings.set_profile(quake_rs::settings::Profile::Modern));
 }
