@@ -690,8 +690,16 @@ fn span_exact_cached(crow: &mut [u8], sp: &Span, fx: &BlockFixed, block: &[u8], 
         // No z test: a non-positive `zi` (rounding at a clipped edge) saturates
         // and the clamp keeps the read in the block.
         let z = 65536.0 / zi;
-        let bx = (((sz * z) as i64).wrapping_add(fx.sadjust) >> 16).clamp(0, bw_i - 1) as usize;
-        let by = (((tz * z) as i64).wrapping_add(fx.tadjust) >> 16).clamp(0, bh_i - 1) as usize;
+        let s = ((sz * z) as i64).wrapping_add(fx.sadjust) >> 16;
+        let t = ((tz * z) as i64).wrapping_add(fx.tadjust) >> 16;
+        // Nearly every pixel is inside the block: one test for both
+        // coordinates (as unsigned, a negative is past any width) before the
+        // four of the two clamps.
+        let (bx, by) = if (s as u64) < bw as u64 && (t as u64) < bh as u64 {
+            (s as usize, t as usize)
+        } else {
+            (s.clamp(0, bw_i - 1) as usize, t.clamp(0, bh_i - 1) as usize)
+        };
         *c = block[by * bw + bx];
         zi += sp.dzi;
         sz += sp.dsz;
@@ -1464,6 +1472,22 @@ mod tests {
         }
     }
 
+    /// The exact span with each coordinate clamped at every pixel, as
+    /// [`span_exact_cached`] was before it tested "inside the block" first:
+    /// the fuzz's reference for it.
+    fn exact_clamped_every_pixel(crow: &mut [u8], sp: &Span, fx: &BlockFixed, block: &[u8], bw: usize, bh: usize) {
+        let (mut zi, mut sz, mut tz) = (sp.zi, sp.sz, sp.tz);
+        for c in crow.iter_mut() {
+            let z = 65536.0 / zi;
+            let bx = (((sz * z) as i64).wrapping_add(fx.sadjust) >> 16).clamp(0, bw as i64 - 1) as usize;
+            let by = (((tz * z) as i64).wrapping_add(fx.tadjust) >> 16).clamp(0, bh as i64 - 1) as usize;
+            *c = block[by * bw + bx];
+            zi += sp.dzi;
+            sz += sp.dsz;
+            tz += sp.dtz;
+        }
+    }
+
     /// The C span routines at every length the setting has — the walls'
     /// `D_DrawSpans8` at 4, 8, 32 and 64, the liquids' `Turbulent8` at 4, 8,
     /// 16, 32 and 64 — against literal transcriptions of id's C over random
@@ -1473,7 +1497,8 @@ mod tests {
     /// build (`cargo test --lib fuzz`) checks every add for overflow too.
     /// And `D_DrawSpans16` against its arithmetic in the asm's order: the
     /// span loops ask for each segment's end a segment ahead
-    /// ([`segments_ahead`]), the references on reaching it.
+    /// ([`segments_ahead`]), the references on reaching it. And the exact
+    /// span against its two clamps at every pixel.
     #[test]
     fn the_c_spans_at_every_length_are_ids_c_and_stay_in_the_block() {
         let mut r = Rng(0x9e37_79b9_7f4a_7c15);
@@ -1504,6 +1529,9 @@ mod tests {
             span_cached(&mut port, &sp, &fx, &block, bw, bh, PerspSpan::Spans16);
             d_draw_spans16_in_order(&mut c, &sp, &fx, &block, bw);
             assert_eq!(port, c, "D_DrawSpans16, {len} pixels on {bw}x{bh}, {sp:?}");
+            span_cached(&mut port, &sp, &fx, &block, bw, bh, PerspSpan::Exact);
+            exact_clamped_every_pixel(&mut c, &sp, &fx, &block, bw, bh);
+            assert_eq!(port, c, "exact, {len} pixels on {bw}x{bh}, {sp:?}");
             // A span whose texels vary: it ran through the block, not only
             // along one clamped edge.
             in_block += usize::from(port.iter().any(|&p| p != port[0]));
