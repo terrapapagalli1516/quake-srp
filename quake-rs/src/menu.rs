@@ -174,7 +174,7 @@ pub struct SettingRow {
     pub label: &'static str,
     /// The two bronze help lines shown under the list while it is
     /// highlighted (a third names its console command: [`SettingRow::console_hint`]),
-    /// centred, at most [`EXTRAS_NOTE_COLS`] characters.
+    /// centred, at most `EXTRAS_NOTE_COLS` (36) characters.
     pub help: [&'static str; 2],
     pub kind: RowKind,
 }
