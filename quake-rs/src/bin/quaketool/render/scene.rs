@@ -236,7 +236,7 @@ pub fn cmd_scene(pak_path: &str, map_name: &str, out: &str, opts: &[String]) -> 
     // particles in this single-shot `scene` command (no per-frame loop), so that
     // slice is empty; dynamic lights are empty too unless explicitly injected
     // below for A/B debugging.
-    let light_styles = server.lightstyle_scales(server.time(), quake_rs::server::LerpLightStyles::Classic);
+    let light_styles = server.lightstyle_scales(server.sv_time(), quake_rs::server::LerpLightStyles::Classic);
 
     // Optional injected dynamic light, for eyeballing / A-B-diffing the dlight
     // path (e.g. the R_MarkLights BSP gating) on a real map:

@@ -838,18 +838,21 @@ fn render_demo_frame(
         d.particles.integrate(cl_frametime, v.time, d.sv_gravity * 0.05);
     }
     // The RECORDED svc_lightstyle table drives the world lighting through the
-    // same R_AnimateLight 10 Hz logic the live walk uses (lightstyle_scales_at)
-    // — the demo's torch flicker matches the recording exactly — stepped or
-    // gliding as `r_lerplightstyles` says, as live play is (the attract demo
-    // is the first thing a visitor sees). A synthetic demo without a table
-    // (tests) falls back to the previous seeded default: style 0 = 'm'
-    // (264/256, id's steady-world brightness), the rest neutral.
+    // same R_AnimateLight 10 Hz logic the live walk uses (lightstyle_scales_at,
+    // on the double clock `d.time`, whose float is `v.time`) — in Classic the
+    // demo's flicker matches the recording exactly — stepped or gliding as
+    // `r_lerplightstyles` says, as live play is. (Of the attract loop, the
+    // first thing a visitor sees, only demo3's views hold an animated light;
+    // the steady torches' flicker, `r_torchflicker`, is the renderer's, and
+    // lights all three.) A synthetic demo without a table (tests) falls back
+    // to the previous seeded default: style 0 = 'm' (264/256, id's
+    // steady-world brightness), the rest neutral.
     let demo_styles = if f.lightstyles.is_empty() {
         let mut s = render::NEUTRAL_LIGHTSTYLE_SCALES;
         s[0] = 264.0 / 256.0;
         s
     } else {
-        crate::server::lightstyle_scales_at(&f.lightstyles, v.time, vid.video.lightstyles)
+        crate::server::lightstyle_scales_at(&f.lightstyles, d.time, vid.video.lightstyles)
     };
     // The first-person weapon viewmodel: SU_WEAPON is the model PRECACHE index
     // (`view->model = cl.model_precache[cl.stats[STAT_WEAPON]]`, V_CalcRefdef),

@@ -77,7 +77,8 @@ pub const LIGHTSTYLES: usize = 64;
 /// scene's [`light_styles`](super::Scene::light_styles) (the
 /// [`Scene::new`](super::Scene::new) default) it leaves lightmaps exactly as
 /// the static (style-0) renderer produced them. The animated front-ends
-/// instead pass `server.lightstyle_scales(time)`.
+/// instead pass `server.lightstyle_scales(time, lerp)` (stepped as id's, or
+/// gliding: `r_lerplightstyles`).
 pub const NEUTRAL_LIGHTSTYLE_SCALES: [f32; LIGHTSTYLES] = [1.0; LIGHTSTYLES];
 
 /// `DFace.styles` slot value meaning "this lightmap layer is unused".

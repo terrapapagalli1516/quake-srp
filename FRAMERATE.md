@@ -510,7 +510,13 @@ units (`server::GLIDE_STEP`; 256 is the white point, a letter 22). At every
 whole tenth the value is id's letter, so those frames are id's
 (`server::lightstyle::tests`); DarkPlaces glides from `k-1` to `k` instead,
 the same shape a tenth later. One function serves the live walk and demo
-playback (`server::lightstyle_scales_at`), so the attract demo glides too.
+playback (`server::lightstyle_scales_at`), so demos glide too — though of
+the attract loop only demo3's views hold an animated light (demo1's and
+demo2's frames are the same either way; the steady torches' flicker, below,
+is what moves their light). The glide reads its fraction off the client's
+`double` clock (`sv.time`, the demo's `cl.time`), Classic its letter off the
+`float` id's renderer reads, as before: on a `float` clock two 480 Hz frames
+would share a time after about 10 hours in one level.
 A one-letter style — a steady light, a switched one — never moves, and a
 pattern QuakeC replaces (`lightstyle()`) still changes at once.
 
@@ -526,13 +532,16 @@ lights are e1m1's fluorescent flicker, e1m5's and e1m6's slow pulse. The
 flickering torches are the registered episode 2's (e2m2–e2m5, styles 1 and
 6).
 
-At 240 Hz (`quaketool view --lightstyles classic|smooth` at 24 clock times
-1/240 s apart, the two modes' frames at the whole tenth byte-identical):
+At 240 Hz (`quaketool view --lightstyles classic|smooth` at 25 clock times
+1/240 s apart, across one tenth: `cl.time` 5.0–5.1 at e2m2's start, 5.1–5.2
+in e1m1's corridor, where style 10 goes from 'm' to 'a'; the two modes'
+frames at the whole tenth byte-identical). The numbers depend on the tenth:
+how far its letters are apart.
 
-| wall, 640x400 | id's: frames that change, the jump | the glide: frames that change, the largest |
+| wall, 640x400 | id's: steps that change, the jump | the glide: steps that change, the largest |
 |---|---|---|
-| e2m2's start, torch-lit (styles 1, 6) | 1 of 23, 33% of the view | 23 of 23, 2.2% |
-| e1m1's fluorescent corridor (style 10, 'm' to 'a') | 1 of 23, 51% | 23 of 23, 16% |
+| e2m2's start, torch-lit (styles 1, 6), 5.0–5.1 | 1 of 24, 10.8% of the view | 22 of 24, 0.65% |
+| e1m1's fluorescent corridor (style 10, 'm' to 'a'), 5.1–5.2 | 1 of 24, 51% | 24 of 24, 15% |
 
 **The cost.** The lit-surface caches (`D_CacheSurface`'s, the port's
 `render::surf`) are keyed on the style's value: every new value rebakes each
