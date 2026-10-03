@@ -514,6 +514,21 @@ impl BlockFixed {
     }
 }
 
+/// The end of the full `N`-pixel segment that starts at pixel `k0` of a span
+/// of `end` pixels — `seg_end` of the pixel it leads to — or `None` when no
+/// full segment starts there (a full segment is one with pixels after it).
+///
+/// The span loops call this for the segment AFTER the one they are about to
+/// draw. id's routines divide for a segment's end on reaching the segment,
+/// and its pixels cannot start before the quotient is there; asked for a
+/// segment early, the divide runs while the segment before is drawn. The
+/// values are the same (each end is a function of its pixel alone), the wall
+/// spans a tenth to a fifth faster (PERF_PLAN.md, §14).
+#[inline]
+fn segments_ahead<const N: usize, E>(k0: usize, end: usize, seg_end: impl Fn(usize) -> E) -> Option<E> {
+    (k0 + N < end).then(|| seg_end(k0 + N))
+}
+
 /// `D_DrawSpans16` (d_draw16.s) over one of id's spans of a surface-cache
 /// block (`crow`, its pixels): the texel coordinates are exact at the first
 /// pixel, then at the end of every full 16-pixel segment, and in between
@@ -542,10 +557,15 @@ fn span16_cached(
     let mut k0 = 0;
     // The full segments: exact again at pixel k0 + 16, the positions `16*s +
     // i*ds` with 20 fractional bits. (A loop of a constant 16, which the
-    // compiler unrolls.)
-    while k0 + 16 < end {
-        let (sn, tn) = sp.st_at(k0 + 16, fx.sadjust, fx.tadjust);
-        let (sn, tn) = (sn.max(4096).min(fx.bbextents), tn.max(4096).min(fx.bbextentt));
+    // compiler unrolls.) A segment's end is asked for a segment ahead
+    // ([`segments_ahead`]).
+    let seg_end = |k: usize| {
+        let (sn, tn) = sp.st_at(k, fx.sadjust, fx.tadjust);
+        (sn.max(4096).min(fx.bbextents), tn.max(4096).min(fx.bbextentt))
+    };
+    let mut ahead = segments_ahead::<16, _>(k0, end, seg_end);
+    while let Some((sn, tn)) = ahead {
+        ahead = segments_ahead::<16, _>(k0 + 16, end, seg_end);
         let (mut sa, mut ta, ds, dt) = (s * 16, t * 16, sn - s, tn - t);
         let seg: &mut [u8; 16] = (&mut crow[k0..k0 + 16]).try_into().expect("16 pixels");
         for c in seg {
@@ -618,9 +638,13 @@ fn span_c_cached<const N: usize>(crow: &mut [u8], sp: &Span, fx: &BlockFixed, bl
     // the compiler unrolls (one of a variable length cost 8 nearly what
     // exact perspective costs). Then the last, `n` pixels.
     let mut k0 = 0;
-    while k0 + N < end {
-        let (a, b) = sp.st_at(k0 + N, fx.sadjust, fx.tadjust);
-        let (snext, tnext) = (a.max(low).min(fx.bbextents), b.max(low).min(fx.bbextentt));
+    let seg_end = |k: usize| {
+        let (a, b) = sp.st_at(k, fx.sadjust, fx.tadjust);
+        (a.max(low).min(fx.bbextents), b.max(low).min(fx.bbextentt))
+    };
+    let mut ahead = segments_ahead::<N, _>(k0, end, seg_end);
+    while let Some((snext, tnext)) = ahead {
+        ahead = segments_ahead::<N, _>(k0 + N, end, seg_end);
         let (sstep, tstep) = ((snext - s) >> shift, (tnext - t) >> shift);
         let seg: &mut [u8; N] = (&mut crow[k0..k0 + N]).try_into().expect("N pixels");
         for c in seg {
@@ -633,8 +657,7 @@ fn span_c_cached<const N: usize>(crow: &mut [u8], sp: &Span, fx: &BlockFixed, bl
     }
     if k0 < end {
         let n = end - k0;
-        let (a, b) = sp.st_at(end - 1, fx.sadjust, fx.tadjust);
-        let (snext, tnext) = (a.max(low).min(fx.bbextents), b.max(low).min(fx.bbextentt));
+        let (snext, tnext) = seg_end(end - 1);
         let (sstep, tstep) = (c_step(snext - s, n - 1), c_step(tnext - t, n - 1));
         for c in &mut crow[k0..] {
             *c = block.get((t >> 16) as usize * bw + (s >> 16) as usize).copied().unwrap_or(0);
@@ -742,9 +765,13 @@ fn turb_span<const N: usize>(
     // no-alias promise a function's arguments carry, and the loop then runs
     // a third slower.)
     let mut k0 = 0;
-    while k0 + N < end {
-        let (a, b) = sp.st_at(k0 + N, sadjust, tadjust);
-        let (sn, tn) = (a.clamp(low, BBEXTENTS), b.clamp(low, BBEXTENTS));
+    let seg_end = |k: usize| {
+        let (a, b) = sp.st_at(k, sadjust, tadjust);
+        (a.clamp(low, BBEXTENTS), b.clamp(low, BBEXTENTS))
+    };
+    let mut ahead = segments_ahead::<N, _>(k0, end, seg_end);
+    while let Some((sn, tn)) = ahead {
+        ahead = segments_ahead::<N, _>(k0 + N, end, seg_end);
         let (ss, ts) = (((sn - s) >> shift) as i32, ((tn - t) >> shift) as i32);
         let (mut a, mut b) = ((s as i32) & TURB_COORD_MASK, (t as i32) & TURB_COORD_MASK);
         let seg: &mut [u8; N] = (&mut crow[k0..k0 + N]).try_into().expect("N pixels");
@@ -760,8 +787,7 @@ fn turb_span<const N: usize>(
     }
     if k0 < end {
         let n = end - k0;
-        let (a, b) = sp.st_at(end - 1, sadjust, tadjust);
-        let (sn, tn) = (a.clamp(low, BBEXTENTS), b.clamp(low, BBEXTENTS));
+        let (sn, tn) = seg_end(end - 1);
         let (ss, ts) = (c_step(sn - s, n - 1) as i32, c_step(tn - t, n - 1) as i32);
         let (mut a, mut b) = ((s as i32) & TURB_COORD_MASK, (t as i32) & TURB_COORD_MASK);
         for c in &mut crow[k0..] {
@@ -1403,6 +1429,41 @@ mod tests {
         }
     }
 
+    /// `D_DrawSpans16`'s arithmetic in the asm's order — each segment's end
+    /// divided for on reaching the segment — as [`span16_cached`] was before
+    /// its ends were asked for a segment ahead: the reference the fuzz holds
+    /// it to.
+    fn d_draw_spans16_in_order(crow: &mut [u8], sp: &Span, fx: &BlockFixed, block: &[u8], bw: usize) {
+        let end = crow.len();
+        let (s0, t0) = sp.st_at(0, fx.sadjust, fx.tadjust);
+        let (mut s, mut t) = (s0.clamp(0, fx.bbextents), t0.clamp(0, fx.bbextentt));
+        let mut k0 = 0;
+        while k0 + 16 < end {
+            let (sn, tn) = sp.st_at(k0 + 16, fx.sadjust, fx.tadjust);
+            let (sn, tn) = (sn.max(4096).min(fx.bbextents), tn.max(4096).min(fx.bbextentt));
+            let (mut sa, mut ta, ds, dt) = (s * 16, t * 16, sn - s, tn - t);
+            for c in &mut crow[k0..k0 + 16] {
+                *c = block[(ta >> 20) as usize * bw + (sa >> 20) as usize];
+                sa += ds;
+                ta += dt;
+            }
+            (s, t) = (sn, tn);
+            k0 += 16;
+        }
+        let steps = end.saturating_sub(k0 + 1);
+        let (mut ss, mut ts) = (0i64, 0i64);
+        if steps > 0 {
+            let (sn, tn) = sp.st_at(k0 + steps, fx.sadjust, fx.tadjust);
+            let (dss, dts) = (sn.max(4096).min(fx.bbextents) - s, tn.max(4096).min(fx.bbextentt) - t);
+            (ss, ts) = if steps == 1 { (dss, dts) } else { ((dss * RECIPROCAL_16[steps]) >> 31, (dts * RECIPROCAL_16[steps]) >> 31) };
+        }
+        for c in crow.iter_mut().skip(k0) {
+            *c = block[(t >> 16) as usize * bw + (s >> 16) as usize];
+            s += ss;
+            t += ts;
+        }
+    }
+
     /// The C span routines at every length the setting has — the walls'
     /// `D_DrawSpans8` at 4, 8, 32 and 64, the liquids' `Turbulent8` at 4, 8,
     /// 16, 32 and 64 — against literal transcriptions of id's C over random
@@ -1410,6 +1471,9 @@ mod tests {
     /// negative now and then, huge steps): the same pixels, and no position
     /// off the block (the transcription's unchecked read panics). A debug
     /// build (`cargo test --lib fuzz`) checks every add for overflow too.
+    /// And `D_DrawSpans16` against its arithmetic in the asm's order: the
+    /// span loops ask for each segment's end a segment ahead
+    /// ([`segments_ahead`]), the references on reaching it.
     #[test]
     fn the_c_spans_at_every_length_are_ids_c_and_stay_in_the_block() {
         let mut r = Rng(0x9e37_79b9_7f4a_7c15);
@@ -1437,6 +1501,9 @@ mod tests {
                 d_draw_spans8_as_written(n, &mut c, &sp, &fx, &block, bw);
                 assert_eq!(port, c, "{persp:?}, {len} pixels on {bw}x{bh}, {sp:?}");
             }
+            span_cached(&mut port, &sp, &fx, &block, bw, bh, PerspSpan::Spans16);
+            d_draw_spans16_in_order(&mut c, &sp, &fx, &block, bw);
+            assert_eq!(port, c, "D_DrawSpans16, {len} pixels on {bw}x{bh}, {sp:?}");
             // A span whose texels vary: it ran through the block, not only
             // along one clamped edge.
             in_block += usize::from(port.iter().any(|&p| p != port[0]));
