@@ -170,8 +170,8 @@ mod tests {
 
     /// `--video modern` is the whole 2026 set, exact perspective with the
     /// rest (it was id's spans until the user turned it on in 2026);
-    /// `--video classic` is id's; `--exactpersp` moves it alone, in either
-    /// order with `--video` the way every video option does.
+    /// `--video classic` is id's; `--exactpersp` moves it alone, and a later
+    /// `--video` sets it again with the rest, as it does every video option.
     #[test]
     fn video_modern_carries_exact_perspective() {
         let mut v = VideoArgs::default();
