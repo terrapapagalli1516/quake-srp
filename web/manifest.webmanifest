@@ -1,6 +1,6 @@
 {
-  "name": "quake-rs",
-  "short_name": "quake-rs",
+  "name": "quake-srp",
+  "short_name": "quake-srp",
   "description": "id Software's Quake (1996), ported to dependency-free safe Rust and software-rendered in the browser.",
   "id": "./",
   "start_url": "./",
