@@ -2082,20 +2082,22 @@ mod tests {
     }
 
     /// `PR_RunError("Bad builtin call number")`: a function whose
-    /// `first_statement` names a builtin number past the table — as the
-    /// mission packs' re-release `progs.dat` declares for `finaleFinished`
-    /// (#79) and `localsound` (#80), neither ever called — loads fine and
-    /// runs fine until something actually calls it; only then does the VM
-    /// error, matching id's lazy behaviour (`common.rs`'s doc, which no
-    /// longer scans for this eagerly).
+    /// `first_statement` names a builtin number past the table — the shape
+    /// the mission packs' re-release `progs.dat` itself relied on while
+    /// `finaleFinished` (#79) and `localsound` (#80) were still unhandled
+    /// (table slots now exist for both — `builtins.rs`'s doc; #80 still
+    /// behaves exactly like this test, since nothing ever calls it) — loads
+    /// fine and runs fine until something actually calls it; only then does
+    /// the VM error, matching id's lazy behaviour (`common.rs`'s doc, which
+    /// no longer scans for this eagerly).
     #[test]
     fn calling_an_unknown_builtin_errors_at_the_call_not_at_load() {
         let mut b = Builder::new();
-        // "foreign": builtin #79, one past the port's 79-entry table
-        // (0..=78) — declared here, but this test never calls it.
+        // "foreign": builtin #81, one past the port's now-81-entry table
+        // (0..=80) — declared here, but this test never calls it.
         let foreign_name = b.intern("foreign");
         b.functions.push(Function {
-            first_statement: -79,
+            first_statement: -81,
             parm_start: 0,
             locals: 0,
             profile: 0,
@@ -2130,7 +2132,7 @@ mod tests {
         let mut vm = Vm::load(&img).expect("a declared, uncalled foreign builtin loads fine");
         vm.set_gi(g_func, foreign_idx as i32);
         let err = vm.execute(main_idx).unwrap_err();
-        assert!(err.to_string().contains("bad builtin call number 79"), "{err}");
+        assert!(err.to_string().contains("bad builtin call number 81"), "{err}");
     }
 
     /// D2: the handles in `fo`/`go` are the by-name lookups done once at load —

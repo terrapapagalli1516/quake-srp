@@ -106,6 +106,31 @@ mod tests {
         assert_eq!(lines[lines.len() - 2..], ["test fault", "Host_Error: Program error"]);
     }
 
+    /// The mission packs' re-release end-of-game credits roll
+    /// (`Walk::pending_menu_credits`, set by `walk_frame` once builtin #79
+    /// `finaleFinished` is finally true and `finale_transition` ran
+    /// `localcmd("menu_credits\n")` -- AUDIT.md "The mission packs' paths",
+    /// P7/B4): the App-level reaction (`finish_menu_credits`, `cl_demo.rs`)
+    /// ends the session exactly as the Quit menu's "Y" does
+    /// (`App::request_quit`) -- `CL_Disconnect`, the same end screen. The
+    /// embedded shareware id1 this test boots never sets the flag on its
+    /// own (its progs never declares the builtin); set it directly, standing
+    /// in for the mission packs' `finale_transition` this fixture does not
+    /// have, to prove the App-level wiring without needing the real pack
+    /// data -- `pr_cmds.rs`'s `hipend_ending_...`/`r2m8_ending_...` already
+    /// prove the QuakeC side of the chain against it.
+    #[test]
+    fn menu_credits_ends_the_session_like_the_quit_menu() {
+        set_resolution(320, 200);
+        assert_eq!(boot(), 1);
+        close_menu();
+        walk_mut(|w| w.pending_menu_credits = true);
+        step(0.05);
+        let (has_walk, disconnected, _) = game_state();
+        assert!(!has_walk && disconnected, "CL_Disconnect ran");
+        assert!(crate::app::take_quit().is_some(), "request_quit latched, as the Quit menu's Y does");
+    }
+
     /// Regression for the one-time texture/lighting "pops" in the first second of
     /// live play (two distinct root causes, both whole-view shimmers):
     ///

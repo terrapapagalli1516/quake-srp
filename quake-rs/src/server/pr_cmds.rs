@@ -230,6 +230,22 @@ fn bi_cvar(vm: &mut Vm) -> Result<()> {
     Ok(())
 }
 
+/// `finaleFinished` (#79, the mission packs' 2021 re-release only): whether
+/// the end-of-pack finale/credits text has been fully shown and the player
+/// has pressed a button since ([`ServerCvars::finale_finished`], latched by
+/// [`super::Server::set_finale_finished`] — a front-end sets it from
+/// client-side state, `client::screen::finale_text_fully_revealed`, since
+/// single-player keeps server and client in one process). `client.qc`'s
+/// `finale_check` polls this every 0.1s and, once true, runs `menu_credits`
+/// then `disconnect` five seconds later. `id1`'s progs never declares this
+/// builtin, so it is never called for it (AUDIT.md "The mission packs'
+/// paths", P7/B4).
+fn bi_finale_finished(vm: &mut Vm) -> Result<()> {
+    let finished = vm.host().map(|h| h.cvars().finale_finished).unwrap_or(false);
+    vm.ret_float(if finished { 1.0 } else { 0.0 });
+    Ok(())
+}
+
 /// The handful of cvar defaults the spawn/think code reads. Values match the
 /// stock `*.c` declarations (`deathmatch` "0"). `skill` and `sv_gravity` are
 /// the server's *live* values ([`ServerCvars`]): `cvar_set("skill", N)` from a
@@ -574,6 +590,10 @@ pub fn install_engine_builtins(vm: &mut Vm) {
     put(76, bi_precache_sound); // precache_sound (alias)
     put(77, bi_precache_file); // precache_file (alias)
     put(78, bi_noop); // setspawnparms
+    put(79, bi_finale_finished); // finaleFinished (mission packs' re-release only)
+    // #80 localsound stays pf_fixme: declared by both packs, called by
+    // neither (AUDIT.md "The mission packs' paths", P7/B4) — left failing at
+    // the call, like id's own PR_RunError would.
 }
 
 #[cfg(test)]
@@ -784,4 +804,201 @@ mod tests {
         assert!((0.0..=1.0).contains(&frac));
     }
 
+    /// `finaleFinished` (#79): false on a fresh server, latches true once
+    /// [`Server::set_finale_finished`] sees it, and stays latched — a later
+    /// `false` (what a frame where the condition no longer holds would pass)
+    /// is not a reset, matching `finale_check`'s own one-shot need (AUDIT.md
+    /// "The mission packs' paths", P7/B4).
+    #[test]
+    fn finale_finished_builtin_reads_the_latch() {
+        let img = Builder::new().build();
+        let mut server = Server::new(empty_bsp(), Progs::parse(&img).expect("parse")).expect("server");
+        assert!(!server.finale_finished(), "a fresh server has not latched it");
+        server.vm.call_builtin(79, 0).expect("builtin #79 is installed");
+        assert_eq!(server.vm.gf(OFS_RETURN), 0.0, "false by default");
+
+        server.set_finale_finished(true);
+        assert!(server.finale_finished());
+        server.vm.call_builtin(79, 0).expect("builtin #79");
+        assert_eq!(server.vm.gf(OFS_RETURN), 1.0, "latched true");
+
+        // A `false` input (what a frame where the reveal/keypress condition
+        // no longer holds would pass) is not a reset -- only a fresh server
+        // (a changelevel/restart) clears it.
+        server.set_finale_finished(false);
+        assert!(server.finale_finished(), "a false input does not clear the latch");
+    }
+
+    /// Hipnotic's hipend ending, on real data: `#[ignore]`d (needs the
+    /// mission pack's own `progs.dat`/`hipend.bsp`, which this repo does not
+    /// carry — see `AUDIT.md` "The mission packs' paths", P7/B4, and
+    /// `pr_edict.rs`'s `r2m6_needs_more_than_ids_600_edicts` for the same
+    /// pattern). Point `QUAKE_HIPNOTIC_DIR` at a *basedir* laid out as
+    /// `census/packs.py --data` wants it (`id1/pak0.pak`, `id1/pak1.pak`,
+    /// `hipnotic/pak0.pak`) and run `cargo test --release hipend_ending --
+    /// --ignored`. Goes through the real `-hipnotic` file layering
+    /// ([`crate::common::init_filesystem`]), not a bare `progs.dat`/`.bsp`
+    /// pair, so `cvar("registered")` reads true exactly as real play would
+    /// (id1's `pak1.pak` carries `gfx/pop.lmp`) — the hipend branch at
+    /// `intermission_running == 3` needs it, else it takes the shareware
+    /// sell-screen branch instead and never reaches `finale_check`.
+    ///
+    /// Plays the real chain end to end exactly as the map's own QuakeC does
+    /// (no shortcuts past it): hipend's ending runs through its one
+    /// `info_startendtext` (hipmisc.qc's `info_startendtext_use`, reached in
+    /// play once the player sits through its `effect_finale` camera chain —
+    /// out of this brief's scope, P5/the oriented-sprite and camera work),
+    /// whose `.use` sets `intermission_running = 1` and calls
+    /// `ExitIntermission()` directly — already `intermission_running == 2`
+    /// by the time it returns (`ExitIntermission` increments it again on
+    /// entry), hipend's own finale text written. From there tick real
+    /// frames with `+attack` held, as a player mashing "continue" would, so
+    /// `IntermissionThink` (run every frame by the real `PlayerPreThink`)
+    /// drives one more `ExitIntermission` call once its `intermission_exittime`
+    /// gate opens — `intermission_running` 2->3, hipend's own branch, which
+    /// spawns the `finale_check` timer. Before #79 this point was a QuakeC
+    /// "bad builtin call number 79" error, ending the game; confirm instead
+    /// it idles cleanly (`finaleFinished()` answering false) until
+    /// [`Server::set_finale_finished`] (what `client/cl_main.rs`'s
+    /// `walk_frame` does once the finale text is fully shown and a button
+    /// pressed) lets `finale_check` -> `finale_transition` queue
+    /// `menu_credits` ([`Server::take_pending_menu_credits`]).
+    #[test]
+    #[ignore]
+    fn hipend_ending_runs_finale_check_to_menu_credits() {
+        let Ok(dir) = std::env::var("QUAKE_HIPNOTIC_DIR") else {
+            eprintln!("QUAKE_HIPNOTIC_DIR not set; skipping (see this test's doc comment)");
+            return;
+        };
+        let fs = crate::common::init_filesystem(std::path::Path::new(&dir), &["hipnotic"], false)
+            .expect("basedir laid out as id1/ + hipnotic/, each with its pak0.pak (+ id1/pak1.pak)");
+        assert!(fs.registered, "id1's pak1.pak must be present for cvar(\"registered\") to read true");
+        let read = |name: &str| -> Vec<u8> {
+            fs.files.read_file(name).expect("read").unwrap_or_else(|| panic!("{name} not found"))
+        };
+        let progs = Progs::parse(&read("progs.dat")).expect("parse progs.dat");
+        let bsp = crate::bsp::Bsp::parse(&read("maps/hipend.bsp")).expect("parse hipend.bsp");
+
+        let mut server = Server::with_pak(bsp, progs, Some(fs.files)).expect("server");
+        server.set_map_name("hipend");
+        server.spawn_entities().expect("hipend spawns clean");
+        let _player = server.connect_client().expect("connect");
+        server.run_signon_frames().expect("signon settles");
+
+        // The map's one info_startendtext: its `.use` is info_startendtext_use.
+        let starter = (0..server.vm.num_edicts() as i32)
+            .find(|&e| {
+                !server.vm.is_free_edict(e)
+                    && server.vm.ent_get_string(e, "classname") == "info_startendtext"
+            })
+            .expect("hipend has an info_startendtext");
+
+        server.vm.gset_int("self", starter);
+        server.vm.call_by_name("info_startendtext_use").expect("info_startendtext_use");
+        assert_eq!(server.vm.gget_float("intermission_running"), 2.0, "ExitIntermission ran once already");
+
+        let cmd = crate::server::UserCmd {
+            forwardmove: 0.0,
+            sidemove: 0.0,
+            upmove: 0.0,
+            yaw: 0.0,
+            pitch: 0.0,
+            buttons: 1, // +attack: IntermissionThink's "a button": self.button0.
+            impulse: 0,
+        };
+        // intermission_exittime is `time + 1` (ExitIntermission's own TRUE,
+        // non-deathmatch); held attack then drives IntermissionThink's one
+        // more ExitIntermission call (running 2->3) the instant the gate
+        // opens. 8 sim-seconds is generous slack.
+        for _ in 0..80 {
+            server.client_frame_f64(&cmd, 0.1).expect("frame (pre-latch)");
+        }
+        assert_eq!(server.vm.gget_float("intermission_running"), 3.0, "hipend's own branch spawned finale_check");
+        assert!(!server.finale_finished(), "nothing has latched it yet");
+        assert!(!server.take_pending_menu_credits(), "finale_check is still polling false");
+
+        // Keep ticking with #79 still false: this is exactly the point that
+        // used to error "bad builtin call number 79" -- a clean `.expect`
+        // across many more polls (every 0.1s) is the regression proof.
+        for _ in 0..30 {
+            server.client_frame_f64(&cmd, 0.1).expect("finale_check polls #79 cleanly");
+        }
+        assert!(!server.take_pending_menu_credits(), "still not latched");
+
+        // The player has "seen the text and pressed a key" (what
+        // `walk_frame` computes from `finale_text_fully_revealed` + a
+        // button): latch it. finale_check sees it true within 0.1s and
+        // schedules finale_transition 5s later.
+        server.set_finale_finished(true);
+        for _ in 0..70 {
+            // 7 sim-seconds: >= the 5s wait, plus slack for when exactly
+            // finale_check's own think next lands.
+            if server.take_pending_menu_credits() {
+                return; // menu_credits queued -- the chain completed.
+            }
+            server.client_frame_f64(&cmd, 0.1).expect("frame (post-latch)");
+        }
+        assert!(server.take_pending_menu_credits(), "finale_transition queued menu_credits");
+    }
+
+    /// Rogue's own ending chain (`oldone.qc`'s `finale_5`/`finale_6`,
+    /// reached in play once the final boss (`th_die = finale_1`) is killed
+    /// and its cutscene chain -- `finale_1..4`'s teleport-train choreography,
+    /// out of this brief's scope -- finishes) on real data: `#[ignore]`d
+    /// (needs the mission pack's own `progs.dat`; see `AUDIT.md` "The
+    /// mission packs' paths", P7/B4). Point `QUAKE_ROGUE_DIR` at a directory
+    /// holding it and run `cargo test --release r2m8_ending -- --ignored`.
+    ///
+    /// `finale_5`/`finale_6` need no map state at all (unlike Hipnotic's
+    /// `ending.qc`'s `finale_check`, no `cvar("registered")` check), so this
+    /// calls `finale_5` directly on a throwaway edict standing in for
+    /// `finale_4`'s own `timer`, then ticks real frames
+    /// (`MoveType::None`'s generic `SV_RunThink`) to drive its 0.1s poll --
+    /// otherwise the same proof as `hipend_ending_runs_finale_check_to_menu_credits`,
+    /// cross-checking the same builtin/outbox plumbing against Rogue's own
+    /// compiled progs.dat, not just Hipnotic's.
+    #[test]
+    #[ignore]
+    fn r2m8_ending_runs_finale_5_to_menu_credits() {
+        let Ok(dir) = std::env::var("QUAKE_ROGUE_DIR") else {
+            eprintln!("QUAKE_ROGUE_DIR not set; skipping (see this test's doc comment)");
+            return;
+        };
+        let progs_bytes = std::fs::read(format!("{dir}/progs.dat")).expect("progs.dat");
+        let progs = Progs::parse(&progs_bytes).expect("parse progs.dat");
+        let mut server = Server::new(empty_bsp(), progs).expect("server");
+
+        let timer = server.vm.spawn(); // stands in for finale_4's own `timer`
+        // finale_4's real setup (`timer.think = finale_5`) before the first
+        // call, since finale_5's own "poll false" branch only ever touches
+        // `nextthink`, trusting `think` is already itself.
+        let finale_5_idx = server.vm.progs().find_function("finale_5").expect("finale_5 declared");
+        server.vm.set_ent_int(timer, server.vm.fo().think, finale_5_idx as i32);
+        server.vm.gset_int("self", timer);
+        server.vm.call_by_name("finale_5").expect("finale_5");
+
+        let cmd = crate::server::UserCmd {
+            forwardmove: 0.0,
+            sidemove: 0.0,
+            upmove: 0.0,
+            yaw: 0.0,
+            pitch: 0.0,
+            buttons: 0,
+            impulse: 0,
+        };
+        for _ in 0..20 {
+            server.client_frame_f64(&cmd, 0.1).expect("finale_5 polls #79 cleanly (pre-latch)");
+        }
+        assert!(!server.take_pending_menu_credits(), "not yet -- finaleFinished() hasn't latched");
+
+        // "Seen the text and pressed a key": latch it, as `walk_frame` would.
+        server.set_finale_finished(true);
+        for _ in 0..70 {
+            if server.take_pending_menu_credits() {
+                return; // menu_credits queued -- the chain completed.
+            }
+            server.client_frame_f64(&cmd, 0.1).expect("frame (post-latch)");
+        }
+        assert!(server.take_pending_menu_credits(), "finale_6 queued menu_credits");
+    }
 }

@@ -12,7 +12,7 @@ use quake_rs::stepping::Stepping;
 
 use crate::app::ensure_app;
 use crate::bench::{self, Phase};
-use crate::cl_demo::{finish_host_error, host_end_game, step_demo, step_timedemo};
+use crate::cl_demo::{finish_host_error, finish_menu_credits, host_end_game, step_demo, step_timedemo};
 use crate::cl_walk::step_walk;
 
 /// How a host frame is gated and stepped: [`host_filter_time`]'s 72 fps cap
@@ -293,6 +293,10 @@ pub(crate) fn step(dt: f32) -> i32 {
         }
         // A QuakeC error ended the game this frame: Host_Error's disconnect.
         finish_host_error(a);
+        // The mission packs' re-release-only end-of-game credits roll:
+        // builtin #79 finally true, `menu_credits` queued — end the session
+        // like the Quit menu does.
+        finish_menu_credits(a);
 
         // The wasm_showfps setting (off in both profiles): QuakeWorld draws it with the
         // rest of the play-screen 2-D (SCR_DrawFPS, before Sbar_Draw, the

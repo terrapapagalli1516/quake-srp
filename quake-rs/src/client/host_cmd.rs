@@ -376,6 +376,7 @@ pub fn try_changelevel(w: &mut Walk, next_map: &str, sound: &mut Vec<SoundCall>)
     w.finale_text.clear();
     w.finale_start = 0.0;
     w.pending_sellscreen = false;
+    w.pending_menu_credits = false;
     // Drop any events the *outgoing* server queued (the new server starts fresh).
     let _ = w.server.drain_sounds();
     let _ = w.server.drain_particles();
@@ -479,6 +480,7 @@ pub fn try_restart(w: &mut Walk, sound: &mut Vec<SoundCall>) {
     w.finale_text.clear();
     w.finale_start = 0.0;
     w.pending_sellscreen = false;
+    w.pending_menu_credits = false;
     let _ = w.server.drain_sounds();
     let _ = w.server.drain_particles();
     let _ = w.server.drain_temp_entities();

@@ -20,6 +20,19 @@
 //! the `pr_builtin[]` array in `pr_cmds.c` (the non-`QUAKE2` build), so e.g.
 //! `ftos == #26`, `vtos == #27`, `rint == #36`, `fabs == #43`,
 //! `nextent == #47`, `vectoangles == #51`.
+//!
+//! `pr_cmds.c`'s own table ends at `#78` (`setspawnparms`): id's engine, and
+//! this port until now, never had a `#79` or `#80` to dispatch — a progs
+//! that declared one and called it would hit the VM's own bad-builtin-number
+//! check ([`crate::vm::Vm::call_builtin`]), never this table. The mission
+//! packs' 2021 re-release `progs.dat` declares exactly two more,
+//! `finaleFinished` (#79) and `localsound` (#80) — table slots 79/80 below
+//! exist only so that declaration loads without the table itself being
+//! "past the end"; `install_engine_builtins`
+//! overwrites #79 with the real implementation (it reaches server/host
+//! state no self-contained builtin here can), and leaves #80 as
+//! [`pf_fixme`] (no pack ever calls it — see AUDIT.md "The mission packs'
+//! paths", P7/B4).
 
 use crate::error::{ProgramError, Result};
 use crate::vm::{Builtin, Vm};
@@ -494,6 +507,10 @@ pub fn default_builtins() -> Vec<Builtin> {
         pf_fixme,       // 76  precache_sound
         pf_fixme,       // 77  precache_file
         pf_fixme,       // 78  setspawnparms (server world)
+        pf_fixme,       // 79  finaleFinished (mission packs' re-release only; server
+                        //     world — install_engine_builtins puts bi_finale_finished)
+        pf_fixme,       // 80  localsound (mission packs' re-release only; never
+                        //     called by either pack — left unimplemented, see B4)
     ]
 }
 
@@ -1013,8 +1030,10 @@ mod tests {
         // Index 0 is reserved (Fixme): calling it must error.
         let mut vm = bare_vm();
         assert!((table[0])(&mut vm).is_err());
-        // The full non-QUAKE2 table is 79 entries (0..=78); centerprint is #73.
-        assert_eq!(table.len(), 79, "table must hold all 0..=78 builtins");
+        // The full non-QUAKE2 table is 79 entries (0..=78), plus the mission
+        // packs' re-release #79/#80 (finaleFinished/localsound) — 81 total;
+        // centerprint is #73.
+        assert_eq!(table.len(), 81, "table must hold 0..=78 plus #79/#80");
 
         // #14 spawn writes a fresh entity index into OFS_RETURN.
         let before = vm.num_edicts();

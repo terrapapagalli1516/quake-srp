@@ -373,6 +373,25 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
         impulse: if menu_up { 0 } else { w.next_impulse },
     };
     if !paused {
+        // The mission packs' re-release `finaleFinished` builtin (#79,
+        // server::pr_cmds::bi_finale_finished): latch it once the end-of-pack
+        // finale/credits text — cl.intermission 2 (the plaque) or 3 (text
+        // alone) — has been fully typewriter-revealed
+        // (`screen::finale_text_fully_revealed`, the same budget math the
+        // draw uses) AND the player has pressed a button THIS frame (the
+        // simplification: `cmd.buttons`, i.e. +attack or +jump — the two
+        // keys/clicks this port already turns into a UserCmd bit; a bare
+        // movement key does not count as "pressing a key" here). Single
+        // player keeps server and client state in the same `Walk`, so this
+        // is the only place able to feed the server's builtin what only the
+        // client knows. id1 never declares the builtin, so this is inert
+        // for it (AUDIT.md "The mission packs' paths", P7/B4).
+        if w.intermission >= 2
+            && cmd.buttons != 0
+            && crate::screen::finale_text_fully_revealed(&w.finale_text, w.clock - w.finale_start)
+        {
+            w.server.set_finale_finished(true);
+        }
         // A queued impulse is sent once (CL_SendMove: `in_impulse = 0`). While
         // paused it waits: the C's SV_ReadClientMove still stores it on the
         // edict behind the menu, and it runs when the server does.
@@ -457,6 +476,14 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
     }
     if w.host_error.is_some() {
         return disconnected_frame(vid, sound); // the new level's QuakeC failed
+    }
+    // The mission packs' re-release-only end-of-game credits roll
+    // (localcmd("menu_credits\n"), builtin #79 finally true): surface it for
+    // whatever owns the session ([`Walk::pending_menu_credits`]) — a plain
+    // flag like `pending_sellscreen`, since quake-rs itself has no notion of
+    // a Quit screen to show. `id1` never sets this.
+    if w.server.take_pending_menu_credits() {
+        w.pending_menu_credits = true;
     }
 
     // CL_ParseClientdata's item get-times (the new-weapon icon flash), on the

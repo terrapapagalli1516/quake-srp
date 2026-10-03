@@ -332,6 +332,43 @@ pub fn draw_pause(image: &mut Image, pic: &crate::wad::Qpic) {
     blit_qpic_at(image, pic, x as f32, y as f32, sc.scale, 0.0, 0.0);
 }
 
+/// `scr_printspeed.value * elapsed`, clamped the way a `9999`-plus budget
+/// already paints anything id1 or the packs ship: the `remaining` both
+/// [`crate::sbar::draw_finale_overlay`] (the draw) and
+/// [`finale_text_fully_revealed`] (the mission packs' `finaleFinished`
+/// builtin, below) feed from — kept in one place so neither can disagree on
+/// the frame the reveal completes.
+pub(crate) fn scr_printspeed_remaining(elapsed: f32) -> i32 {
+    (8.0 * elapsed.max(0.0)).min(9999.0) as i32
+}
+
+/// Whether [`draw_center_string_revealed`]'s typewriter reveal has painted
+/// every character of `text` by `elapsed` seconds after the finale started.
+///
+/// The mission packs' re-release engine exposes exactly this as a builtin,
+/// `finaleFinished` (#79): `finale_check` (client.qc) polls it every 0.1s and,
+/// once true, waits 5 more seconds then runs `menu_credits` +`disconnect`
+/// (`server::pr_cmds::bi_finale_finished`, set each frame by
+/// `client/cl_main.rs`'s `walk_frame` from exactly this client-side state —
+/// `w.finale_text`/`w.finale_start`/`w.clock` — since single-player keeps
+/// server and client in one process; see AUDIT.md "The mission packs'
+/// paths", P7/B4). `id1`'s progs never declares the builtin, so this is dead
+/// code for it.
+///
+/// Mirrors [`draw_center_string_revealed`]'s own math rather than redoing it:
+/// a budget of `n` paints `n + 1` characters (the doc comment there), so the
+/// reveal is complete once `remaining + 1` reaches the total character count
+/// across every line (each truncated to 40, as the draw truncates it; `\n`
+/// itself is not drawn and does not count).
+pub fn finale_text_fully_revealed(text: &str, elapsed: f32) -> bool {
+    let total: usize = text.split('\n').map(|line| line.len().min(40)).sum();
+    if total == 0 {
+        return true; // nothing to reveal
+    }
+    let remaining = scr_printspeed_remaining(elapsed);
+    i64::from(remaining) + 1 >= total as i64
+}
+
 /// Draw a `centerprint` message: `SCR_DrawCenterString` outside the finale
 /// (`remaining = 9999`, the whole string) — [`draw_center_string_revealed`].
 pub fn draw_centerprint(
@@ -529,6 +566,26 @@ mod tests {
         draw_finale_overlay(&mut img, Some(&cc), Some(&plaque), "", 0.0);
         assert_eq!(px(&img, 110 + 1, 16 + 1), 52, "finale.lmp centered at y=16");
         assert_eq!(px(&img, 100, 16 + 1), 0, "left of the centered plaque is clear");
+    }
+
+    #[test]
+    fn finale_text_fully_revealed_agrees_with_the_draw() {
+        // "AB\nCD": 4 characters total (the '\n' doesn't count), matching
+        // finale_center_string_reveals_at_printspeed above.
+        let text = "AB\nCD";
+        assert!(!finale_text_fully_revealed(text, 0.0), "only 'A' is painted yet");
+        // 8 chars/sec: the 4th character needs remaining >= 3, i.e. elapsed >= 0.375s.
+        assert!(!finale_text_fully_revealed(text, 0.374), "one tick short");
+        assert!(finale_text_fully_revealed(text, 0.375), "exactly four characters' worth");
+        assert!(finale_text_fully_revealed(text, 1.0), "well past the reveal");
+        // A line past 40 characters truncates (as the draw does): only the
+        // first 40 of each line count toward the total, needing remaining
+        // >= 39 (elapsed >= 4.875s) — the 41st character never counts.
+        let long = "x".repeat(41);
+        assert!(finale_text_fully_revealed(&long, 39.0 / 8.0), "all 40 painted");
+        assert!(!finale_text_fully_revealed(&long, 38.0 / 8.0), "39 of 40 painted");
+        // Nothing to reveal: vacuously done.
+        assert!(finale_text_fully_revealed("", 0.0), "empty text has nothing to wait for");
     }
 
     #[test]
