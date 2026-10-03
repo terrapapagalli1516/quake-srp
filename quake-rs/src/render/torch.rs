@@ -115,7 +115,7 @@ pub(super) struct Flicker {
 /// (misc.qc's spawn functions; `light_flame_small_white` is the yellow one's
 /// white twin).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Flame {
+pub(super) enum TorchKind {
     /// `light_torch_small_walltorch` (`progs/flame.mdl`): the mapper's choice
     /// for a flickering torch, where id made one (styles 1 and 6).
     WallTorch,
@@ -127,12 +127,12 @@ pub(super) enum Flame {
     SmallFlame,
 }
 
-impl Flame {
-    fn of_classname(name: &str) -> Option<Flame> {
+impl TorchKind {
+    fn of_classname(name: &str) -> Option<TorchKind> {
         match name {
-            "light_torch_small_walltorch" => Some(Flame::WallTorch),
-            "light_flame_large_yellow" => Some(Flame::LargeFlame),
-            "light_flame_small_yellow" | "light_flame_small_white" => Some(Flame::SmallFlame),
+            "light_torch_small_walltorch" => Some(TorchKind::WallTorch),
+            "light_flame_large_yellow" => Some(TorchKind::LargeFlame),
+            "light_flame_small_yellow" | "light_flame_small_white" => Some(TorchKind::SmallFlame),
             _ => None,
         }
     }
@@ -143,9 +143,9 @@ impl Flame {
     pub(super) fn flicker(self) -> Flicker {
         let voice = |pattern, rate| Voice { pattern, rate };
         match self {
-            Flame::WallTorch => Flicker { voices: [voice(FLICKER_6, 1.0), voice(FLICKER_1, 0.75)], depth: 0.8 },
-            Flame::SmallFlame => Flicker { voices: [voice(FLICKER_1, 0.8), voice(FLICKER_6, 0.9)], depth: 1.0 },
-            Flame::LargeFlame => Flicker { voices: [voice(FLICKER_1, 0.5), voice(FLICKER_6, 0.6)], depth: 1.3 },
+            TorchKind::WallTorch => Flicker { voices: [voice(FLICKER_6, 1.0), voice(FLICKER_1, 0.75)], depth: 0.8 },
+            TorchKind::SmallFlame => Flicker { voices: [voice(FLICKER_1, 0.8), voice(FLICKER_6, 0.9)], depth: 1.0 },
+            TorchKind::LargeFlame => Flicker { voices: [voice(FLICKER_1, 0.5), voice(FLICKER_6, 0.6)], depth: 1.3 },
         }
     }
 }
@@ -183,7 +183,7 @@ pub(super) struct Torch {
     pub(super) origin: Vec3,
     /// The `light` key, or LIGHT.EXE's `DEFAULTLIGHTLEVEL` (300) without one.
     pub(super) light: f32,
-    pub(super) flame: Flame,
+    pub(super) kind: TorchKind,
     /// Where in each voice's pattern it is at time 0, in letters
     /// ([`phase_of`]).
     phases: [f32; 2],
@@ -192,12 +192,12 @@ pub(super) struct Torch {
 }
 
 impl Torch {
-    fn new(origin: Vec3, light: f32, flame: Flame) -> Torch {
-        let voices = flame.flicker().voices;
+    fn new(origin: Vec3, light: f32, kind: TorchKind) -> Torch {
+        let voices = kind.flicker().voices;
         Torch {
             origin,
             light,
-            flame,
+            kind,
             phases: [0, 1].map(|k| phase_of(origin, k, voices[k as usize].pattern.len())),
             means: voices.map(|v| pattern_mean(v.pattern)),
         }
@@ -211,7 +211,7 @@ impl Torch {
         if strength.is_off() {
             return 0.0;
         }
-        let f = self.flame.flicker();
+        let f = self.kind.flicker();
         let tenths = f64::from(if time.is_finite() { time } else { 0.0 }) * 10.0;
         let mut swing = 0.0f32;
         for (k, v) in f.voices.iter().enumerate() {
@@ -251,12 +251,12 @@ pub(super) fn steady_torches(entities: &str) -> Vec<Torch> {
                 _ => {}
             }
         }
-        let (Some(flame), Some(origin)) = (Flame::of_classname(&class), origin) else { continue };
+        let (Some(kind), Some(origin)) = (TorchKind::of_classname(&class), origin) else { continue };
         if style != 0 {
             continue;
         }
         let light = if light == 0.0 { DEFAULT_LIGHT } else { light };
-        out.push(Torch::new(origin, light, flame));
+        out.push(Torch::new(origin, light, kind));
     }
     out
 }
@@ -285,7 +285,7 @@ const MIN_SHARE: f32 = 0.5;
 pub(super) fn share(origin: Vec3, light: f32, p: Vec3, normal: Vec3) -> f32 {
     let d = [origin[0] - p[0], origin[1] - p[1], origin[2] - p[2]];
     let dist = dot(d, d).sqrt();
-    if !(dist < light) {
+    if dist.is_nan() || dist >= light {
         return 0.0;
     }
     let cos = if dist > 0.0 { dot(d, normal) / dist } else { 1.0 };
@@ -463,7 +463,7 @@ fn invert3(m: [Vec3; 3]) -> Option<[Vec3; 3]> {
     let c = |a: Vec3, b: Vec3| [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
     let (r0, r1, r2) = (c(m[1], m[2]), c(m[2], m[0]), c(m[0], m[1]));
     let det = dot(m[0], r0);
-    if !(det.abs() > 1e-9) {
+    if det.is_nan() || det.abs() <= 1e-9 {
         return None;
     }
     // The inverse's columns are the cofactor rows over the determinant.
@@ -539,6 +539,41 @@ impl FaceTorches<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render::light::{face_lightmap_with, LightMap};
+    use crate::render::{demo_room, Camera, Renderer, RenderOptions, Scene, VideoCvars};
+    use LerpLightStyles::{Classic, Smooth};
+
+    const KINDS: [TorchKind; 3] = [TorchKind::WallTorch, TorchKind::SmallFlame, TorchKind::LargeFlame];
+
+    /// `demo_room` lit as one style-0 block of `luxel` everywhere, with
+    /// `entities` for its entity lump. Its floor (face 0, z = -128, s = x,
+    /// t = y) is the face the torches light; its walls' texture axes lie
+    /// along their normals, which the tool cannot light.
+    fn torch_room(entities: &str, luxel: u8) -> Bsp {
+        let mut bsp = demo_room();
+        bsp.lighting = vec![luxel; 200_000];
+        for f in bsp.faces.iter_mut() {
+            f.lightofs = 0;
+            f.styles = [0, STYLE_NONE, STYLE_NONE, STYLE_NONE];
+        }
+        bsp.entities = entities.into();
+        bsp
+    }
+
+    fn lump(torches: &[&str]) -> String {
+        let mut e = String::from("{ \"classname\" \"worldspawn\" \"wad\" \"gfx/base.wad\" }\n");
+        for t in torches {
+            e += &format!("{{ {t} }}\n");
+        }
+        e
+    }
+
+    /// A big flame 128 units above the floor's middle.
+    const FLAME: &str = "\"classname\" \"light_flame_large_yellow\" \"origin\" \"0 128 0\" \"light\" \"300\"";
+
+    fn torch(kind: TorchKind, origin: Vec3) -> Torch {
+        Torch::new(origin, 300.0, kind)
+    }
 
     #[test]
     fn the_strength_is_clamped_and_rounded() {
@@ -550,6 +585,322 @@ mod tests {
         assert_eq!(TorchFlicker::from_value(9.0).value(), 2.0);
         assert_eq!(TorchFlicker::from_value(f32::INFINITY).value(), 2.0);
         assert_eq!(TorchFlicker::from_value(0.333).value(), 0.33);
+        assert_eq!(VideoCvars::CLASSIC.torches, TorchFlicker::OFF, "off in Classic");
+        assert!(!VideoCvars::MODERN.torches.is_off(), "on in 2026");
+    }
+
+    /// The steady torches are the four flame classes with style 0 (or none):
+    /// an animated style (start's 1 and 6) is the light style's, a switched
+    /// one (32 and up) QuakeC's; no `light` key, or 0, is LIGHT.EXE's 300.
+    #[test]
+    fn the_steady_torches_are_the_flames_without_a_style() {
+        let e = lump(&[
+            "\"classname\" \"light_torch_small_walltorch\" \"origin\" \"1 2 3\" \"light\" \"200\"",
+            "\"classname\" \"light_flame_large_yellow\" \"origin\" \"4 5 6\"",
+            "\"origin\" \"7 8 9\" \"light\" \"0\" \"classname\" \"light_flame_small_yellow\" \"style\" \"0\"",
+            "\"classname\" \"light_flame_small_white\" \"origin\" \"-10 -11 -12\" \"light\" \"250\"",
+            "\"classname\" \"light_torch_small_walltorch\" \"origin\" \"0 0 0\" \"style\" \"1\"",
+            "\"classname\" \"light_torch_small_walltorch\" \"origin\" \"0 0 0\" \"style\" \"6\"",
+            "\"classname\" \"light_flame_large_yellow\" \"origin\" \"0 0 0\" \"style\" \"11\"",
+            "\"classname\" \"light_flame_small_yellow\" \"origin\" \"0 0 0\" \"style\" \"32\"",
+            "\"classname\" \"light\" \"origin\" \"0 0 0\"",
+            "\"classname\" \"light_fluoro\" \"origin\" \"0 0 0\"",
+            "\"classname\" \"light_torch_small_walltorch\"",
+        ]);
+        let got: Vec<(Vec3, f32, TorchKind)> = steady_torches(&e).iter().map(|t| (t.origin, t.light, t.kind)).collect();
+        assert_eq!(
+            got,
+            [
+                ([1.0, 2.0, 3.0], 200.0, TorchKind::WallTorch),
+                ([4.0, 5.0, 6.0], 300.0, TorchKind::LargeFlame),
+                ([7.0, 8.0, 9.0], 300.0, TorchKind::SmallFlame),
+                ([-10.0, -11.0, -12.0], 250.0, TorchKind::SmallFlame),
+            ]
+        );
+        assert!(steady_torches("").is_empty() && steady_torches("garbage { \"").is_empty());
+    }
+
+    /// `SingleLightFace`'s add times `rangescale`: `(light - dist)` times
+    /// `0.5 + 0.5 cos`, halved; nothing at or past `light`, half the light
+    /// edge-on, none from straight behind.
+    #[test]
+    fn the_share_falls_off_as_the_light_tool_lit() {
+        let up = [0.0, 0.0, 1.0];
+        assert_eq!(share([0.0, 0.0, 100.0], 300.0, [0.0; 3], up), 100.0, "(300 - 100) * 1 * 0.5");
+        assert_eq!(share([0.0, 0.0, 250.0], 300.0, [0.0; 3], up), 25.0);
+        assert_eq!(share([0.0, 0.0, 300.0], 300.0, [0.0; 3], up), 0.0, "at the light's reach");
+        assert_eq!(share([0.0, 0.0, 400.0], 300.0, [0.0; 3], up), 0.0, "past it");
+        assert_eq!(share([100.0, 0.0, 0.0], 300.0, [0.0; 3], up), 50.0, "edge-on: half");
+        assert_eq!(share([0.0, 0.0, -100.0], 300.0, [0.0; 3], up), 0.0, "from behind");
+        let slant = share([60.0, 0.0, 80.0], 300.0, [0.0; 3], up); // dist 100, cos 0.8
+        assert!((slant - 200.0 * 0.9 * 0.5).abs() < 1e-3, "{slant}");
+        // Linear in the distance.
+        let s: Vec<f32> = [50.0, 100.0, 150.0, 200.0].iter().map(|&z| share([0.0, 0.0, z], 300.0, [0.0; 3], up)).collect();
+        assert_eq!(s, [125.0, 100.0, 75.0, 50.0]);
+    }
+
+    /// A torch's phases are a function of its origin alone — the same each
+    /// time — and a row of torches a few units apart start nowhere near
+    /// together.
+    #[test]
+    fn the_phase_is_the_origins() {
+        let row: Vec<Torch> = (0..8).map(|k| torch(TorchKind::WallTorch, [64.0 * k as f32, 512.0, 96.0])).collect();
+        let again: Vec<Torch> = (0..8).map(|k| torch(TorchKind::WallTorch, [64.0 * k as f32, 512.0, 96.0])).collect();
+        assert_eq!(row, again);
+        for t in &row {
+            for (k, v) in TorchKind::WallTorch.flicker().voices.iter().enumerate() {
+                assert!((0.0..v.pattern.len() as f32).contains(&t.phases[k]));
+            }
+        }
+        let mut phases: Vec<u32> = row.iter().map(|t| (t.phases[0] * 16.0) as u32).collect();
+        phases.sort_unstable();
+        phases.dedup();
+        assert_eq!(phases.len(), row.len(), "no two of the row in step");
+        // Different scales at one instant: they do not pulse as one.
+        let at = |t: &Torch| t.scale(12.34, Smooth, TorchFlicker::STYLE);
+        let distinct: std::collections::BTreeSet<u32> = row.iter().map(|t| at(t).to_bits()).collect();
+        assert!(distinct.len() >= 6, "{distinct:?}");
+        // A whole-unit origin, however it is written, is the same torch.
+        assert_eq!(phase_of([1.0, 2.0, 3.0], 0, 23), phase_of([1.2, 1.9, 3.4], 0, 23));
+    }
+
+    /// The flicker is zero-mean: over a long run of frames each kind's scale
+    /// averages to 0, stepped or gliding — so the light averages to id's —
+    /// and it moves, more for the big flame than the wall torch.
+    #[test]
+    fn the_flicker_is_zero_mean() {
+        for flame in KINDS {
+            let t = torch(flame, [100.0, -200.0, 64.0]);
+            for lerp in [Classic, Smooth] {
+                // 400 s at 120 Hz: past each kind's two periods' common one.
+                let n = 48_000;
+                let (mut sum, mut lo, mut hi) = (0.0f64, f32::MAX, f32::MIN);
+                for f in 0..n {
+                    let s = t.scale(f as f32 / 120.0, lerp, TorchFlicker::STYLE);
+                    sum += f64::from(s);
+                    (lo, hi) = (lo.min(s), hi.max(s));
+                }
+                let mean = sum / n as f64;
+                assert!(mean.abs() < 2e-3, "{flame:?} {lerp:?}: mean {mean}");
+                assert!(lo < -0.05 && hi > 0.15, "{flame:?} {lerp:?}: {lo}..{hi}");
+            }
+        }
+        let swing = |flame| {
+            let t = torch(flame, [0.0; 3]);
+            (0..24_000).map(|f| t.scale(f as f32 / 120.0, Smooth, TorchFlicker::STYLE).powi(2)).sum::<f32>()
+        };
+        assert!(swing(TorchKind::LargeFlame) > swing(TorchKind::SmallFlame) && swing(TorchKind::SmallFlame) > swing(TorchKind::WallTorch));
+    }
+
+    /// The strength scales the swing exactly and 0 is still; the scale is a
+    /// pure function of the time and the torch (any clock is safe).
+    #[test]
+    fn the_strength_scales_the_swing() {
+        let t = torch(TorchKind::SmallFlame, [3.0, 4.0, 5.0]);
+        for f in 0..2000 {
+            let time = f as f32 * 0.0131;
+            let full = t.scale(time, Smooth, TorchFlicker::STYLE);
+            assert_eq!(t.scale(time, Smooth, TorchFlicker::from_value(0.5)), full * 0.5);
+            assert_eq!(t.scale(time, Smooth, TorchFlicker::from_value(2.0)), full * 2.0);
+            assert_eq!(t.scale(time, Smooth, TorchFlicker::OFF), 0.0);
+            assert_eq!(t.scale(time, Smooth, TorchFlicker::STYLE).to_bits(), full.to_bits());
+        }
+        for time in [f32::NAN, f32::INFINITY, -1e30, 1e30, -5.0] {
+            assert!(t.scale(time, Smooth, TorchFlicker::from_value(2.0)).abs() < 2.0, "{time}");
+        }
+    }
+
+    /// The faces a torch lights: those it is in front of and within its
+    /// light of, at the tool's sample points; every share bounded by its
+    /// luxel; nothing for a face with no style-0 block or no samples.
+    #[test]
+    fn the_shares_are_the_tools_and_bounded_by_the_luxel() {
+        let bsp = torch_room(&lump(&[FLAME]), 255);
+        let set = TorchSet::build(&bsp);
+        assert_eq!(set.counts().0, 1);
+        let floor = set.face(0);
+        assert!(!floor.is_empty(), "the floor is lit");
+        assert!(set.face(1).is_empty() || set.face(1).lit.iter().all(|l| l.torch == 0), "the ceiling, if lit, by the flame");
+        // The floor's luxel under the flame (x = 0, y = 128 -> luxel (16, 24)
+        // of 33 from texmins -256) is 128 + 1 units below it.
+        let lit = &floor.lit[0];
+        let under = 24 * 33 + 16;
+        assert!((lit.shares[under] - share([0.0, 128.0, 0.0], 300.0, [0.0, 128.0, -127.0], [0.0, 0.0, 1.0])).abs() < 1e-3);
+        assert!((lit.shares[under] - (300.0 - 127.0) * 0.5).abs() < 1e-3);
+        // A far corner of the floor is out of reach.
+        assert_eq!(lit.shares[0], 0.0);
+
+        // A dim room: no share is more than the luxel holds, two torches
+        // together neither.
+        let two = lump(&[FLAME, "\"classname\" \"light_flame_large_yellow\" \"origin\" \"0 100 -100\""]);
+        let dim = TorchSet::build(&torch_room(&two, 10));
+        let lits = dim.face(0).lit;
+        assert_eq!(lits.len(), 2);
+        for j in 0..lits[0].shares.len() {
+            let sum: f32 = lits.iter().map(|l| l.shares[j]).sum();
+            assert!(sum <= 10.0 + 1e-4, "luxel {j}: {sum}");
+        }
+        assert!(lits.iter().any(|l| l.shares.iter().any(|&s| s > 9.0)), "the bound, not nothing");
+
+        // Behind the floor, or past its reach above it: nothing.
+        for far in ["0 0 -200", "0 0 400"] {
+            let e = lump(&[&format!("\"classname\" \"light_flame_large_yellow\" \"origin\" \"{far}\"")]);
+            assert!(TorchSet::build(&torch_room(&e, 200)).face(0).is_empty(), "{far}");
+        }
+        // No style-0 block (lit only by a switched light), or no samples.
+        let mut bsp = torch_room(&lump(&[FLAME]), 200);
+        bsp.faces[0].styles = [32, STYLE_NONE, STYLE_NONE, STYLE_NONE];
+        bsp.faces[1].lightofs = -1;
+        let set = TorchSet::build(&bsp);
+        assert!(set.face(0).is_empty() && set.face(1).is_empty());
+        // The style-0 block where it is the second.
+        bsp.faces[0].styles = [32, 0, STYLE_NONE, STYLE_NONE];
+        assert!(!TorchSet::build(&bsp).face(0).is_empty());
+    }
+
+    /// The floor's lightmap at `time`, with the torches at `strength` (style
+    /// 0 at id's 'm').
+    fn floor_luxels(bsp: &Bsp, set: &mut TorchSet, time: f32, strength: TorchFlicker) -> Vec<f32> {
+        let mut styles = crate::render::NEUTRAL_LIGHTSTYLE_SCALES;
+        styles[0] = 264.0 / 256.0;
+        set.animate(time, Smooth, strength);
+        let mut poly = Vec::new();
+        assert!(face_world_poly(bsp, &bsp.faces[0], &mut poly));
+        let lm = face_lightmap_with(bsp, &bsp.faces[0], &poly, &styles, set.face(0), &[], 0).expect("lit");
+        owned(&lm)
+    }
+
+    fn owned(lm: &LightMap) -> Vec<f32> {
+        match &lm.luxels {
+            crate::render::light::Luxels::Owned(v) => v.clone(),
+            crate::render::light::Luxels::Static(s) => s.iter().map(|&b| f32::from(b)).collect(),
+        }
+    }
+
+    /// Over the flicker's run a torch-lit face's light averages to id's:
+    /// every luxel within a hundredth of a luxel unit, the colormap row
+    /// (`blocklights`) within one; at strength 0 it is id's bit for bit.
+    #[test]
+    fn the_time_average_is_ids_light() {
+        let bsp = torch_room(&lump(&[FLAME]), 120);
+        let mut set = TorchSet::build(&bsp);
+        let id = floor_luxels(&bsp, &mut set, 0.0, TorchFlicker::OFF);
+        assert!(id.iter().all(|&l| l == 120.0 * 264.0 / 256.0), "strength 0 is id's");
+        // The big flame's two voices (4.6 s and 2.83 s) come round together
+        // every 391 s: that, at 100 Hz.
+        let n = 39_100;
+        let mut sum = vec![0.0f64; id.len()];
+        let mut moved = 0usize;
+        for f in 0..n {
+            let l = floor_luxels(&bsp, &mut set, f as f32 / 100.0, TorchFlicker::STYLE);
+            moved += usize::from(l != id);
+            for (a, &v) in sum.iter_mut().zip(&l) {
+                *a += f64::from(v);
+            }
+        }
+        assert!(moved > n * 9 / 10, "the light moves ({moved} of {n} frames)");
+        let worst = sum.iter().zip(&id).map(|(&a, &want)| (a / n as f64 - f64::from(want)).abs()).fold(0.0, f64::max);
+        assert!(worst < 0.01, "a luxel's average is {worst} from id's");
+        // As colormap rows: (65280 - luxel*256) >> 10, averaged.
+        let row = |l: f64| ((65280.0 - (l * 256.0).round()) as i64 >> 10) as f64;
+        for (&a, &want) in sum.iter().zip(&id) {
+            assert!((row(a / n as f64) - row(f64::from(want))).abs() <= 1.0);
+        }
+    }
+
+    /// A luxel the torches drive below nothing clamps at black (the darkest
+    /// colormap row) and one past the brightest at the colormap's ceiling
+    /// (row 0): `R_BuildLightMap`'s bound, never a wrapped row.
+    #[test]
+    fn the_extremes_clamp_at_black_and_at_the_ceiling() {
+        let shares: Box<[f32]> = vec![0.0, 255.0, 1000.0, 255.0].into_boxed_slice();
+        let lit = [TorchLit { torch: 0, shares }];
+        let lm = |scale: f32, base: f32| {
+            let torches = FaceTorches { lit: &lit, scales: &[scale] };
+            let mut buf = vec![base; 4];
+            torches.add_to(&mut buf, 264.0 / 256.0);
+            let lm = LightMap { luxels: crate::render::light::Luxels::Owned(buf), lmw: 2, lmh: 2, texmins: [0.0; 2] };
+            let mut bl = Vec::new();
+            lm.blocklights_into(&mut bl);
+            bl
+        };
+        // Pulled far below 0: black (t = 16320, row 63), never more.
+        let dark = lm(-1.0, 10.0);
+        assert_eq!(dark[0], (65280 - 2560) >> 2, "a luxel no torch lights is untouched");
+        assert!(dark[1..].iter().all(|&t| t == 16320), "{dark:?}");
+        // Pushed past white: the ceiling (t = 64, row 0), never less.
+        let bright = lm(2.0, 200.0);
+        assert!(bright[1..].iter().all(|&t| t == 64), "{bright:?}");
+        assert!(bright.iter().chain(&dark).all(|&t| (64..=16320).contains(&t)));
+    }
+
+    fn scene_at<'a>(bsp: &'a Bsp, palette: &'a crate::render::Palette, colormap: &'a [u8], time: f32, torches: TorchFlicker) -> Scene<'a> {
+        let cam = Camera::looking_at([0.0, -200.0, 0.0], [0.0, 100.0, -128.0], 90.0);
+        let options = RenderOptions { video: VideoCvars { torches, ..VideoCvars::MODERN }, ..RenderOptions::default() };
+        Scene { time, colormap: Some(colormap), options, ..Scene::new(bsp, cam, 160, 100, palette) }
+    }
+
+    fn row_colormap() -> Vec<u8> {
+        (0..crate::render::light::COLORMAP_LEN).map(|i| (i / 256) as u8).collect()
+    }
+
+    /// With the extra on and no torch in reach the frame is id's byte for
+    /// byte; with one in reach it moves, and a renderer that drew other
+    /// times first draws each time as a fresh one does (the caches are keyed
+    /// on the torches' scales): the flicker is a function of the time alone,
+    /// so a demo and the live game show the same light at the same time.
+    #[test]
+    fn no_torch_in_reach_is_ids_frame_and_the_flicker_is_the_times() {
+        let palette = crate::render::fixtures::ramp_palette();
+        let cm = row_colormap();
+        for far in [lump(&[]), lump(&["\"classname\" \"light_flame_large_yellow\" \"origin\" \"5000 0 0\""])] {
+            let bsp = torch_room(&far, 120);
+            let mut r = Renderer::new();
+            for f in 0..40 {
+                let t = f as f32 * 0.137;
+                let on = r.render(&scene_at(&bsp, &palette, &cm, t, TorchFlicker::from_value(2.0)));
+                let off = crate::render::fixtures::render_once(&scene_at(&bsp, &palette, &cm, t, TorchFlicker::OFF));
+                assert!(on.pixels == off.pixels, "frame {f}: id's");
+            }
+        }
+        let bsp = torch_room(&lump(&[FLAME]), 120);
+        let off = crate::render::fixtures::render_once(&scene_at(&bsp, &palette, &cm, 1.0, TorchFlicker::OFF));
+        let mut warm = Renderer::new();
+        let mut differs = 0;
+        for f in 0..60 {
+            let t = 7.0 + f as f32 / 60.0;
+            let a = warm.render(&scene_at(&bsp, &palette, &cm, t, TorchFlicker::STYLE));
+            let fresh = crate::render::fixtures::render_once(&scene_at(&bsp, &palette, &cm, t, TorchFlicker::STYLE));
+            assert!(a.pixels == fresh.pixels, "t = {t}: the warm renderer's frame is the fresh one's");
+            differs += usize::from(a.pixels != off.pixels);
+        }
+        assert!(differs > 30, "the flame flickers ({differs} of 60)");
+        // Off again: id's frame from the same renderer.
+        let back = warm.render(&scene_at(&bsp, &palette, &cm, 1.0, TorchFlicker::OFF));
+        assert!(back.pixels == off.pixels);
+    }
+
+    /// id's maps: e1m2's 24 steady torches and flames all light faces; start's
+    /// 19 flickering wall torches (styles 1 and 6) are left to their styles,
+    /// its 22 steady ones flicker; e1m1 has none.
+    #[test]
+    fn ids_maps_steady_torches() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../quake-data/ID1/PAK0.PAK");
+        let Ok(pak) = crate::pak::Pak::open(&path) else {
+            eprintln!("skipped: no shareware pak at {}", path.display());
+            return;
+        };
+        let bsp = |m: &str| Bsp::parse(&pak.read_file(&format!("maps/{m}.bsp")).expect("read").expect(m)).expect(m);
+        for (map, torches) in [("e1m1", 0), ("e1m2", 24), ("start", 22)] {
+            let world = bsp(map);
+            let set = TorchSet::build(&world);
+            let (n, pairs) = set.counts();
+            assert_eq!(n, torches, "{map}");
+            let lit: std::collections::BTreeSet<u32> = (0..world.faces.len()).flat_map(|f| set.face(f).lit.iter().map(|l| l.torch)).collect();
+            assert_eq!(lit.len(), n, "{map}: every torch lights a face");
+            assert_eq!(pairs == 0, n == 0, "{map}");
+        }
+        let start = TorchSet::build(&bsp("start"));
+        assert_eq!(start.torches().iter().filter(|t| t.kind == TorchKind::LargeFlame).count(), 10);
     }
 }
-

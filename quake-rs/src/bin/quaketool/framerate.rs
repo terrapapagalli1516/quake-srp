@@ -1630,6 +1630,7 @@ fn lightstyles_report(pak: &Pak, rates: &[Rate], views: &[StyleView], res: (usiz
 /// [--secs S] [--view NAME=MAP:X,Y,Z:YAW[:PITCH]]...`: as `--lightstyles`,
 /// the steady torches as id's → flickering at strength S (`r_torchflicker`),
 /// the rest of the 2026 profile's video cvars on in both.
+#[allow(clippy::too_many_arguments)]
 fn torches_report(pak: &Pak, rates: &[Rate], views: &[StyleView], res: (usize, usize), threads: usize, reps: usize, secs: f64, strength: render::TorchFlicker) -> String {
     let modes = [render::TorchFlicker::OFF, strength].map(|torches| render::VideoCvars { torches, ..render::VideoCvars::MODERN });
     let title = format!("r_torchflicker at {}x{}, {threads} thread(s), {secs} s a run; 0 → {}", res.0, res.1, strength.value());

@@ -653,15 +653,11 @@ pub(super) fn surface_extents(ti: &crate::bsp::TexInfo, world_poly: &[Vec3]) -> 
 /// of 256 mapped to neutral). SAFETY: the recursion is depth-bounded and every
 /// index is `.get()`-checked, so corrupt node/plane/face data yields a default
 /// (no light) rather than a panic or unbounded recursion.
-#[cfg(test)]
-pub(super) fn r_light_point(bsp: &Bsp, p: Vec3, light_styles: &[f32; LIGHTSTYLES]) -> f32 {
-    r_light_point_hit(bsp, p, light_styles).0
-}
-
-/// [`r_light_point`], and the luxel it read: `(face, luxel)` — the world face
-/// the ray landed on and the luxel's index in its grid — when that face has
-/// samples. The steady torches' flicker ([`super::torch`]) moves a model's
-/// light by that luxel's change.
+///
+/// It also returns the luxel it read: `(face, luxel)` — the world face the ray
+/// landed on and the luxel's index in its grid — when that face has samples.
+/// The steady torches' flicker ([`super::torch`]) moves a model's light by
+/// that luxel's change.
 pub(super) fn r_light_point_hit(bsp: &Bsp, p: Vec3, light_styles: &[f32; LIGHTSTYLES]) -> LightPoint {
     if bsp.lighting.is_empty() {
         return (255.0, None); // C: `if (!worldmodel->lightdata) return 255;`

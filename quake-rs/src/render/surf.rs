@@ -623,9 +623,11 @@ impl SurfaceCaches {
     ///    move). The result is NOT stored, and any cached entry for this face
     ///    is dropped, so the dlight is never silently lost on a later frame.
     ///  * **Owned combine, no dlight** (animated styles, flickering torches)
-    ///    — keyed by the resolved style scale values and the torches' scales. On a hit the cached luxels are cloned
-    ///    into a fresh `LightMap` (bit-identical to a rebuild: the combine is
-    ///    deterministic). On a miss it is rebuilt and stored.
+    ///    — keyed by the resolved style scale values and the torches' scales.
+    ///    On a hit the cached luxels are cloned into a fresh `LightMap`
+    ///    (bit-identical to a rebuild: the combine is deterministic). On a miss
+    ///    it is rebuilt and stored.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn world_lightmap<'a>(
         &mut self,
         bsp: &'a Bsp,

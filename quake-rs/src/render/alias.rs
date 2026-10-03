@@ -1793,6 +1793,39 @@ mod tests {
         );
     }
 
+    /// `r_torchflicker`: a model standing by a steady torch is lit by the
+    /// luxel under it as it moves — id's light with the extra off or the
+    /// torch still, the floor's change with it on — on e1m2's floor before
+    /// the arch's two flames (when id's pak is here).
+    #[test]
+    fn a_model_by_a_torch_flickers_with_the_floor() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../quake-data/ID1/PAK0.PAK");
+        let Ok(pak) = crate::pak::Pak::open(&path) else {
+            eprintln!("skipped: no shareware pak at {}", path.display());
+            return;
+        };
+        let bsp = Bsp::parse(&pak.read_file("maps/e1m2.bsp").expect("read").expect("e1m2")).expect("parse");
+        let mut styles = NEUTRAL_LIGHTSTYLE_SCALES;
+        styles[0] = 264.0 / 256.0;
+        let mut torches = super::super::torch::TorchSet::build(&bsp);
+        let origin = [1488.0, 1100.0, 296.0];
+        let (r, hit) = super::super::light::r_light_point_hit(&bsp, origin, &styles);
+        let (face, luxel) = hit.expect("a lit floor");
+        let id = alias_entity_light(&bsp, origin, &styles, None, &[], false);
+        assert_eq!(id.0, (r.floor() as i32).min(128));
+        torches.animate(0.0, crate::server::LerpLightStyles::Smooth, crate::render::TorchFlicker::OFF);
+        assert_eq!(alias_entity_light(&bsp, origin, &styles, Some(&torches), &[], false), id, "still: id's");
+        let mut seen = std::collections::BTreeSet::new();
+        for f in 0..400 {
+            torches.animate(f as f32 / 40.0, crate::server::LerpLightStyles::Smooth, crate::render::TorchFlicker::STYLE);
+            let delta = torches.face(face).at(luxel) * styles[0];
+            let (ambient, _) = alias_entity_light(&bsp, origin, &styles, Some(&torches), &[], false);
+            assert_eq!(ambient, ((r + delta).floor() as i32).min(128));
+            seen.insert(ambient);
+        }
+        assert!(seen.len() >= 4 && seen.iter().any(|&a| a > id.0) && seen.iter().any(|&a| a < id.0), "{seen:?} about {}", id.0);
+    }
+
     #[test]
     fn alias_lighting_follows_r_drawentitiesonlist_and_setup_lighting() {
         // No lightdata: R_LightPoint is 255 -> ambient clamps to 128 and the
