@@ -9,7 +9,7 @@ Chromium. The page opens as `?classic` (every engine departure off):
      Enter opens the settings hub (menu_screen_id 10), whose rows open the
      pages (12 Picture and sound, 13 Motion and light, 14 Controls); their
      rows switch each setting (Picture: Uncapped framerate row 0, the
-     Perspective span row 6 stepping id's 16, 8, 4, exact, Show FPS row 8;
+     Perspective span row 6 stepping 64, 32, id's 16, 8, 4, exact, Show FPS row 8;
      Motion: Fluid sky row 2, Gliding
      lights row 3, the Torch flicker slider row 4, five steps to 1;
      Controls: Wheel weapons row 1 binds and unbinds the wheel:
@@ -177,13 +177,14 @@ with sync_playwright() as p:
     check("all off again", ext() == 0)
     key("ArrowDown", 6)                    # row 6: Perspective span, id's 16
     spans = []
-    for _ in range(4):
+    for _ in range(6):
         key("ArrowRight"); spans.append(cvar("r_perspspan"))
-    check("Right steps Perspective span: 8, 4, exact, then id's 16 again", spans == ["8", "4", "1", "16"], str(spans))
-    key("ArrowLeft")
-    check("Left from id's 16 wraps to exact (the extras' old bit 4)", cvar("r_perspspan") == "1" and ext() == 4)
-    key("ArrowRight")
-    check("...and Right is id's 16 again", ext() == 0)
+    check("Right steps Perspective span: 8, 4, exact, 64, 32, then id's 16 again",
+          spans == ["8", "4", "1", "64", "32", "16"], str(spans))
+    key("ArrowRight", 3)
+    check("...exact is the extras' old bit 4", cvar("r_perspspan") == "1" and ext() == 4)
+    key("ArrowLeft", 3)
+    check("...and Left back through 4 and 8 to id's 16", cvar("r_perspspan") == "16" and ext() == 0)
     key("Escape")
     check("Esc returns to the hub, on Picture and sound's row", scr() == EXTRAS and cur() == 1)
     key("ArrowDown"); key("Enter")
@@ -318,16 +319,18 @@ with sync_playwright() as p:
     pg3.evaluate(GRAB, "_x_off")
     d = pg3.evaluate(DIFF, ["_x_on", "_x_off"])
     check("2026: id's 16-pixel spans redraw the walls", d is not None and d["n"] > 1000, str(d))
-    # 8 and 4 between: each redraws the walls, nearer exact than the last.
+    # 64 and 32 longer, 8 and 4 between: each redraws the walls, nearer exact
+    # the shorter its span.
     near = {}
-    for span in (8, 4):
+    for span in (64, 32, 8, 4):
         pg3.evaluate(f"quake.callLine('exec r_perspspan {span}')")
         pg3.evaluate(FROZEN)
         pg3.evaluate(GRAB, f"_x_{span}")
         near[span] = pg3.evaluate(DIFF, ["_x_on", f"_x_{span}"])
-    n16, n8, n4 = d["n"] if d else 0, (near[8] or {}).get("n", 0), (near[4] or {}).get("n", 0)
-    check("2026: r_perspspan 8 and 4 redraw the walls, nearer exact at each step", n16 > n8 > n4 > 0,
-          f"pixels off exact: 16 {n16}, 8 {n8}, 4 {n4}")
+    n16 = d["n"] if d else 0
+    n64, n32, n8, n4 = ((near[k] or {}).get("n", 0) for k in (64, 32, 8, 4))
+    check("2026: r_perspspan 64, 32, 8 and 4 redraw the walls, nearer exact the shorter the span",
+          n64 > n32 > n16 > n8 > n4 > 0, f"pixels off exact: 64 {n64}, 32 {n32}, 16 {n16}, 8 {n8}, 4 {n4}")
     pg3.evaluate(f"exp.set_extras({ext3})")
     pg3.evaluate(FROZEN)
     pg3.evaluate(GRAB, "_x_on2")
