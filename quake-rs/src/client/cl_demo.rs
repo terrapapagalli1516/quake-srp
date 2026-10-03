@@ -1045,7 +1045,7 @@ fn render_demo_frame(
             }
             let lines = d.notify.visible(v.time);
             if !lines.is_empty() {
-                render::draw_notify(&mut img, cc, &lines);
+                render::draw_notify(&mut img, cc, &lines, render::notify_top(d.show_fps));
             }
         }
     }

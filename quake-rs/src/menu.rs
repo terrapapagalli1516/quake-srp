@@ -203,7 +203,7 @@ pub const SETTING_ROWS: [SettingRow; 19] = [
     SettingRow {
         cvar: "wasm_showfps",
         label: "              Show FPS",
-        help: ["Frames per second, bottom right,", "as QuakeWorld's show_fps drew it"],
+        help: ["Frames per second, top left, as", "QuakeWorld's show_fps counts"],
         kind: RowKind::Toggle,
     },
     SettingRow {

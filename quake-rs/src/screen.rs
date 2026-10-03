@@ -421,28 +421,43 @@ pub fn draw_centerprint(
     draw_center_string_revealed(image, conchars, text, -1);
 }
 
+/// Where [`draw_fps`] puts the readout on the 2-D screen ([`screen_2d`]):
+/// the top-left corner, its first cell at the notify lines' left margin
+/// (`Con_DrawNotify`'s `(x+1)<<3`) on their first row (`v = 0`).
+const FPS_POS: (i32, i32) = (8, 0);
+
 /// EXTRA, not in id's Quake (Options > Classic / 2026 > Show FPS,
 /// `wasm_showfps`): the frame rate as QuakeWorld's `SCR_DrawFPS`
-/// (QW/client/screen.c) draws it —
-/// `sprintf(st, "%3d FPS", lastfps)` in white conchars (`Draw_String`) at
-/// `x = vid.width - strlen(st)*8 - 8`, `y = vid.height - sb_lines - 8`: the
-/// bottom-right corner, just above the status bar. `fps` is the host's
-/// count (QW's `lastfps`). The coordinates are the 2-D layer's screen
+/// (QW/client/screen.c) writes it — `sprintf(st, "%3d FPS", lastfps)` in
+/// white conchars (`Draw_String`) — but in the top-left corner,
+/// [`FPS_POS`], where QuakeWorld put it in the bottom-right one, just above
+/// the status bar (`x = vid.width - strlen(st)*8 - 8`, `y = vid.height -
+/// sb_lines - 8`): over the game, clear of the bar and the touch controls
+/// above it, and where a glance finds it. The notify lines, which start in
+/// that corner too, move down a row while it shows ([`notify_top`]). The
+/// `%3d` keeps "FPS" still as the count changes. `fps` is the host's count
+/// (QW's `lastfps`). The coordinates are the 2-D layer's screen
 /// ([`screen_2d`]: the framebuffer 1:1 as id, or the "scaled 2-D" extra's).
-pub fn draw_fps(
-    image: &mut Image,
-    conchars: &crate::wad::Qpic,
-    fps: u32,
-    sb_lines: i32,
-) {
+pub fn draw_fps(image: &mut Image, conchars: &crate::wad::Qpic, fps: u32) {
     if image.w == 0 || image.h == 0 {
         return;
     }
     let sc = screen_2d(image.w, image.h);
     let st = format!("{fps:3} FPS");
-    let x = sc.w - st.len() as i32 * 8 - 8;
-    let y = sc.h - sb_lines.max(0) - 8;
+    let (x, y) = FPS_POS;
     draw_string_scaled(image, conchars, x as f32, y as f32, &st, sc.scale, 0.0, 0.0);
+}
+
+/// The 2-D row the notify lines start at ([`crate::console::draw_notify`]):
+/// `Con_DrawNotify`'s `v = 0`, or, while [`draw_fps`]'s readout has that
+/// row's corner (`show_fps`), the text row under it — so neither covers the
+/// other. Classic never shows the readout, so its notify lines are id's.
+pub fn notify_top(show_fps: bool) -> i32 {
+    if show_fps {
+        FPS_POS.1 + 8
+    } else {
+        0
+    }
 }
 
 /// `V_RenderView`'s crosshair (view.c, with `crosshair 1`): the conchars `+`
@@ -632,31 +647,57 @@ mod tests {
     }
 
     #[test]
-    fn draw_fps_sits_bottom_right_above_the_status_bar_like_scr_drawfps() {
+    fn draw_fps_sits_in_the_top_left_corner_at_the_notify_margin() {
         let cc = solid_conchars();
         let lit = 95u8;
-        // " 60 FPS": x = 320 - 7*8 - 8 = 256 (a blank), '6' at 264; y = 200 -
-        // sb_lines - 8.
-        for (sb_lines, y) in [(48, 144usize), (24, 168), (0, 192)] {
-            let mut img = Image::new(320, 200, 0);
-            draw_fps(&mut img, &cc, 60, sb_lines);
-            let px = |x: usize, y: usize| img.pixels[y * 320 + x];
-            assert_eq!(px(264, y), lit, "sb_lines {sb_lines}: '6' at (264, {y})");
-            assert_eq!(px(311, y + 7), lit, "'S' ends at x=311 (8 px from the edge)");
-            assert_eq!(px(312, y), 0, "an 8 px margin on the right");
-            assert_eq!(px(263, y), 0, "%3d pads 60 with a blank");
-            assert_eq!(px(264, y - 1), 0, "one text row tall");
-            if y + 8 < 200 {
-                assert_eq!(px(264, y + 8), 0, "one text row tall");
-            }
-        }
-        // Three digits fill the pad; at 960x600 the 2-D layer stays 1:1, as
-        // id draws it in every mode (the scaled-2-D extra is off).
+        // " 60 FPS" from (8, 0): a blank at x 8..16 (`%3d`), '6' at 16, the
+        // 'S' ending at 8 + 7*8 = 64; one text row, rows 0..8, whatever the
+        // status bar (the readout no longer sits on it).
+        let mut img = Image::new(320, 200, 0);
+        draw_fps(&mut img, &cc, 60);
+        let px = |img: &Image, x: usize, y: usize| img.pixels[y * img.w + x];
+        assert_eq!(px(&img, 16, 0), lit, "'6' at (16, 0)");
+        assert_eq!(px(&img, 15, 0), 0, "%3d pads 60 with a blank");
+        assert_eq!(px(&img, 63, 7), lit, "'S' ends at x=64");
+        assert_eq!(px(&img, 64, 0), 0);
+        assert_eq!(px(&img, 16, 8), 0, "one text row tall");
+        let lit_rows: Vec<usize> = (0..200).filter(|&y| (0..320).any(|x| px(&img, x, y) != 0)).collect();
+        assert_eq!(lit_rows, (0..8).collect::<Vec<_>>());
+        // Three digits fill the pad: '1' at the margin itself.
         let mut img = Image::new(960, 600, 0);
-        draw_fps(&mut img, &cc, 144, 48);
-        let px = |x: usize, y: usize| img.pixels[y * 960 + x];
-        assert_eq!(px(960 - 64, 600 - 56), lit, "'1' at (vid.width-64, vid.height-sb_lines-8)");
-        assert_eq!(px(960 - 65, 600 - 56), 0);
+        draw_fps(&mut img, &cc, 144);
+        assert_eq!(px(&img, 8, 0), lit, "'1' at (8, 0) on a 1:1 960x600 2-D layer");
+        assert_eq!(px(&img, 7, 0), 0, "an 8 px margin on the left");
+        // The scaled 2-D layer blows the corner up with the rest: 3x at 960x600.
+        let _g = crate::draw::Scaled2dGuard::set(true);
+        let mut img = Image::new(960, 600, 0);
+        draw_fps(&mut img, &cc, 144);
+        assert_eq!(px(&img, 24, 0), lit, "'1' at (8, 0) x 3");
+        assert_eq!(px(&img, 23, 0), 0);
+        assert_eq!(px(&img, 24, 23), lit, "a 24-row cell");
+        assert_eq!(px(&img, 24, 24), 0);
+    }
+
+    #[test]
+    fn the_notify_lines_start_a_row_lower_while_the_readout_shows() {
+        // Con_DrawNotify's v = 0, unless the readout has that row.
+        assert_eq!(notify_top(false), 0);
+        assert_eq!(notify_top(true), FPS_POS.1 + 8);
+        // Drawn together, they never share a pixel: the readout fills row 0,
+        // the first notify line row 1.
+        let cc = solid_conchars();
+        let mut fps = Image::new(320, 200, 0);
+        draw_fps(&mut fps, &cc, 60);
+        let mut notify = Image::new(320, 200, 0);
+        crate::console::draw_notify(&mut notify, &cc, &["You got the shells"], notify_top(true));
+        let both = (0..320 * 200).filter(|&i| fps.pixels[i] != 0 && notify.pixels[i] != 0).count();
+        assert_eq!(both, 0, "the readout and the notify line overlap nowhere");
+        let lit_rows: Vec<usize> = (0..200).filter(|&y| (0..320).any(|x| notify.pixels[y * 320 + x] != 0)).collect();
+        assert_eq!(lit_rows, (8..16).collect::<Vec<_>>(), "the notify line on the second text row");
+        // Without the readout the notify line is id's, from row 0.
+        let mut id = Image::new(320, 200, 0);
+        crate::console::draw_notify(&mut id, &cc, &["You got the shells"], notify_top(false));
+        assert!((0..320).any(|x| id.pixels[x] != 0), "row 0");
     }
 
     #[test]

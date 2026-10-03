@@ -1320,7 +1320,7 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
             }
             let lines = w.notify.visible(w.host_time);
             if !lines.is_empty() {
-                render::draw_notify(&mut img, cc, &lines);
+                render::draw_notify(&mut img, cc, &lines, render::notify_top(w.show_fps));
             }
         }
     }

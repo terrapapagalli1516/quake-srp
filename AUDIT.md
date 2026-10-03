@@ -44,7 +44,7 @@ the volumes, the mouse).
 | Touch controls on a touch screen (stick, look by dragging, fire, jump, weapon), and the live game pauses when the page is hidden | `in_touch` (Touch controls) | on | Phones. Classic on a touch screen keeps a MENU button and the tappable menu. ("Touch, install and offline") |
 | A gamepad as a twin-stick pad: in_win.c's advanced joystick layout (`joystick 1`, `joyadvanced 1`, the axis maps and sensitivities), a round dead zone, a look curve, the pad in the menus, and the 2026 pad bindings | `joystick` (Gamepad), `joyadv*`, `joy*sensitivity`, `joy*threshold`, `joy_deadzone`, `joy_exponent`, `joy_menukeys` | on | id's `joystick 0` reads no pad. ("Input") |
 | Rumble on damage and on the big guns (the pad, or a phone's vibration) | `joy_rumble` (Rumble) | on | |
-| QuakeWorld's frame-rate readout | `wasm_showfps` (Show FPS) | off | Clutter. |
+| QuakeWorld's frame-rate readout, in the top-left corner (QuakeWorld's sat bottom right, just above the status bar); the notify lines start a text row lower while it shows | `wasm_showfps` (Show FPS) | off | Clutter. |
 | Exact perspective at every pixel | `wasm_exactpersp` (Exact perspective) | off | id's 16-pixel spans are part of the look. |
 | The `ED_Alloc` edict ceiling past id's 600 (`Vm::max_edicts`) | `sv_max_edicts` (console only, no settings row — nothing to choose until a map needs it) | on, 8192 | id's own number, kept for Classic. No map of id1 or the mission packs needs more: Rogue's `r2m6`, which seemed to, overflowed only while the port kept its statics' edicts ("`makestatic` frees its edict"). Room for bigger maps. |
 
@@ -61,7 +61,8 @@ Classic; the scaled layer's own screen in 2026):
   Classic keeps it in the top-left corner, as id; 2026 centres it (the scaled 2-D row).
 - Anchored by design, left where id puts them: the notify lines (`Con_DrawNotify`, at the
   console's own left margin, wrapped to its width), the console, the crosshair (the view's
-  centre), and Show FPS (QuakeWorld's bottom-right corner).
+  centre), and Show FPS (the top-left corner at the notify lines' margin, the notify lines
+  a row lower under it; QuakeWorld's sat bottom right, above the status bar).
 - Not ported: `SCR_DrawLoading` (centred by id; the port draws no loading plaque),
   `SCR_DrawRam`/`SCR_DrawTurtle`/`SCR_DrawNet` (id's surface-cache, slow-frame and
   lost-connection icons, at the view's top-left corner), `Draw_BeginDisc` (the screen's

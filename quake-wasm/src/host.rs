@@ -194,6 +194,7 @@ pub(crate) fn step(dt: f32) -> i32 {
         let viewsize = a.settings.cvars.viewsize;
         let crosshair = a.settings.cvars.crosshair;
         let sbar_layout = a.settings.cvars.sbar_layout;
+        let show_fps = a.settings.cvars.show_fps;
         let lerpmove = a.settings.cvars.lerpmove;
         let lerpmodels = a.settings.cvars.lerpmodels;
         // Host_EndGame on the demo's svc_disconnect: once a demo has shown its
@@ -214,6 +215,7 @@ pub(crate) fn step(dt: f32) -> i32 {
             wk.viewsize = viewsize;
             wk.crosshair = crosshair;
             wk.sbar_layout = sbar_layout;
+            wk.show_fps = show_fps;
             wk.stepping = stepping;
             wk.lerpmove = lerpmove;
             wk.lerpmodels = lerpmodels;
@@ -226,6 +228,7 @@ pub(crate) fn step(dt: f32) -> i32 {
             d.viewsize = viewsize;
             d.crosshair = crosshair;
             d.sbar_layout = sbar_layout;
+            d.show_fps = show_fps;
             d.stepping = stepping;
             d.lerpmove = lerpmove;
             d.lerpmodels = lerpmodels;
@@ -252,6 +255,7 @@ pub(crate) fn step(dt: f32) -> i32 {
                     d.viewsize = viewsize;
                     d.crosshair = crosshair;
                     d.sbar_layout = sbar_layout;
+                    d.show_fps = show_fps;
                     d.stepping = stepping;
                     d.lerpmove = lerpmove;
                     d.lerpmodels = lerpmodels;
@@ -305,16 +309,17 @@ pub(crate) fn step(dt: f32) -> i32 {
         // The wasm_showfps setting (off in both profiles): QuakeWorld draws it with the
         // rest of the play-screen 2-D (SCR_DrawFPS, before Sbar_Draw, the
         // console and M_Draw — so the menu's fade dims it) and not on the
-        // intermission/finale screens.
-        if a.settings.cvars.show_fps {
+        // intermission/finale screens. The port's sits in the top-left
+        // corner, where the mode's notify lines made room for it (`show_fps`
+        // above).
+        if show_fps {
             let intermission = if a.mode == 1 {
                 a.demo.as_ref().and_then(|d| d.demo.frames.get(d.idx)).map(|f| f.intermission != 0)
             } else {
                 a.walk.as_ref().map(|wk| wk.intermission != 0)
             };
             if let (Some(false), Some(img), Some(cc)) = (intermission, img.as_mut(), a.conchars.as_ref()) {
-                let sb_lines = render::calc_refdef(w, h, viewsize, false, sbar_layout).sb_lines;
-                render::draw_fps(img, cc, a.show_fps.shown(), sb_lines);
+                render::draw_fps(img, cc, a.show_fps.shown());
             }
         }
 
@@ -676,17 +681,17 @@ mod tests {
     }
 
     #[test]
-    fn wasm_showfps_draws_the_rate_bottom_right_above_the_status_bar_only_when_on() {
+    fn wasm_showfps_draws_the_rate_top_left_only_when_on() {
         assert_eq!(boot(), 1);
         close_menu();
         for _ in 0..90 {
             step(1.0 / 60.0);
         }
-        let (w, h) = APP.with(|c| {
+        let w = APP.with(|c| {
             let b = c.borrow();
             let a = b.as_ref().unwrap();
             assert_eq!(a.show_fps.shown(), 60, "60 Hz presents 60 frames a second");
-            (a.render_w, a.render_h)
+            a.render_w
         });
         let grab = || APP.with(|c| c.borrow().as_ref().unwrap().present.rgba());
         // Frozen frames (dt = 0): only the readout can differ.
@@ -696,10 +701,11 @@ mod tests {
         step(0.0);
         let on = grab();
         assert_ne!(off, on, "wasm_showfps draws");
-        // " 60 FPS" at x w-64..w-8, y h-56..h-48 (viewsize 100: sb_lines 48):
-        // the 2-D layer 1:1 as id draws it (the scaled-2-D extra is off).
-        let (x0, x1) = (w - 64, w - 8);
-        let (y0, y1) = (h - 56, h - 48);
+        // " 60 FPS" at x 8..64, y 0..8, the top-left corner at the notify
+        // lines' margin: the 2-D layer 1:1 as id draws it (the scaled-2-D
+        // extra is off).
+        let (x0, x1) = (8, 64);
+        let (y0, y1) = (0, 8);
         for (i, (a, b)) in off.chunks_exact(4).zip(on.chunks_exact(4)).enumerate() {
             if a != b {
                 let (x, y) = (i % w, i / w);

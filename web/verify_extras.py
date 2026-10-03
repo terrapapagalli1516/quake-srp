@@ -13,8 +13,8 @@ Chromium. The page opens as `?classic` (every departure off, id's keys):
      verify_extras.png (the page), verify_extras_fps.png (the readout).
   2. wasm_uncapped through the real program: a second of 1/144 s steps runs
      72 host frames with the cap (id's), 144 without.
-  3. On frozen frames: wasm_showfps changes only the box at the bottom
-     right above the status bar, wasm_exactpersp redraws the walls, and
+  3. On frozen frames: wasm_showfps changes only the box in the top-left
+     corner, wasm_exactpersp redraws the walls, and
      switching either off restores id's frame byte for byte.
   4. Persistence: config.cfg keeps the profile and what differs from it
      (`wasm_showfps "1"`, `viewsize "80"`, ...), and a plain reload (no
@@ -218,11 +218,12 @@ with sync_playwright() as p:
     w, h = pg.evaluate("Promise.all([exp.width(), exp.height()])")
     d = pg.evaluate(DIFF, ["_on", "_off"])
     # The 2-D layer is 1:1 as id draws it (the scaled-2-D extra is off):
-    # " 60 FPS" at x w-64..w-8, y h-56..h-48 (viewsize 100: sb_lines 48).
-    box = (w - 64, w - 8, h - 56, h - 48)
+    # " 60 FPS" at x 8..64, y 0..8, the top-left corner at the notify lines'
+    # margin (they start a row lower while it shows; none are up here).
+    box = (8, 64, 0, 8)
     inside = d is not None and d["x0"] >= box[0] and d["x1"] < box[1] \
         and d["y0"] >= box[2] and d["y1"] < box[3]
-    check("the readout draws bottom right, above the status bar, and nowhere else",
+    check("the readout draws in the top-left corner, and nowhere else",
           inside, f"{d}; box {box}")
     pg.evaluate("exp.set_extras(2)")
     pg.evaluate(FROZEN)

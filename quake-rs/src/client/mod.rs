@@ -163,6 +163,11 @@ pub struct Walk {
     /// ([`render::SbarLayout`], with `viewsize` [`render::calc_refdef`]'s
     /// input). Set like `viewsize`.
     pub sbar_layout: render::SbarLayout,
+    /// `wasm_showfps` this frame: the host draws its frame-rate readout in
+    /// the top-left corner over this frame ([`render::draw_fps`]), so the
+    /// notify lines start a text row lower ([`render::notify_top`]). Set
+    /// like `viewsize`.
+    pub show_fps: bool,
     /// How this frame steps the game ([`Stepping`]): Classic, id's per-frame
     /// code, unless the host runs uncapped. Set by the host each frame, like
     /// `key_move`.
@@ -418,6 +423,8 @@ pub struct DemoPlay {
     pub crosshair: bool,
     /// The `scr_sbaroverlay` setting this frame (see `Walk::sbar_layout`).
     pub sbar_layout: render::SbarLayout,
+    /// `wasm_showfps` this frame (see `Walk::show_fps`).
+    pub show_fps: bool,
     /// How this frame steps playback ([`Stepping`]), set by the host each
     /// frame like `viewsize`.
     pub stepping: Stepping,
@@ -517,6 +524,7 @@ impl DemoPlay {
             viewsize: render::VIEWSIZE_DEFAULT,
             crosshair: false,
             sbar_layout: render::SbarLayout::Classic,
+            show_fps: false,
             stepping: Stepping::Classic,
             lerpmove: LerpMove::Classic,
             glides: StepGlides::default(),
@@ -641,6 +649,7 @@ pub fn assemble_walk(
         viewsize: render::VIEWSIZE_DEFAULT,
         crosshair: false,
         sbar_layout: render::SbarLayout::Classic,
+        show_fps: false,
         stepping: Stepping::Classic,
         lerpmove: LerpMove::Classic,
         glides: StepGlides::default(),

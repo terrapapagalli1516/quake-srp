@@ -77,7 +77,7 @@ pub use crate::sbar::{
     draw_finale_overlay, draw_hud_into, draw_intermission_overlay, Hud, IntermissionStats,
 };
 pub use crate::screen::{
-    calc_refdef, compose_view, draw_centerprint, draw_crosshair, draw_fps, draw_pause, screen_with_backtile,
+    calc_refdef, compose_view, draw_centerprint, draw_crosshair, draw_fps, draw_pause, notify_top, screen_with_backtile,
     status_bar_rows, vid_aspect, SbarLayout, ViewRect,
     SB_LINES_FULL, VIEWSIZE_DEFAULT,
 };
