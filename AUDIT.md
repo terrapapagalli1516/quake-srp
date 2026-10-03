@@ -1571,11 +1571,14 @@ world, e1m1/e1m2/e1m3/e1m7 unless stated).
     +30-40%. PERF_PLAN §6 has the table.
   - The old per-pixel perspective stays as an opt-in extra
     (`RenderOptions::exact_perspective`, `quaketool view --exactpersp 1`,
-    `compare.py --exactpersp`): byte-identical to before (the oracle's exact
+    `compare.py --exactpersp`; since 2026-10-03 `RenderOptions::persp_span`'s
+    `PerspSpan::Exact`, `--perspspan 1`): byte-identical to before (the oracle's exact
     rows are unchanged). The uncached per-pixel wall path (faces over the
     surface-cache size cap, or no colormap — never in id's maps) stays exact.
 - ✅ **`wasm_exactpersp 0|1`** (an extra, not id; default 0 — and on in the 2026 profile since
-  2026-10-03, the user's call; see the departures table). The browser
+  2026-10-03, the user's call; see the departures table. Since 2026-10-03 the setting
+  is `r_perspspan 64|32|16|8|4|1`, Classic 16 and 2026 exact (1); `wasm_exactpersp` is
+  a retired name for its two ends, read by an old `config.cfg`). The browser
   reaches the exact-perspective renderer option through a console variable.
   All of the port's opt-in extras live in one place, `quake-wasm/src/
   extras.rs`: a table of `wasm_*` cvars that behave like id's (`wasm_x` prints
@@ -1633,7 +1636,7 @@ earlier verify scripts).
 |---|---|---|---|
 | Uncapped framerate | `wasm_uncapped 0\|1` | `Host_FilterTime` without its 72 fps gate (same [0.001, 0.1] clamps): a host frame per display refresh (120/144 Hz run 120/144 fps). The gate itself is unchanged. | departure, opt-in via Web extras, default off |
 | Show FPS | `wasm_showfps 0\|1` | QuakeWorld's `SCR_DrawFPS`: `"%3d FPS"` in white conchars at `vid.width - len*8 - 8`, `vid.height - sb_lines - 8`, not on intermission screens. The rate is presented frames over a window of at least 1 s of `realtime` (QW shows the raw count; count/window reads a steady 60 instead of 60/61). | departure, opt-in via Web extras, default off |
-| Exact perspective | `wasm_exactpersp 0\|1` | exact perspective at every pixel of the textured walls and liquids instead of id's 16-pixel spans (`RenderOptions::exact_perspective`, `quake/w2b`'s). | departure, opt-in via Web extras, default off (on in the 2026 profile since 2026-10-03: "The profiles and the departures") |
+| Exact perspective | `wasm_exactpersp 0\|1` (since 2026-10-03 `r_perspspan 64\|32\|16\|8\|4\|1`, the old name its two ends) | exact perspective at every pixel of the textured walls and liquids instead of id's 16-pixel spans (`RenderOptions::exact_perspective`, `quake/w2b`'s; now `RenderOptions::persp_span`, which also has 64, 32, 8 and 4). | departure, opt-in via Web extras, default off (since 2026-10-03 Classic 16 and 2026 exact: "The profiles and the departures") |
 | Scaled 2-D layer | `wasm_scaled2d 0\|1` | the status bar, menus, console and text blown up from a 320x200 screen, the port's old layout, instead of WinQuake's 1:1 2-D layer (`draw::set_scaled_2d`, `quake/fid2d`'s). Added by the chair after this branch (`dafa2c7`, extras bit 8). | departure, opt-in via Web extras, default off |
 
 Faithful, same branch:
