@@ -535,6 +535,10 @@ impl Host for WorldModel {
         self.precache_models.iter().position(|s| s == name).map(|i| i as i32)
     }
 
+    fn model_name(&self, idx: i32) -> Option<&str> {
+        usize::try_from(idx).ok().and_then(|i| self.precache_models.get(i)).map(|s| s.as_str())
+    }
+
     fn model_bbox(&self, name: &str) -> Option<(Vec3, Vec3)> {
         // Brush submodels ("*N") read bounds straight from the world BSP.
         if let Some(n) = Self::submodel_index(name) {

@@ -311,11 +311,24 @@ pub fn sv_move(
 
             let tr = match solid {
                 Solid::Bsp => {
-                    // model "*N" -> submodel index N. Borrow the name (no per-clip
-                    // String allocation); the &str borrow ends with this expression.
-                    let idx = vm
-                        .ent_str(ei, vm.fo().model)
-                        .strip_prefix('*')
+                    // Submodel index from `modelindex` (set once by `setmodel`,
+                    // via the precache table `host.model_name` reverses), NOT
+                    // from the entity's own live `model` string: `SV_HullForEntity`
+                    // (world.c) resolves a SOLID_BSP entity's hull as
+                    // `sv.models[(int)ent->v.modelindex]`, never by re-reading
+                    // `model`. QuakeC is free to overwrite `self.model` after
+                    // `setmodel` (hipnotic's `func_movewall` does exactly that,
+                    // unconditionally, right after its own `setmodel` call, to
+                    // avoid leaking the submodel name) — re-parsing the live
+                    // field here made every such entity un-clippable the instant
+                    // its `model` went blank, even though `solid` stayed
+                    // SOLID_BSP and `modelindex` stayed perfectly valid: a closed,
+                    // "solid" door the player walked straight through (the
+                    // startdoor brief, round 2 — Scourge of Armagon's start.bsp
+                    // rotating door, its real collision 22 func_movewalls).
+                    let idx = host
+                        .model_name(vm.ent_float(ei, vm.fo().modelindex) as i32)
+                        .and_then(|m| m.strip_prefix('*'))
                         .and_then(|d| d.parse::<usize>().ok());
                     match idx {
                         Some(idx) => crate::world::trace_submodel(
@@ -640,6 +653,88 @@ mod tests {
         assert!(tr.fraction < 1.0, "the move was clipped, got {}", tr.fraction);
         assert_eq!(tr.ent, blocker, "the Solid::BBox edict was the blocker");
         assert!(tr.endpos[0] < 84.0, "stopped before the box, got {}", tr.endpos[0]);
+    }
+
+    /// [`world_open_bsp`] (clear world, model 0) plus model 1: a brush
+    /// submodel whose hulls 1/2 are a single +X half-space wall (x<0 solid) —
+    /// `world.rs`'s `submodel_wall_bsp`, folded onto the open world so a
+    /// Solid::Bsp entity using model 1 is the only thing a trace can hit.
+    fn world_open_bsp_with_wall_submodel() -> crate::bsp::Bsp {
+        use crate::bsp::{DClipNode, DModel, DPlane, CONTENTS_EMPTY, CONTENTS_SOLID};
+        let mut b = world_open_bsp();
+        b.planes.push(DPlane { normal: [1.0, 0.0, 0.0], dist: 0.0, ptype: 0 });
+        let wall_plane = (b.planes.len() - 1) as i32;
+        b.clipnodes.push(DClipNode { planenum: wall_plane, children: [CONTENTS_EMPTY as i16, CONTENTS_SOLID as i16] });
+        let wall_clipnode = (b.clipnodes.len() - 1) as i32;
+        b.models.push(DModel {
+            mins: [-256.0; 3],
+            maxs: [256.0; 3],
+            origin: [0.0; 3],
+            headnode: [0, wall_clipnode, wall_clipnode, 0],
+            visleafs: 0,
+            firstface: 0,
+            numfaces: 0,
+        });
+        b
+    }
+
+    #[test]
+    fn sv_move_stops_at_solid_bsp_entity_even_once_its_model_field_is_cleared() {
+        // The startdoor brief, round 2: hipnotic's `func_movewall` (its
+        // rotating doors' real collision) calls `setmodel(self, self.model)`
+        // and then, by its own design, unconditionally blanks `self.model` to
+        // "" right after (common QuakeC idiom — avoid leaking the submodel
+        // name once it's served its purpose). `self.modelindex`, a SEPARATE
+        // field `setmodel` also set, is untouched by that. id's own
+        // `SV_HullForEntity` resolves a SOLID_BSP entity's hull as
+        // `sv.models[(int)ent->v.modelindex]` — never by re-reading `model` —
+        // so this is harmless in the real engine. `sv_move`'s Solid::Bsp
+        // branch used to re-parse the live `model` STRING field every clip
+        // instead, so once it went blank the entity silently stopped
+        // blocking anything, though `solid` and the real hull were both
+        // still intact: a closed, "solid" door the player walked straight
+        // through.
+        let (img, _touch, _g_one, _g_flag) = touch_progs();
+        let progs = Progs::parse(&img).expect("parse");
+        let mut server = Server::new(world_open_bsp_with_wall_submodel(), progs).expect("server");
+
+        // Register "*1" in the precache table (what `setmodel`'s builtin
+        // does), so `modelindex` resolves back to it — exactly as a real
+        // setmodel("*1") call would have left things, including the
+        // instant *right after* a QC line like `func_movewall`'s own
+        // `self.model = "";`.
+        let idx = server.vm.with_host(|_vm, h| h.precache_model("*1")).expect("host");
+        let wall = server.vm.spawn();
+        server.vm.set_solid(wall, Solid::Bsp);
+        server.vm.ent_set_vector(wall, "origin", [0.0, 0.0, 0.0]);
+        server.vm.ent_set_float(wall, "modelindex", idx as f32);
+        server.vm.ent_set_string(wall, "model", ""); // blanked, as func_movewall does
+        // model 1's own mins/maxs (`[-256,256]` on every axis): absmin/absmax
+        // as `link_edict`/`SV_LinkEdict` would leave them (origin + those
+        // bounds), wide enough that the broadphase reject above never
+        // excludes it.
+        server.vm.ent_set_vector(wall, "absmin", [-256.0, -256.0, -256.0]);
+        server.vm.ent_set_vector(wall, "absmax", [256.0, 256.0, 256.0]);
+
+        let tr = sv_move(
+            &mut server.vm,
+            [50.0, 0.0, 0.0],
+            [-50.0, 0.0, 0.0],
+            [-16.0, -16.0, -24.0],
+            [16.0, 16.0, 32.0],
+            -1,
+            false,
+            false,
+        );
+
+        assert!(
+            tr.fraction < 1.0,
+            "a SOLID_BSP entity with a blanked `model` field but a valid \
+             `modelindex` must still block (SV_HullForEntity keys off \
+             modelindex, not the live model string); got fraction {}",
+            tr.fraction
+        );
+        assert_eq!(tr.ent, wall, "the Solid::Bsp edict (not the open world) was the blocker");
     }
 
     #[test]

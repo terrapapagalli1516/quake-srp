@@ -372,6 +372,7 @@ pub(crate) fn touch_progs() -> (Vec<u8>, usize, usize, usize) {
     b.add_field("size", EV_VECTOR, 26); // 26,27,28
     b.add_field("groundentity", EV_ENTITY, 29);
     b.add_field("owner", EV_ENTITY, 30); // SV_ClipToLinks owner-skip tests
+    b.add_field("modelindex", EV_FLOAT, 31); // Solid::Bsp hull resolution tests
 
     let touch_fn = b.add_function(
         "do_touch",
