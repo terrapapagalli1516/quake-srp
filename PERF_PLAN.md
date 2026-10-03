@@ -1376,3 +1376,116 @@ submerged hires-scale view with a liquid surface through `Renderer::render` +
 `render::raster::tests::wrap_texel_matches_rem_euclid_for_every_modulus`, checks the new
 helper against `rem_euclid` directly for power-of-two and non-power-of-two moduli across
 negative, zero and boundary `i32` values.
+
+## 13. The frame's bakes on every core (2026-10-03, branch `fleet/torchlight`)
+
+§11 left the surface cache's fills in the frame's serial part: `D_DrawSurfaces`' setup
+baked each stale block (`R_DrawSurface`) on the calling thread as it came to the face,
+before the bands. The 2026 extras made that the largest serial piece: the torch flicker
+(`r_torchflicker`) rebakes most of a torch-lit room's blocks every frame at 72 Hz, the
+light-style glide (`r_lerplightstyles`) a flickering light's blocks at every step, and a
+dynamic light every block it touches. At 1080p on 8 threads the torch-lit views took
+2.2–3.3 ms at 72 Hz, two-thirds of it serial, past 480 Hz's 2.08 ms.
+
+- **Look up first, bake after.** The setup now only looks the blocks up, in id's order.
+  A miss stores its cache entry at once, marked pending, and adds a `surf::BakeJob` to
+  the frame's list: the lightmap (built as before, serially — a few hundred luxels a
+  face), the texture's level, the colormap and the block's size. A later ask for the same
+  face in the frame (an inline model drawn by two entities) finds the pending entry and
+  shares the job, dynamic light or not; a miss on a face asked for earlier replaces the
+  entry, so the cache ends a frame as one-by-one baking left it.
+- **Bake together.** Once every surface is looked up, `surf::bake_all` bakes the jobs on
+  the renderer's threads (`band::map_jobs`: scoped threads taking jobs one at a time
+  from a counter, the largest first so they end together, the results in the jobs'
+  order). Then each waiting surface and pending entry takes its block, and the bands
+  draw as before: nothing is baked inside the bands, no lock is in a span loop, no block
+  is baked twice, and nothing is baked that is not drawn.
+- **Why this shape.** It is the dumb robust one: a bake reads only its job (the
+  lightmap it owns, a texture level, the colormap), so it is a pure function of the job,
+  and the frame and the cache are the same for any thread count — the rule of
+  `band.rs`, with no new state shared between threads. The threads are scoped threads,
+  as the bands' (a pool kept across frames would need the frame's data owned or
+  `'static`); in the page each is a wake-up of one of the host's pooled workers
+  (`web/wasi.js`), as the bands' are. Baking inside the bands, at a band's first touch of
+  a face, would save the second round of thread starts but needs a lock or a once-cell
+  per block in the span setup and bakes a face shared by two bands on whichever comes
+  first; not built.
+- **When it pays.** A thread's start costs about 10 µs natively and a texel of baking
+  about 0.7 ns, so a thread pays for itself from about 15,000 texels. `bake_all` starts
+  one thread per 32K texels of the frame's bakes (`BAKE_TEXELS_PER_THREAD`): under 64K
+  texels — a frame's usual: a muzzle flash's few blocks, a light style's step — and with
+  one thread, the bakes stay on the calling thread with no thread started.
+
+**Identity.** The three goldens, `classic_check` (9 checks), and the `play` hashes of
+demo1–3, `walk_e1m1`, `fire_e1m2` and `walk_e1m3` at 640×400, Classic and `--video
+modern` (the torches flickering, the glide on), 1 and 8 threads, are the same before and
+after. Unit tests (`render::surf::tests`): the lightmapped room's frames and cache, a light
+moving and a style stepping, on 1, 2, 3, 8 and 16 threads; e1m3's torch-lit flames with a
+moving light on 1–16 threads (each frame bakes enough for at least four threads); warm and
+cold renderers hold the same blocks; e1m2's model 52 drawn twice bakes each block once,
+lit or not; a face the frame does not draw is not baked; small bakes and a single job stay
+on the calling thread.
+
+**Native** (`quaketool framerate <pak0>,<pak1> --bake --threads 1,2,4,8,16 --reps 2
+--secs 3 --res W×H`: the live game standing at each view, the 2026 video settings, the 3-D
+view's median ms a frame over interleaved runs, before → after in the same sitting,
+2026-10-03, load 1–6; "serial" is the view's time less its bands' wall time at 8 threads,
+from a run with the counters on). 1920×1080:
+
+| view | Hz | blocks (texels) a frame | 1 | 2 | 4 | 8 | 16 | serial at 8 |
+|---|---|---|---|---|---|---|---|---|
+| e1m2's start | 72 | 110 (0.68M) | 4.49 → 4.85 | 3.44 → 3.57 | 2.58 → 2.31 | 2.19 → 1.75 | 2.13 → 1.74 | 1.19 (54%) → 0.94 (54%) |
+| e1m2's start | 480 | 61 (0.37M) | 4.72 → 6.69 | 3.52 → 3.68 | 2.39 → 2.41 | 1.91 → 1.82 | 1.84 → 1.76 | 1.08 (56%) → 0.91 (50%) |
+| e1m3's flames | 72 | 134 (1.50M) | 5.62 → 5.33 | 4.32 → 3.94 | 3.40 → 2.70 | 3.06 → 2.12 | 2.97 → 2.12 | 1.91 (62%) → 1.14 (54%) |
+| e1m3's flames | 480 | 85 (1.05M) | 5.60 → 5.41 | 3.87 → 3.82 | 3.19 → 2.48 | 2.52 → 1.89 | 2.50 → 2.01 | 1.64 (65%) → 1.08 (57%) |
+| e4m5's flames | 72 | 188 (1.62M) | 5.55 → 6.30 | 4.48 → 4.55 | 3.57 → 3.07 | 3.31 → 2.13 | 3.20 → 2.10 | 2.06 (62%) → 1.29 (60%) |
+| e4m5's flames | 480 | 76 (0.69M) | 5.29 → 5.93 | 3.86 → 4.01 | 3.02 → 2.77 | 2.44 → 2.27 | 2.36 → 2.32 | 1.34 (55%) → 1.16 (51%) |
+| e2m5's gliding torches | 72 | 41 (0.38M) | 3.60 → 3.75 | 2.60 → 2.60 | 1.87 → 1.60 | 1.19 → 1.06 | 1.15 → 1.03 | 0.58 (49%) → 0.45 (42%) |
+| e2m5's gliding torches | 480 | 17 (0.17M) | 3.51 → 3.50 | 2.47 → 2.50 | 1.62 → 1.56 | 1.03 → 1.02 | 0.94 → 0.95 | 0.32 (31%) → 0.33 (32%) |
+| e1m1, firing rockets | 72 | 79 (0.24M) | 4.29 → 4.93 | 3.09 → 3.37 | 2.21 → 2.22 | 1.51 → 1.52 | 1.47 → 1.42 | 0.72 (47%) → 0.71 (46%) |
+| e1m1, firing rockets | 480 | 76 (0.23M) | 4.25 → 4.97 | 3.09 → 3.31 | 2.21 → 2.15 | 1.51 → 1.54 | 1.46 → 1.53 | 0.71 (47%) → 0.71 (46%) |
+
+1315×535 (a wide frame):
+
+| view | Hz | blocks (texels) a frame | 1 | 2 | 4 | 8 | 16 | serial at 8 |
+|---|---|---|---|---|---|---|---|---|
+| e1m2's start | 72 | 109 (0.23M) | 2.18 → 1.87 | 1.67 → 1.72 | 1.35 → 1.18 | 1.06 → 0.94 | 1.17 → 1.00 | 0.83 (78%) → 0.64 (68%) |
+| e1m2's start | 480 | 61 (0.13M) | 1.79 → 1.77 | 1.63 → 1.63 | 1.27 → 1.14 | 0.96 → 0.90 | 1.00 → 0.96 | 0.64 (67%) → 0.59 (66%) |
+| e1m3's flames | 72 | 154 (0.78M) | 2.36 → 2.36 | 2.20 → 2.07 | 1.92 → 1.44 | 1.57 → 1.13 | 1.65 → 1.28 | 1.25 (80%) → 0.82 (73%) |
+| e1m3's flames | 480 | 98 (0.51M) | 2.21 → 2.16 | 2.03 → 1.93 | 1.67 → 1.43 | 1.40 → 1.10 | 1.46 → 1.23 | 1.09 (78%) → 0.77 (70%) |
+| e4m5's flames | 72 | 204 (1.01M) | 2.71 → 2.72 | 2.56 → 2.32 | 2.20 → 1.68 | 2.05 → 1.29 | 2.16 → 1.41 | 1.47 (71%) → 0.93 (72%) |
+| e4m5's flames | 480 | 84 (0.45M) | 2.27 → 2.28 | 2.13 → 2.09 | 1.71 → 1.52 | 1.42 → 1.21 | 1.49 → 1.33 | 1.02 (72%) → 0.83 (69%) |
+| e2m5's gliding torches | 72 | 39 (0.36M) | 1.41 → 1.41 | 1.29 → 1.24 | 0.91 → 0.69 | 0.72 → 0.54 | 0.75 → 0.61 | 0.46 (65%) → 0.30 (57%) |
+| e2m5's gliding torches | 480 | 16 (0.16M) | 1.20 → 1.21 | 1.10 → 1.10 | 0.72 → 0.63 | 0.52 → 0.46 | 0.54 → 0.53 | 0.20 (39%) → 0.20 (44%) |
+| e1m1, firing rockets | 72 | 74 (0.16M) | 1.54 → 1.57 | 1.46 → 1.48 | 1.06 → 0.95 | 0.78 → 0.74 | 0.85 → 0.82 | 0.47 (60%) → 0.44 (60%) |
+| e1m1, firing rockets | 480 | 71 (0.16M) | 1.53 → 1.54 | 1.44 → 1.48 | 1.05 → 0.96 | 0.78 → 0.73 | 0.88 → 0.82 | 0.46 (59%) → 0.45 (60%) |
+
+- The torch-lit views at 1080p on 8 threads drop from 2.2–3.3 ms to 1.75–2.1 at 72 Hz
+  (−20 to −36%), and 1.9–2.5 to 1.8–2.3 at 480; the serial part from 1.2–2.1 ms to
+  0.9–1.3. At 1315×535, −11 to −37% at 8 threads.
+- The 1080p 1-thread column of the "after" run sat at the sitting's busiest moment (load
+  4.5 against 1.1): the same views on one thread, before and after interleaved five times
+  in a quiet sitting, are within ±1.5% of each other (e1m2's start 4.61 → 4.65 ms and 4.39
+  → 4.43, e4m5 5.67 → 5.61 and 4.99 → 5.04, the rockets 4.09 → 4.02 and 4.11 → 4.08):
+  one thread costs nothing extra.
+- **What did not pay:** the rocket fight. Its explosions and muzzle flashes rebake 75–80
+  blocks a frame, but small ones (0.24M texels, 0.2 ms of baking), and a dynamic light's
+  serial work is mostly elsewhere (marking the faces, building the lit lightmaps); its
+  frames are the same within noise. The glide at 480 Hz (17 blocks) neither.
+- **What is serial now.** On e1m3's flames at 1080p, 8 threads (a profile): the edge scan
+  0.53 ms, the world walk 0.08, the lookups with their lightmaps about 0.15, the bakes'
+  own wall time 0.26 (0.97 on one thread: 3.7x on eight — the thread starts and the
+  largest block bound it). The edge scan is id's `R_ScanEdges` and stays one pass.
+
+**`timedemo demo1`** (every message a frame; 1920×1080, `--video modern --display 16:9`,
+median of five interleaved rounds, frames per second):
+
+| threads | 1 | 2 | 4 | 8 | 16 |
+|---|---:|---:|---:|---:|---:|
+| native, before | 199 | 265 | 381 | 494 | 489 |
+| native, after | 199 | 270 | 421 | 567 | 554 |
+
+In the page (the threads build on this round's deploy, headless, a 1886×996 2026 frame at
+pixel size 1, `r_threads N` then `timedemo demo1`, median of three rounds): Chromium 164
+→ 164 fps on one thread, 296 → 339 on 4, 337 → 390 on 8, 323 → 383 on 16; Firefox 139 →
+141, 242 → 279, 280 → 318, 271 → 314.

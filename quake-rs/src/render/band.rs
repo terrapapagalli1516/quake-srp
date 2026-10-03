@@ -14,7 +14,9 @@
 //! What must be decided for the whole frame first — the edge scan, the
 //! surface cache (`D_CacheSurface`), the alias models' vertices and clipping,
 //! the particles' projection — is done once, before the bands, and handed to
-//! them read-only. One thread is the same code with one band, drawn on the
+//! them read-only. The surface cache's bakes, the blocks the frame finds
+//! stale, are independent of one another, and run on the threads too, as
+//! jobs ([`map_jobs`]), once every block is looked up and before the bands. One thread is the same code with one band, drawn on the
 //! calling thread. A band's pixels are the view's own rows or, drawn straight
 //! into the screen, the screen's rows under the view ([`Band::placed`]).
 //!
