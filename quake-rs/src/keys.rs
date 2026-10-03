@@ -434,6 +434,22 @@ impl Bindings {
         self
     }
 
+    /// The 2026 profile's mouse wheel: a notch switches weapons, as id's own
+    /// wheel support does once a player binds it ("What id does" in the
+    /// wheel's brief — `default.cfg` predates `in_win.c`'s `WM_MOUSEWHEEL`
+    /// handling, so it ships unbound and players bound it themselves: `bind
+    /// MWHEELUP "impulse 10"`, `bind MWHEELDOWN "impulse 12"`). Up is
+    /// [`BIND_CHANGEWEAPON`] (`impulse 10`, next weapon — QuakeSpasm's own
+    /// default); down is `impulse 12` (`W_CycleWeaponReverse`, previous), a
+    /// console [`Binding::Line`] like the gamepad's left bumper above, since
+    /// it has no [`BIND_COMMANDS`] slot of its own (id's menu never offered a
+    /// "previous weapon" row to rebind).
+    pub fn with_wheel(mut self) -> Bindings {
+        self.bind(K_MWHEELUP, BIND_CHANGEWEAPON);
+        self.set(K_MWHEELDOWN, Binding::parse("impulse 12"));
+        self
+    }
+
     /// `keybindings[key]`.
     pub fn get(&self, key: u8) -> Option<&Binding> {
         self.keys[key as usize].as_ref()
@@ -603,6 +619,20 @@ mod tests {
         assert_eq!(pad.get(aux(10)).map(Binding::text), Some("togglemenu"), "Start");
         assert_eq!(pad.get(aux(5)).map(Binding::text), Some("impulse 12"), "LB: the previous weapon");
         assert_eq!((pad.get(K_JOY1 + 2), pad.get(aux(12))), (None, None), "X and R3 free");
+    }
+
+    /// default.cfg leaves the wheel unbound (it predates `in_win.c`'s
+    /// `WM_MOUSEWHEEL` handling); the 2026 profile binds a notch to the
+    /// weapon cycle, up for next ([`BIND_CHANGEWEAPON`], QuakeSpasm's own
+    /// default) and down for previous (a console Line: no bindnames row of
+    /// its own, like the gamepad's left bumper).
+    #[test]
+    fn the_wheel_switches_weapons_only_in_the_2026_profile() {
+        let id = Bindings::default_cfg();
+        assert_eq!((id.get(K_MWHEELUP), id.get(K_MWHEELDOWN)), (None, None));
+        let wheel = id.with_wheel();
+        assert_eq!(wheel.command(K_MWHEELUP), Some(BIND_CHANGEWEAPON), "notch up: next weapon");
+        assert_eq!(wheel.get(K_MWHEELDOWN).map(Binding::text), Some("impulse 12"), "notch down: previous weapon");
     }
 
     /// AUDIT.md's "Missing `default.cfg` binds: F1-F4, F6, F9, F10, F12":
