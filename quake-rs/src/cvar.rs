@@ -105,7 +105,8 @@ pub struct Cvars {
     pub show_fps: bool,
     /// `r_perspspan`: how often the walls and liquids find their texel
     /// exactly ([`PerspSpan`]): every 16 pixels and affine between, id's
-    /// `D_DrawSpans16` (Classic); 8, id's portable C; 4; or 1, exact at every
+    /// `D_DrawSpans16` (Classic); 64 or 32, longer, about 1996's look on a
+    /// 1080p or a phone's frame; 8, id's portable C; 4; or 1, exact at every
     /// pixel (2026). The retired `wasm_exactpersp` still sets and reads it
     /// ([`RETIRED`]).
     pub persp_span: PerspSpan,
@@ -514,7 +515,7 @@ pub const CVARS: &[Cvar] = &[
         get: |c| flag(c.uncapped), set: |c, v| c.uncapped = on(v) },
     Cvar { name: "wasm_showfps", archive: true, departure: true, help: "frame rate readout",
         get: |c| flag(c.show_fps), set: |c, v| c.show_fps = on(v) },
-    Cvar { name: "r_perspspan", archive: true, departure: true, help: "exact every 16 (id), 8, 4 or 1 px",
+    Cvar { name: "r_perspspan", archive: true, departure: true, help: "exact every 64,32,16 (id),8,4,1 px",
         get: |c| c.persp_span.pixels().to_string(), set: |c, v| c.persp_span = PerspSpan::from_pixels(atof(v)) },
     Cvar { name: "wasm_scaled2d", archive: true, departure: true, help: "2-D layer at id's proportions",
         get: |c| flag(c.scaled_2d), set: |c, v| c.scaled_2d = on(v) },
@@ -727,8 +728,8 @@ mod tests {
         let fps = find("wasm_showfps").expect("the cvar");
         assert_eq!((fps.get(&id), fps.get(&modern)), ("0".into(), "0".into()));
         let mut spans = Cvars::modern();
-        for (set, now) in [("8", "8"), ("4", "4"), ("16", "16"), ("1", "1"), ("12", "8"), ("100", "16"), ("5", "4"),
-                           ("2", "1"), ("0", "16"), ("junk", "16"), ("-4", "16")] {
+        for (set, now) in [("8", "8"), ("4", "4"), ("16", "16"), ("1", "1"), ("32", "32"), ("64", "64"), ("12", "8"),
+                           ("40", "32"), ("100", "64"), ("5", "4"), ("2", "1"), ("0", "16"), ("junk", "16"), ("-4", "16")] {
             c.set(&mut spans, set);
             assert_eq!(c.get(&spans), now, "r_perspspan {set}");
         }
@@ -755,7 +756,7 @@ mod tests {
         let mut c = Cvars::modern();
         old.set(&mut c, "0");
         assert_eq!((c.persp_span, old.get(&c).as_str()), (PerspSpan::Spans16, "0"), "a 2026 player's saved 0: id's spans, as before");
-        for (span, reads) in [(PerspSpan::Spans8, "0"), (PerspSpan::Spans4, "0"), (PerspSpan::Exact, "1")] {
+        for (span, reads) in [(PerspSpan::Spans64, "0"), (PerspSpan::Spans32, "0"), (PerspSpan::Spans8, "0"), (PerspSpan::Spans4, "0"), (PerspSpan::Exact, "1")] {
             c.persp_span = span;
             assert_eq!(old.get(&c), reads, "{span:?}");
         }
