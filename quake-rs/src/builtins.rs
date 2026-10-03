@@ -28,7 +28,7 @@
 //! packs' 2021 re-release `progs.dat` declares exactly two more,
 //! `finaleFinished` (#79) and `localsound` (#80) — table slots 79/80 below
 //! exist only so that declaration loads without the table itself being
-//! "past the end"; [`crate::server::pr_cmds::install_engine_builtins`]
+//! "past the end"; `install_engine_builtins`
 //! overwrites #79 with the real implementation (it reaches server/host
 //! state no self-contained builtin here can), and leaves #80 as
 //! [`pf_fixme`] (no pack ever calls it — see AUDIT.md "The mission packs'

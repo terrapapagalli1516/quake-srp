@@ -136,7 +136,7 @@ pub(super) fn bi_changelevel(vm: &mut Vm) -> Result<()> {
 ///   * `restart` — reload the current level (the death-respawn path, `client.qc`).
 ///   * `changelevel <map>` / `map <map>` — defer a level swap (same as PF_changelevel).
 ///   * `menu_credits` — the mission packs' re-release-only end-of-game credits
-///     roll ([`Outbox::menu_credits`]); the `disconnect` that always follows
+///     roll (`Outbox::menu_credits`); the `disconnect` that always follows
 ///     it in the same QuakeC frame needs no handler of its own (see there).
 ///
 /// Everything else is a benign no-op (matching the old behaviour). The token parse
@@ -383,7 +383,7 @@ impl Server {
 
     /// Take and clear a pending `menu_credits` (the mission packs'
     /// re-release-only end-of-game credits roll, `localcmd("menu_credits\n")`
-    /// — [`Outbox::menu_credits`]). A front-end that sees `true` ends the
+    /// — `Outbox::menu_credits`). A front-end that sees `true` ends the
     /// session the same way the Quit menu does (`id1` never calls this).
     pub fn take_pending_menu_credits(&mut self) -> bool {
         self.take_outbox(|o| &mut o.menu_credits)
