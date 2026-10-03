@@ -424,6 +424,9 @@ impl SurfaceCaches {
             return None;
         }
         let (scales, n_styles) = style_scales(req.face, req.light_styles);
+        // A style past 0: an animated (or switched) light, which rebakes the
+        // block whenever its value changes.
+        prof.add(|s| s.surf_styled += u64::from(req.face.styles.iter().take_while(|&&st| st != STYLE_NONE).any(|&st| st != 0)));
         // texturemins are whole multiples of 16, so `>> mip` is exact.
         let texmins_i = [lm.texmins[0] as i32, lm.texmins[1] as i32];
         let texmins = [(texmins_i[0] >> mip) as f32, (texmins_i[1] >> mip) as f32];
