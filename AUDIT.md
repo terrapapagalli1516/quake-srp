@@ -34,7 +34,7 @@ the volumes, the mouse).
 | The status bar over the view: the 3-D view fills the frame, as at viewsize 120, and the bar is drawn over its bottom, opaque (QuakeSpasm's `scr_sbaralpha` layout, without the alpha), so either side of the bar is the game, not `backtile`. `sb_lines`, the bar itself and the touch controls above it (`sbar_height`) are unchanged; below viewsize 100 the view keeps viewsize's size, centred on the whole screen (`SbarLayout::Overlay`) | `scr_sbaroverlay` (Status bar overlay) | on | On any frame whose 2-D screen is wider than the bar's 320 columns (384 at 16:9) id's layout leaves a brown strip either side of it. The view's centre, the crosshair's, moves down half the bar's rows; the horizontal field of view is unchanged (Hor+ measures the screen, not the view). |
 | Monsters glide between their 0.1 s steps (QuakeSpasm's `r_lerpmove`) | `r_lerpmove` (Smooth monsters) | on | At high refresh rates a stepping monster visibly jumps ten times a second. ("Demo playback between messages") |
 | An alias model's animation blends between its frames (QuakeSpasm's `r_lerpmodels`) | `r_lerpmodels` (Smooth animations) | on | id steps `frame` ten times a second; at high refresh rates a monster's walk cycle (and the view weapon's) visibly holds a pose for several frames, then jumps. (`client::lerpmodels`, FRAMERATE.md "Animation frames blended") |
-| id's crosshair (`V_RenderView`'s `+`), left off the intermission and finale screens as id's GLQuake leaves it (`gl_screen.c`'s `SCR_UpdateScreen`; WinQuake draws it over the stats too) | `crosshair` (Crosshair) | on (id: 0) | Mouse aiming; a level's stats have nothing to aim at. |
+| A crosshair at the view's centre (`V_RenderView`'s): `crosshair 1` the port's cross — thin arms of palette 253 round an open centre, outlined in black, in proportion to the frame's height (`screen::CrossSize`) — and `2` id's conchars `+` at the 2-D layer's scale, its crossing on the centre (id's puts the glyph's corner there, its crossing 4 pixels right of and 4.5 below the aim); left off the intermission and finale screens as id's GLQuake leaves it (`gl_screen.c`'s `SCR_UpdateScreen`; WinQuake draws it over the stats too) | `crosshair` (Crosshair: off, cross, id's +) | 1, the cross (id: 0) | Mouse aiming. id's `+` at the 2026 2-D scale is a blocky grey glyph 35 pixels across at 1080p, crossing 20 pixels right of the aim and 22.5 below. A level's stats have nothing to aim at. |
 | Mouse look without holding `+mlook` | `freelook` (Mouse look) | on | How mouse play works today; `+mlook` still works in both profiles. |
 | Always Run | `cl_forwardspeed`, `cl_backspeed` 400 (Options > Always Run) | on (id: 200) | |
 | WASD: `w`/`s` forward and back, `a`/`d` strafe, over `default.cfg`'s `a` `+lookup` and `d` `+moveup` | the profile's bindings (`Bindings::with_wasd`) | on | |
@@ -2201,8 +2201,10 @@ each; the C followed and the evidence are in the commit messages.
   `M_Keys_Key` refuses it and ends the grab. The Quit prompt is `M_Quit_Key`:
   only y/Y quit, n/N/Escape go back, Enter and the rest do nothing. The page
   forwards the mouse buttons (K_MOUSE1..3) while a key is being grabbed, so
-  Customize controls binds them as id's does. Losing the window's focus runs
-  vid_win.c's `ClearAllStates` (`key_clear_states`: nothing stays held). The
+  Customize controls binds them as id's does. Losing the window's focus, the
+  pointer lock or fullscreen, or the tab hidden, runs vid_win.c's
+  `ClearAllStates` (`clear_all_states`: every key's release, nothing stays
+  held; web/PLATFORM.md, "Input"). The
   menu/console exports the tests and automation use (`menu_up`,
   `menu_select`, `console_enter`, ...) are one key each through the same
   path, and so is the 2-D oracle's `key` (the C's `oracle_key` is
@@ -3151,7 +3153,7 @@ starts the door did not move, yet they could walk through it. hip1m1's start roo
 `trigger_relay` (1 s delay) that opens five `func_door` pieces (`t7`/`t2` at once, `t4`
 +1.5 s, `t6`/`t8` +2.5 s; `spawnflags` 2052 = `DOOR_DONT_LINK` + not-in-deathmatch, `wait
 -1`). This round tried hard to reproduce it and could not, on real hipnotic data
-(`deploy/{id1,hipnotic}` in a work directory),
+(a local deploy dir, `deploy/{id1,hipnotic}`),
 three independent ways:
 
 - **A native Rust harness** (`Server::with_pak` directly, no client/renderer): teleported

@@ -309,16 +309,41 @@ pub(crate) fn key_up(keynum: i32) {
     key_event(keynum, 0, 0);
 }
 
-/// vid_win.c's `ClearAllStates`, what the page runs when the window loses
-/// the keyboard (a key released elsewhere never comes up here): an up for
-/// every key, so no `+` command stays held, then `Key_ClearStates` (the
-/// autorepeat counts; Shift is up).
-pub(crate) fn key_clear_states() {
+/// vid_win.c's `ClearAllStates`, what the page runs whenever a key's release
+/// may never come: the window lost the keyboard, the pointer lock or
+/// fullscreen, or the tab was hidden (`web/PLATFORM.md`, "Input"). id's
+/// ran it on every activation change and video mode set ("fix the leftover
+/// Alt from any Alt-Tab"). In id's order: `Key_Event (i, false)` for every
+/// key, so each `+` binding lets go as its key's release would (a `+` line
+/// runs its `-` half, `+mlook`'s release re-levels with `lookspring`), then
+/// `Key_ClearStates` (`keydown[]`, `key_repeats[]`) and `IN_ClearStates`
+/// (the mouse movement not yet in a move: `mx_accum`, `my_accum`). A key
+/// the player still holds presses again with its next autorepeat: its
+/// repeat count starts over, so `Key_Event` takes it as a press.
+pub(crate) fn clear_all_states() {
+    for key in 0..=u8::MAX {
+        key_event(i32::from(key), 0, 0);
+    }
     ensure_app(|a| {
         a.keys_held = [false; 256];
         a.key_repeats = [0; 256];
-        a.shift_down = false;
+        if let Some(w) = a.walk.as_mut() {
+            w.mouse_fwd = 0.0;
+            w.mouse_side = 0.0;
+        }
     });
+}
+
+/// The keys the engine holds down (`keydown[]`), by `Key_KeynumToString`
+/// name, space-separated, and how many — a read-only call for the browser
+/// checks: after the page loses the keyboard it must be none.
+pub(crate) fn keys_held() -> (usize, String) {
+    APP.with(|c| {
+        let names: Vec<String> = c.borrow().as_ref().map_or_else(Vec::new, |a| {
+            (0..=u8::MAX).filter(|&k| a.keys_held[usize::from(k)]).map(keynum_to_string).collect()
+        });
+        (names.len(), names.join(" "))
+    })
 }
 
 /// 1 when the engine currently believes Quake keynum `keynum` is held — a
@@ -898,6 +923,44 @@ mod tests {
             step(0.05);
         }
         assert!(player_pitch().abs() < 0.5, "and the view re-levels ({})", player_pitch());
+    }
+
+    /// vid_win.c's `ClearAllStates` (the page sends it when a key's release
+    /// may never come: the lock, fullscreen or the keyboard lost, the tab
+    /// hidden): every key lets go as its own release would — `+mlook`'s
+    /// release re-levels the view with `lookspring`, which zeroing
+    /// `keydown[]` alone (the port's version until 2026-10-02) skipped —
+    /// Shift is up, the mouse movement not yet in a move is dropped
+    /// (`IN_ClearStates`), and a key still held presses again with its next
+    /// autorepeat (`key_repeats` starts over).
+    #[test]
+    fn clear_all_states_lets_every_key_go_as_its_release_would() {
+        use quake_rs::keys::{K_MOUSE1, K_UPARROW};
+        reset_queue();
+        assert_eq!(boot(), 1);
+        close_menu();
+        crate::host_cmd::execute_console_command("lookspring 1");
+        mouse_move(0.0, -10.0);
+        for k in [K_UPARROW, b'\\', K_SHIFT, K_MOUSE1] {
+            key_down(i32::from(k));
+            key_down(i32::from(k)); // an autorepeat
+        }
+        assert_eq!(keys_held(), (4, "\\ UPARROW SHIFT MOUSE1".to_string()));
+        assert!(!walk_mut(|w| w.pitch_drift));
+        assert_eq!(walk_mut(|w| w.mouse_fwd), 30.0, "id's mouse Y: a pending forward move");
+        clear_all_states();
+        assert_eq!(keys_held(), (0, String::new()));
+        assert!(walk_mut(|w| w.pitch_drift), "+mlook let go with lookspring: the view re-levels");
+        assert_eq!(walk_mut(|w| w.mouse_fwd), 0.0, "IN_ClearStates: the mouse's pending move dropped");
+        let (shift, repeats) = APP.with(|c| {
+            let a = c.borrow();
+            let a = a.as_ref().unwrap();
+            (a.shift_down, a.key_repeats.iter().all(|&r| r == 0))
+        });
+        assert!(!shift && repeats, "Shift is up and no key counts as repeating");
+        key_down(i32::from(K_UPARROW)); // the held key's next autorepeat
+        assert_eq!(key_is_down(i32::from(K_UPARROW)), 1, "a key still held presses again");
+        key_up(i32::from(K_UPARROW));
     }
 
     #[test]

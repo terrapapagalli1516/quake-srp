@@ -161,7 +161,8 @@ mod tests {
     fn the_2026_profile_is_the_default_and_classic_is_ids() {
         let s = Settings::default();
         assert_eq!(s.profile, Profile::Modern);
-        assert!(s.cvars.uncapped && s.cvars.native && s.cvars.crosshair && s.cvars.always_run());
+        assert!(s.cvars.uncapped && s.cvars.native && s.cvars.always_run());
+        assert_eq!(s.cvars.crosshair, crate::render::Crosshair::Cross);
         assert_eq!(s.binds.command(b'w'), Some(BIND_FORWARD));
         let id = Settings::new(Profile::Classic);
         assert_eq!(id.cvars, Cvars::classic());

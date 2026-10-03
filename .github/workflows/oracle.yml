@@ -1,0 +1,59 @@
+# Classic's proof, by hand (Actions > oracle > Run workflow): the goldens, the
+# play hashes, the timedemo counts, the census, and id's own C against the
+# port — the 3-D view, the 2-D layer, demo playback and the mixer
+# (oracle/README.md, "Classic"). The same as `uv run oracle/classic_check.py`
+# on a machine with the data.
+#
+# What it needs, fetched here because none of it is in the repository:
+# - id's shareware pak, from the archive README.md names (ci/fetch_shareware.sh
+#   checks its hashes);
+# - id's WinQuake source (GPL), cloned from id-Software/Quake into quake-c/;
+# - docker, which builds the C oracle as a static 32-bit i386 program
+#   (oracle/build.sh, oracle/build_sound.sh) that the x86-64 runner runs.
+# Best effort: it has not run on GitHub's runners yet, only on the machine the
+# port was built on. The report is uploaded whether it passes or not.
+name: oracle
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  RUST_TOOLCHAIN: "1.93.1"   # as check.yml
+  CARGO_TERM_COLOR: always
+
+jobs:
+  classic:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Rust ${{ env.RUST_TOOLCHAIN }}
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+
+      - name: id's shareware pak
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends libarchive-tools
+          ci/fetch_shareware.sh
+
+      - name: id's WinQuake source
+        run: git clone --depth 1 https://github.com/id-Software/Quake.git quake-c
+
+      - name: Classic's proof
+        run: uv run oracle/classic_check.py
+
+      - name: The report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: classic-check
+          path: oracle/build/classic-check
+          if-no-files-found: warn

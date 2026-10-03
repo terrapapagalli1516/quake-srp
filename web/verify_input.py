@@ -25,6 +25,17 @@
      shrink drops columns).
   7. KEYS BY THEIR PLACE — an AZERTY key event (code KeyW, key 'z') is
      keynum 'w' in the game (id's scancodes), and types 'z' in the console.
+  8. EVERY KEY UP WHEN A RELEASE MAY NEVER COME — vid_win.c's ClearAllStates
+     when the pointer lock ends, the window blurs, the tab hides, fullscreen
+     ends: the engine holds no key after each (keys and mouse buttons held
+     down through it), a held key's next autorepeat presses it again, and a
+     fresh press works.
+  9. THE MOUSE AT ANY FRAME RATE — under pointer lock, 1000 counts from a
+     1000 Hz mouse, delivered a refresh at a time as browsers deliver them,
+     turn the view 160° at headless Chromium's 60 Hz refresh and again with
+     its frame-rate limit off (several hundred refreshes a second; Firefox:
+     `layout.frame_rate` 480). Synthetic `mousemove`s: headless Chromium's
+     own lock cancels every real move (PLATFORM.md, "Input").
 
 Headless fullscreen is approximate: the Alt+Enter/fullscreen checks are best-effort
 here (skipped with a note when the headless browser refuses) — see the manual
@@ -64,6 +75,42 @@ def boot_page(pg):
     attract loop booted)."""
     pg.goto(f"http://127.0.0.1:{PORT}/index.html", wait_until="load")
     pg.wait_for_function("window.quake && quake.ready", timeout=120000)
+
+def mouse_turn(pg):
+    """(8) Walk mode, the pointer locked, then a second of a 1000 Hz mouse
+    moving right a count a millisecond: each refresh, the counts since the
+    last one, in one to three `mousemove`s (a whole number each), as a
+    browser coalesces them into the refresh. Returns (refreshes a second,
+    degrees turned right, degrees expected)."""
+    pg.evaluate("exp.boot().then(() => exp.menu_cancel())")
+    pg.wait_for_function("exp.menu_visible().then(v => !v)", timeout=5000)
+    time.sleep(0.3)
+    pg.locator("#c").click(position={"x": 320, "y": 240})
+    pg.wait_for_function("document.pointerLockElement === document.getElementById('c')", timeout=5000)
+    time.sleep(0.5)   # past the headless lock's own jump
+    yaw = lambda: pg.evaluate("Promise.all([exp.listener_fwd_x(), exp.listener_fwd_y()])"
+                              ".then(([x, y]) => Math.atan2(y, x) * 180 / Math.PI)")
+    y0 = yaw()
+    hz = pg.evaluate("""() => new Promise(done => {
+        const c = document.getElementById('c');
+        let sent = 0, refreshes = 0, t0 = null;
+        function refresh(t) {
+          if (t0 === null) t0 = t;
+          refreshes++;
+          const due = Math.min(1000, Math.floor(t - t0)), n = due - sent, parts = 1 + refreshes % 3;
+          for (let i = 0; i < parts; i++) {
+            const k = i < parts - 1 ? Math.floor(n / parts) : n - (parts - 1) * Math.floor(n / parts);
+            if (k) c.dispatchEvent(new MouseEvent('mousemove', { movementX: k }));
+          }
+          sent = due;
+          if (sent < 1000) requestAnimationFrame(refresh); else done(refreshes * 1000 / (t - t0));
+        }
+        requestAnimationFrame(refresh);
+    })""")
+    time.sleep(0.3)
+    turned = (y0 - yaw() + 540) % 360 - 180
+    want = 1000 * 0.16 * pg.evaluate("exp.mouse_sensitivity()")
+    return hz, turned, want
 
 with sync_playwright() as p:
     br = isolated.launch(p, [
@@ -369,7 +416,100 @@ with sync_playwright() as p:
           'Unknown command "z"' in pg.evaluate("quake.text('console_text')"))
     pg.keyboard.press("Backquote")
 
+    # (8) Every key up when a release may never come (PLATFORM.md, "Input";
+    # vid_win.c's ClearAllStates). In a real Chromium the Esc that ends the
+    # pointer lock eats the keyups after it (W held through it stayed
+    # +forward); headless delivers them, so each step reads the engine's
+    # keys while they are still down here.
+    held = lambda: pg.evaluate("quake.text('keys_held')")
+    pg.wait_for_function("exp.menu_visible().then(v => !v)", timeout=5000)
+    # (8a) The pointer lock ends (the browser's Esc: exitPointerLock).
+    pg.locator("#c").click(position={"x": 320, "y": 240})
+    pg.wait_for_function("document.pointerLockElement === document.getElementById('c')", timeout=5000)
+    pg.keyboard.down("w")
+    pg.mouse.down()
+    check("lock: W and the fire button held", held() == "w MOUSE1", repr(held()))
+    pg.evaluate("document.exitPointerLock()")
+    pg.wait_for_function("exp.menu_visible().then(v => v === 1)", timeout=5000)
+    check("lock lost: the engine holds no key, the drag is over",
+          held() == "" and pg.evaluate("dragging") is False, repr(held()))
+    pg.keyboard.up("w")
+    pg.mouse.up()
+    pg.keyboard.press("Escape")
+    pg.wait_for_function("exp.menu_visible().then(v => !v)", timeout=5000)
+    # (8b) The window blurs (Alt-Tab, a click elsewhere).
+    pg.keyboard.down("w")
+    pg.keyboard.down("Shift")
+    check("blur: W and Shift held", held() == "w SHIFT", repr(held()))
+    pg.evaluate("dispatchEvent(new FocusEvent('blur'))")
+    check("blur: the engine holds no key", held() == "", repr(held()))
+    pg.keyboard.up("Shift")
+    pg.keyboard.up("w")
+    # (8c) The tab hides.
+    def visibility(hidden):
+        pg.evaluate("""h => { Object.defineProperty(document, 'hidden', { value: h, configurable: true });
+                              Object.defineProperty(document, 'visibilityState', { value: h ? 'hidden' : 'visible', configurable: true });
+                              document.dispatchEvent(new Event('visibilitychange')); }""", hidden)
+    pg.keyboard.down("w")
+    visibility(True)
+    check("hidden: the engine holds no key", held() == "", repr(held()))
+    visibility(False)
+    pg.evaluate("delete document.hidden; delete document.visibilityState")
+    pg.keyboard.up("w")
+    # (8d) Fullscreen ends (the browser's Esc, Alt+Enter, the window manager).
+    pg.keyboard.press("Alt+Enter")
+    try:
+        pg.wait_for_function("!!document.fullscreenElement", timeout=3000)
+        fs = True
+    except Exception:
+        fs = False
+    if fs:
+        pg.evaluate("""window.__fsOff = 0; document.addEventListener('fullscreenchange',
+                       () => { if (!document.fullscreenElement) window.__fsOff++; })""")
+        pg.keyboard.down("w")
+        check("fullscreen: W held", held() == "w", repr(held()))
+        pg.evaluate("document.exitFullscreen()")
+        pg.wait_for_function("window.__fsOff > 0", timeout=5000)
+        check("fullscreen left: the engine holds no key, Esc unlocked",
+              held() == "" and pg.evaluate("escLocked") is False, repr(held()))
+        pg.keyboard.up("w")
+    else:
+        print("SKIP the fullscreen step (headless refused requestFullscreen)")
+    # (8e) A key the player still holds presses again with its next
+    # autorepeat; and a fresh press works.
+    pg.keyboard.down("w")
+    pg.evaluate("dispatchEvent(new FocusEvent('blur'))")
+    pg.evaluate("dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyW', key: 'w', repeat: true, bubbles: true, cancelable: true }))")
+    check("a held key's autorepeat after the clear presses it again", held() == "w", repr(held()))
+    pg.keyboard.up("w")
+    check("...and its release lets go", held() == "", repr(held()))
+    pg.keyboard.down("ArrowUp")
+    check("a fresh press holds", held() == "UPARROW", repr(held()))
+    pg.keyboard.up("ArrowUp")
+    check("...and lets go", held() == "", repr(held()))
+    # (9) The mouse turns as far at any frame rate: here at the headless
+    # 60 Hz refresh, then in a browser without the frame-rate limit.
+    hz, turned, want = mouse_turn(pg)
+    check(f"mouse: 1000 counts turn {want:.0f}° at a {hz:.0f} Hz refresh",
+          abs(turned - want) < 0.05, f"{turned:.3f}°")
+
     check("no console errors", not errs, str(errs[-5:]))
+    br.close()
+
+    # (8, continued) Several hundred refreshes a second: Chromium's
+    # frame-rate limit off, Firefox's refresh driver at 480 Hz.
+    br = isolated.launch(p, ["--no-sandbox", "--autoplay-policy=no-user-gesture-required",
+                             "--disable-frame-rate-limit", "--disable-gpu-vsync"],
+                         prefs={"layout.frame_rate": 480})
+    pg = br.new_page(viewport={"width": 820, "height": 560})
+    boot_page(pg)
+    pg.locator("#overlay").click()
+    hz, turned, want = mouse_turn(pg)
+    if hz < 200:
+        print(f"SKIP mouse at a high refresh rate: this browser refreshed at {hz:.0f} Hz")
+    else:
+        check(f"mouse: 1000 counts turn {want:.0f}° at a {hz:.0f} Hz refresh",
+              abs(turned - want) < 0.05, f"{turned:.3f}°")
     br.close()
 httpd.shutdown()
 print(f"done: {passed} passed, {failed} failed")

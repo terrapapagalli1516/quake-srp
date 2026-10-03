@@ -155,9 +155,9 @@ pub struct Walk {
     /// [`render::calc_refdef`] turns it into the 3-D view rectangle and how
     /// much status bar shows.
     pub viewsize: f32,
-    /// The `crosshair` cvar this frame: `V_RenderView` draws the `+` over
-    /// the finished view ([`render::draw_crosshair`]). Set like `viewsize`.
-    pub crosshair: bool,
+    /// The `crosshair` cvar this frame: `V_RenderView` draws it over the
+    /// finished view ([`render::draw_crosshair`]). Set like `viewsize`.
+    pub crosshair: render::Crosshair,
     /// The `scr_sbaroverlay` setting this frame: whether the 3-D view stops
     /// above the status bar (id's) or fills the frame under it
     /// ([`render::SbarLayout`], with `viewsize` [`render::calc_refdef`]'s
@@ -420,7 +420,7 @@ pub struct DemoPlay {
     /// much status bar shows.
     pub viewsize: f32,
     /// The `crosshair` cvar this frame (see `Walk::crosshair`).
-    pub crosshair: bool,
+    pub crosshair: render::Crosshair,
     /// The `scr_sbaroverlay` setting this frame (see `Walk::sbar_layout`).
     pub sbar_layout: render::SbarLayout,
     /// `wasm_showfps` this frame (see `Walk::show_fps`).
@@ -522,7 +522,7 @@ impl DemoPlay {
             centerprint: None,
             notify: ConNotify::default(),
             viewsize: render::VIEWSIZE_DEFAULT,
-            crosshair: false,
+            crosshair: render::Crosshair::Off,
             sbar_layout: render::SbarLayout::Classic,
             show_fps: false,
             stepping: Stepping::Classic,
@@ -647,7 +647,7 @@ pub fn assemble_walk(
         centerprint: None,
         notify: ConNotify::default(),
         viewsize: render::VIEWSIZE_DEFAULT,
-        crosshair: false,
+        crosshair: render::Crosshair::Off,
         sbar_layout: render::SbarLayout::Classic,
         show_fps: false,
         stepping: Stepping::Classic,

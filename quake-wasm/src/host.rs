@@ -554,9 +554,9 @@ mod tests {
 
     /// The 2026 profile in the frame: the game stepped as 72 Hz runs, the
     /// renderer's Hor+ and hires with native resolution, the 2-D layer at a
-    /// whole scale, and id's crosshair — a `+` whose cell's corner is the
-    /// view's centre, over the view and under the rest (the fade of the menu
-    /// dims it); Classic is none of them.
+    /// whole scale, and the 2026 cross centred on the view, over the view and
+    /// under the rest (the fade of the menu dims it); Classic is none of
+    /// them.
     #[test]
     fn the_2026_profile_steps_uncapped_scales_2d_and_draws_the_crosshair() {
         use quake_rs::render::FovMode;
@@ -592,9 +592,14 @@ mod tests {
             .map(|i| (i % w, i / w))
             .collect();
         assert!(!differing.is_empty(), "the crosshair draws");
+        // The cross's reach from the centre: half its thickness, the gap, an
+        // arm and the outline (1000 rows: 2, 2, 7 and 1).
+        let size = render::CrossSize::for_height(h);
+        let reach = size.thickness / 2 + size.gap + size.arm + 1;
+        assert_eq!(reach, 11);
         assert!(
-            differing.iter().all(|&(x, y)| (cx..cx + 40).contains(&x) && (cy..cy + 40).contains(&y)),
-            "only the + (a 2-D cell, scale 5, at the view's centre {cx},{cy}): {:?}",
+            differing.iter().all(|&(x, y)| (cx - reach..cx + reach).contains(&x) && (cy - reach..cy + reach).contains(&y)),
+            "only the cross, about the view's centre {cx},{cy}: {:?}",
             &differing[..differing.len().min(8)]
         );
     }

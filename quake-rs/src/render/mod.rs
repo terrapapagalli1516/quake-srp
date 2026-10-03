@@ -78,7 +78,7 @@ pub use crate::sbar::{
 };
 pub use crate::screen::{
     calc_refdef, compose_view, draw_centerprint, draw_crosshair, draw_fps, draw_pause, notify_top, screen_with_backtile,
-    status_bar_rows, vid_aspect, SbarLayout, ViewRect,
+    status_bar_rows, vid_aspect, CrossSize, Crosshair, SbarLayout, ViewRect,
     SB_LINES_FULL, VIEWSIZE_DEFAULT,
 };
 // The renderer's public API (its files are private).

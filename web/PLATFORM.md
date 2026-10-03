@@ -101,7 +101,7 @@ round-trip tests; `wasi.js` and `index.html` carry the same constants.
 | 1 | TICK | `seq u32`, `dt f64` (seconds since the last tick) |
 | 2 | KEY | `keynum u8`, `down u8`, `0 u16`, `ch u32` (the character the layout typed; 0 none) |
 | 3 | MOUSE | `dx f32`, `dy f32` (raw `movementX`/`movementY`) |
-| 4 | CLEAR_KEYS | — (window blur: `ClearAllStates`) |
+| 4 | CLEAR_KEYS | — (a release may be lost: `ClearAllStates`, "Input") |
 | 5 | POINTER_UNLOCKED | — (the port's `+mlook` release: lookspring) |
 | 6 | AUDIO_READY | `ready u8`, `0 ×3`, `rate u32` (the AudioContext's sample rate; 0 none yet) |
 | 7 | CALL | `id u32`, then the UTF-8 line |
@@ -672,6 +672,30 @@ it means, as id's `Key_Event`, `IN_MouseMove` and the joystick code do.
   console and the name fields. A key `code` does not name falls back to
   `key`. (`verify_input.py`: AZERTY's key in W's place is `w` in the game and
   types `z` in the console; letters used to follow the layout, `z`.)
+- **Every key up when a release may never come.** A key let go while the
+  page did not have the keyboard never comes up to it, and Chromium also
+  drops every keyup after a key the browser handled itself (the Esc that
+  ends the pointer lock) until the next keydown: W held through that Esc
+  stayed `+forward` for good. So, as id's `vid_win.c` ran `ClearAllStates`
+  on every activation change and mode set (vid_win.c: "fix the leftover Alt from any
+  Alt-Tab"), the page sends one `CLEAR_KEYS` record whenever a release may
+  have been lost: the window blurs, the tab hides, the pointer lock ends,
+  fullscreen ends. The program (`input.rs`, `clear_all_states`) runs
+  `Key_Event (key, false)` for every key, so each `+` binding lets go as
+  its release would, then `Key_ClearStates` and `IN_ClearStates`; the page
+  ends its unlocked mouse drag. A key still held presses again with its
+  next autorepeat (its repeat count starts over); one whose repeat a later
+  key stopped waits for its next press, as in id's. Not on entering
+  fullscreen (no keyup was lost there) nor on `pointerlockerror` (a lock
+  never taken loses nothing). The touch controls' `releaseAll` and the pad
+  are unchanged. `verify_input.py` (8) checks each trigger headless with the
+  `keys_held` call; a headed Chromium 146 (2026-10-02, as in "Fullscreen")
+  showed the stuck W before, and nothing left held after in 15 cases (Esc
+  windowed and held in fullscreen, fullscreen without Keyboard Lock, the
+  focus to another window with Alt or the fire button held, a click
+  elsewhere, Alt+Enter both ways, F11, a new tab). Not tried: Firefox,
+  Safari, macOS, Windows, a real Alt-Tab (XTEST's keys never reach the Wayland compositor
+  there; another window was activated instead).
 - **The F-keys.** `default.cfg`'s shortcuts (F1 help, F2/F3 the Save/Load
   screen, F4 Options, F6/F9 quicksave/quickload, F10 quit, F12 a screenshot)
   reach the game as ordinary `KEY` records like any other key; the page's
@@ -697,12 +721,14 @@ it means, as id's `Key_Event`, `IN_MouseMove` and the joystick code do.
   `IN_StartupMouse` switched Windows' pointer acceleration off while the game
   ran, so a count was always the same turn. Refused (Linux, Firefox), the
   plain lock, at once and from then on (Chromium refuses a burst of lock
-  requests). Each `mousemove` is a `MOUSE` record; a browser that coalesces
-  samples into one event per refresh sums their movement into it, so every
-  count arrives, and the program adds each as it comes: the turn per count
-  is the same at any frame rate (`mouse_turns_the_same_at_60_and_480_hz`).
-  `pointerrawupdate` would deliver samples sooner within a refresh, but the
-  frame starts at the refresh either way, so it would not show them sooner.
+  requests). Each `mousemove` is a `MOUSE` record with the event's
+  `movementX/Y` as they came (floats, never rounded); a browser that
+  coalesces samples into one event per refresh sums their movement into it,
+  so every count arrives, and the program adds each as it comes: the turn
+  per count is the same at any frame rate ("The mouse at any frame rate",
+  below). `pointerrawupdate` would deliver samples sooner within a refresh,
+  but the frame starts at the refresh either way, so it would not show them
+  sooner.
 - **The gamepad.** The Gamepad API has no events for a pad's state, so the
   page polls `navigator.getGamepads()` once per refresh, just before the tick
   (as late as the frame allows), and sends a `GAMEPAD` record when the state
@@ -734,6 +760,41 @@ pad, Classic's `joystick 0` and `1`, and on a touch page the rumble going to
 the pad or the phone, whichever was used last).
 The synthetic pad stands in for the browsers' own Gamepad API; no real pad
 was tried.
+
+**The mouse at any frame rate.** Nothing on the mouse path is per frame:
+the page forwards each event's movement and `IN_MouseMove` adds it to the
+view angles when the record arrives, before the frame that draws them.
+`sys::tests::the_mouse_turns_the_view_the_same_at_any_refresh_rate` feeds
+the program a 1000 Hz mouse's second of motion (1000 counts) the way a
+browser delivers it — a whole number of counts per refresh, in one to three
+events — through its own loop at 60, 144, 240 and 480 Hz in the 2026 profile
+and behind Classic's 72 fps gate: the drawn view turns 160° each time.
+`verify_input.py` does the same in the page at headless Chromium's 60 Hz and
+with its frame-rate limit off (several hundred refreshes a second; Firefox:
+`layout.frame_rate 480`), with synthetic events: headless Chromium's own
+pointer lock dispatches a `mousemove` at screen (0, 0) every frame, which
+cancels every real move (it is also the view's jump to pitch −70 on
+locking). The browsers' side was measured with real input on a Linux desktop
+(2026-10-02: the Wayland compositor's virtual output, its X11 layer, XTEST relative motion, 1000
+counts at 1000 Hz, the pointer locked). In the game, Chromium 146 and
+Firefox 155 delivered all 1000 counts and the view turned 160° at a 60 Hz
+and at a 455–710 Hz refresh; on a bare page with its main thread busy (up
+to 14 ms of a 60 Hz frame, 3 ms of a 480 Hz one) they and WebKitGTK 26.6
+delivered every count.
+On Linux there is no raw input and `movementX` is in CSS pixels: at a
+device pixel ratio of 1.5 the same motion is 668 counts (Chromium) or 665
+(Firefox), at every rate — the pixel ratio scales the turn there, the frame
+rate does not. Not verified: Windows and macOS (where Chromium's raw input
+reports the mouse's own counts), and a real 480 Hz display. To check one,
+paste this into the console, capture the mouse, and move it the same
+distance (along a ruler) within five seconds, at 60 Hz and again at the
+display's top rate: fewer counts at the higher rate is the browser losing
+them; the same counts but less turn would be the game.
+
+```js
+let n = 0, s = 0; canvas.addEventListener('mousemove', e => { n++; s += e.movementX; });
+setTimeout(() => console.log(n, 'events,', s, 'counts'), 5000);
+```
 
 **Latency.** `web/latency.py` measures from each input event's `timeStamp`
 (when the browser got it, so the wait for the refresh counts; a pad's
@@ -1509,6 +1570,28 @@ Either way the page must be a secure context — https, or localhost — for
 `SharedArrayBuffer` and service workers alike. A phone reaching the server
 by name over plain http gets neither, so serve it over https: any reverse
 proxy or tunnel that terminates TLS in front of the server works.
+
+**A public demo** (shareware only): `web/publish.sh OUTDIR [PAK0.PAK]`
+builds the threads program and assembles a new deploy dir: the page,
+`quake.wasm`, `id1/pak0.pak` (refused unless its sha256 is id's unmodified
+shareware pak's), id's shareware licence beside it as `id1/slicnse.txt`
+when `SLICNSE.TXT` sits next to the pak's folder (`ci/fetch_shareware.sh`
+leaves it there), no `files.json`, and a `_headers` file:
+
+```
+/*               Cross-Origin-Opener-Policy: same-origin
+                 Cross-Origin-Embedder-Policy: require-corp
+/id1/pak0.pak    Cache-Control: public, max-age=31536000, immutable
+/quake.wasm      Cache-Control: no-cache
+```
+
+Cloudflare Pages and Netlify read `_headers`: a request gets every
+matching rule's headers, and a `Cache-Control` there replaces Pages'
+default (`public, max-age=0, must-revalidate`, which the page's other files
+keep). Any other host works through the service worker. The pak is id's and
+never changes, so a year; the program and the page change under the same
+names with each deploy, so they revalidate on every load, a 304 when
+nothing changed. Pages takes files up to 25 MiB; the pak is 17.8 MiB.
 `web/isolated.py` is the checks' server. `uv run --with playwright
 web/bench.py DEPLOYDIR` and `QUAKE_VERIFY_PORT=… uv run --with playwright
 web/verify_walk.py DEPLOYDIR` take a deploy dir, and `bench.py --build`

@@ -5,7 +5,7 @@
 //! `SCR_UpdateScreen`'s tile-cleared border, `SCR_DrawCenterString`,
 //! `SCR_ScreenShot_f`/`WritePCXfile`.
 
-use crate::draw::{blit_qpic_at, draw_char_scaled, draw_string_scaled, draw_tile_clear, screen_2d};
+use crate::draw::{blit_qpic_at, draw_char_scaled, draw_string_scaled, draw_tile_clear, fill_rect, screen_2d};
 use crate::render::Image;
 
 // ---------------------------------------------------------------------------
@@ -460,23 +460,159 @@ pub fn notify_top(show_fps: bool) -> i32 {
     }
 }
 
-/// `V_RenderView`'s crosshair (view.c, with `crosshair 1`): the conchars `+`
-/// through `Draw_Character`, its cell's top-left corner at the centre of the
-/// view, `(scr_vrect.x + scr_vrect.width/2, scr_vrect.y + scr_vrect.height/2)`
-/// (`cl_crossx`/`cl_crossy`, id's offsets from there, are 0 and not
-/// modelled). `vrect` is in framebuffer pixels; the character is drawn on the
-/// 2-D layer's screen ([`screen_2d`]), so with the scaled 2-D extra it has
-/// that layer's size, at the same place. The client leaves it off an
-/// intermission or finale, as id's GLQuake does (`walk_frame`).
-pub fn draw_crosshair(image: &mut Image, conchars: &crate::wad::Qpic, vrect: &ViewRect) {
-    let sc = screen_2d(image.w, image.h);
-    if image.w == 0 || image.h == 0 || sc.scale.is_nan() || sc.scale <= 0.0 {
+// ---------------------------------------------------------------------------
+// The crosshair: V_RenderView's `+`, and the 2026 cross
+// ---------------------------------------------------------------------------
+
+/// The `crosshair` cvar (view.c): what `V_RenderView` draws at the view's
+/// centre. id's draws its conchars `+` for any non-zero value, 1:1, with the
+/// character cell's top-left corner at the centre — at 320x200 a grey `+`
+/// 7 pixels across, its crossing 4 pixels right of and 4.5 below the point
+/// the gun fires at. Blown up by the 2026 2-D layer's scale (5 at 1080p) that
+/// is a blocky glyph 35 pixels across, crossing 20 pixels right of the aim
+/// and 22.5 below; so the port's own cross is `1`, the 2026 default, and
+/// id's glyph is kept as `2`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Crosshair {
+    /// `0`: none, id's default (Classic).
+    #[default]
+    Off,
+    /// `1`: the 2026 cross ([`CrossSize`]): four thin arms around an open
+    /// centre, [`CROSS_COLOUR`] with a one-pixel [`CROSS_OUTLINE`], sized to
+    /// the frame's height.
+    Cross,
+    /// `2`: id's conchars `+` at the 2-D layer's scale, as the menus are
+    /// blown up, with its crossing on the view's centre (QuakeSpasm centres
+    /// it too, by its cell; id's corner placement put it off the aim).
+    Glyph,
+}
+
+impl Crosshair {
+    /// The style a cvar value names: 0 is off, 2 id's glyph, and any other
+    /// number the cross (id draws a crosshair for any non-zero value).
+    #[must_use]
+    pub fn from_cvar(value: f32) -> Crosshair {
+        if value == 0.0 {
+            Crosshair::Off
+        } else if value == 2.0 {
+            Crosshair::Glyph
+        } else {
+            Crosshair::Cross
+        }
+    }
+
+    /// The cvar value naming this style.
+    #[must_use]
+    pub fn cvar(self) -> u8 {
+        match self {
+            Crosshair::Off => 0,
+            Crosshair::Cross => 1,
+            Crosshair::Glyph => 2,
+        }
+    }
+}
+
+/// The 2026 cross's arms: one of id's light colours (palette 253, the cream
+/// white of its flames and lamps, 255 247 199). Like every 2-D colour it
+/// goes through the frame's palette, so a damage flash or a powerup tints it
+/// with the rest of the screen.
+pub const CROSS_COLOUR: u8 = 253;
+/// The one-pixel outline round each arm: palette 0, black, so the cross reads
+/// on a bright wall as on a dark one.
+pub const CROSS_OUTLINE: u8 = 0;
+
+/// The 2026 cross's sizes in framebuffer pixels, for a frame `h` rows tall:
+/// the arms' thickness, the gap between the open centre square (thickness x
+/// thickness) and each arm, and each arm's length. Each is a whole number of
+/// pixels in proportion to the frame's height — one pixel of thickness and
+/// gap per 540 rows, one of arm per 135 — so the cross covers the same share
+/// of the view, and so the same angle (Hor+ keeps the vertical field of view),
+/// on every screen: 1/1/4 on a 535-row phone frame, 2/2/8 at 1080, 3/3/11 at
+/// 1440, 4/4/16 at 2160. The outline is one pixel at every size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CrossSize {
+    pub thickness: usize,
+    pub gap: usize,
+    pub arm: usize,
+}
+
+impl CrossSize {
+    /// The sizes for a frame `h` rows tall (at least 1/1/4, its shape at 540
+    /// rows, however small the frame).
+    #[must_use]
+    pub fn for_height(h: usize) -> CrossSize {
+        let per = |rows: usize, least: usize| ((h + rows / 2) / rows).max(least);
+        CrossSize { thickness: per(540, 1), gap: per(540, 1), arm: per(135, 4) }
+    }
+}
+
+/// Where id's `+` crosses in its 8x8 conchars cell, in texels from the cell's
+/// top-left corner. Its grey strokes span columns 1-6 and rows 2-6 (a dark
+/// shadow below and right of them): the upright is columns 3 and 4, the bar
+/// row 4, so the crossing's middle is at x 4, y 4.5.
+const GLYPH_CROSSING: (f32, f32) = (4.0, 4.5);
+
+/// `V_RenderView`'s crosshair (view.c), in the `crosshair` cvar's style,
+/// drawn over the finished view at its centre — `scr_vrect.x +
+/// scr_vrect.width/2`, `scr_vrect.y + scr_vrect.height/2` (`cl_crossx` and
+/// `cl_crossy`, id's offsets from there, are 0 and not modelled). `vrect` is
+/// in framebuffer pixels; only [`Crosshair::Glyph`] needs `conchars`. The
+/// client leaves it off an intermission or finale, as id's GLQuake does
+/// (`walk_frame`).
+pub fn draw_crosshair(image: &mut Image, style: Crosshair, conchars: Option<&crate::wad::Qpic>, vrect: &ViewRect) {
+    if image.w == 0 || image.h == 0 {
         return;
     }
-    let s = sc.scale.round().max(1.0) as usize;
-    let x = (vrect.x + vrect.w / 2) / s;
-    let y = (vrect.y + vrect.h / 2) / s;
-    draw_char_scaled(image, conchars, x as f32, y as f32, b'+', sc.scale, 0.0, 0.0);
+    match style {
+        Crosshair::Off => {}
+        Crosshair::Cross => draw_cross(image, vrect),
+        Crosshair::Glyph => {
+            if let Some(cc) = conchars {
+                draw_glyph_crosshair(image, cc, vrect);
+            }
+        }
+    }
+}
+
+/// [`Crosshair::Cross`]: four arms of [`CrossSize::for_height`] round an
+/// open square at the view's centre, each outlined first so no outline
+/// covers an arm. The square's top-left is `(2*x + w - thickness + 1) / 2`
+/// across (likewise down), so the cross is symmetric about the view's centre
+/// exactly when the thickness and the view's width have the same parity, and
+/// half a pixel right (below) of it otherwise: an odd thickness always
+/// centres on `V_RenderView`'s pixel, `x + w/2`.
+fn draw_cross(image: &mut Image, vrect: &ViewRect) {
+    let size = CrossSize::for_height(image.h);
+    let (t, g, l) = (size.thickness as i64, size.gap as i64, size.arm as i64);
+    let corner = |at: usize, len: usize| (2 * at as i64 + len as i64 - t + 1).div_euclid(2);
+    let (x, y) = (corner(vrect.x, vrect.w), corner(vrect.y, vrect.h));
+    // Each arm as [x0, x1) x [y0, y1): right, left, down, up.
+    let arms = [
+        (x + t + g, y, x + t + g + l, y + t),
+        (x - g - l, y, x - g, y + t),
+        (x, y + t + g, x + t, y + t + g + l),
+        (x, y - g - l, x + t, y - g),
+    ];
+    for &(x0, y0, x1, y1) in &arms {
+        fill_rect(image, x0 - 1, y0 - 1, x1 + 1, y1 + 1, CROSS_OUTLINE);
+    }
+    for &(x0, y0, x1, y1) in &arms {
+        fill_rect(image, x0, y0, x1, y1, CROSS_COLOUR);
+    }
+}
+
+/// [`Crosshair::Glyph`]: id's `Draw_Character` of `+` at the 2-D layer's
+/// scale ([`screen_2d`]: 1 in Classic, as id), placed so that the glyph's
+/// crossing ([`GLYPH_CROSSING`]) lands on the view's centre, to the nearest
+/// pixel.
+fn draw_glyph_crosshair(image: &mut Image, conchars: &crate::wad::Qpic, vrect: &ViewRect) {
+    let s = screen_2d(image.w, image.h).scale;
+    if !(s.is_finite() && s > 0.0) {
+        return;
+    }
+    let ox = (vrect.x as f32 + vrect.w as f32 * 0.5 - GLYPH_CROSSING.0 * s).round();
+    let oy = (vrect.y as f32 + vrect.h as f32 * 0.5 - GLYPH_CROSSING.1 * s).round();
+    draw_char_scaled(image, conchars, 0.0, 0.0, b'+', s, ox, oy);
 }
 
 // ---------------------------------------------------------------------------
@@ -997,6 +1133,160 @@ mod tests {
                 assert!(got.pixels == want, "{w}x{h} {vrect:?} tile {}", t.is_some());
             }
         }
+    }
+
+    // -- V_RenderView's crosshair --------------------------------------------
+
+    #[test]
+    fn the_crosshair_cvar_names_three_styles() {
+        for (v, style) in [(0.0, Crosshair::Off), (1.0, Crosshair::Cross), (2.0, Crosshair::Glyph)] {
+            assert_eq!(Crosshair::from_cvar(v), style);
+            assert_eq!(f32::from(style.cvar()), v, "{style:?} round-trips");
+        }
+        // id draws a crosshair for any non-zero value: the cross, here.
+        for v in [3.0, -1.0, 0.5] {
+            assert_eq!(Crosshair::from_cvar(v), Crosshair::Cross, "{v}");
+        }
+        let mut img = Image::new(320, 200, 7);
+        draw_crosshair(&mut img, Crosshair::Off, Some(&solid_conchars()), &vr(0, 0, 320, 152));
+        assert!(img.pixels.iter().all(|&p| p == 7), "0 draws nothing");
+        draw_crosshair(&mut img, Crosshair::Glyph, None, &vr(0, 0, 320, 152));
+        assert!(img.pixels.iter().all(|&p| p == 7), "2 without a font draws nothing");
+    }
+
+    #[test]
+    fn the_cross_is_in_proportion_to_the_frame_height() {
+        let size = |h| {
+            let s = CrossSize::for_height(h);
+            (s.thickness, s.gap, s.arm)
+        };
+        assert_eq!(size(535), (1, 1, 4), "a phone's 1315x535 frame");
+        assert_eq!(size(1080), (2, 2, 8));
+        assert_eq!(size(1440), (3, 3, 11));
+        assert_eq!(size(2160), (4, 4, 16));
+        assert_eq!(size(200), (1, 1, 4), "never smaller than at 540 rows");
+        assert_eq!(size(0), (1, 1, 4));
+    }
+
+    /// Framebuffer pixels, as `(x, y)`.
+    type Pixels = Vec<(usize, usize)>;
+
+    /// The pixels of a cross drawn over palette 7 on a `w x h` frame: the
+    /// arms ([`CROSS_COLOUR`]) and the outline ([`CROSS_OUTLINE`]), and that
+    /// nothing else changed.
+    fn cross_pixels(w: usize, h: usize, vrect: ViewRect) -> (Pixels, Pixels) {
+        let mut img = Image::new(w, h, 7);
+        draw_crosshair(&mut img, Crosshair::Cross, None, &vrect);
+        let at = |c: u8| (0..w * h).filter(|&i| img.pixels[i] == c).map(|i| (i % w, i / w)).collect::<Vec<_>>();
+        let (arms, outline) = (at(CROSS_COLOUR), at(CROSS_OUTLINE));
+        assert_eq!(arms.len() + outline.len() + at(7).len(), w * h, "only the arms and the outline are drawn");
+        (arms, outline)
+    }
+
+    #[test]
+    fn the_cross_centres_on_the_view_with_its_arms_outlined() {
+        // 1920x1080 in 2026 (the view above the 240-row bar): 2-pixel arms 8
+        // long, 2 from an open 2x2 centre, symmetric about the view's centre
+        // (960, 420), a pixel corner.
+        let (arms, outline) = cross_pixels(1920, 1080, vr(0, 0, 1920, 840));
+        assert_eq!(arms.len(), 4 * 2 * 8);
+        assert_eq!(outline.len(), 4 * (4 * 10 - 2 * 8), "a one-pixel ring round each arm");
+        for &(x, y) in arms.iter().chain(&outline) {
+            assert!(arms.contains(&(1919 - x, y)) || outline.contains(&(1919 - x, y)), "mirrored about x 960");
+            assert!(arms.contains(&(x, 839 - y)) || outline.contains(&(x, 839 - y)), "mirrored about y 420");
+        }
+        // The right arm: x 963..=970 on rows 419 and 420, outlined at 962 and
+        // 971 and on rows 418 and 421; the centre and the gap are the view's.
+        for x in 963..=970 {
+            assert!(arms.contains(&(x, 419)) && arms.contains(&(x, 420)), "arm at {x}");
+            assert!(outline.contains(&(x, 418)) && outline.contains(&(x, 421)), "outline above and below {x}");
+        }
+        assert!(outline.contains(&(962, 419)) && outline.contains(&(971, 420)), "outline at the arm's ends");
+        assert!(!arms.contains(&(972, 419)) && !outline.contains(&(972, 419)));
+        for x in 959..=961 {
+            assert!(!arms.contains(&(x, 419)) && !outline.contains(&(x, 419)), "the open centre at {x}");
+        }
+
+        // A wide 1315x535 frame at 2-D scale 2 (the view's 439 rows
+        // above the 96-row bar): 1-pixel arms 4 long, 1 from the open centre
+        // pixel — V_RenderView's (x + w/2, y + h/2), the view's exact middle.
+        let (arms, outline) = cross_pixels(1315, 535, vr(0, 0, 1315, 439));
+        // (The four rings meet on the centre pixel's corners: a dark ring
+        // round it.)
+        assert_eq!((arms.len(), outline.len()), (4 * 4, 4 * (3 * 6 - 4) - 4));
+        let (cx, cy) = (657, 219);
+        let mut expect: Vec<(usize, usize)> = (2..=5)
+            .flat_map(|d| [(cx + d, cy), (cx - d, cy), (cx, cy + d), (cx, cy - d)])
+            .collect();
+        let mut got = arms.clone();
+        expect.sort_unstable();
+        got.sort_unstable();
+        assert_eq!(got, expect, "the four arms round ({cx}, {cy})");
+        assert!(!arms.contains(&(cx, cy)) && !outline.contains(&(cx, cy)), "the centre pixel is the view's");
+        for d in [1, 6] {
+            assert!(outline.contains(&(cx + d, cy)) && outline.contains(&(cx, cy - d)), "the arms' ends outlined at {d}");
+        }
+
+        // An odd thickness on an even view: centred on V_RenderView's pixel,
+        // x + w/2, half a pixel right of (below) the true middle.
+        let (arms, _) = cross_pixels(2560, 1440, vr(0, 0, 2560, 1104));
+        let span = |v: Vec<usize>| (*v.iter().min().unwrap(), *v.iter().max().unwrap());
+        assert_eq!(span(arms.iter().map(|p| p.0).collect()), (1280 - 15, 1280 + 15), "1 + 3 + 11 each way");
+        assert_eq!(span(arms.iter().map(|p| p.1).collect()), (552 - 15, 552 + 15));
+        // A view off the frame's corner (viewsize 50) centres on its own middle.
+        let (arms, _) = cross_pixels(960, 600, vr(240, 78, 480, 300));
+        assert_eq!(span(arms.iter().map(|p| p.0).collect()), (480 - 5, 480 + 5));
+        assert_eq!(span(arms.iter().map(|p| p.1).collect()), (228 - 5, 228 + 5));
+    }
+
+    /// A conchars font blank but for id's `+` (0x2b): its rows 2-7, the grey
+    /// upright in columns 3-4 and bar in row 4, the dark shadow (2) below and
+    /// right — gfx.wad's own cell.
+    fn plus_conchars() -> Qpic {
+        const PLUS: [[u8; 8]; 8] = [
+            [0, 0, 0, 0, 0, 0, 0, 0],
+            [0, 0, 0, 0, 0, 0, 0, 0],
+            [0, 0, 0, 8, 8, 0, 0, 0],
+            [0, 0, 0, 8, 6, 2, 0, 0],
+            [0, 8, 8, 6, 8, 6, 8, 0],
+            [0, 0, 2, 8, 6, 2, 2, 2],
+            [0, 0, 0, 7, 9, 2, 0, 0],
+            [0, 0, 0, 0, 2, 2, 0, 0],
+        ];
+        let mut data = vec![0u8; 128 * 128];
+        let (cx, cy) = (usize::from(b'+' % 16) * 8, usize::from(b'+' / 16) * 8);
+        for (r, row) in PLUS.iter().enumerate() {
+            data[(cy + r) * 128 + cx..][..8].copy_from_slice(row);
+        }
+        Qpic { width: 128, height: 128, data }
+    }
+
+    #[test]
+    fn ids_glyph_crosshair_crosses_on_the_views_centre_at_the_2d_scale() {
+        let cc = plus_conchars();
+        // Classic's 1:1 (crosshair 2): the cell's corner at (160-4, 76-4.5),
+        // rounded, so the upright (columns 3-4) straddles x 160 and the bar
+        // (row 4) is row 76 — where id put the cell's corner itself.
+        let mut img = Image::new(320, 200, 0);
+        draw_crosshair(&mut img, Crosshair::Glyph, Some(&cc), &vr(0, 0, 320, 152));
+        let px = |img: &Image, x: usize, y: usize| img.pixels[y * img.w + x];
+        assert_eq!((px(&img, 159, 74), px(&img, 160, 74)), (8, 8), "the upright's top");
+        assert_eq!((px(&img, 157, 76), px(&img, 162, 76)), (8, 8), "the bar, row 76");
+        assert_eq!(px(&img, 156, 76), 0);
+        assert_eq!(px(&img, 160, 79), 2, "the shadow");
+        assert_eq!(img.pixels.iter().filter(|&&p| p != 0).count(), 22, "the glyph's 22 texels, 1:1");
+
+        // 2026's 2-D layer at 1600x1000 is scale 5: each texel a 5x5 block,
+        // the upright x 795..805 about the view's centre (800, 380) and the
+        // bar rows 378..383 (380.5 from 4.5 texels, rounded).
+        let _g = crate::draw::Scaled2dGuard::set(true);
+        let mut img = Image::new(1600, 1000, 0);
+        draw_crosshair(&mut img, Crosshair::Glyph, Some(&cc), &vr(0, 0, 1600, 760));
+        assert_eq!(img.pixels.iter().filter(|&&p| p != 0).count(), 22 * 25);
+        let lit_x: Vec<usize> = (0..1600).filter(|&x| px(&img, x, 370) != 0).collect();
+        assert_eq!((lit_x[0], *lit_x.last().unwrap()), (795, 804), "the upright, rows above the bar");
+        let lit_y: Vec<usize> = (0..1000).filter(|&y| px(&img, 786, y) != 0).collect();
+        assert_eq!((lit_y[0], *lit_y.last().unwrap()), (378, 382), "the bar, left of the upright");
     }
 
     #[test]

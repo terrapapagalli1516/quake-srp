@@ -10,10 +10,10 @@
      pixels; Auto (one render thread) picks 2x2, the frame 1246x716 and the
      canvas 2492 device pixels wide — every frame pixel a whole 2x2 square of
      the screenshot, never smoothed; vid_pixelsize 3 gives 830x477 at 3x3.
-  3. The 2026 frame: the view fills the frame under the status bar
-     (scr_sbaroverlay), id's crosshair at its centre (crosshair 1 and 0
-     differ only in its cell), no 72 fps cap (a second of 1/144 s steps runs
-     144 frames), and W walks.
+  3. The 2026 frame: the 2026 cross centred on the view (crosshair 1 and 0
+     differ only there), id's + crossing the same centre at the 2-D scale
+     (crosshair 2), no 72 fps cap (a second of 1/144 s steps runs 144
+     frames), and W walks.
   4. `?classic` is Classic: the profile, config.cfg with nothing changed from
      it, every departure off, id's keys (`w` unbound, `a` +lookup), the 72
      fps cap (72 frames in a second at 144 Hz), the video mode in the 4:3 box
@@ -153,11 +153,23 @@ with sync_playwright() as p:
     pg.evaluate(GRAB, "_x0")
     pg.evaluate("quake.callLine('exec crosshair 1')")
     d = pg.evaluate(DIFF, ["_x1", "_x0"])
-    # The view fills the frame under the status bar (2026's scr_sbaroverlay;
-    # the 2-D layer at 3x on a 1246x716 screen): a 1240x716 view at x 3, its
-    # centre (623, 358), on the 2-D layer's grid (621, 357), a 24x24 cell.
-    ok = d is not None and 621 <= d["x0"] and d["x1"] < 621 + 24 and 357 <= d["y0"] and d["y1"] < 357 + 24
-    check("the crosshair: a + at the view's centre, and nothing else", ok, str(d))
+    # The view is above the status bar (viewsize 100, the 2-D layer at 3x on
+    # a 1246x716 screen: 144 rows): its centre pixel (623, 286). The cross on
+    # 716 rows: 1-pixel arms 5 long, 1 from the open centre pixel, so
+    # 617..629 x 280..292, and its black outline one further (where the
+    # scene is not already black).
+    ok = d is not None and 616 <= d["x0"] <= 617 and 629 <= d["x1"] <= 630 and 279 <= d["y0"] <= 280 and 292 <= d["y1"] <= 293
+    check("the crosshair: the 2026 cross about the view's centre, and nothing else", ok, str(d))
+    # crosshair 2: id's + at the 2-D scale (3), its crossing on the centre:
+    # the 8x8 cell's corner at (623 - 4*3, 286 - 4.5*3) = (611, 273), the
+    # glyph's grey texels (columns 1-6, rows 2-6) 614..632 x 279..293, its
+    # dark shadow to 634 x 296.
+    pg.evaluate("quake.callLine('exec crosshair 2')")
+    pg.evaluate(GRAB, "_x2")
+    pg.evaluate("quake.callLine('exec crosshair 1')")
+    d = pg.evaluate(DIFF, ["_x2", "_x0"])
+    ok = d is not None and (d["x0"], d["y0"]) == (614, 279) and 632 <= d["x1"] <= 634 and 293 <= d["y1"] <= 296
+    check("crosshair 2: id's + at the 2-D scale, crossing the view's centre", ok, str(d))
     pg.evaluate("quake.resume()")
     check("no 72 fps cap: 144 frames in a second at 144 Hz", pg.evaluate(second_at_144) == 144)
     x0 = pg.evaluate("exp.listener_x()"), pg.evaluate("exp.listener_y()")
