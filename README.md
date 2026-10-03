@@ -4,7 +4,7 @@
 
 **Play it:** `DEMO-URL` (id's shareware episode, in the browser)
 
-**Browsers:** tested in Chromium and Firefox (headless and headed) and on an Android phone;
+**Browsers:** tested in Chromium (headless and headed), Firefox (headless) and on an Android phone;
 not yet in Safari.
 
 | Classic | 2026 (the default) |
