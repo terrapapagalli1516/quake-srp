@@ -13,7 +13,7 @@ only `hasTouch`), at devicePixelRatio 1 (its device_scale_factor does not
 reach a cross-origin isolated page, so the "@3" and "@2.6" checks run at 1,
 and say so). Each check that needs a drag or a held finger is SKIPped with
 the reason: 3's stick, look, two thumbs, FIRE and JUMP, and 2b's held arrow
-(a quick tap of it runs). The rest, 95 of Chromium's 102 checks, runs on
+(a quick tap of it runs). The rest, 101 of Chromium's 108 checks, runs on
 Gecko's touch events and pointer events.
 
   1. The page: touch.js loads on the coarse pointer, the touch layout fills
@@ -25,8 +25,11 @@ Gecko's touch events and pointer events.
      with YES / NO buttons; BACK backs out. The menu pad (▲▼◀▶, OK): shown
      only in menu mode, clear of the menu's own layout at three phone
      sizes; the arrows move the cursor and step a slider (held, several
-     notches), OK enters a submenu, Help's pages turn; hidden while the
-     menu asks y/n and while Customize controls grabs a key.
+     notches), OK enters a submenu, Help's pages turn; the settings hub and
+     its pages as Options (OK opens the hub and Motion and light, ◀▶ step
+     its Torch flicker slider, BACK backs out a screen at a time:
+     verify_touch_settings.png); hidden while the menu asks y/n and while
+     Customize controls grabs a key.
   3. Play: the left stick walks (the player moves), a drag on the right
      turns the view, FIRE shoots (a shell spent), JUMP jumps, WEAPON cycles
      (shotgun to axe), MENU opens the menu.
@@ -402,6 +405,31 @@ def main():
         check("cancelled: the pad is back", wait("!(quake.state.flags & 8)") and shown("#tMenuPad"))
         pg.keyboard.press("Escape")                         # back to Options
         check("back on Options", wait("quake.state.menuScreen === 5"), str(screen_id()))
+
+        # The settings hub and its pages (Options > Classic / 2026) take the
+        # pad as Options does: OK opens the hub and a page, ◀▶ step a page's
+        # slider (Torch flicker), BACK backs out a screen at a time.
+        goto_row(13)                                        # Classic / 2026
+        pad_tap("#tPadOk")
+        check("OK on Classic / 2026 opens the settings hub", wait("quake.state.menuScreen === 10"), str(screen_id()))
+        goto_row(2)                                         # Motion and light
+        pad_tap("#tPadOk")
+        check("OK on Motion and light opens its page", wait("quake.state.menuScreen === 13"), str(screen_id()))
+        goto_row(4)                                         # Torch flicker: a slider row
+        torch = lambda: pg.evaluate("quake.text('cvar', 'r_torchflicker')")
+        t0 = torch()
+        pad_tap("#tPadRight")
+        check("the pad's RIGHT steps the torch slider (2026's 1, a step)", (t0, torch()) == ("1", "1.2"), f"{t0} -> {torch()}")
+        pad_tap("#tPadLeft")
+        pad_tap("#tPadLeft")
+        check("...and LEFT steps it back down", torch() == "0.8", torch())
+        pg.screenshot(path=os.path.join(WEB, "verify_touch_settings.png"))
+        call("exec r_torchflicker 1")
+        tap_el("#tBack")
+        check("BACK: the hub, on the page's row", wait("quake.state.menuScreen === 10") and cursor() == 2,
+              f"{screen_id()} {cursor()}")
+        tap_el("#tBack")
+        check("BACK: Options again", wait("quake.state.menuScreen === 5"), str(screen_id()))
 
         # Help pages (id's M_Help_Key) take the pad's ◀▶ too.
         pg.keyboard.press("Escape")                         # back to Main
