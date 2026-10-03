@@ -3694,3 +3694,11 @@ code (a dev report) now agrees that the tarbaby's blob has no light.
 frame cannot be exact where one is in view, as it cannot be between two runs of id's own
 game. Mission-pack demos were not run (the id1 attract loop is the only recorded
 stream in the tree).
+
+**Cost and the browser checks** (under the fleet's `measure` lock; timings are noisy).
+`timedemo` at 640x400, the same machine interleaved before / after, median of five:
+demo1 1247 -> 1207 fps (-3.2%), demo2 1335 -> 1326 (-0.7%), demo3 1305 -> 1231 (-5.7%);
+the frame counts are id's (969, 985, 1090). The lit surfaces rebuild their lightmaps
+every frame a light touches them, as in live play (`PERF_PLAN.md` A2). `quaketool
+framerate --check` passes; the browser's `verify_demo` (11 checks), `verify_timedemo`
+(31, its 969 frames at 640x400 included) and `verify_walk` pass.
