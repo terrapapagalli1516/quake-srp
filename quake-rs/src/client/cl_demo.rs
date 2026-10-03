@@ -1745,6 +1745,53 @@ mod tests {
         }
     }
 
+    /// What the light does to the picture: the frame that reads a recorded
+    /// explosion is lit by it (it is not without the message), and the
+    /// lit frame is the same pixels on one render thread and on four — the
+    /// bakes that rebuild the surfaces it touches are independent of how many
+    /// threads share them.
+    #[test]
+    fn a_recorded_explosion_changes_the_frame_the_same_on_any_thread_count() {
+        use crate::server::{te_consts::TE_EXPLOSION, TempEntityEvent};
+        let first_lit_frame = |boom: bool, threads: usize| {
+            let msgs = (0..3)
+                .map(|n| {
+                    let mut m = message(n, Vec::new());
+                    m.viewheight = 22.0;
+                    m.lightstyles = std::rc::Rc::new(vec!["m".into()]);
+                    if boom && n == 1 {
+                        m.temp_entities.push(TempEntityEvent {
+                            te_type: TE_EXPLOSION,
+                            pos: [48.0, 0.0, 0.0],
+                            end: [48.0, 0.0, 0.0],
+                            entity: 0,
+                            color_start: 0,
+                            color_length: 0,
+                        });
+                    }
+                    m
+                })
+                .collect();
+            let mut d = playback_in(render::fixtures::lightmapped_demo_room(120, 0), render::fixtures::ramp_palette(), msgs);
+            d.viewsize = 120.0;
+            d.renderer.set_threads(threads);
+            // The frame that reads message 1 (the same frame with and without its explosion).
+            loop {
+                let image = demo_frame(&mut d, 1.0 / 72.0, false, &VID).image;
+                if d.idx == 1 {
+                    return (image.pixels.clone(), d.view.dlights.len());
+                }
+            }
+        };
+        let (without, lights) = first_lit_frame(false, 1);
+        assert_eq!(lights, 0);
+        let (one, lights) = first_lit_frame(true, 1);
+        assert_eq!(lights, 1);
+        assert_ne!(one, without, "the explosion's light is in the frame");
+        let (four, _) = first_lit_frame(true, 4);
+        assert_eq!(one, four, "the same pixels on four threads");
+    }
+
     /// The recorded explosion lights timedemo's frames too (each message is
     /// its frame's), and the playback starting over clears the pool, as
     /// `CL_ClearState` does.
