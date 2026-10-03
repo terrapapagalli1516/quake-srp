@@ -204,14 +204,14 @@ shown through each frame (the cshifts, then gamma: the renderer's
 - **WebGL2** (on a GPU): the page asks for `INDEXED8` (`PRESENT`). The
   frame goes up as an `R8UI` texture and the palette as a 256×1 `RGBA8`
   one, straight from the shared view where the browser takes one (Chromium
-  does; else through one copy into a staging buffer, the smallest copy that
+  does, and Firefox 155; else through one copy into a staging buffer, the smallest copy that
   works: a byte a pixel, 0.06 / 0.25 / 0.56 ms at 1280×800 / 1440p / 4K
   here, the upload after it no slower), and a fragment shader draws each pixel as
   `texelFetch(palette, texelFetch(frame, p).r)` — exact integers, no
   filtering, blending, dithering or colour conversion, so the canvas holds
   exactly the RGBA the program's own pack would. No RGBA pack runs in the
   program, and a palette shift costs 1 KB.
-- **2-D canvas** (no WebGL2 — headless Firefox —, a WebGL2 drawn by the CPU,
+- **2-D canvas** (no WebGL2 — a headless Firefox with no display to ask —, a WebGL2 drawn by the CPU,
   or `?canvas2d`): the page asks for `RGBA8`; the program packs its frame
   through the palette on the renderer's threads (`render::pack_rgba`, one
   4-byte store a pixel), and the page copies it into an `ImageData` for
@@ -234,8 +234,12 @@ frame (the `frame_hash` call) in the attract demo, the live walk, the Quad's
 cshift, underwater (the warp and the water's shift), the menu's fade, the
 console and at gamma 0.7, with WebGL2 (the shared views and the staging
 copy, and after a lost and restored context) and with the 2-D canvas: equal
-everywhere, in headless Chromium (SwiftShader and the GPU) and Firefox (the
-2-D canvas; its headless build has no WebGL2). Natively, `quaketool play
+everywhere, in headless Chromium (SwiftShader and the GPU) and Firefox 155
+(WebGL2 on the GPU, taking the shared views: no staging copy was needed; and
+the 2-D canvas). A headless Firefox has WebGL2 only when it has a display to
+ask (`DISPLAY` set, here the Wayland compositor's X11 layer and the integrated GPU; with none it says
+`AllowWebgl2:false` and the page takes the 2-D canvas), so the checks run
+both ways. Natively, `quaketool play
 --hash-every` over 28 runs (seven workloads at three Classic sizes, the
 Quad's shift among them; 1080p modern on 8 threads; 1440p with the scaled
 2-D layer) prints the same hashes as before the renderer went 8-bit
@@ -694,9 +698,11 @@ it means, as id's `Key_Event`, `IN_MouseMove` and the joystick code do.
   showed the stuck W before, and nothing left held after in 15 cases (Esc
   windowed and held in fullscreen, fullscreen without Keyboard Lock, the
   focus to another window with Alt or the fire button held, a click
-  elsewhere, Alt+Enter both ways, F11, a new tab). Not tried: Firefox,
-  Safari, macOS, Windows, a real Alt-Tab (XTEST's keys never reach the Wayland compositor
-  there; another window was activated instead).
+  elsewhere, Alt+Enter both ways, F11, a new tab); a headed Firefox 155
+  (2026-10-03, as in "Fullscreen") left nothing held in the one case tried:
+  W held through the Esc that ends the lock and fullscreen together. Not
+  tried: Safari, macOS, Windows, a real Alt-Tab (XTEST's keys never reach
+  the Wayland compositor there; another window was activated instead).
 - **The F-keys.** `default.cfg`'s shortcuts (F1 help, F2/F3 the Save/Load
   screen, F4 Options, F6/F9 quicksave/quickload, F10 quit, F12 a screenshot)
   reach the game as ordinary `KEY` records like any other key; the page's
@@ -758,16 +764,24 @@ it means, as id's `Key_Event`, `IN_MouseMove` and the joystick code do.
      3 × its `deltaY` is that many notches, however close the next comes:
      a Mac's 72 px notches 29 and 51 ms apart, which the second rule
      made one switch, are two. (Chromium's DevTools give every synthesized
-     wheel event one such notch, `input_handler.cc`.)
+     wheel event one such notch, `input_handler.cc`.) Firefox's events are
+     lines (`deltaMode` 1) with the same count in `wheelDeltaY`, so rule 1
+     takes them too: a notch is 6 lines on Linux (headed Firefox 155 on X11,
+     real wheel clicks through XTEST, 2026-10-03: `deltaY` ±6, `wheelDeltaY`
+     ±120; Chromium's own, on the same desktop, ±120 px), not the 3 the page had
+     assumed, and a Mac's have no ticks (rule 2).
   2. *A lone event.* Else an event more than 100 ms after the last is a
      notch of its own, whatever its size — a mouse's notch comes alone:
      Safari's, and Firefox's on a Mac (`deltaMode` 1, and no ticks:
      `nsCocoaWindow.mm` sets none) — fired at once and counted as a whole
      notch's worth.
   3. *A stream.* Else (a trackpad, a fast spin in Safari) the events
-     accumulate at 100 px a notch — Firefox's notch on Windows and Linux,
-     `deltaMode` 1 with its ticks only in `wheelDeltaY`, is 3 lines — the
-     direction's flip dropping what was carried.
+     accumulate at 100 px a notch — `deltaMode` 1's lines at a third of it
+     — the direction's flip dropping what was carried. (Until 2026-10-03
+     rule 1 read pixel events only, and Firefox's lines went here at 3 a
+     notch: its real 6 counted two notches an event in a spin quicker than
+     100 ms a notch, so 6 clicks switched 11 weapons; now 6, at every gap
+     from 300 ms to none. Chromium's 6 were 6 before.)
   Each event is capped at three notches, so a fast flick or a trackpad's
   fling can't cycle through every weapon. It needs no pointer lock — id's
   own never did — and fires whatever has the keyboard: `Key_Event` routes it
@@ -776,7 +790,8 @@ it means, as id's `Key_Event`, `IN_MouseMove` and the joystick code do.
   wheel, so Classic leaves it unbound, as id's players who bound it
   themselves; 2026 binds a notch up to `impulse 10` (next weapon) and down
   to `impulse 12` (previous). `verify_input.py` (5b) feeds Playwright's
-  notches, a trackpad's burst (`wheelDeltaY` 3 × `deltaY`), Safari-shaped
+  notches, Firefox-shaped ones (6 and 3 lines with their ticks 30 ms apart,
+  and a Mac's lines with none), a trackpad's burst (`wheelDeltaY` 3 × `deltaY`), Safari-shaped
   notches (4, 8 and 12 px 150 ms apart: three; a stream of 6 px; a turn
   back; a 1000 px flick), a Mac's Chrome events (72 px, `wheelDeltaY`
   −120, 29 and 51 ms apart: three, and one back up), two notches in one
@@ -1104,9 +1119,13 @@ there is the button and F11. `vid_altenter` was `vid_fkey`; a
 exists (Chromium: Chrome, Edge, Opera) the page locks Escape (and F12, "The
 F-keys" above) on entering fullscreen: a tapped Esc is the game's, id's
 `togglemenu`, with the mouse still captured; a held Esc is the browser's
-way out. Elsewhere the browser's two steps stand: the first Esc releases
-the mouse (the page opens the menu, "Input"), the next leaves fullscreen.
-The hint on entering says which.
+way out. Elsewhere the browser's own Esc stands. Measured in a headed
+Firefox 155 (below): with the mouse captured one Esc ends the lock and
+fullscreen together, and the page opens the menu (the lock loss, "Input");
+with the mouse free the first Esc only leaves fullscreen and the page gets no
+key, the next opens the menu. Either way the game is windowed, with
+nothing left held when the mouse was captured, and Alt+Enter goes back to
+fullscreen. The hint on entering says what is on offer.
 
 **When the browser says no** — no user activation (a script's call, not a
 key or a click), a frame embedding the page without `allow="fullscreen"`
@@ -1124,8 +1143,16 @@ menu, the console, after a `changelevel`, after the mouse was released and
 captured again, in Classic and with `vid_fkey 1`, F11, and a request
 without activation (`TypeError: Permissions check failed`, reported).
 `verify_extras.py` checks the page's side headless, where Chromium has
-Keyboard Lock but no browser Esc handling. Not tried: Firefox and Safari
-headed, macOS, Windows.
+Keyboard Lock but no browser Esc handling. In a headed Firefox 155
+(2026-10-03, the same recipe, Firefox with no Keyboard Lock API): a real
+click on the canvas takes the lock; Alt+Enter enters fullscreen with the
+lock kept and leaves it with the lock gone and no menu (the page's own
+doing); one Esc in fullscreen with the mouse captured left both at once, opened
+the menu, and a W held through it was not left held (nor after its release);
+a click with the menu up does nothing, the next Esc closes the menu and the
+click after it captures again; Esc in fullscreen with the mouse free only left
+fullscreen, the next opened the menu. F11 did nothing in that Playwright-run
+window (not a finding about Firefox's). Not tried: Safari, macOS, Windows.
 
 ## Quit
 
@@ -1400,8 +1427,13 @@ a page's runs share QuakeC's random stream).
 of 1..4,000,000, a spawned thread answers over a channel, then 200 rounds
 of seven scoped threads reuse the workers) and runs it in the host: it
 passes in headless Chromium and Firefox (a round 25 and 37 µs). The nine
-page checks pass on the threads build as on `wasm32-wasip1`'s (Chromium;
-walk and demo in Firefox too).
+page checks pass on the threads build as on `wasm32-wasip1`'s (Chromium; and
+in Firefox 155 the 16 that take a deploy dir). Firefox on the threads build
+is `crossOriginIsolated` and draws on 16 render threads: `timedemo demo1`
+(Classic) at 1920×1200, one run each, 240 fps on one thread and 577 on 16
+against Chromium's 280 and 773; and `verify_timedemo.py`'s 960×600, headless
+on the 2-D canvas, six runs of each browser interleaved, medians: Chromium
+958 fps, Firefox 821.
 
 ## Measurements
 
@@ -1719,18 +1751,25 @@ run here.
 ## Browser support
 
 The design needs cross-origin isolation (below) for `SharedArrayBuffer`, and
-`Atomics.wait` in a worker. Checked here: headless Chromium (the nine
-checks, `verify_present.py`, `verify_threads.py` and the benchmark) and
-headless Firefox 155 (the nine checks and `verify_present.py` with
-`QUAKE_BROWSER=firefox`, `verify_extras.py` skipping its Keyboard Lock half,
-which Firefox has no API for; `verify_threads.py`); each on both builds.
-WebGL2 is optional: without it the page presents through the 2-D canvas.
-Playwright's WebKit would not start here (missing system
+`Atomics.wait` in a worker. Checked here (2026-10-03): headless Chromium 146
+and headless Firefox 155, each all 18 `verify_*.py` (Firefox:
+`QUAKE_BROWSER=firefox`; "Build, serve, deploy" lists what differs and why),
+`verify_threads.py` in both, the benchmark in Chromium; Firefox's 16
+deploy-dir checks on the threads build with a display for its WebGL2 and
+without, and on `wasm32-wasip1` with one. Headed, on the desktop's Wayland compositor's virtual output with real input
+through XTEST: Chromium 146 (2026-10-02) and Firefox 155 ("Fullscreen",
+"Input"); in Firefox also the wheel, a save across a reload, and the sound's
+start: under
+its strictest autoplay setting (Block Audio and Video: `getAutoplayPolicy`
+says `disallowed` before a gesture) a real click, Enter or Space on the first
+screen leaves the context running a second later, the ring played and no
+underruns. WebGL2 is optional: without it the page presents through the 2-D
+canvas. Playwright's WebKit would not start here (missing system
 libraries). A GPU is checked through headless Chromium (`QUAKE_GPU=1`: the
-local GPU, ANGLE on GL; `verify_present.py` and the benchmark). Not
-checked: Safari, iOS, Firefox's WebGL2 (its headless build has none; its
-refusal of shared views is emulated, `verify_present.py`'s staging copy), a
-GPU driving a real high-refresh display. From the platforms' documentation, not from a
+local GPU, ANGLE on GL; `verify_present.py` and the benchmark) and
+through Firefox with a display (WebGL2 on the same GPU, shared views
+taken). Not checked: Safari, iOS, Firefox on Windows or macOS, a GPU driving a
+real high-refresh display. From the platforms' documentation, not from a
 run: Safari has `SharedArrayBuffer` under COOP/COEP since 15.2 (iOS 15.2),
 with `Atomics.wait` in workers; iOS has no pointer lock, and a phone plays
 with the touch controls ("Touch"). The program's own memory no longer
@@ -1832,6 +1871,32 @@ nothing changed. Pages takes files up to 25 MiB; the pak is 17.8 MiB.
 web/bench.py DEPLOYDIR` and `QUAKE_VERIFY_PORT=… uv run --with playwright
 web/verify_walk.py DEPLOYDIR` take a deploy dir, and `bench.py --build`
 assembles one under `quake-wasm/target/bench-web`.
+
+**Firefox.** `QUAKE_BROWSER=firefox` runs any `verify_*.py` in Playwright's
+Firefox (`isolated.launch`, which also gives it the autoplay preferences
+Chromium takes as a flag; `webkit` does not start here). All 18 pass
+(Firefox 155, 2026-10-03). What differs, each said by the script that
+differs:
+
+- `verify_extras` skips the Keyboard Lock checks, 17 of Chromium's 56: Firefox
+  has no such API (its own no-API half runs).
+- `verify_present` tests WebGL2 only where Firefox has one, and a headless
+  Firefox has one only with a display to ask: set `DISPLAY` (here
+  `env -u WAYLAND_DISPLAY DISPLAY=:0`, the Wayland compositor's X11 layer and the integrated GPU) and the
+  default page is WebGL2, 30 checks; with none the page takes the 2-D canvas
+  and 26 run. Every other check runs on whichever the page picked, so run the
+  suite both ways.
+- `verify_settings` skips its devicePixelRatio 2 section (3 checks): Playwright's
+  Firefox loses a context's `device_scale_factor` on a cross-origin isolated
+  page (a plain page keeps it), which is every page served here.
+- `verify_touch` runs on taps only: 95 checks pass and 7 are skipped, each saying
+  why (the stick, the look drag, two thumbs, FIRE, JUMP, a held menu-pad
+  arrow: Playwright's Firefox touchscreen taps and does nothing else, and has
+  no `isMobile`), at devicePixelRatio 1 (so its "@3" and "@2.6" checks are
+  layout checks at 1).
+- The rest run the same checks with the same counts. `verify_threads` and
+  `verify_audio_resilience` pass in both, and `verify_timedemo` prints Firefox's
+  own rate.
 
 **Natively**, the same program runs on a pipe:
 `cargo run --release -- -basedir <dir with id1/pak0.pak>` reads the records

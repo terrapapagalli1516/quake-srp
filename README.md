@@ -4,8 +4,8 @@
 
 **Play it:** `DEMO-URL` (id's shareware episode, in the browser)
 
-**Browsers:** tested in Chromium (headless and headed), Firefox (headless) and on an Android phone;
-not yet in Safari.
+**Browsers:** tested in Chromium and Firefox (headless and headed) and on an Android phone; not
+yet in Safari. Firefox has no Keyboard Lock, so there one Esc in fullscreen also leaves it.
 
 | Classic | 2026 (the default) |
 |:---:|:---:|
@@ -235,7 +235,9 @@ Beyond Classic:
   gameplay scenarios at high frame rates and compares them with id's 72 Hz.
 - 18 headless-browser checks (`web/verify_*.py`) cover everything from walking and the
   menus to the gamepad, touch, quitting, sound through late frames, and reading back the
-  canvas.
+  canvas. All 18 pass in Chromium and in Firefox (`QUAKE_BROWSER=firefox`; Firefox's touch
+  check runs on taps, and the Keyboard Lock checks are skipped there: `web/PLATFORM.md`,
+  "Build, serve, deploy").
 
 ## Numbers
 

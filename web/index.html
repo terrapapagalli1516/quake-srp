@@ -2544,9 +2544,9 @@ function programBuffer(end) {
 // putImageData. `format` is what the presenter asks the program for.
 
 // A presenter's use of a view on shared memory: straight to the API when it
-// takes one (Chromium's WebGL2 does), else through a copy into `staging`
-// (a browser whose WebGL refuses shared views; not one checked here: headless
-// Firefox has no WebGL2). Returns the time the copy took.
+// takes one (Chromium's WebGL2 does, and Firefox 155's), else through a copy
+// into `staging` (a browser whose WebGL refuses shared views; none checked
+// here refuses). Returns the time the copy took.
 function viaStaging(p, view, use) {
   if (p.sharedOk) {
     try { use(view); return 0; } catch (e) { p.sharedOk = false; console.info('[quake] shared views refused; copying frames:', e.message); }
