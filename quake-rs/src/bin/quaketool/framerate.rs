@@ -490,6 +490,7 @@ const SCENARIOS: &[Scenario] = &[
     Scenario { name: "accel", what: "from rest, forward held, on flat floor; the view bob while running", run: accel },
     Scenario { name: "friction", what: "at full speed, forward let go: the slide to a stop", run: friction },
     Scenario { name: "stairs", what: "running up and down e1m1's first stairs (6 steps of 8 units, then 16)", run: stairs },
+    Scenario { name: "step", what: "the view over a 16-unit step: running up it (id's stair smoothing, 80 u/s) and off it", run: step },
     Scenario { name: "fall", what: "the drop height (feet above floor) that makes the landing sound, and fall damage", run: fall },
     Scenario { name: "swim", what: "e1m4's deep water: sinking idle, swimming down, swimming up", run: swim },
     Scenario { name: "lava", what: "standing waist-deep in e1m7's lava for 5 s", run: lava },
@@ -658,6 +659,60 @@ fn stairs(c: &Ctx) -> Vec<Measure> {
     ]
 }
 
+/// e1m1's last landing on the stairs (origin z 72 standing) and the start
+/// room's floor 16 units above it, the riser between them at y = -304.
+const STEP_FOOT: [f32; 3] = [480.0, -200.0, 72.03125];
+const STEP_TOP: [f32; 3] = [480.0, -340.0, 88.03125];
+
+/// The view over one stair step. The server steps the player up at once
+/// (`SV_WalkMove`); the client's `V_CalcRefdef` lowers the eye by the rise,
+/// at most 12 units, and lifts it back at 80 u/s while the player stands on
+/// the ground (`cl.onground`). `Walk::oldz` is that smoothed height (the
+/// eye less its view offset and bob).
+fn step(c: &Ctx) -> Vec<Measure> {
+    let mut s = c.sim("e1m1");
+    // Up: run south from the landing up the riser.
+    s.place(STEP_FOOT, 270.0);
+    s.w.in_fwd = 1.0;
+    let (mut lag, mut t_step, mut level, mut fastest) = (Series::default(), f64::NAN, f64::NAN, 0.0f64);
+    let (mut z, mut eye) = (s.origin()[2], f64::from(s.w.oldz));
+    s.run_until(1.5, |s| {
+        let (o, e) = (s.origin()[2], f64::from(s.w.oldz));
+        if t_step.is_nan() && o > z + 8.0 {
+            t_step = s.t; // the frame that stepped up
+        } else if !t_step.is_nan() {
+            fastest = fastest.max((e - eye) / s.dt);
+        }
+        if !t_step.is_nan() {
+            lag.push(s.t - t_step, f64::from(o) - e);
+            if level.is_nan() && e >= f64::from(o) {
+                level = s.t - t_step;
+            }
+        }
+        (z, eye) = (o, e);
+        !level.is_nan()
+    });
+    // Down: run north off the riser; id smooths only steps up.
+    s.place(STEP_TOP, 90.0);
+    s.w.in_fwd = 1.0;
+    let mut off = 0.0f32;
+    s.run_until(1.0, |s| {
+        let o = s.origin();
+        off = off.max((o[2] - s.w.oldz).abs());
+        o[1] > STEP_FOOT[1]
+    });
+    // At 72 Hz the eye is a frame's rise (80/72 u) from the straight line at
+    // most; at the frame ends it is on it at every rate.
+    vec![
+        m("eye below the body as it steps", "u", lag.at(0.0), 0.1),
+        m("eye below the body at 0.05 s", "u", lag.at(0.05), 80.0 / 72.0),
+        m("eye below the body at 0.1 s", "u", lag.at(0.1), 80.0 / 72.0),
+        m("eye level again after", "s", level, 1.0 / 72.0),
+        m("eye's fastest rise", "u/s", fastest, 0.5),
+        m("going down: eye off the body, max", "u", f64::from(off), 0.01),
+    ]
+}
+
 /// e1m1's tall room: 440 units clear above the floor (origin z -376 standing).
 const DROP_SPOT: [f32; 3] = [704.0, 2160.0, -375.96875];
 
@@ -761,6 +816,9 @@ fn plat(c: &Ctx) -> Vec<Measure> {
     s.teleport([-544.0, 2656.0, top0 + 24.03125], 0.0);
     let (t0, pz0) = (s.t, s.origin()[2]);
     let (mut lz, mut gap, mut air) = (Series::default(), 0.0f32, 0);
+    // The rider's view: stair smoothing holds the eye up to 12 units under a
+    // rising lift (V_CalcRefdef), so it rises at the lift's speed.
+    let (mut eye, mut fastest) = (f64::NAN, 0.0f64);
     s.run(2.0, |s| {
         let l = s.w.server.vm.ent_get_vector(lift, "origin")[2];
         lz.push(s.t - t0, f64::from(l - lz0));
@@ -768,12 +826,16 @@ fn plat(c: &Ctx) -> Vec<Measure> {
         if !s.on_ground() {
             air += 1;
         }
+        let e = f64::from(s.w.oldz);
+        fastest = fastest.max((e - eye) / s.dt);
+        eye = e;
     });
     let rise = lz.max();
     vec![
         m("lift reaches the top", "s", lz.rises_to(rise - 0.01), 1.0 / 72.0),
         m("rider off the floor, max", "u", f64::from(gap), 0.5),
         m("rider frames airborne", "", f64::from(air), f64::NAN),
+        m("rider's eye: fastest rise", "u/s", fastest, 1.0),
     ]
 }
 
