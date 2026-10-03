@@ -1,12 +1,13 @@
 //! The video settings beyond id's modes: sizes past `MAXWIDTH` x `MAXHEIGHT`,
-//! and a field of view that widens with the display (Hor+).
+//! a field of view that widens with the display (Hor+), and a sky whose
+//! clouds glide at the display's rate.
 //!
 //! id's WinQuake never set a mode larger than 1280x1024 (`r_shared.h`), and
 //! `R_ViewChanged` (`r_main.c`) spreads `fov` over the view's width whatever
 //! its shape, so a wider view shows the same horizontal angle with less above
 //! and below. Both are right for 1996 and both are kept as **Classic**
 //! ([`VideoCvars::CLASSIC`], the default here, which every golden and oracle
-//! run uses). The port's two extras are for 2026 displays:
+//! run uses), with id's sky. The port's three extras are for 2026 displays:
 //!
 //! - [`FovMode::HorPlus`]: `fov` is the horizontal field of view of a 4:3
 //!   screen; a wider screen keeps that screen's VERTICAL field of view and sees
@@ -17,12 +18,19 @@
 //!   proportions at any resolution — particles ([`super::part`]) and the
 //!   underwater warp ([`super::warp`], rendered at full resolution). At 320x200
 //!   both are id's to the pixel.
+//! - [`SkyScroll::Fluid`]: the sky's cloud layer scrolls by its exact offset,
+//!   not id's whole texels ([`super::sky`]). A sky texel that was a pixel at
+//!   320x200 is 6 at 1080p and 11 at 4K, where id's eight one-texel jumps a
+//!   second are a visible lurch; the fluid clouds glide, still in whole texels
+//!   of the sky's own, unfiltered.
 //!
 //! These are cvars in id's sense — settings the platform sets and the
 //! renderer reads each frame, like `d_mipscale` ([`super::MipCvars`]): the
 //! scene hands them in with every frame
 //! ([`RenderOptions::video`](super::RenderOptions::video)), and the client's
 //! [`Vid`](crate::client::Vid) carries them from the platform.
+
+use super::sky::SkyScroll;
 
 /// id's widest and tallest view (`r_shared.h`: `MAXWIDTH` 1280, `MAXHEIGHT`
 /// 1024): `vid_win.c` and `vid_ext.c` offer no larger mode, and the renderer
@@ -111,13 +119,16 @@ pub struct VideoCvars {
     /// Views past id's `MAXWIDTH` x `MAXHEIGHT`, with the resolution-bound
     /// sizes (particles, the underwater warp) at their 320x200 proportions.
     pub hires: bool,
+    /// How the sky's clouds scroll: id's whole texels, or fluid
+    /// (`r_fluidsky`).
+    pub sky: SkyScroll,
 }
 
 impl VideoCvars {
-    /// id's WinQuake: `fov` across the view, at most 1280x1024.
-    pub const CLASSIC: VideoCvars = VideoCvars { fov_mode: FovMode::Classic, hires: false };
-    /// Both extras on: what a 2026 display wants.
-    pub const MODERN: VideoCvars = VideoCvars { fov_mode: FovMode::HorPlus, hires: true };
+    /// id's WinQuake: `fov` across the view, at most 1280x1024, id's sky.
+    pub const CLASSIC: VideoCvars = VideoCvars { fov_mode: FovMode::Classic, hires: false, sky: SkyScroll::Classic };
+    /// Every extra on: what a 2026 display wants.
+    pub const MODERN: VideoCvars = VideoCvars { fov_mode: FovMode::HorPlus, hires: true, sky: SkyScroll::Fluid };
 }
 
 impl VideoCvars {
@@ -208,7 +219,7 @@ mod tests {
             render_once(&Scene { options, ..Scene::new(&bsp, cam, w, h, &pal) })
         };
         let narrow = draw(144, 108, VideoCvars::CLASSIC);
-        let wide = draw(192, 108, VideoCvars { fov_mode: FovMode::HorPlus, hires: false });
+        let wide = draw(192, 108, VideoCvars { fov_mode: FovMode::HorPlus, ..VideoCvars::CLASSIC });
         let classic_wide = draw(192, 108, VideoCvars::CLASSIC);
         let same = |img: &crate::render::Image| {
             (0..108 * 144).filter(|&i| img.pixels[(i / 144) * 192 + 24 + i % 144] == narrow.pixels[i]).count()

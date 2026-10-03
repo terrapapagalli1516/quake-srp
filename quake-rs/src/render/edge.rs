@@ -1873,6 +1873,7 @@ impl EdgeState {
             sky_dome_scale(w, h, frame.scr_fov(), cam.fov_deg),
             opts.sky_centre(w, h),
             frame.scene.time,
+            opts.video.sky,
         );
         let sky_tex = sky_texture(ents[0].bsp);
         let (light_dir, _) = normalize([0.3, 0.5, 1.0]);

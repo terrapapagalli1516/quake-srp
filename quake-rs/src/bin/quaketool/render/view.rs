@@ -36,7 +36,7 @@
 //!                    passes id's `cl_dlights`, in slot order)
 //! --d-mipscale X     the `d_mipscale` cvar (default 1; 0 = every surface at mip 0)
 //! --d-mipcap N       the `d_mipcap` cvar (default 0; the finest mip level allowed)
-//! --video, --fov-mode, --hires  the port's video cvars (`video.rs`; default classic)
+//! --video, --fov-mode, --hires, --sky  the port's video cvars (`video.rs`; default classic)
 //! ```
 //!
 //! The map's entities are still spawned (worldspawn's QuakeC sets the light-style

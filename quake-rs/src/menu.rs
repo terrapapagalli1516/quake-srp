@@ -4210,11 +4210,16 @@ mod tests {
         // shipped, only whether a map past id's 600-edict ceiling spawns
         // at all), so a console cvar
         // (like id's own `sv_gravity`, which also has no menu row) is the
-        // whole interface.
+        // whole interface. And r_fluidsky: the page is full (a 20th row
+        // would leave room for one help line, which the const assert below
+        // forbids), and the fluid sky has no trade to weigh — it is id's
+        // frame at every whole texel and glides between them; Classic turns
+        // it off with the rest, the console alone.
         let pad_layout = |n: &str| n.starts_with("joy") && n != "joystick" && n != "joy_rumble";
         let listed = |c: &&cvar::Cvar| {
             (c.departure && !c.name.starts_with("cl_") && !pad_layout(c.name) || c.name == "cl_jumpswim")
                 && c.name != "sv_max_edicts"
+                && c.name != "r_fluidsky"
         };
         for c in cvar::CVARS.iter().filter(listed) {
             assert_eq!(SETTING_ROWS.iter().filter(|r| r.cvar == c.name).count(), 1, "{}: one row", c.name);

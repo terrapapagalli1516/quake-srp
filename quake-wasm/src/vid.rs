@@ -15,10 +15,13 @@
 //!   square pixels, [`pixel_size`] device pixels to one of the picture's; the
 //!   renderer's `hires` lets it past id's 1280x1024 and Hor+ (`fov_adapt`)
 //!   widens the view instead of squashing it.
+//!
+//! The sky's clouds glide (`r_fluidsky`, [`render::SkyScroll::Fluid`]) or step
+//! as id's do, in either.
 
 use quake_rs::client::Vid;
 use quake_rs::cvar::Cvars;
-use quake_rs::render::{self, FovMode, MipCvars, VideoCvars};
+use quake_rs::render::{self, FovMode, MipCvars, SkyScroll, VideoCvars};
 
 use crate::app::{ensure_app, App, APP};
 
@@ -163,9 +166,10 @@ pub(crate) fn apply_settings(a: &mut App) {
 
 /// The checks' and the benchmark's shorthand for the picture (the
 /// `set_video` call): `modern` is the 2026 profile's — native resolution at
-/// one device pixel a pixel, Hor+ — whose size then follows the window
-/// (`set_window`); `classic` a video mode in the 4:3 box with id's field of
-/// view. Returns 1 for a known name.
+/// one device pixel a pixel, Hor+, the fluid sky: `quaketool --video modern`
+/// — whose size then follows the window (`set_window`); `classic` a video
+/// mode in the 4:3 box with id's field of view and sky. Returns 1 for a known
+/// name.
 pub(crate) fn set_video(name: &str) -> i32 {
     let modern = match name.trim() {
         "classic" => false,
@@ -175,6 +179,7 @@ pub(crate) fn set_video(name: &str) -> i32 {
     ensure_app(|a| {
         let c = &mut a.settings.cvars;
         (c.native, c.fov_adapt) = (modern, modern);
+        c.sky = if modern { SkyScroll::Fluid } else { SkyScroll::Classic };
         if modern {
             c.pixel_size = 1;
         }
@@ -238,7 +243,7 @@ pub(crate) fn vid(a: &App) -> Vid {
         height: h,
         display_aspect,
         exact_perspective: c.exact_persp,
-        video: VideoCvars { fov_mode, hires: native },
+        video: VideoCvars { fov_mode, hires: native, sky: c.sky },
         mip: MipCvars { mipscale: c.d_mipscale, mipcap: c.d_mipcap },
     }
 }
@@ -312,6 +317,24 @@ mod tests {
         c.native = false;
         assert_eq!(picture_size(&c, Some((1920, 1080)), 1.0, 1), (960, 600), "the mode");
         assert_eq!((auto_pixel_budget(0), auto_pixel_budget(3), auto_pixel_budget(4)), (AUTO_PIXEL_BUDGET, AUTO_PIXEL_BUDGET, 2 * AUTO_PIXEL_BUDGET));
+    }
+
+    /// The renderer's sky follows `r_fluidsky`: off in Classic, on in 2026,
+    /// and `set_video`'s `modern` is `quaketool --video modern`'s, the fluid
+    /// sky with the rest.
+    #[test]
+    fn the_sky_follows_r_fluidsky() {
+        let sky = || APP.with(|c| vid(c.borrow().as_ref().unwrap()).video.sky);
+        assert_eq!(boot(), 1);
+        assert_eq!(sky(), SkyScroll::Classic, "the tests start in Classic");
+        use_2026();
+        assert_eq!(sky(), SkyScroll::Fluid);
+        crate::host_cmd::execute_console_command("r_fluidsky 0");
+        assert_eq!(sky(), SkyScroll::Classic);
+        assert_eq!(set_video("modern"), 1);
+        assert_eq!(sky(), SkyScroll::Fluid);
+        assert_eq!(set_video("classic"), 1);
+        assert_eq!(sky(), SkyScroll::Classic);
     }
 
     /// A phone's small, dense screen starts Auto at 2x2 whatever its threads;
