@@ -770,15 +770,16 @@ id's x86 renderer finds a wall's texel exactly every 16 pixels and steps
 affinely in between (`D_DrawSpans16`; `Turbulent8` on liquids). The user
 turned exact perspective on in the 2026 profile (`fleet/exactpersp`: at 1080p
 and above they see the affine steps as a wobble along a wall seen at a grazing
-angle), and then asked for the steps between: `r_perspspan 16|8|4|1`, the
-Picture and sound page's Perspective span row (`id's 16`, `8`, `4`, `exact`,
-left and right). Classic is 16; 2026 stays exact (1) until they have tried the
-four. The old `wasm_exactpersp` is a view onto it: `1` sets exact, `0` id's
+angle), and then asked for the steps between, and then for longer ones
+("better for performance? a retro look?"): `r_perspspan 64|32|16|8|4|1`, the
+Picture and sound page's Perspective span row (`64`, `32`, `id's 16`, `8`,
+`4`, `exact`; right is the finer). Classic is 16; 2026 stays exact (1) until
+they have tried them. The old `wasm_exactpersp` is a view onto it: `1` sets exact, `0` id's
 16, and it reads 1 only while the span is 1; nothing writes it any more, so
 a saved `wasm_exactpersp "1"` (a Classic player who switched it on) draws
 exact perspective as before and the next save writes `r_perspspan "1"`.
 
-**The four.** 16 is `D_DrawSpans16` (d_draw16.s), what 1996 players saw,
+**The six.** 16 is `D_DrawSpans16` (d_draw16.s), what 1996 players saw,
 Classic's pixels unchanged. 8 is id's own portable C, `D_DrawSpans8`
 (d_scan.c), ported as written; beyond the count it differs from the asm in
 1/65536ths of a texel: a full segment's step is floored to 16.16 (`>> 3`)
@@ -788,10 +789,18 @@ are clamped to 8/65536 where the asm clamps to 1/16 texel. Against id's C
 (`compare.py --spans 8 --perspspan 8`, the oracle running `D_DrawSpans8`) the
 eight standard rows are 100.00% at the page's aspect (the port's 16 against
 them: 91.97-97.43%) and 99.97-99.99% at 640x480 and 1280x1024, the float
-residue 16 has against `--spans 16`. 4 is the same arithmetic at 4 (its
-clamp, 4/65536, still keeps every position inside the surface). 1 is the
-exact path, its pixels unchanged. Liquids take `Turbulent8`'s arithmetic at
-the same length (at 8 and 4 not id's: `Turbulent8` is 16 in both id builds).
+residue 16 has against `--spans 16`. 4, 32 and 64 are the same arithmetic at
+their length: the C's form, because it is id's pattern for any power of two
+(`>> 3` and the guard of 8 are its only 8s), where the asm is tied to 16 by
+`reciprocal_table_16` and its 20-bit carry. At 64 it still holds: the ends
+are clamped into `[64, bbextents]`, the floored step loses under 63/65536
+texel by a segment's end, the guard keeps every position at least `i/64`
+above the surface's edge, and the positions are `i64` (a fuzz puts all four
+against a literal transcription of id's C, 2,000,000 random spans and
+100,000 in a debug build with overflow checks: the same pixels, no read off
+the block). 1 is the exact path, its pixels unchanged. Liquids take
+`Turbulent8`'s arithmetic at the same length (at 64, 32, 8 and 4 not id's:
+`Turbulent8` is 16 in both id builds).
 16 and 1 are proven the same pixels as before by 66 hashes (eight maps'
 views at 1920x1080 and 1315x535 in Classic and in 2026 at 16 and 1; `shot`s
 with the status bar overlay, under water, slime and lava; `play` frames of
@@ -800,105 +809,206 @@ demo1 and the e1m1 walk).
 **What changes.** The affine error of a run grows as the square of its
 length: on a steep test wall (`raster`'s
 `the_error_against_exact_shrinks_with_the_square_of_the_span`) the texel is
-off by 2.97 texels on average at 16, 0.77 at 8, 0.19 at 4. In a frame that
-is a share of pixels a texel off, and the share falls a little slower than
-the error (a pixel only changes where the error crosses a texel's edge): at
-1920x1080 of the frame's pixels differ from exact at 16 / 8 / 4
+off by 31.1 texels on average at 64, 10.3 at 32, 2.97 at 16, 0.77 at 8,
+0.19 at 4 (64 falls short of four times 32's: its segment is half that
+128-pixel row). In a frame that is a share of pixels a texel off, and the
+share falls a little slower than the error (a pixel only changes where the
+error crosses a texel's edge): of the frame's pixels differ from exact
 
-| view (`quaketool view ... --res 1920x1080 --video modern --perspspan N`) | 16 | 8 | 4 |
-|---|---|---|---|
-| e1m6's long corridor, `--origin 504,500,242 --angles 0,100,0` | 3.69% | 1.27% | 0.40% |
-| the same at 1315x535 | 6.58% | 2.52% | 0.86% |
-| e1m6's courtyard, `--origin 204,-100,220 --angles 0,100,0` | 4.94% | 1.54% | 0.44% |
-| e1m1's start, `--origin 480,-352,110 --angles 0,90,0` | 0.78% | 0.46% | 0.21% |
-| e1m4's lake from above, `--origin 320,1284,950 --angles 35,0,0` | 0.19% | 0.05% | 0.02% |
+| view (`quaketool view ... --res 1920x1080 --video modern --perspspan N`) | 64 | 32 | 16 | 8 | 4 |
+|---|---|---|---|---|---|
+| e1m6's long corridor, `--origin 504,500,242 --angles 0,100,0` | 22.2% | 10.4% | 3.69% | 1.27% | 0.40% |
+| the same at 1315x535 | 32.7% | 16.0% | 6.58% | 2.52% | 0.86% |
+| e1m6's courtyard, `--origin 204,-100,220 --angles 0,100,0` | 16.6% | 10.3% | 4.94% | 1.54% | 0.44% |
+| the same at 1315x535 | 18.1% | 11.0% | 6.41% | 3.05% | 0.87% |
+| e1m1's start, `--origin 480,-352,110 --angles 0,90,0` | 6.31% | 2.24% | 0.78% | 0.46% | 0.21% |
+| e1m4's lake from above, `--origin 320,1284,950 --angles 35,0,0` | 2.15% | 0.67% | 0.19% | 0.05% | 0.02% |
 
 Floors and ceilings hardly change at all: with the view level (no roll) a
 row of the screen crosses a floor at one depth, so an affine run along it is
-exact (e1m6's corridor floor, 0.40 / 0.11 / 0.02% of a crop of it, the same
-with the strafe's 2-degree roll). It is the walls, whose depth changes along
-the row, and most where they are seen at a grazing angle. A lake seen from
-above is a floor too: it costs the most to draw exactly and changes least.
+exact (e1m6's corridor floor, 0.40 / 0.11 / 0.02% of a crop of it at 16 / 8
+/ 4, the same with the strafe's 2-degree roll). It is the walls, whose depth
+changes along the row, and most where they are seen at a grazing angle. A
+lake seen from above is a floor too: it costs the most to draw exactly and
+changes least.
 
-**What it looks like.** Stills, each pixel 2x2 or 4x4, the four as a grid
-(16, 8 / 4, exact): `screenshots/perspspan-wall-2x.png` (e1m6's corridor,
-the left wall near the far end, 1080p crop at (400, 100)),
-`perspspan-wall-grazing-4x.png` (the courtyard's tower, its grazing right
-face, crop at (1220, 200)) and `perspspan-floor-2x.png` (the corridor floor);
+**The proportion: which span was 1996's.** What the eye takes in is how far
+a texel is off, at a given size on the screen, and that goes with the square
+of the angle a segment spans, not of its pixels. id's 16 pixels at 320x200
+were a twentieth of a 90-degree view's width (320 columns on a 4:3 monitor):
+16 x 2/320 = 0.1 in tangent units at the centre. At the same field of view a
+frame W wide has the same segment at 16 x W/320 pixels: 32 at 640x400, 64 at
+1280x800. But 2026's picture is Hor+: a wide frame keeps a 4:3 screen's
+vertical view (tan 0.75 each way) and shows more at the sides, so its extra
+columns are more world, not finer detail; per pixel its angle is 1.5/H, H
+the frame's height, and 1996's segment is 16 x H/240 = H/15 pixels: about
+36 on a wide 1315x535 frame (its 1315 columns span 123 degrees), 72 at
+1920x1080, 48 in a 1280x800 window. (16 x W/320 would say 66 and 96: right
+for a 4:3 frame, twice too long for these.) So in the wide frame 32 is 1996's
+look, at 1080p 64; and 16 looks clean at 1080p because its segment spans a
+fifth of 1996's angle (in the wide frame, about half).
+
+Measured, the share of pixels off exact over ten views (the eight shareware
+starts, e1m6's corridor and courtyard), the 2026 frames' central 4:3 (713x535
+and 1440x1080: the picture a 320x200 frame shows):
+
+| frame | span | pixels off exact, mean (median) |
+|---|---|---|
+| 320x200 on a 4:3 monitor (1996) | 16 | 8.87% (5.88%) |
+| a wide 1315x535 frame | 16 / 32 / 64 | 4.31% (2.84%) / 9.65% (7.91%) / 17.0% (13.3%) |
+| 1920x1080 | 16 / 32 / 64 | 2.06% (1.21%) / 5.30% (4.07%) / 10.9% (9.46%) |
+| the same picture at every size (square pixels, id's view): 320x200 / 640x400 / 1280x800 | 16 / 32 / 64 | 9.61% / 11.5% / 12.8% |
+| the same, id's 16 at each size | 16 | 9.61% / 5.45% / 2.38% |
+
+The proportional span lands near 1996's share, a little over it: at a larger
+frame the far walls are drawn from finer mip levels (at 320x200 a distant
+wall reads mip 2 or 3, texels four to eight times coarser), so the same
+angular error moves finer texels and touches more pixels. That is also why
+the share at id's 16 falls about by half per doubling of the size, not to a
+quarter: on the finer mips the error in the texels shown falls only as
+span squared over width. In stills, `screenshots/perspspan-1996-vs-phone.png`
+puts the corridor at 320x200 with id's 16 (blown up to a wide frame's central
+713x535) beside the wide 2026 frame at 32, 64 and exact: 1996's mortar lines bend at
+the far end of the corridor much as the wide frame's do at 32 (28.1% and 26.3% of
+those pixels off exact); at 64 the bends are larger (45.6%).
+
+**What it looks like.** Stills, each pixel 2x2 or 4x4, as grids:
+`screenshots/perspspan-wall-2x.png` (16, 8 / 4, exact: e1m6's corridor, the
+left wall near the far end, 1080p crop at (400, 100)),
+`perspspan-wall-grazing-4x.png` (16, 8 / 4, exact: the courtyard's tower,
+its grazing right face, crop at (1220, 200)), `perspspan-floor-2x.png` (the
+corridor floor), `perspspan-wall-long-1080-2x.png` (64, 32 / 16, exact: the
+first's crop) and `perspspan-wall-long-phone-2x.png` (64, 32 / 16, exact:
+a wide 1315x535 frame, crop at (440, 60), each pixel 2x2 as at pixel size 2);
 `exactpersp-spans-above-exact-below.png` is `fleet/exactpersp`'s, 16 above
-exact below in the courtyard.
-At 16 the mortar lines along the grazing wall are broken into straight
-pieces with a jog every 16 pixels; at 8 they are nearly straight with a
-one-pixel jog here and there; at 4 I cannot tell them from exact at 2x or
-4x. The floor looks the same at all four.
+exact below in the courtyard. At 64 the mortar lines along the grazing wall
+are bent into arcs, a chord every 64 pixels, the far end of the wall visibly
+warped; at 32 the arcs are shallower, a bend where each meets the next; at
+16 the lines are broken into straight pieces with a jog every 16 pixels; at
+8 they are nearly straight with a one-pixel jog here and there; at 4 I
+cannot tell them from exact at 2x or 4x. The floor looks the same at all of
+them. In the wide frame everything is the same at a larger scale: 64 a
+third of the wall's pixels off, the warp plain at that size; 32 the
+bends that 1996 had.
 
-And in motion, a clip: `quaketool framerate <pak> --perspspan --dump DIR
---rates 60 --res 1920x1080 --secs 10 --view corridor=e1m6:504,500,220:100
---turn -1.5` (a slow turn to the right in e1m6's corridor, 60 fps, the torches
-flickering as in 2026), the four 960x540 crops of the left wall as a 2x2
-grid (16, 8 / 4, exact) through ffmpeg's `xstack`. Every span's run is the
-same game frame for frame, so the four differ only by the span. I could not
-watch it at speed; I looked at its frames, at runs of consecutive frames and
-at a space-time slice of one row, and measured how much of the error moves
-from one frame to the next. At 16, 4.3% of the wall's pixels are off exact
-in a frame and 7.7% change between right and wrong from one frame to the
-next: the error does not stay put, it slides through the texture with the
+And in motion, three clips of the same slow turn: `quaketool framerate <pak>
+--perspspan --spans S,... --dump DIR --rates 60 --res WxH --secs 10 --view
+corridor=e1m6:504,500,220:100 --turn -1.5 [--crop 0,100,960,540]` (a slow
+turn to the right in e1m6's corridor, 60 fps, the torches flickering as in
+2026), as a grid through ffmpeg's `xstack`: the 1080p left wall at 16, 8 /
+4, exact (960x540 crops); the same at all six (64, 32 / 16, 8 / 4, exact);
+and the whole wide 1315x535 frame at 64, 32 / 16, exact (18 MB, for a
+phone). Every span's run is the same game frame for frame, so they differ
+only by the span. I could not watch them at speed; I looked at their frames,
+at runs of consecutive frames and at a space-time slice of one row, and
+measured how much of the error moves from one frame to the next:
+
+| left wall, in a frame / changing frame to frame | 64 | 32 | 16 | 8 | 4 |
+|---|---|---|---|---|---|
+| 1920x1080, the 960x540 crop | 30.2% / 15.8% | 13.9% / 14.8% | 4.3% / 7.7% | 1.2% / 2.2% | 0.4% / 0.6% |
+| 1315x535, its left 600 columns | 34.5% / 10.2% | 17.6% / 11.0% | 7.5% / 8.6% | | |
+
+At 16 the error does not stay put: it slides through the texture with the
 turn, so the mortar lines' jogs crawl along them, the wobble the user
-describes. At 8 that is 1.2% and 2.2% (a few short jogs crawling, a quarter
-as many); at 4, 0.4% and 0.6%, scattered single pixels I did not find in the
-frames I looked at without the difference map. Whether 4 or 8 is still
-perceptible at speed I do not know; the user's eye decides.
+describes; at 8 a quarter as much; at 4 scattered single pixels I did not
+find in the frames I looked at without the difference map. At 32 and 64
+the error is larger than what moves: a third of the wall at 64 is a texel
+or more off at any moment, the arcs travelling along the lines as the wall
+turns past them, a slow warping more than a shimmer. Whether a given span
+is perceptible at speed I do not know; the user's eye decides.
 
-**The cost.** `quaketool framerate <pak> --perspspan --rates 240 --res WxH
---threads 1|8 --reps 5 --secs 3`: the live game with the camera held at each
-view (`PERSP_VIEWS`, the player floating), the 2026 video settings with the
-torches flickering, the four spans interleaved, the 3-D view's median ms a
-frame, native release build, 2026-10-03, load 1-3:
+**The cost.** `quaketool framerate <pak> --perspspan --spans 16,64,32,8,4,1
+--rates 240 --res WxH --threads 1|8 --reps 4 --secs 3`: the live game with
+the camera held at each view (`PERSP_VIEWS`, the player floating), the 2026
+video settings with the torches flickering, the six spans interleaved, the
+3-D view's median ms a frame (2,876 frames each), native release build,
+2026-10-03, each table taken under the fleet's measurement lock (`with.sh
+measure`) with other agents' low-priority work still running (load
+3-7). (`fleet/perspspan`'s first table for 16, 8, 4 and 1, at load 1-3 and
+before the lock, is in this file's history; its proportions are these.)
 
-| view | 1920x1080, 1 thread: 16 / 8 / 4 / 1 | 1920x1080, 8 threads | 1315x535, 1 thread | 1315x535, 8 threads |
-|---|---|---|---|---|
-| e1m1's start | 2.94 / 3.31 (+13%) / 3.86 (+31%) / 5.18 (+76%) | 1.01 / 1.08 (+7%) / 1.17 (+16%) / 1.35 (+33%) | 1.13 / 1.26 (+11%) / 1.43 (+27%) / 1.85 (+63%) | 0.56 / 0.58 (+3%) / 0.62 (+11%) / 0.69 (+22%) |
-| e1m1's corridor | 2.76 / 3.11 (+13%) / 3.65 (+32%) / 4.95 (+79%) | 0.96 / 1.01 (+6%) / 1.09 (+14%) / 1.28 (+33%) | 1.10 / 1.21 (+10%) / 1.38 (+26%) / 1.80 (+64%) | 0.53 / 0.54 (+3%) / 0.59 (+12%) / 0.65 (+24%) |
-| e1m6's courtyard walls | 2.80 / 3.15 (+13%) / 3.68 (+31%) / 4.98 (+78%) | 0.96 / 1.01 (+5%) / 1.08 (+13%) / 1.27 (+32%) | 1.06 / 1.18 (+11%) / 1.34 (+27%) / 1.77 (+67%) | 0.48 / 0.51 (+5%) / 0.56 (+17%) / 0.62 (+30%) |
-| e1m4's lake, from above | 4.02 / 4.37 (+9%) / 5.10 (+27%) / 7.78 (+93%) | 1.14 / 1.18 (+4%) / 1.29 (+13%) / 1.68 (+48%) | 1.56 / 1.67 (+7%) / 1.91 (+23%) / 2.72 (+75%) | 0.67 / 0.69 (+3%) / 0.73 (+9%) / 0.85 (+28%) |
+| 3-D view, 1920x1080, 1 thread, ms | 64 | 32 | 16 | 8 | 4 | exact |
+|---|---|---|---|---|---|---|
+| e1m1's start | 2.99 (-12%) | 3.13 (-7%) | 3.39 | 3.75 (+11%) | 4.26 (+26%) | 5.80 (+71%) |
+| e1m1's corridor | 2.67 (-15%) | 2.84 (-10%) | 3.16 | 3.39 (+7%) | 4.04 (+28%) | 5.80 (+84%) |
+| e1m6's courtyard walls | 2.52 (-17%) | 2.81 (-7%) | 3.03 | 3.37 (+11%) | 3.88 (+28%) | 5.35 (+76%) |
+| e1m4's lake, from above | 3.61 (-14%) | 3.80 (-9%) | 4.19 | 4.58 (+9%) | 5.40 (+29%) | 8.21 (+96%) |
+
+| 3-D view, 1920x1080, 8 threads, ms | 64 | 32 | 16 | 8 | 4 | exact |
+|---|---|---|---|---|---|---|
+| e1m1's start | 0.96 (-6%) | 1.07 (+4%) | 1.03 | 1.18 (+15%) | 1.33 (+30%) | 1.73 (+69%) |
+| e1m1's corridor | 1.05 (-4%) | 1.05 (-4%) | 1.10 | 1.17 (+6%) | 1.25 (+14%) | 1.57 (+42%) |
+| e1m6's courtyard walls | 1.02 (-5%) | 1.04 (-3%) | 1.07 | 1.17 (+9%) | 1.23 (+15%) | 1.54 (+43%) |
+| e1m4's lake, from above | 1.24 (-4%) | 1.26 (-3%) | 1.29 | 1.36 (+5%) | 1.48 (+15%) | 2.14 (+66%) |
+
+| 3-D view, 1315x535, 1 thread, ms | 64 | 32 | 16 | 8 | 4 | exact |
+|---|---|---|---|---|---|---|
+| e1m1's start | 1.03 (-11%) | 1.12 (-4%) | 1.17 | 1.28 (+10%) | 1.44 (+23%) | 1.90 (+63%) |
+| e1m1's corridor | 1.01 (-10%) | 1.09 (-2%) | 1.12 | 1.26 (+12%) | 1.42 (+27%) | 1.88 (+67%) |
+| e1m6's courtyard walls | 0.95 (-12%) | 1.05 (-4%) | 1.09 | 1.22 (+12%) | 1.37 (+26%) | 1.83 (+68%) |
+| e1m4's lake, from above | 1.43 (-9%) | 1.50 (-5%) | 1.57 | 1.73 (+10%) | 1.91 (+21%) | 2.79 (+78%) |
+
+| 3-D view, 1315x535, 8 threads, ms | 64 | 32 | 16 | 8 | 4 | exact |
+|---|---|---|---|---|---|---|
+| e1m1's start | 0.55 (-3%) | 0.56 (-1%) | 0.57 | 0.58 (+3%) | 0.62 (+9%) | 0.70 (+23%) |
+| e1m1's corridor | 0.59 (-2%) | 0.60 (-0%) | 0.60 | 0.63 (+6%) | 0.66 (+11%) | 0.77 (+29%) |
+| e1m6's courtyard walls | 0.56 (-2%) | 0.56 (-1%) | 0.57 | 0.60 (+5%) | 0.62 (+9%) | 0.73 (+28%) |
+| e1m4's lake, from above | 0.75 (-3%) | 0.76 (-2%) | 0.77 | 0.86 (+12%) | 0.80 (+4%) | 1.04 (+35%) |
+
 
 `timedemo demo1` (`quaketool timedemo <pak> demo1 --video modern --display
 square --res WxH --threads N --perspspan S --profile 1`: the whole host frame
-with its RGBA pack, five runs of each interleaved, the median) and the same
-in the browser (`timedemo demo1` from the console of a `?2026` page with a
-1920x1080 frame, `vid_pixelsize 1`, its status bar corners drawn; headless
-Chromium, the threads build, `r_threads 8`, three runs of each interleaved):
+with its RGBA pack, four runs of each interleaved, the median, under the
+lock; a cell's runs still spread by up to a fifth, 4's most: the 3-D view's
+tables are the better measure of a span) and the same in the browser
+(`timedemo demo1` from the console of a `?2026` page with a 1920x1080 frame,
+`vid_pixelsize 1`, its status bar corners drawn; headless Chromium, the
+threads build, `r_threads 8`, four runs of each in a fresh page each round,
+under the lock):
 
-| demo1, ms a frame (fps) | 16 | 8 | 4 | 1 (exact) |
-|---|---|---|---|---|
-| native 1920x1080, 1 thread | 4.70 (213) | 5.05 (198), +8% | 5.57 (180), +18% | 7.01 (143), +49% |
-| native 1920x1080, 8 threads | 1.57 (637) | 1.63 (614), +4% | 1.72 (581), +10% | 1.96 (509), +25% |
-| native 1315x535, 1 thread | 2.10 (476) | 2.22 (450), +6% | 2.39 (418), +14% | 2.83 (353), +35% |
-| native 1315x535, 8 threads | 1.02 (981) | 1.04 (961), +2% | 1.07 (935), +5% | 1.19 (841), +17% |
-| browser 1920x1080, 8 threads | 2.44 (410) | 2.56 (391), +5% | 2.66 (376), +9% | 3.00 (333), +23% |
+| demo1, ms a frame (fps) | 64 | 32 | 16 | 8 | 4 | exact |
+|---|---|---|---|---|---|---|
+| native 1920x1080, 1 thread | 4.95 (202), -5% | 5.25 (190), +1% | 5.21 (192) | 5.53 (181), +6% | 6.74 (148), +29% | 7.96 (126), +53% |
+| native 1920x1080, 8 threads | 1.73 (579), -2% | 1.75 (570), -1% | 1.77 (565) | 2.01 (496), +14% | 1.98 (506), +12% | 2.34 (428), +32% |
+| native 1315x535, 1 thread | 2.22 (450), -1% | 2.26 (442), +1% | 2.24 (446) | 2.43 (412), +8% | 2.54 (393), +13% | 3.04 (329), +35% |
+| native 1315x535, 8 threads | 1.07 (938), -4% | 1.07 (938), -4% | 1.11 (903) | 1.29 (777), +16% | 1.31 (766), +18% | 1.29 (776), +16% |
+| browser 1920x1080, 8 threads | 2.80 (358), -9% | 2.91 (344), -6% | 3.08 (324) | 3.22 (310), +5% | 3.19 (314), +3% | 3.60 (278), +17% |
 
-In plain words: on the walls 8 costs about an eighth more than id's 16 on one
-thread, 4 about a third more, exact three quarters more; so 8 buys back
-five sixths of exact's extra cost and 4 about three fifths. A whole demo1
-frame at 1080p on one thread: +8%, +18%, +49%; on eight threads and in the
-browser about half of that. Liquids are where exact costs most (+93%
-on the lake) and 4 saves most (+27%).
 
-These are a faster 16 than `fleet/exactpersp` measured (its tables are in
-this file's history: 16 → exact +45-49% for the walls): the span
-loops' full segments are now loops of a constant length the compiler
-unrolls (`raster::span16_cached`, `span_c_cached`, `turb_span`; the last
-segment's C division a match of constant divisors). That made 16's walls
-16% faster for the 3-D view (main against this branch in one sitting, 1080p,
-one thread: 3.29-3.42 → 2.75-2.89 ms; demo1 5.21 → 4.64 ms) and left exact's
-where it was (4.89-5.03 → 4.92-5.08 ms; demo1 6.96 → 6.93), so exact's
-relative cost reads higher here (+76-79%). It
-mattered most for 8 and 4: written as id's loops, with a variable trip count,
-8 cost nearly what exact did (on a 1900-pixel oblique span, ns a pixel: 16
-1.25 → 0.91, 8 1.92 → 1.04, 4 1.96 → 1.37, exact 1.87; on a liquid 16 1.76 →
-1.71, 8 2.30 → 1.85, 4 3.37 → 2.09, exact 3.7). What is left is the
-arithmetic: a double-precision divide every N pixels, two saturating float
-to integer conversions, and the pixel loop.
+And on an Android phone, at its 2640x1080, 8 threads,
+`timedemo demo1` (opt-phone's runs, from a scratch directory: `
+phone/D-span-cool-fullscreen.log` cool and `F-span-warm-fullscreen.log` warm,
+the phone throttling): 16 182 / about 85 fps, 8 175 / 81, 4 174 / 78, exact
+152 / 69 (64 and 32 not measured there).
+
+In plain words: 64 and 32 are faster than 16, but not by much. The 3-D view
+on one thread is 9-17% (64) and 2-10% (32) quicker, on eight threads
+2-6% and 0-4%; a whole demo1 frame 1-5% natively, 6-9% in the browser. The
+divide was already one pixel in sixteen; what is left is the pixel loop
+(find the texel, fetch it, store it), which every span pays at every pixel:
+on a long oblique span the walls cost 0.68 ns a pixel at 64, 0.82 at 32,
+0.99 at 16, 1.14 at 8, 1.36 at 4 and 2.10 exact; the liquids 1.40, 1.52,
+1.76, 1.91, 2.20 and 3.88 (a micro benchmark). The other way, 8 costs a
+tenth more than 16 for the 3-D view on one thread, 4 about a quarter more,
+exact three quarters (a lake almost double); on eight threads about half of
+that. Liquids are where exact costs most and the spans save most.
+
+The span loops' full segments are loops of a constant length the compiler
+unrolls (`raster::span16_cached`, `span_c_cached`, `turb_span`). That made
+16's walls 16% faster for the 3-D view (`fleet/perspspan`'s first round:
+main against the branch in one sitting, 1080p, one thread, 3.29-3.42 →
+2.75-2.89 ms; demo1 5.21 → 4.64 ms) and left exact's where it was (4.89-5.03
+→ 4.92-5.08 ms), so exact's relative cost reads higher than `fleet/
+exactpersp` measured (+71-96% against its +45-49%). Written as id's loops,
+with a variable trip count, 8 cost nearly what exact did. What is left is
+the arithmetic: a double-precision divide every N pixels, two saturating
+float to integer conversions, and the pixel loop. (In the browser the review
+found exact 2-3% slower than before the change, 3.22 against 3.15 ms at
+8 threads. Under the lock today one build's five runs spread 136-325 fps;
+the best of five: before 313.5 fps, after 307.3, with the span routines kept
+out of `draw_band` (`#[inline(never)]`) 321.8, with the dispatchers kept out
+324.6 — inside the timings' noise, so nothing was changed; a quieter run would
+tell.)
 
 **What moved besides.** `--video modern` (`quaketool`) and
 `set_video("modern")` (the page's checks, `bench.py --video modern`) are the
@@ -911,9 +1021,9 @@ draws `VideoCvars::MODERN` with id's spans in both columns) has id's spans
 and the slower 16. The page's settings checks (`verify_settings`,
 `verify_extras`, `verify_save`) expect the 2026 extras to be 13 (uncapped,
 exact perspective, scaled 2-D) or 15 with Show FPS; `extras()`'s bit 4 is
-"the span is 1". And the Auto pixel size (`vid::AUTO_PIXEL_BUDGET`, "about
+"the span is 1" (clearing it leaves a span other than exact as it is). And the Auto pixel size (`vid::AUTO_PIXEL_BUDGET`, "about
 6 ms" a 1080p frame a thread) was set against id's spans; with exact
-perspective a 1080p frame on one thread is 7 ms, at 4 5.6 ms. Not changed.
+perspective a 1080p demo1 frame on one thread is 7-8 ms, at 64 about 5. Not changed.
 
 ## Rerun it
 
@@ -929,7 +1039,7 @@ cd quake-rs && cargo build --release
 ./target/release/quaketool framerate ../quake-data/ID1/PAK0.PAK,PAK1.PAK --torchflicker 1 --res 1920x1080 --secs 3  # flickering torches' cost (7 min)
 ./target/release/quaketool framerate ../quake-data/ID1/PAK0.PAK,PAK1.PAK --bake --threads 1,2,4,8,16 --res 1920x1080  # the bakes on 1-16 threads (10 min)
 ./target/release/quaketool framerate ../quake-data/ID1/PAK0.PAK --torchflicker 1 --dump DIR --strengths 0,1 --rates 60 --res 960x540 --secs 10 --view arch=e1m2:1488,1240,296:270  # raw frames for a clip
-./target/release/quaketool framerate ../quake-data/ID1/PAK0.PAK --perspspan --rates 240 --res 1920x1080 --threads 1 --reps 5 --secs 3  # the perspective spans' cost (6 min)
+./target/release/quaketool framerate ../quake-data/ID1/PAK0.PAK --perspspan --spans 16,64,32,8,4,1 --rates 240 --res 1920x1080 --threads 1 --reps 4 --secs 3  # the six spans' cost (8 min; under with.sh measure)
 ./target/release/quaketool framerate ../quake-data/ID1/PAK0.PAK --perspspan --dump DIR --rates 60 --res 1920x1080 --secs 10 --view corridor=e1m6:504,500,220:100 --turn -1.5  # the spans' clip, raw (15 GB)
 ```
 

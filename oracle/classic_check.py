@@ -41,8 +41,9 @@ Two kinds of check:
     sound call the walk makes identical.
 
 Needs cargo, uv, the shareware pak at `quake-data/ID1/PAK0.PAK`, and for
-`edicts`/`oracle`/`screen2d`/`sound` the C oracles (`oracle/build.sh`,
-`oracle/build_sound.sh`: docker, once). The report (and every tool's own
+`edicts`/`oracle`/`screen2d`/`demolerp`/`sound` the C oracles (`oracle/build.sh`,
+`oracle/build_sound.sh`: docker; each tool builds its oracle when it is missing
+or older than its sources, `oraclebin.py`). The report (and every tool's own
 output) goes to `--out` (default `oracle/build/classic-check`); the exit
 status is 0 only when every check passed.
 """

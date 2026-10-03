@@ -637,8 +637,8 @@ that split.
   a seven-minute track is not decoded whole into memory), through a gain
   node (the level) into the page's AudioContext, beside the worklet that
   plays the program's mix: it starts with the first click, as the game's
-  sound does, and a hidden tab pauses it with the game (WinQuake paused the
-  CD when it lost the screen). A looping track loops in the element; a
+  sound does, and a hidden tab (or a phone held upright) pauses it with the
+  game (WinQuake paused the CD when it lost the screen). A looping track loops in the element; a
   track played once reports its end (the `cd_ended` call: MCI's notify).
 - **Without music** there is no drive: no `-cdtracks`, no `CD` records,
   nothing in the program changes (id's `cd_null.c`, which the C oracle is
@@ -714,7 +714,7 @@ it means, as id's `Key_Event`, `IN_MouseMove` and the joystick code do.
   on every activation change and mode set (vid_win.c: "fix the leftover Alt from any
   Alt-Tab"), the page sends one `CLEAR_KEYS` record whenever a release may
   have been lost: the window blurs, the tab hides, the pointer lock ends,
-  fullscreen ends. The program (`input.rs`, `clear_all_states`) runs
+  fullscreen ends, a phone is turned upright ("Touch"). The program (`input.rs`, `clear_all_states`) runs
   `Key_Event (key, false)` for every key, so each `+` binding lets go as
   its release would, then `Key_ClearStates` and `IN_ClearStates`; the page
   ends its unlocked mouse drag. A key still held presses again with its
@@ -1270,7 +1270,9 @@ The page only plays what it paints.
   `S_LocalSound`s through the mixer.
 - **A hidden tab** stops the game (no refreshes, no ticks). The page
   suspends the AudioContext with it and resumes it when the tab comes back,
-  so the sound stops and goes on where the game does.
+  so the sound stops and goes on where the game does. A touch screen held
+  upright does the same (the game waits behind the rotate prompt, "Touch"):
+  `awayNow()` is the hidden tab or that.
 
 **Classic and 2026.** The setting is `snd_modern` (`Cvars::sound`, a
 `quake_rs::snd::SoundMode`; Options > Classic / 2026 > Picture and sound >
@@ -1407,7 +1409,17 @@ the same pixels for any count). `wasi.js`:
   mode;
 - before the program starts, makes a pool of thread workers (as many as
   `navigator.hardwareConcurrency`, 2–16), each another instance of
-  `wasi.js` — a worker made after its parent has blocked may never start;
+  `wasi.js` — a worker made after its parent has blocked may never start.
+  If the browser will not make them (`Worker` throws, or one fails to
+  load) the page stops and says so, on the boot panel and the status line, as
+  for the memory ("the game did not start: this browser would not start the
+  worker threads the game needs to run (…)"), and the pool made so far is
+  ended: the threads build never runs on one thread instead — a game that
+  quietly runs slower, in a mode nobody chose, is one more thing to keep
+  track of (until 2026-10-03 it did, and `-hwthreads 1` was the sign;
+  `verify_crash.py` makes `Worker` throw and checks the message). The
+  player's own `r_threads 1` is not that and stays: a setting, in either
+  build;
 - answers `thread-spawn` by claiming a free worker. Its first thread goes
   by message (the module, the memory, the thread id and start argument);
   the worker instantiates the module once, calls `wasi_thread_start`, marks
@@ -1418,8 +1430,20 @@ the same pixels for any count). `wasi.js`:
   wasm atomics on the shared memory, so `join`, `Mutex` and channels need
   nothing more from the host. With every worker busy it answers EAGAIN;
 - passes the program `-hwthreads N`, the threads it may count on
-  (`hardwareConcurrency`, at most the pool plus its own). If the pool cannot
-  be made, the program runs alone (`-hwthreads 1`).
+  (`hardwareConcurrency`, at most the pool plus its own).
+
+**What the browser must give.** When it will not, the page says so once,
+plainly, and the game does not start — never a degraded mode: the memory and
+the thread workers (above), and WebAssembly SIMD, which `wasi.js` probes
+(`SIMD_PROBE`, the usual `i8x16.popcnt` module) before it compiles the
+program: "the game did not start: this browser has no WebAssembly SIMD, which
+the game needs to run (Chrome 91, Firefox 89 and Safari 16.4 have it)". A
+build that uses SIMD (`-C target-feature=+simd128`) cannot be compiled
+without it, and asking first keeps the line from depending on how a browser
+words its compile error; for a build without SIMD the probe is harmless,
+since every current browser passes it. `verify_crash.py` checks all three
+lines (stubbing `Worker`, `WebAssembly.Memory`, and `WebAssembly.validate`
+with `compile`).
 
 A thread has the clocks, randomness, sleep and stderr (to its worker's
 console: the parent never reads messages again). The files, stdin and
@@ -1766,10 +1790,68 @@ character; Enter; a deleted zero-width sentinel is Backspace; Android's
 composed words when they end), and its key events never reach the page's
 own keyboard handler. Multiplayer > Setup's name rows get the same button.
 
-**Around the controls.** Held upright, a prompt asks for landscape (a tap
-dismisses it). The first tap ("tap to start") also asks for fullscreen and
-`screen.orientation.lock('landscape')` where the browser has them
-(Android; a fullscreen button stays while not fullscreen). During a game a
+**Quake plays only sideways.** The user saw the game sometimes play
+for a while upright on a phone and asked for landscape only, with the
+usual rotate-your-phone prompt shown whenever the phone is turned upright.
+(Until 2026-10-03 the prompt could be tapped away — "or tap to play
+upright" — after which the game ran upright for good; and it ran on behind
+the prompt while it showed.) Now, on a touch screen (`html.touch`: a coarse
+pointer, or `?touch`), whenever the page's box is taller than wide (CSS
+`(orientation: portrait)`: height at least width — the room the page has,
+not the device's turn, so a split screen is judged by its own box), `#tRotate`
+covers everything — the start prompt, the layer, a menu — opaque, so the
+game's last picture does not show through. It is plain CSS, up in the
+refresh the box turns, and there is nothing to dismiss it and no upright
+mode left. The game waits behind it:
+
+- **No ticks, no frames.** index.html's frame loop reads the same media
+  query (`portraitNow()`, once a refresh) and on the change does what a hidden tab already
+  does to it: sends no tick, presents nothing. The game's time stands still
+  (a tick carries the time since the last; none comes), so the attract loop,
+  a menu, the console and a game in progress stop alike with no state of the
+  game's own changed. Turned back, `lastTick` starts over and everything
+  goes on from the same instant — same game, same menu row, same demo frame.
+  Not id's `pause`, which a hidden tab's touch handling uses (below): a demo
+  ignores it (`host_pause`: "not really connected"), `pausable 0` refuses
+  it, it toggles, and it draws a plaque nobody looks at; and the hidden tab
+  wants a menu to come back to, where turning the phone back is the
+  resuming.
+- **Every key and finger is let go**: `clearAllStates()` (the CLEAR_KEYS
+  record, as a blur sends it), touch.js's `releaseAll()` (stick, fire,
+  jump), the menu pad's repeat timers, the phone's keyboard — the prompt
+  takes the touches from here, so no release would come, and a finger still
+  down when the phone turns back walks nobody on (it must lift and land
+  again). A keyboard beside a tablet is not heard while it waits
+  (`keyEvent`, `mouseMove`), so no stale presses wait for the turn back.
+- **Sound and CD stop** as on a hidden tab (`awayNow()`: hidden, or this;
+  `syncAudioAway`, `cdSync`) and go on where they were; the Screen Wake Lock
+  is let go.
+- **The window's box is not reported** (`sendWindow` returns): the program
+  keeps its landscape frame instead of resizing to a tall one nobody sees
+  and back; `releaseGame` sends the box if it changed. A page that loads
+  upright reports none until its first turn. The report goes out from the
+  frame loop, a refresh after the resize event (`windowDirty`), not from
+  the event: Firefox evaluates a media query at layout, after the event, so
+  a handler there still read the old orientation and sent the tall box.
+- **A tap on the prompt asks for fullscreen and the landscape lock** (the
+  gesture the covered "tap to start" would have given). A phone whose
+  rotation is locked never reports landscape by itself; Android Chrome's lock,
+  in fullscreen, overrides that and turns the page. Where a page has no
+  fullscreen (an iPhone) the hint says to unlock rotation instead.
+
+By reasoning, not run: a **tablet** is a touch device and follows the same
+rule (an iPad held upright waits, as a phone does). A **foldable** is judged
+by the box the page is given: a foldable phone unfolded is a tall box
+upright (the prompt) and a wide one sideways (the game). Its cover screen is
+close to square, so the page's box there is a coin
+toss between the two and not checked; nor is what box Chrome gives a page
+half folded. A desktop browser in a tall window has no `touch` class and
+is unaffected (with `?touch` it follows the rule). The phone's keyboard
+only shortens the box, so a sideways page stays sideways under it.
+
+**Around the controls.** The first tap ("tap to start") also asks for
+fullscreen and `screen.orientation.lock('landscape')` where the browser has
+them (Android; a fullscreen button stays while not fullscreen). During a game a
 Screen Wake Lock keeps the display on. Every touch resumes audio if the
 browser suspended it (iOS "interrupts" it in the background). When the
 page is hidden the audio is suspended, and with the touch controls on (not

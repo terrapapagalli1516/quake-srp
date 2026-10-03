@@ -84,6 +84,7 @@ pub fn cmd_view(args: &[String]) -> CmdResult {
     let mut viewent: Option<[f32; 6]> = None;
     let mut dlights: Vec<quake_rs::dlight::DynamicLight> = Vec::new();
     let mut particles: Vec<([f32; 3], u8)> = Vec::new();
+    let mut style_values: Option<Vec<f32>> = None;
     let mut video = VideoArgs::default();
     let mut res: Option<&str> = None;
     let mut i = 3;
@@ -128,6 +129,13 @@ pub fn cmd_view(args: &[String]) -> CmdResult {
                 // Live for this frame (die far away, no decay); unowned.
                 let minlight = v.get(4).copied().unwrap_or(0.0);
                 dlights.push(quake_rs::dlight::DynamicLight::new([v[0], v[1], v[2]], v[3], f32::MAX, minlight, 0.0, 0));
+            }
+            "--style-values" => {
+                // id's `d_lightstylevalue[]` of the frame (the oracle's .json), in place of the
+                // styles the map's own animation gives at --time.
+                let v: Vec<f32> = val.split(',').map(|p| p.trim().parse::<f32>()).collect::<Result<_, _>>()
+                    .map_err(|_| format!("--style-values: expected comma-separated integers, got {val:?}"))?;
+                style_values = Some(v);
             }
             "--viewmodel" => viewmodel_arg = Some(val.as_str()),
             "--viewent" => {
@@ -192,7 +200,11 @@ pub fn cmd_view(args: &[String]) -> CmdResult {
     let angles = angles.unwrap_or([0.0, start.map_or(0.0, |(_, a)| a), 0.0]);
     let cam = Camera { pos: origin, yaw: angles[1], pitch: -angles[0], roll: angles[2], fov_deg: fov };
     let time = time.unwrap_or_else(|| server.time());
-    let light_styles = server.lightstyle_scales(f64::from(time), video.cvars.lightstyles);
+    let mut light_styles = server.lightstyle_scales(f64::from(time), video.cvars.lightstyles);
+    // `R_BuildLightMap` multiplies a luxel by `d_lightstylevalue[style]` against a white point of 256.
+    for (scale, value) in light_styles.iter_mut().zip(style_values.iter().flatten()) {
+        *scale = value / 256.0;
+    }
 
     // The entity list, resolved against per-name model caches (each file parsed once).
     let mut mdls: HashMap<String, Option<Mdl>> = HashMap::new();

@@ -25,8 +25,9 @@
 //! frames as `PREFIX-<workload>-<W>x<H>-<frame>.ppm`. Each run ends with a
 //! tally of the sound calls its frames made. `--trace PATH` writes, for each
 //! demo frame, what `CL_RelinkEntities` drew — the clocks, the view angles,
-//! the view entity, `cl.velocity` and every relinked entity — as the records
-//! of the oracle's `oracle_trace` (`oracle/demo_lerp.py` compares the two).
+//! the view entity, `cl.velocity`, every relinked entity and the dynamic
+//! lights it was drawn with — as the records of the oracle's `oracle_trace`
+//! (`oracle/demo_lerp.py` compares the two).
 //!
 //! Several workloads and resolutions run in `bench.py`'s order (each workload
 //! at each resolution) in one host, as the page runs them: the host hands
@@ -340,8 +341,8 @@ pub fn cmd_play(pak_path: &str, workloads: &str, rest: &[String]) -> Result<Stri
 }
 
 /// One `--trace` record, the `traced`-th: the frame's clocks, what
-/// `CL_RelinkEntities` drew for the camera, and each relinked entity
-/// (statics are never relinked).
+/// `CL_RelinkEntities` drew for the camera, each relinked entity
+/// (statics are never relinked) and each dynamic light drawn.
 fn trace_frame(out: &mut String, traced: &mut usize, d: &DemoPlay) {
     let f = &d.demo.frames[d.idx];
     let v = &d.view;
@@ -359,6 +360,15 @@ fn trace_frame(out: &mut String, traced: &mut usize, d: &DemoPlay) {
             out,
             "E {} {model} {} {} {} {} {} {} {}",
             e.num, e.origin[0], e.origin[1], e.origin[2], e.angles[0], e.angles[1], e.angles[2], e.frame
+        );
+    }
+    // The lights R_PushDlights saw: pool slot, key, origin, radius (before
+    // the frame's decay), die, decay, minlight.
+    for (slot, l) in &v.dlights {
+        let _ = writeln!(
+            out,
+            "D {slot} {} {} {} {} {} {} {} {}",
+            l.key(), l.origin[0], l.origin[1], l.origin[2], l.radius, l.die, l.decay, l.minlight
         );
     }
 }

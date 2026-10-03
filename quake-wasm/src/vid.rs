@@ -372,6 +372,7 @@ mod tests {
         use_2026();
         assert_eq!(span(), PerspSpan::Exact, "2026: exact at every pixel");
         for (line, want) in [("r_perspspan 8", PerspSpan::Spans8), ("r_perspspan 4", PerspSpan::Spans4),
+                             ("r_perspspan 64", PerspSpan::Spans64), ("r_perspspan 32", PerspSpan::Spans32),
                              ("wasm_exactpersp 0", PerspSpan::Spans16), ("wasm_exactpersp 1", PerspSpan::Exact),
                              ("r_perspspan 16", PerspSpan::Spans16)] {
             crate::host_cmd::execute_console_command(line);

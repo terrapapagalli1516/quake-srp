@@ -63,7 +63,14 @@ const RIGHT_FD_WRITE = 1n << 6n;
 
 class Exit { constructor(code) { this.code = code; } }
 
-let memory;                              // the program's WebAssembly.Memory
+// The usual feature probe for WebAssembly SIMD: a module with one function,
+// `() -> v128`, whose body is `i32.const 0; i8x16.splat; i8x16.popcnt`. It
+// validates only where the browser has SIMD (Chrome 91, Firefox 89, Safari
+// 16.4) — so a program built with it, which no other browser can compile, is
+// told apart from one that is simply broken.
+const SIMD_PROBE = new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123, 3, 2, 1, 0, 10, 10, 1, 8, 0, 65, 0, 253, 15, 253, 98, 11]);
+
+let memory;                             // the program's WebAssembly.Memory
 let ctl, ring;                           // views on the shared control block and ring
 // The frame slots: made here, as large as the largest frame so far, and
 // made anew (and sent to the page) when a frame outgrows them.
@@ -80,6 +87,16 @@ onmessage = async (e) => {
   ring = new Uint8Array(shared, CTL_BYTES, RING_BYTES);
   if (audioShared) sound.init(audioShared);
   for (const [path, data] of files) fs.files.set(path, { data, size: data.length });
+  if (!WebAssembly.validate(SIMD_PROBE)) {
+    // A browser without wasm SIMD cannot compile a build that uses it: said
+    // once, plainly, like the refused memory and the refused workers below —
+    // asked before compiling, so the line does not depend on how any
+    // browser words its compile error. (Harmless for a build without SIMD:
+    // every current browser passes the probe.)
+    stderr.line('quake: this browser has no WebAssembly SIMD, which the game needs to run (Chrome 91, Firefox 89 and Safari 16.4 have it)');
+    finish(3, 'simd: this browser has no WebAssembly SIMD');
+    return;
+  }
   let module;
   try {
     module = await WebAssembly.compile(wasm);
@@ -107,9 +124,18 @@ onmessage = async (e) => {
     postMessage({ t: 'memory', memory: shared_memory });
   }
   if (WebAssembly.Module.imports(module).some(i => i.module === 'wasi' && i.name === 'thread-spawn')) {
-    // Without its thread workers the program still runs, on its own thread
-    // (a `thread-spawn` then answers EAGAIN, and quake.wasm draws alone).
-    await threads.start(module, shared_memory).catch((err) => threads.abandon(err));
+    try {
+      await threads.start(module, shared_memory);
+    } catch (err) {
+      // The browser would not make the workers the threads build runs its
+      // threads in: the game does not run here — said once, plainly, like
+      // the refused memory above, and not on one thread instead (a game
+      // that quietly runs slower, in a mode nobody chose, is not a thing
+      // to keep track of: PLATFORM.md "Threads").
+      stderr.line(`quake: this browser would not start the worker threads the game needs to run (${err && err.message || err})`);
+      finish(3, 'threads: ' + (err && err.message || err));
+      return;
+    }
     // The threads it may use: the pool's and its own (quake-wasm's main.rs).
     argv = [...argv, '-hwthreads', String(threads.offer())];
   }
@@ -454,22 +480,24 @@ const threads = {
     this.started = new Array(n).fill(false);
     this.module = module;
     this.memory = memory;
-    await Promise.all(Array.from({ length: n }, () => new Promise((resolve, reject) => {
-      const w = new Worker(self.location.href);
-      w.onmessage = (e) => { if (e.data.t === 'ready') resolve(); };
-      w.onerror = (e) => reject(new Error('a thread worker failed: ' + e.message));
-      w.postMessage({ t: 'hello' });
-      this.pool.push(w);
-    })));
-  },
-  // The pool could not be made: none of it is used.
-  abandon(err) {
-    console.warn('[quake] no thread workers, the program runs alone:', err);
-    for (const w of this.pool) w.terminate();
-    this.pool = [];
+    try {
+      await Promise.all(Array.from({ length: n }, () => new Promise((resolve, reject) => {
+        const w = new Worker(self.location.href);
+        w.onmessage = (e) => { if (e.data.t === 'ready') resolve(); };
+        w.onerror = (e) => reject(new Error('a thread worker failed: ' + e.message));
+        w.postMessage({ t: 'hello' });
+        this.pool.push(w);
+      })));
+    } catch (err) {
+      // Not a pool the program can use: none of it stays (the caller stops).
+      for (const w of this.pool) w.terminate();
+      this.pool = [];
+      throw err;
+    }
   },
   // The threads the program may count on: this machine's, at most the pool
-  // plus the program's own.
+  // plus the program's own (the player's `r_threads` goes lower, never
+  // higher).
   offer() {
     return Math.max(1, Math.min(navigator.hardwareConcurrency || 1, this.pool.length + 1));
   },

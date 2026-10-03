@@ -398,8 +398,9 @@ pub struct RenderOptions {
     /// exactly ([`PerspSpan`]). id's x86 renderer, what 1996 players saw, is
     /// exact only every 16 pixels and affine in between (`D_DrawSpans16`,
     /// `Turbulent8`); that is this struct's default, and Classic's. EXTRA,
-    /// not id: every 8 (id's portable C, `D_DrawSpans8`), every 4, or at
-    /// every pixel, the 2026 profile's (`r_perspspan`): from 1080p up the
+    /// not id: every 64 or 32 (`D_DrawSpans8`'s arithmetic, longer), every 8
+    /// (id's portable C, `D_DrawSpans8`), every 4, or at every pixel, the
+    /// 2026 profile's (`r_perspspan`): from 1080p up the
     /// spans' affine steps show as a wobble along a wall seen at a grazing
     /// angle.
     pub persp_span: PerspSpan,
@@ -2004,8 +2005,9 @@ mod tests {
         let off = |img: &[u8]| img.iter().zip(&exact).filter(|(a, b)| a != b).count();
         assert_eq!(draw(PerspSpan::Spans16), fixtures::render_once(&scene()).pixels, "16 is the default, id's");
         let (d16, d8, d4) = (off(&draw(PerspSpan::Spans16)), off(&draw(PerspSpan::Spans8)), off(&draw(PerspSpan::Spans4)));
-        // (2026-10-03: 24826, 12487 and 5136 of the 144000 pixels.)
-        assert!(d16 > d8 && d8 > d4 && d4 > 0, "pixels off exact: 16 {d16}, 8 {d8}, 4 {d4}");
+        let (d64, d32) = (off(&draw(PerspSpan::Spans64)), off(&draw(PerspSpan::Spans32)));
+        // (2026-10-03: 63648, 44956, 24826, 12487 and 5136 of the 144000 pixels.)
+        assert!(d64 > d32 && d32 > d16 && d16 > d8 && d8 > d4 && d4 > 0, "pixels off exact: 64 {d64}, 32 {d32}, 16 {d16}, 8 {d8}, 4 {d4}");
     }
 
     #[test]

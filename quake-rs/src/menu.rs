@@ -146,8 +146,8 @@ pub enum RowKind {
     /// `crosshair`: `off`, `cross` (the 2026 one), `id's +`; left and right
     /// step it.
     Crosshair,
-    /// `r_perspspan`: `id's 16`, `8`, `4`, `exact` ([`PerspSpan::ALL`]);
-    /// left and right step it.
+    /// `r_perspspan`: `64`, `32`, `id's 16`, `8`, `4`, `exact`
+    /// ([`PerspSpan::ALL`]); left and right step it, right the finer.
     PerspSpan,
     /// A strength drawn as `M_DrawSlider` draws id's: left and right step
     /// the cvar by `step` within `min..=max`, as `M_AdjustSliders` steps
@@ -251,7 +251,7 @@ pub const PICTURE_ROWS: [SettingRow; 10] = [
     SettingRow {
         cvar: "r_perspspan",
         label: "      Perspective span",
-        help: ["Walls exact every 16 pixels (id's),", "8, 4, or 1: less wobble, more work"],
+        help: ["Pixels between exact texels. 1996's", "16 is 32 on a phone, 64 at 1080p"],
         kind: RowKind::PerspSpan,
     },
     SettingRow {
@@ -454,7 +454,7 @@ impl SettingRow {
             RowKind::Profile => "console: profile classic|2026".to_string(),
             RowKind::PixelSize => format!("console: {} 0-{PIXEL_SIZE_MAX}", self.cvar),
             RowKind::Crosshair => format!("console: {} 0/1/2", self.cvar),
-            RowKind::PerspSpan => format!("console: {} 16/8/4/1", self.cvar),
+            RowKind::PerspSpan => format!("console: {} 64/32/16/8/4/1", self.cvar),
             RowKind::Toggle => format!("console: {} 0/1", self.cvar),
             RowKind::Slider { min, max, .. } => {
                 format!("console: {} {}-{}", self.cvar, cvar::number_string(min), cvar::number_string(max))
@@ -4463,19 +4463,24 @@ mod tests {
         let console = cvar::find("crosshair").unwrap().get(&s.cvars);
         assert_eq!((s.cvars.crosshair, console.as_str()), (Crosshair::Glyph, "2"), "left wraps to id's +");
         assert_eq!(crosshair.console_hint(), "console: crosshair 0/1/2");
-        // And the perspective span: id's 16 (Classic's), 8, 4, exact (2026's),
-        // wrapping; the console reads the span's pixels.
+        // And the perspective span: 64, 32, id's 16 (Classic's), 8, 4, exact
+        // (2026's), right the finer, wrapping; the console reads the span's
+        // pixels.
         let span = on_row(&mut m, "r_perspspan");
         assert_eq!((span.value(&s).as_str(), span.label.trim_start()), ("id's 16", "Perspective span"));
-        let steps: Vec<String> = (0..5).map(|_| { m.adjust(1, &mut s); span.value(&s) }).collect();
-        assert_eq!(steps, ["8", "4", "exact", "id's 16", "8"]);
+        let steps: Vec<String> = (0..7).map(|_| { m.adjust(1, &mut s); span.value(&s) }).collect();
+        assert_eq!(steps, ["8", "4", "exact", "64", "32", "id's 16", "8"]);
         m.adjust(-1, &mut s);
-        m.adjust(-1, &mut s);
+        let steps: Vec<String> = (0..3).map(|_| { m.adjust(-1, &mut s); span.value(&s) }).collect();
+        assert_eq!(steps, ["32", "64", "exact"], "left: the longer, and from 64 round to exact");
         let console = cvar::find("r_perspspan").unwrap().get(&s.cvars);
-        assert_eq!((s.cvars.persp_span, console.as_str(), span.value(&s).as_str()), (PerspSpan::Exact, "1", "exact"), "left wraps to exact");
+        assert_eq!((s.cvars.persp_span, console.as_str()), (PerspSpan::Exact, "1"));
         m.adjust(1, &mut s);
-        assert_eq!(s.cvars.persp_span, PerspSpan::Spans16, "and right from exact to id's 16");
-        assert_eq!(span.console_hint(), "console: r_perspspan 16/8/4/1");
+        let console = cvar::find("r_perspspan").unwrap().get(&s.cvars);
+        assert_eq!((s.cvars.persp_span, console.as_str()), (PerspSpan::Spans64, "64"), "and right from exact to 64");
+        (0..2).for_each(|_| m.adjust(1, &mut s));
+        assert_eq!(s.cvars.persp_span, PerspSpan::Spans16, "back to Classic's");
+        assert_eq!(span.console_hint(), "console: r_perspspan 64/32/16/8/4/1");
 
         // The torch flicker: a slider (M_DrawSlider's knob), 0 to 2 by a
         // tenth of its range, clamped at its ends as id's sliders are;

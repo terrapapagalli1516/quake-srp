@@ -50,7 +50,8 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 //                                      the warm ms/frame (renderer only)
 //   oracle_trace path [frames]         write one record per rendered frame to path: the client
 //                                      clocks, the view angles, the view entity's origin,
-//                                      cl.velocity and every relinked entity (demo_lerp.py
+//                                      cl.velocity, every relinked entity and the dynamic lights
+//                                      R_PushDlights marks (demo_lerp.py
 //                                      compares demo playback); quit after `frames` records
 //   oracle_walk path / oracle_sndlog path   a scripted walk, and a log of every call into
 //                                      the sound layer (walk_oracle.c, oracle/sound_walk.py)
@@ -499,7 +500,9 @@ static void Oracle_Key_f (void)
 // with the clocks (cl.time, cl.oldtime, and cl.mtime[0..1] as CL_LerpPoint
 // left them), cl.viewangles, the view entity's relinked origin and
 // cl.velocity, then an "E" line per entity on cl_visedicts (its number, -1
-// for a temp entity; model; origin; angles; frame).
+// for a temp entity; model; origin; angles; frame), then a "D" line per dynamic
+// light R_PushDlights marks (die >= cl.time, a radius): its slot in cl_dlights,
+// key, origin, radius, die, decay and minlight.
 static FILE	*trace_file;
 static int	trace_left = -1;
 static int	trace_count;
@@ -766,6 +769,11 @@ static void Oracle_TraceFrame (void)
 			e->origin[0], e->origin[1], e->origin[2], e->angles[0], e->angles[1], e->angles[2],
 			e->frame);
 	}
+	for (i=0 ; i<MAX_DLIGHTS ; i++)
+		if (cl_dlights[i].die >= cl.time && cl_dlights[i].radius)	// R_PushDlights' test
+			fprintf (trace_file, "D %d %d %.9g %.9g %.9g %.9g %.9g %.9g %.9g\n", i, cl_dlights[i].key,
+				cl_dlights[i].origin[0], cl_dlights[i].origin[1], cl_dlights[i].origin[2],
+				cl_dlights[i].radius, cl_dlights[i].die, cl_dlights[i].decay, cl_dlights[i].minlight);
 	trace_count++;
 	if (trace_left > 0 && trace_count >= trace_left)
 	{

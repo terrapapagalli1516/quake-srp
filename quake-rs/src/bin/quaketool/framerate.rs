@@ -1013,7 +1013,7 @@ fn rocket(c: &Ctx) -> Vec<Measure> {
     let (mut light, mut count, mut spread) = (Series::default(), Series::default(), Series::default());
     s.run(0.6, |s| {
         let now = s.w.clock;
-        let radius = s.w.dlights.active().iter().filter(|d| d.die >= now).map(|d| d.radius).fold(0.0f32, f32::max);
+        let radius = s.w.dlights.active(f64::from(now)).iter().map(|d| d.radius).fold(0.0f32, f32::max);
         light.push(s.t - tb, f64::from(radius));
         let (n, r) = explosion_cloud(&s.w, boom.1);
         count.push(s.t - born, n);

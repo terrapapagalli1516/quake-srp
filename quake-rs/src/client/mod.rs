@@ -265,7 +265,7 @@ pub struct Walk {
     /// Deterministic RNG for particle spawns (no `rand` crate; std-only).
     pub prng: Lcg,
     /// Live dynamic lights (explosions, muzzle flashes, EF_* lights). Allocated
-    /// each frame from the drained temp entities + the server's entity_dlights,
+    /// each frame from the drained temp entities + the server's lit entities,
     /// decayed under `advance`, and passed to the renderer to light the walls.
     pub dlights: DynamicLights,
     /// The beam temp-entity slots (`cl_beams`): lightning bolts the drained
@@ -361,8 +361,14 @@ pub struct DemoPlay {
     /// its z-buffer) — so the demo shows blood, gunshot puffs and explosions just
     /// like [`walk_frame`](cl_main::walk_frame) does for live play.
     pub particles: ParticleSystem,
-    /// Deterministic RNG for the demo's particle spawns (std-only, like Walk).
+    /// Deterministic RNG for the demo's particle spawns and light jitter (std-only, like Walk).
     pub prng: Lcg,
+    /// `cl_dlights`: the lights the recorded stream makes — the explosions of
+    /// its temp entities as each message is read, the light effects (and a
+    /// rocket's) of its entities each frame they are relinked — by the same
+    /// calls the live walk's lights are made with. Decayed after each frame is
+    /// drawn (`CL_DecayLights`), reset when playback starts over.
+    pub dlights: DynamicLights,
     /// The message whose effects were last spawned, so each message's bursts
     /// spawn once, in the frame that reads it; `None` until the first frame of
     /// playback reads one.
@@ -501,6 +507,7 @@ impl DemoPlay {
             view: cl_demo::DemoView::default(),
             particles: ParticleSystem::new(),
             prng: Lcg::new(0x9E37_79B9),
+            dlights: DynamicLights::new(),
             last_spawned_idx: None,
             beams: Beams::new(),
             beam_scratch: Vec::new(),
@@ -693,7 +700,7 @@ pub struct Vid {
     pub display_aspect: f64,
     /// How often walls and liquids find their texel exactly
     /// ([`render::PerspSpan`]): id's 16-pixel spans (`D_DrawSpans16`) in id's
-    /// Quake and in Classic, 8, 4, or every pixel — `r_perspspan`, exact in
+    /// Quake and in Classic, 64, 32, 8, 4, or every pixel — `r_perspspan`, exact in
     /// the 2026 profile.
     pub persp_span: render::PerspSpan,
     /// The port's video cvars (Hor+, views past id's largest mode): Classic

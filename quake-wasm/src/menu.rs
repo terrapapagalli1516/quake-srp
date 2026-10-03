@@ -305,8 +305,8 @@ pub(crate) fn menu_cursor() -> i32 {
 /// The four settings that were the port's first "Web extras", as the bits
 /// the browser checks and the benchmark read and set them by: 1
 /// `wasm_uncapped`, 2 `wasm_showfps`, 4 `wasm_exactpersp` (set while
-/// `r_perspspan` is 1, exact; setting it is `r_perspspan 1`, clearing it id's
-/// 16), 8 `wasm_scaled2d`.
+/// `r_perspspan` is 1, exact; [`set_extras`] says what setting it does), 8
+/// `wasm_scaled2d`.
 pub(crate) fn extras() -> i32 {
     APP.with(|c| {
         c.borrow().as_ref().map_or(0, |a| {
@@ -317,12 +317,21 @@ pub(crate) fn extras() -> i32 {
     })
 }
 
-/// Set the four settings from [`extras`]' bits; other bits are ignored.
+/// Set the four settings from [`extras`]' bits; other bits are ignored. Bit
+/// 4 set is `r_perspspan 1`; clear, it leaves a span of 64, 32, 16, 8 or 4
+/// as it is and turns exact into id's 16 — so `set_extras(extras())` changes
+/// nothing, whatever the span.
 pub(crate) fn set_extras(bits: i32) {
     ensure_app(|a| {
         let s = &mut a.settings.cvars;
         use quake_rs::render::PerspSpan;
-        let span = if bits & 4 != 0 { PerspSpan::Exact } else { PerspSpan::Spans16 };
+        let span = if bits & 4 != 0 {
+            PerspSpan::Exact
+        } else if s.persp_span == PerspSpan::Exact {
+            PerspSpan::Spans16
+        } else {
+            s.persp_span
+        };
         (s.uncapped, s.show_fps, s.persp_span, s.scaled_2d) = (bits & 1 != 0, bits & 2 != 0, span, bits & 8 != 0);
     });
 }
@@ -516,6 +525,16 @@ mod tests {
         assert_eq!(extras(), 15);
         set_extras(0);
         assert_eq!(extras(), 0);
+        // Bit 4 is exact perspective; clearing it keeps any other span, so a
+        // read-and-write-back keeps 8 (or 64) as it is.
+        let cvar_text = |name: &str| APP.with(|c| quake_rs::cvar::find(name).unwrap().get(&c.borrow().as_ref().unwrap().settings.cvars));
+        crate::host_cmd::execute_console_command("r_perspspan 8");
+        set_extras(extras() | 1);
+        assert_eq!((extras(), cvar_text("r_perspspan")), (1, "8".to_string()), "the span kept");
+        set_extras(4);
+        assert_eq!(cvar_text("r_perspspan"), "1");
+        set_extras(0);
+        assert_eq!(cvar_text("r_perspspan"), "16", "exact off is id's 16");
         // They survive a re-boot (reset_nav): they are the App's.
         set_extras(2);
         assert_eq!(boot(), 1);
