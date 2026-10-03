@@ -41,7 +41,8 @@
      48°; a pointermove and its mousemove count once; `?mousecheck`'s
      summary adds up; a real drag counts the same through pointermove's
      coalesced samples (what the page takes) as through mousemove's own
-     movement (what it took before); `?plainlock` asks for the plain lock.
+     movement (what it took before); `?plainlock` asks for the plain lock;
+     `?mousecheck=mouse,trackpad` numbers, stamps and names its runs.
 
 Headless fullscreen is approximate: the Alt+Enter/fullscreen checks are best-effort
 here (skipped with a note when the headless browser refuses) — see the manual
@@ -211,9 +212,20 @@ def mouse_paths(pg):
     for q in ("", "?plainlock"):
         other.goto(f"http://127.0.0.1:{PORT}/index.html{q}", wait_until="load")
         asked[q] = other.evaluate("rawMouse")
-    other.close()
     check("?plainlock: the lock does not ask for unadjusted movement",
           asked == {"": True, "?plainlock": False}, str(asked))
+    # ?mousecheck=mouse,trackpad: the box says which run is next and on what
+    # (the page alone: no game, no lock), and a run's summary is numbered,
+    # stamped and named, the next run named in turn.
+    other.goto(f"http://127.0.0.1:{PORT}/index.html?mousecheck=mouse,trackpad", wait_until="load")
+    box = lambda: other.evaluate("document.getElementById('mouseCheck').textContent")
+    before = box()
+    summary = other.evaluate("quake.mousecheck(1)")
+    after = box()
+    other.close()
+    check("?mousecheck=mouse,trackpad: run #1 asks for the mouse; its summary is #1, stamped, named; #2 asks for the trackpad",
+          before.startswith("run #1 (mouse): in the game, click the view") and re.match(r"#1 \d\d:\d\d:\d\d \(mouse\) mousecheck 1\.\d s: ", summary)
+          and after.startswith(summary + "\nrun #2 (trackpad): in the game, click the view"), f"{before!r} / {summary[:60]!r} / {after[:300]!r}")
 
 with sync_playwright() as p:
     br = isolated.launch(p, [
@@ -410,35 +422,55 @@ with sync_playwright() as p:
     check("2026: a wheel notch up switches to the next weapon, down back to it",
           (w0, w1, w2) == (2, 4, 2), f"{w0:.0f} -> {w1:.0f} -> {w2:.0f}")
     # A trackpad's burst of small deltas (Chrome's own notch is ~100 px)
-    # accumulates and fires exactly once, not once per event.
-    for _ in range(12):
-        pg.mouse.wheel(0, -15)              # 12 x 15 = 180 px: one notch, up
-        time.sleep(0.02)
+    # accumulates and fires exactly once, not once per event. Dispatched with
+    # a trackpad's wheelDeltaY (3 x deltaY: Chrome's on a Mac, Safari's), not
+    # through Playwright: Chromium's DevTools gives every synthesized wheel
+    # event a whole notch (`wheel_ticks_y = delta_y > 0 ? 1 : -1`,
+    # input_handler.cc), which the page rightly takes as a mouse's notch.
+    pg.evaluate("""async () => { const c = document.getElementById('c');
+        for (let i = 0; i < 12; i++) {      // 12 x 15 = 180 px: one notch, up
+          const e = new WheelEvent('wheel', { deltaY: -15, cancelable: true, bubbles: true });
+          Object.defineProperty(e, 'wheelDeltaY', { value: 45 });
+          c.dispatchEvent(e);
+          await new Promise(r => setTimeout(r, 20));
+        } }""")
     w3 = wait_weapon(4)
     check("a trackpad-style burst of small deltas fires once", w3 == 4, f"{w3:.0f}")
-    # macOS-shaped wheels: there a notch is NSEvent's accelerated deltaY x 40
-    # px, a few pixels, so the time decides (a lone event is a notch, a
-    # stream accumulates 100 px a notch). The page's own count of notches
-    # fired (`wheelFired`), events dispatched as the browser would, the gaps
-    # real: 150 ms timers, or none within a stream.
+    # Wheels as a Mac's browsers send them. There a notch is NSEvent's
+    # accelerated deltaY x 40 px, a few pixels or 72; Chrome's wheelDeltaY
+    # is the raw notch count x 120 for a mouse but 3 x deltaY for a trackpad,
+    # as Safari's always is (each step's third value; Safari's by default).
+    # A wheelDeltaY that counts notches is that many at any spacing; else a
+    # lone event is a notch and a stream accumulates 100 px a notch. The
+    # page's own count of notches fired (`wheelFired`), events dispatched as
+    # the browser would, wheelDeltaY set on each (Firefox's init dictionary
+    # has none), the gaps real: timers, or none within a stream.
     def wheel_notches(steps):
         return pg.evaluate("""async steps => {
             const c = document.getElementById('c'), n0 = { ...wheelFired };
-            for (const [deltaY, gap] of steps) {
+            for (const [deltaY, gap, legacy] of steps) {
               if (gap) await new Promise(r => setTimeout(r, gap));
-              c.dispatchEvent(new WheelEvent('wheel', { deltaY, deltaMode: 0, cancelable: true, bubbles: true }));
+              const e = new WheelEvent('wheel', { deltaY, deltaMode: 0, cancelable: true, bubbles: true });
+              Object.defineProperty(e, 'wheelDeltaY', { value: legacy ?? -Math.round(3 * deltaY) });
+              c.dispatchEvent(e);
             }
             return [wheelFired.down - n0.down, wheelFired.up - n0.up];
         }""", steps)
     for name, steps, want in [
         ("three slow macOS notches (4, 8, 12 px, 150 ms apart) are three notches",
-         [(4, 200), (8, 150), (12, 150)], [3, 0]),
+         [(4, 200, None), (8, 150, None), (12, 150, None)], [3, 0]),
         ("a stream of 40 x 6 px: the first at once, then a notch a 100 px",
-         [(6, 200)] + [(6, 0)] * 39, [2, 0]),
+         [(6, 200, None)] + [(6, 0, None)] * 39, [2, 0]),
         ("a stream that turns back drops what it carried (10 x 6 down, 20 x 6 up)",
-         [(6, 200)] + [(6, 0)] * 9 + [(-6, 0)] * 20, [1, 1]),
+         [(6, 200, None)] + [(6, 0, None)] * 9 + [(-6, 0, None)] * 20, [1, 1]),
         ("a flick of 1000 px in a stream is capped at three notches",
-         [(-2, 200), (-1000, 0)], [0, 4]),
+         [(-2, 200, None), (-1000, 0, None)], [0, 4]),
+        ("Chrome on a Mac: 72 px notches (wheelDeltaY -120) 29 and 51 ms apart are three, back up one",
+         [(72, 200, -120), (72, 29, -120), (72, 51, -120), (-72, 300, 120)], [3, 1]),
+        ("Chrome on a Mac: two notches in one event (wheelDeltaY -240) are two",
+         [(144, 200, -240)], [2, 0]),
+        ("Chrome on a Mac: a trackpad's 40 px steps (wheelDeltaY -120 = 3 x 40) 16 ms apart accumulate",
+         [(40, 200, -120)] + [(40, 16, -120)] * 9, [4, 0]),
     ]:
         got = wheel_notches(steps)
         check(f"wheel: {name}", got == want, f"down {got[0]}, up {got[1]}; want {want}")
