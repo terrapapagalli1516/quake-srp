@@ -15,9 +15,9 @@
 //!                          gliding between them (`r_lerplightstyles`)
 //! --torchflicker S         the steady torches flicker at strength S, 0 (id's) to 2
 //!                          (`r_torchflicker`; 1 the flicker style's own swing)
-//! --perspspan 16|8|4|1     walls and liquids exact every 16 pixels (id's
-//!                          `D_DrawSpans16`), 8 (id's C `D_DrawSpans8`), 4, or at
-//!                          every pixel (`r_perspspan`)
+//! --perspspan 64|32|16|8|4|1  walls and liquids exact every 16 pixels (id's
+//!                          `D_DrawSpans16`), 64, 32, 8 (id's C `D_DrawSpans8`; 64,
+//!                          32 and 4 its arithmetic), or at every pixel (`r_perspspan`)
 //! --exactpersp 0|1         the same as --perspspan 16 or 1 (the option before the span)
 //! --display W:H|square     the display's width:height (square: the mode's own,
 //!                          square pixels); the default is the command's
@@ -136,13 +136,13 @@ impl VideoArgs {
 
     /// A short tag for file names and reports: `classic`, `modern`, or the mix
     /// (a preset with another perspective says so: `modern-spans` for id's
-    /// 16, `modern-span8`, `classic-span4`, `classic-exactpersp`).
+    /// 16, `modern-span8`, `classic-span64`, `classic-exactpersp`).
     pub fn tag(&self) -> String {
+        let span = format!("-span{}", self.persp_span.pixels());
         let exact = match self.persp_span {
             PerspSpan::Spans16 => "",
-            PerspSpan::Spans8 => "-span8",
-            PerspSpan::Spans4 => "-span4",
             PerspSpan::Exact => "-exactpersp",
+            _ => &span,
         };
         match self.cvars {
             VideoCvars::CLASSIC => format!("classic{exact}"),
@@ -161,12 +161,12 @@ impl VideoArgs {
     }
 }
 
-/// `--perspspan`'s value: exactly 16, 8, 4 or 1.
+/// `--perspspan`'s value: exactly 64, 32, 16, 8, 4 or 1.
 pub fn parse_span(val: &str) -> Result<PerspSpan, String> {
     PerspSpan::ALL
         .into_iter()
         .find(|p| val == p.pixels().to_string())
-        .ok_or_else(|| format!("--perspspan: expected 16, 8, 4 or 1, got {val:?}"))
+        .ok_or_else(|| format!("--perspspan: expected 64, 32, 16, 8, 4 or 1, got {val:?}"))
 }
 
 /// The options as `quaketool --help` lists them (the module docs say more).
@@ -178,7 +178,7 @@ pub const HELP: &[(&str, &str)] = &[
     ("--lightstyles classic|smooth", "the animated lights in id's ten steps a second, or gliding (`r_lerplightstyles`)"),
     ("--torchflicker S", "the steady torches flicker at strength S, 0 (id's) to 2 (`r_torchflicker`)"),
     ("--display W:H|square", "the display's width:height (square: the mode's own); the default is the command's"),
-    ("--perspspan 16|8|4|1", "walls and liquids exact every 16 pixels (id's), 8 (id's C), 4, or every pixel (`r_perspspan`)"),
+    ("--perspspan 64|32|16|8|4|1", "walls and liquids exact every 16 pixels (id's), 64, 32, 8 (id's C), 4, or every pixel (`r_perspspan`)"),
     ("--exactpersp 0|1", "the same as --perspspan 16 or 1"),
     ("--scaled2d 0|1", "the status bar, menus and console blown up from 320x200"),
     ("--threads N", "draw each frame's 3-D view on N threads (default 1; the pixels are the same for any N)"),
@@ -209,6 +209,8 @@ mod tests {
         assert_eq!(v.tag(), "classic-exactpersp");
         assert_eq!(v.parse("--perspspan", "4"), Ok(true));
         assert_eq!(v.tag(), "classic-span4");
+        assert_eq!(v.parse("--perspspan", "64"), Ok(true));
+        assert_eq!((v.persp_span, v.tag().as_str()), (PerspSpan::Spans64, "classic-span64"));
         assert!(v.parse("--exactpersp", "2").is_err());
         assert!(v.parse("--perspspan", "2").is_err() && v.parse("--perspspan", "0").is_err());
     }

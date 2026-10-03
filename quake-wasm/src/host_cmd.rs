@@ -849,7 +849,7 @@ mod tests {
         assert_eq!(last_line().as_deref(), Some("\"r_perspspan\" is \"8\""));
         run_console_line("wasm_help r_perspspan");
         let said: String = APP.with(|c| c.borrow().as_ref().unwrap().console.lines().map(str::to_string).collect::<Vec<_>>().concat());
-        assert!(said.ends_with("r_perspspan \"8\": exact every 16 (id), 8, 4 or 1 px"), "{said:?}");
+        assert!(said.ends_with("r_perspspan \"8\": exact every 64,32,16 (id),8,4,1 px"), "{said:?}");
         run_console_line("r_perspspan 1");
         run_console_line("wasm_help");
         let help: Vec<String> = APP.with(|c| {
