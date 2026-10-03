@@ -1209,7 +1209,11 @@ function mouseLook(dx, dy, at) {
 //   120), as in all of WebKit's (wheelTicks = deltaY ÷ 40) — so a pixel
 //   event whose wheelDeltaY is a multiple of 120 that is not 3 × its deltaY
 //   is that many notches, at any spacing. (At a page zoom other than 100%
-//   Chromium divides it by the zoom: the other rules take over.)
+//   Chromium divides it by the zoom: the other rules take over.) Firefox's
+//   are lines (deltaMode 1) with the notch count in wheelDeltaY (none on a
+//   Mac, by its source): a notch is 6 lines on Linux (headed Firefox 155),
+//   where 3 was assumed and a stream counted every event twice, so the
+//   ticks are its unit as well.
 // - Else an event WHEEL_ALONE_MS after the last is a notch of its own,
 //   whatever its size (a mouse's notch comes alone: Safari's), fired at once
 //   and counted as a whole notch's worth.
@@ -1240,7 +1244,7 @@ let wheelWatch = null;     // the mouse check's, with ?mousecheck: (event, ms si
 // when it says nothing (a precise device's, or none at all).
 function wheelTicks(e) {
   const w = Math.abs(e.wheelDeltaY || 0);
-  if (e.deltaMode !== 0 || !e.deltaY || !w || w % WHEEL_TICK) return 0;
+  if (e.deltaMode > 1 || !e.deltaY || !w || w % WHEEL_TICK) return 0;
   return Math.abs(w - 3 * Math.abs(e.deltaY)) < 2 ? 0 : w / WHEEL_TICK;
 }
 canvas.addEventListener('wheel', e => {
