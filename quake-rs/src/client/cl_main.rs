@@ -11,6 +11,7 @@
 
 use crate::bsp::Bsp;
 use crate::cd_audio::CdCall;
+use crate::math::angle_wrap;
 use crate::mdl::Mdl;
 use crate::particles::{TrailHead, TrailStep};
 use crate::stepping::advance_clock;
@@ -296,6 +297,11 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
     if dt.is_finite() && dt > 0.0 {
         let aspeed = dt * if km.speed { CL_ANGLESPEEDKEY } else { 1.0 };
         w.yaw += aspeed * CL_YAWSPEED * km.turn;
+        // `cl.viewangles[YAW] = anglemod(...)`: the yaw back within a turn,
+        // as id's keeps it, but exactly (anglemod truncates it to 1/65536
+        // of a turn too), so that the mouse's fractional counts never meet
+        // the coarse steps of an f32 far from 0 ([`angle_wrap`]).
+        w.yaw = angle_wrap(w.yaw);
         if km.look != 0.0 {
             // PITCH -= speed*cl_pitchspeed*up (look up = pitch down numerically);
             // "if (up || down) V_StopPitchDrift()"; clamp 80/-70 (clamp_pitch).
