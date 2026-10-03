@@ -37,6 +37,7 @@ the volumes, the mouse).
 | Mouse look without holding `+mlook` | `freelook` (Mouse look) | on | How mouse play works today; `+mlook` still works in both profiles. |
 | Always Run | `cl_forwardspeed`, `cl_backspeed` 400 (Options > Always Run) | on (id: 200) | |
 | WASD: `w`/`s` forward and back, `a`/`d` strafe, over `default.cfg`'s `a` `+lookup` and `d` `+moveup` | the profile's bindings (`Bindings::with_wasd`) | on | |
+| The wheel switches weapons: a notch up `impulse 10` (next), down `impulse 12` (previous) | the profile's bindings (`Bindings::with_wheel`) | on | `default.cfg` predates the wheel (`in_win.c`'s `WM_MOUSEWHEEL` already turns it into `MWHEELUP`/`MWHEELDOWN` key presses), so id's players bound it themselves. |
 | Jump also swims up (`upmove`), on top of QuakeC's own swim | `cl_jumpswim` (Space swims up) | on | With WASD, `d` no longer swims up. |
 | Alt+Enter toggles fullscreen, whatever has the keyboard (the page takes the chord before the game) | `vid_altenter` (Fullscreen key; `vid_fkey`, its name when the key was F, still sets it) | on | `default.cfg` binds ALT `+strafe` and ENTER `+jump`, so in WinQuake the chord is a strafe-jump. A letter could not work in the menu and the console (`web/PLATFORM.md`, "Fullscreen"). |
 | id's mixer at the device's rate with four of its faults fixed: the click at a loop's restart, 48 kHz pitch 1.4% flat, ambient fades stalling above 100 fps, `S_StopSound`'s channel range | `snd_modern` (Full-rate sound) | on | Classic is id's mixer as written, at 11025 Hz. ("The engine's own mixer") |
