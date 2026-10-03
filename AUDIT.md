@@ -3372,7 +3372,7 @@ was done. Struck items are fixed on this branch.
   monster gibbed at once) hits ED_Alloc on seven pack levels (hip1m4, hip2m2, r1m4,
   r1m7, r2m4, r2m5, r2m7) with the kept statics eating the margin; whether id's would
   overflow too under that stress is not known. Certain about the statics.
-- **P5 Oriented sprites** (open: brief B2). `render/sprite.rs:30` draws every sprite as a
+- **P5 ~~Oriented sprites~~** (fixed, `fleet/sprites` `d049e21`: id's `r_sprite.c`/`d_sprite.c` ported, every type; was: open, brief B2). `render/sprite.rs:30` draws every sprite as a
   camera-facing billboard. Hipnotic's bullet holes are `progs/s_bullet.spr`, an
   `SPR_ORIENTED` sprite (type 3, never in id1) placed on the wall by `placebullethole`
   for every shotgun or super-shotgun pellet that hits the world (up to 10, for 300 s):
