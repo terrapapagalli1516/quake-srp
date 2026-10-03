@@ -125,10 +125,15 @@ fn weapon_model_index(w: &Walk, name: &str) -> usize {
 }
 
 /// `cl.items` as SV_WriteClientdataToMessage sends it: the player's `items`
-/// with the rune bits "stuffed into the high bits of items for sbar" —
-/// `(int)ent->v.items | ((int)pr_global_struct->serverflags << 28)`. QC
-/// `sigil_touch` only sets `serverflags`, so this is how a rune reaches the
-/// status bar.
+/// with more bits above them. For id1's progs those are the rune bits
+/// "stuffed into the high bits of items for sbar" — `(int)ent->v.items |
+/// ((int)pr_global_struct->serverflags << 28)`; QC `sigil_touch` only sets
+/// `serverflags`, so this is how a rune reaches the status bar. A progs that
+/// declares the field `items2` (`GetEdictFieldValue(ent, "items2")`: the
+/// mission packs') gets `items | ((int)items2 << 23)` instead, and no runes:
+/// that is where Hipnotic keeps its wetsuit and empathy shields and Rogue its
+/// armour types, ammo types, shield and anti-grav belt, the bits `sbar.c`
+/// reads at 23 and up.
 pub fn client_items(w: &Walk) -> i32 {
     server_items(&w.server, w.player)
 }
@@ -136,7 +141,14 @@ pub fn client_items(w: &Walk) -> i32 {
 /// [`client_items`] for a `server` and `player` not yet in a [`Walk`] (a
 /// level being assembled).
 pub fn server_items(server: &crate::server::Server, player: i32) -> i32 {
-    (server.vm.ent_float(player, server.vm.fo().items) as i32) | ((server.serverflags() as i32) << 28)
+    let vm = &server.vm;
+    let items = vm.ent_float(player, vm.fo().items) as i32;
+    let high = if vm.fo().items2.is_declared() {
+        (vm.ent_float(player, vm.fo().items2) as i32) << 23
+    } else {
+        (server.serverflags() as i32) << 28
+    };
+    items | high
 }
 
 /// Owned visible-entity descriptor gathered from the server before rendering:
@@ -1274,3 +1286,46 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
     ClientFrame { image: img, cshifts: shifts, sound }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::server_items;
+    use crate::progs::Progs;
+    use crate::server::testutil::{empty_bsp, Builder};
+    use crate::server::Server;
+
+    /// A server on a progs with the fields `items` (cell 0) and, if
+    /// `with_items2`, `items2` (cell 1), and the global `serverflags`; edict 0
+    /// stands in for the player.
+    fn server(with_items2: bool) -> Server {
+        let mut b = Builder::new();
+        b.add_field("items", 2, 0);
+        if with_items2 {
+            b.add_field("items2", 2, 1);
+        }
+        b.entityfields = 2;
+        b.add_global("serverflags", 2, 40);
+        Server::new(empty_bsp(), Progs::parse(&b.build()).expect("progs")).expect("server")
+    }
+
+    /// `SV_WriteClientdataToMessage`: id1's progs (no `items2`) get the rune
+    /// bits of `serverflags` at 28 and up; a progs that declares `items2` (the
+    /// mission packs') gets `items2 << 23` instead and no runes — Hipnotic's
+    /// wetsuit (`items2` 2) at bit 24, Rogue's shield (64) at 29.
+    #[test]
+    fn items2_replaces_the_runes_when_the_progs_declares_it() {
+        let mut id1 = server(false);
+        id1.vm.ent_set_float(0, "items", 4097.0);
+        id1.vm.set_glob_float(id1.vm.go().serverflags, 3.0);
+        assert_eq!(server_items(&id1, 0), 4097 | (3 << 28));
+
+        let mut pack = server(true);
+        pack.vm.ent_set_float(0, "items", 4097.0);
+        pack.vm.set_glob_float(pack.vm.go().serverflags, 3.0);
+        assert_eq!(server_items(&pack, 0), 4097, "items2 0: no runes, nothing above");
+        pack.vm.ent_set_float(0, "items2", 2.0);
+        assert_eq!(server_items(&pack, 0), 4097 | (1 << 24), "Hipnotic's wetsuit");
+        pack.vm.ent_set_float(0, "items2", 64.0 + 128.0);
+        assert_eq!(server_items(&pack, 0), 4097 | (1 << 29) | (1 << 30), "Rogue's shield and belt");
+    }
+}

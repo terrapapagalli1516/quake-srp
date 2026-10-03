@@ -119,16 +119,28 @@ impl<'a> Hull<'a> {
 
     /// Signed plane distance of point `p` against the plane referenced by clip
     /// node `node`. Mirrors the `plane->type < 3` axial fast path of
-    /// `SV_HullPointContents` / `SV_RecursiveHullCheck`. Returns `None` if the
-    /// plane index is out of range (treated as "no information" by callers).
+    /// `SV_HullPointContents` / `SV_RecursiveHullCheck`.
+    ///
+    /// The slanted case is `DotProduct (plane->normal, p) - plane->dist`, which
+    /// id's x87 code evaluates in its 80-bit registers: three products of
+    /// floats (each exact in a double) summed, then the plane's distance
+    /// taken off, rounded once. Done in `f32`, every product and sum rounds,
+    /// and a point lying on the plane (a 45-degree wall through a box corner)
+    /// can come out on the other side: id's `droptofloor` then finds the
+    /// floor where the port finds solid, or the other way round (the mission
+    /// packs' hip1m1, hip2m6 and hip3m1 each have an item that hits it). So it
+    /// is summed in `f64`, which gives the sign id's registers give.
     fn plane_distance(&self, plane: &DPlane, p: Vec3) -> f32 {
         // type < 3 => axial: d = p[type] - dist; else dot(normal, p) - dist.
         if plane.ptype >= 0 && plane.ptype < 3 {
-            // ptype is 0,1,2 here; index is in-bounds for a Vec3.
+            // ptype is 0,1,2 here; index is in-bounds for a Vec3. One
+            // subtraction of two floats rounds without changing its sign.
             let i = plane.ptype as usize;
             p.get(i).copied().unwrap_or(0.0) - plane.dist
         } else {
-            dot(plane.normal, p) - plane.dist
+            let n = plane.normal.map(f64::from);
+            let p = p.map(f64::from);
+            (n[0] * p[0] + n[1] * p[1] + n[2] * p[2] - f64::from(plane.dist)) as f32
         }
     }
 }
@@ -1108,6 +1120,31 @@ mod tests {
             dist,
             ptype: PLANE_X,
         }]
+    }
+
+    /// Two clip planes of Scourge of Armagon's maps that pass exactly
+    /// through the hull-1 point of an item's `droptofloor` (`census/packs.py`,
+    /// `oracle_move`): `DotProduct (normal, p) - dist` is a few millionths
+    /// below zero in id's x87 registers, and 0 or a few millionths above it in
+    /// `f32` arithmetic — id's `droptofloor` and the port's then disagree on
+    /// whether the item is in solid (hip1m1's shells at 1184 -160 -176, which
+    /// id's removes as "fell out of level"; hip3m1's rockets at -224 16 -448,
+    /// which it keeps). Summed in `f64`, the point is on the back side, as in
+    /// id's.
+    #[test]
+    fn a_point_on_a_slanted_plane_lands_on_ids_side() {
+        let s = std::f32::consts::FRAC_1_SQRT_2; // 0.70710677, as the bsp stores it
+        for (normal, dist, p) in [
+            ([s, -s, 0.0], 950.3515_f32, [1200.0, -144.0, -146.0]), // hip1m1 plane 1204
+            ([s, s, 0.0], -124.45079_f32, [-208.0, 32.0, -418.0]), // hip3m1 plane 1526
+        ] {
+            let f32_sum = dot(normal, p) - dist;
+            assert!(f32_sum >= 0.0, "f32 puts {p:?} in front ({f32_sum})");
+            let planes = [DPlane { normal, dist, ptype: 3 }];
+            let hull = one_plane_hull(&planes);
+            assert!(hull.plane_distance(&planes[0], p) < 0.0);
+            assert_eq!(hull_point_contents(&hull, 0, p), CONTENTS_SOLID, "{p:?} is behind the plane");
+        }
     }
 
     #[test]

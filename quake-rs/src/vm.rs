@@ -141,6 +141,13 @@ impl Fld {
     fn ofs(self) -> Option<usize> {
         self.0.map(usize::from)
     }
+
+    /// Whether the progs declares this field: `GetEdictFieldValue` finding it,
+    /// for the engine paths that do one thing when a field exists and another
+    /// when it does not (`items2`).
+    pub fn is_declared(self) -> bool {
+        self.0.is_some()
+    }
 }
 
 impl Glb {
@@ -183,8 +190,10 @@ macro_rules! resolved_by_name {
 
 resolved_by_name!(
     /// `entvars_t` (progdefs.h): every engine-visible entity field, resolved by
-    /// name once, when the progs is loaded ([`Vm::new`]), plus `gravity`, which
-    /// `SV_AddGravity` finds with `GetEdictFieldValue`. id's engine reads these
+    /// name once, when the progs is loaded ([`Vm::new`]), plus the two id's
+    /// engine finds with `GetEdictFieldValue`: `gravity` (`SV_AddGravity`) and
+    /// `items2` (`SV_WriteClientdataToMessage`; only the mission packs' progs
+    /// have it, so it resolves to nothing for id1's). id's engine reads these
     /// as struct members at offsets fixed by the id1 progs; the port looks them
     /// up by name so any progs works, and this table spares the hot paths a hash
     /// of the name on every access (PERF_PLAN D2).
@@ -197,7 +206,7 @@ resolved_by_name!(
     idealpitch, netname, enemy, flags, colormap, team, max_health, teleport_time, armortype,
     armorvalue, waterlevel, watertype, ideal_yaw, yaw_speed, aiment, goalentity, spawnflags,
     target, targetname, dmg_take, dmg_save, dmg_inflictor, owner, movedir, message, sounds,
-    noise, noise1, noise2, noise3, gravity,
+    noise, noise1, noise2, noise3, gravity, items2,
 );
 
 resolved_by_name!(

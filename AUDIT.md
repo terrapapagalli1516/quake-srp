@@ -241,7 +241,10 @@ marked *(2026-06)* were not re-checked since. Struck items were closed on 2026-0
 - `give` is not `Host_Give_f`: it clamps, has an armour case, fills a missing amount, and
   selects the weapon (CENSUS L13).
 - No pitch drift on slopes: `cl.idealpitch` is fixed at 0 (CENSUS L3).
-- `makestatic` keeps the edict (id frees it into the signon); nothing visible (CENSUS L17).
+- `makestatic` keeps the edict (id frees it into the signon) (CENSUS L17). Not invisible:
+  every static holds an edict id's frees and reuses, so a mission-pack map runs up to
+  106 more live edicts than id's (`r1m1`), and Rogue's `r2m6` overflows id's 600 in
+  Classic where id's C spawns it at 546 ("The mission packs' paths", P4).
 - `checkclient` traces a line of sight instead of using the 0.1 s client PVS (CENSUS L19).
 - The gibbed player's head leaves no blood trail: the client skips the player's edict
   before trails, where id skips only drawing it (CENSUS L23).
@@ -289,6 +292,9 @@ marked *(2026-06)* were not re-checked since. Struck items were closed on 2026-0
   `SV_WriteEntitiesToClient` is not modelled (sim).
 - `SV_ClipToLinks` uses `maxs - mins` where id reads `v.size` (differs only if QuakeC sets
   `mins`/`maxs` without `setsize`) (sim).
+- Sprites other than `SPR_VP_PARALLEL` are drawn as facing billboards (`render/sprite.rs`):
+  Hipnotic's bullet holes (`SPR_ORIENTED`) stand out of the walls ("The mission packs'
+  paths", P5).
 - For a mode taller than 16:10 (not a preset) the underwater warp buffer is narrowed
   instead of squeezed through id's aspect (polish; w2b).
 - `CL_UpdateTEnts`' `MAX_VISEDICTS` half-cap and its index clobber (undefined in the C)
@@ -363,10 +369,23 @@ marked *(2026-06)* were not re-checked since. Struck items were closed on 2026-0
   60s, 20,000+ `Cvar_Set: variable campaign not found` lines), because Rogue's real
   engine registered a `campaign` cvar this GPL WinQuake tree never did — so whether the
   real Rogue engine also needed more than 600 edicts for this map is still open.
+  *Corrected 2026-10-02* ("The mission packs' paths", P4): id's C does run `r2m6`
+  (`census/packs.py`: the `campaign` lines are one a frame, not a hang) and peaks at 546
+  edicts; the port's 632 are 541 plus 91 `makestatic` edicts id frees (CENSUS L17). The
+  overflow is the port's, not the map's.
 - Rogue's demo wire format for a weapon past the standard 7 (the `1<<i`
   re-expansion `demo.rs` already documents as not modelled, for any non-standard progs)
   applies to the mission packs too, if a demo of theirs is ever added — none is in scope
   here.
+
+**Mission packs** ("The mission packs' paths", 2026-10-02; the re-release's progs were
+written for its own engine)
+- Its strings are localization keys: pickups, obituaries, centerprints and the finale
+  texts print as `$qc_got_item$qc_double_shotgun`, `$qc_finale_hip1` (P6).
+- Its end-of-pack flow calls `finaleFinished` (#79), which id's engine and the port
+  refuse with a QuakeC error, then `localcmd("menu_credits")` (P7).
+- `PF_cvar` returns 0 for every cvar outside the server's own list: Hipnotic's footsteps
+  (`cvar("crosshair") == 2`) never play (P9).
 
 **Older LOW tail** *(2026-05/06, not re-checked)*: `PF_particle`'s byte count and
 direction quantising; `clip_box`'s inopen/plane-distance coordinates; `SV_NewChaseDir`'s
@@ -3188,3 +3207,212 @@ unreproduced on this build: either it predates a fix already on `main` (the miss
 round landed hours before this one), or it needs the exact phone/touch
 conditions this round's keyboard-driven automation does not cover. If it recurs, the
 `hip1m1_start_door.rs` test and the oracle flags above are the fastest way back in.
+
+**Resolved (chair, the same day).** The user's door was not hip1m1's: Scourge of Armagon
+has its own `maps/start.bsp`, whose start room faces a *rotating* door (`rotate_object`
+`*65` at (816 −256 160), swung by `func_rotate_door` "damndoor", its collision 22
+`func_movewall`s, opened by the floor plate `*77`). The server swings the movewalls away
+(the player walks through) while the renderer drew `*65` at its spawn angles — the
+"brush models do not rotate" line of the Renderer list, closed by `fleet/rotate` below.
+The investigation above stands for hip1m1, and its oracle flags and tests are kept.
+
+## The mission packs' paths (2026-10-02, branch `fleet/packclass`)
+
+The question: rotating brush models were never ported because nothing in id1 rotates
+(`rotate` ported `R_RotateBmodel` this round). What else did id's engine do that the port
+skipped, stubbed or simplified because the shareware and registered id1 never reach it,
+and that Scourge of Armagon (`hipnotic`) or Dissolution of Eternity (`rogue`) do reach?
+
+**How it was looked for.** Statically: every "not modelled / id1 never / none do / stub /
+no-op / simplification" in both crates and the Open list, crossed with what the packs'
+`progs.dat` and data use that id1's do not (`census/qcsym.py` over the three progs:
+builtins and their arities, `Write*` sequences per function, the values stored into
+`effects`, `solid`, `movetype`, `weapon`, `items2`, `avelocity`; `cvar`/`cvar_set`/
+`localcmd`/`stuffcmd` arguments; every model's flags, sync type, skin and frame groups,
+every sprite's type; the maps' special entities). Dynamically, against id's C:
+`census/packs.py` (new: id's server under `-hipnotic`/`-rogue` against the port's, live
+edicts at t = 1.7 / 4.7 / 10.7 s, on all 35 levels of both packs), `oracle_move` (new: one
+`SV_Move` in id's hull code), the 3-D oracle on 64 views (each level's spawn view and its
+first `info_intermission` camera, entities, particles and dynamic lights handed over),
+`screen2d.py --game` (new: each pack's status bar, 21 shots at each of 320x200 and
+640x400), and `quaketool census` (the full scripted playthrough) on every level. One
+caveat runs
+through all of it: the packs exist here only as the 2021 re-release's files, whose
+`progs.dat` was rebuilt for the re-release's own engine, and id's WinQuake cannot really
+run it either (P3, P6, P7).
+
+Each item: the feature, where the port diverges, what a player sees, how sure, and what
+was done. Struck items are fixed on this branch.
+
+- **P1 ~~`items2`~~** (fixed, `4f7237f`). `SV_WriteClientdataToMessage` sends `items |
+  items2 << 23` for a progs that declares `items2` (`GetEdictFieldValue`) and `items |
+  serverflags << 28` (the runes) only for one that does not; both packs declare it.
+  `client/cl_main.rs` `server_items` always mixed in the runes: Hipnotic's wetsuit and
+  empathy shields and Rogue's armour type, ammo-type highlight, power shield and
+  anti-grav belt never reached the bar, and in Rogue a held rune lit the multi-rocket,
+  shield, belt and superhealth bits. Certain: `screen2d.py --game` shows the bars 96-98%
+  (the wrong icons) before and 100.00% after, every shot but the Tab bar's clock (27 px:
+  id's signon of a bigger map takes one more 0.1 s frame, the Open list's connect-time
+  item). id1's progs has no `items2`; nothing changes there.
+- **P2 ~~A point on a slanted clip plane~~** (fixed, `ca2ab37`). `world.rs`
+  `plane_distance`: id's x87 registers evaluate `DotProduct (normal, p) - dist` almost
+  exactly; the port's `f32` rounding put points lying on 45-degree planes on the other
+  side. Three items differ in the packs: hip1m1's shells (1184 -160 -176) and hip2m6's
+  health (1032 8 176) stay where id's `droptofloor` finds solid and removes them ("Bonus
+  item fell out of level"), hip3m1's rockets (-224 16 -448) go where id's keeps them.
+  Certain (`oracle_move` at each point; Python id-style descents of the clip hulls); all
+  three match after. id1's identity values move only in `play.fire_e1m1` (re-recorded,
+  `oracle/classic_expected.txt` says why); every id-anchored check is unchanged.
+- **P3 `svc_achievement` (52)** (kept, named, `b8a16a6`). The re-release progs write
+  `WriteByte 52` + a string when a monster kills another (`Killed`, `MSG_ALL`), at every
+  secret (`multi_trigger`, `MSG_ONE`), at a pack's end. id's client Host_Errors on it
+  ("Illegible server message"): the C oracle ends hip1m1 the moment its player walks into
+  the first `trigger_secret`. The port skips the command and its string. A deliberate
+  departure from id's C (whose engine cannot play these progs), in both profiles.
+- **P4 `makestatic` keeps its edict** (CENSUS L17; open: brief B1). `server/pr_cmds.rs:325`,
+  `vm.rs:1093`. id's `PF_makestatic` writes `svc_spawnstatic` into the signon and frees
+  the edict, which the next spawn reuses at once (`freetime` < 2). The port keeps every
+  static alive: 0-106 more live edicts per pack level (torches, flames, candles,
+  lanterns, `func_illusionary`), and Rogue's `r2m6` overflows 600 in Classic ("ED_Alloc:
+  no free edicts") where id's C spawns it at 546 — the port's 632 are 541 + 91 statics.
+  `sv_max_edicts` (2026) hid this; the fleet/edicts finding that `r2m6` needs more than
+  id's 600 was the port's own count. Also: `quaketool census`'s stress run (every
+  monster gibbed at once) hits ED_Alloc on seven pack levels (hip1m4, hip2m2, r1m4,
+  r1m7, r2m4, r2m5, r2m7) with the kept statics eating the margin; whether id's would
+  overflow too under that stress is not known. Certain about the statics.
+- **P5 Oriented sprites** (open: brief B2). `render/sprite.rs:30` draws every sprite as a
+  camera-facing billboard. Hipnotic's bullet holes are `progs/s_bullet.spr`, an
+  `SPR_ORIENTED` sprite (type 3, never in id1) placed on the wall by `placebullethole`
+  for every shotgun or super-shotgun pellet that hits the world (up to 10, for 300 s):
+  id's draws them lying on the wall, the port as squares facing the player that stand
+  out of it and turn with the view. Certain: the 3-D oracle on hip1m1 after `+attack`,
+  seen along the wall (id's thin slivers; the port's billboards, cut by the wall).
+  `s_blood1.spr` (type 3, `wallsprite`) is placed by no map.
+- **P6 The re-release's strings are localization keys** (open: brief B3). 136 of
+  Hipnotic's string immediates and 190 of Rogue's in `sprint`/`bprint`/`centerprint`/
+  `dprint`/`WriteString` are `$qc_...` keys, and the formatted ones take arguments the
+  re-release's engine substitutes (`sprint(other, "$qc_got_item", self.netname)` with
+  `qc_got_item = "You got {0}\n"`, `qc_double_shotgun = "the Double-barrelled
+  Shotgun"`). id's `PF_VarString` and the port's (`builtins.rs:57`) concatenate: the
+  player reads
+  `$qc_got_item$qc_double_shotgun`, `$qc_enteredplayer`, and `$qc_finale_hip1` as the
+  episode's closing text. Same in id's C. `mission_paks.py` put the maps' `$map_` keys
+  back in English; the progs' cannot be, because of `{0}`.
+- **P7 The end of each pack** (open: brief B4). Hipnotic's `ExitIntermission` on hipend
+  and Rogue's `finale_5`/`finale_check` poll `finaleFinished()` (builtin #79) before
+  `finale_transition` runs `localcmd("menu_credits\n")` and `"disconnect\n"`. id's
+  engine and the port have no #79: `PR_RunError` ("bad builtin call number",
+  `vm.rs:1735`), the game ends with a QuakeC error at each pack's very end. By reading
+  the QuakeC and the dispatch; not reached dynamically.
+- **P8 `cvar_set("campaign")` every frame** (kept). Both packs' `StartFrame` set a cvar
+  the re-release's engine has; id's `Cvar_Set` prints "Cvar_Set: variable campaign not
+  found" every frame (its console and notify lines fill with it: the "hang" an earlier
+  run reported). The port's `cvar_set` (`server/pr_cmds.rs:256`) ignores names it does not
+  keep. A harmless departure; `screen2d.py --game` hides id's notify lines for it.
+- **P9 `cvar()` of a client cvar** (open, small). `server/pr_cmds.rs:239` `cvar_value`
+  answers only the server's own few; everything else is 0. Hipnotic's `worldspawn`
+  turns its footstep sounds on when `cvar("crosshair") == 2` (`footsteps`): in id's a
+  player who sets `crosshair 2` hears them, in the port never. `sv_cheats`, `campaign`,
+  `gamecfg` are 0 in both (id's has no such cvars, or a 0 default).
+- **P10 `MSG_ONE`** (covered). `server/msg.rs:354` models only `MSG_BROADCAST` and
+  `MSG_ALL` ("the id1 progs never write" the others). The packs write `MSG_ONE` for
+  achievements (P3) and Hipnotic's hipend camera (`UpdateCamera`: a hand-built
+  `svc_updateentity` origin update for the player); the port's client reads the edicts
+  directly, so nothing is lost.
+- **P11 A QuakeC `svc_updatestat`** (covered). Hipnotic's spawners (`spawn_use`,
+  `Gremlin_Split`) and Rogue's (`tbaby_checknew`, `morph_wake1`) write `WriteByte 3,
+  STAT_TOTALMONSTERS, WriteLong total_monsters`; the port's parser drops it, and its
+  status bar reads `total_monsters` live (`client/cl_main.rs:1223`): the same number.
+- **P12 The active weapon under `-hipnotic`/`-rogue`** (noted). With `standard_quake`
+  off id's server sends the index of `weapon`'s lowest set bit and the client puts `1<<i`
+  back; the port uses `weapon` itself. Equal for every single-bit weapon; a `weapon` of 0
+  writes no byte at all in id's (its message goes out of step), which no pack code was
+  seen to do.
+- **P13 Temp entities id1 never sends** (noted). `TE_EXPLOSION2` (Rogue's multi-grenades,
+  plasma, lava balls) and `TE_BEAM` (Rogue's grappling hook, deathmatch) are parsed and
+  drawn; `beam.mdl` is in Rogue's pak. `particles.rs:427` draws the explosion's six
+  random numbers per particle in a different order from id's (positions, then
+  velocities; id's interleaves them per axis), but the client's particle generator is the
+  port's own sequence anyway, so nothing visible follows. Not compared with id's C (no
+  pack demo).
+- **P14 What `-hipnotic`/`-rogue` change in id's engine** (checked). `standard_quake`
+  (P12, and `MINIMUM_MEMORY_LEVELPAK`), `sbar.c`, `menu.c` and `Host_Give_f` (Open list),
+  nothing else; `SV_PushMove` does not turn a pusher by `avelocity` in WinQuake and the
+  port does not either (Hipnotic's rotations are think-driven). Both packs call `precache_*`
+  only at spawn, pass `sound` attenuations in range, and use id1's movetypes.
+- **P15 The 3-D views** (checked). 64 views over 33 levels (`r2m6` excepted: P4 stops the
+  port's `view` spawning it): every one at 98.45% or better at `--spans 16`. What is
+  below 99.9% is explained: exact axis-aligned views put a texel boundary or
+  `D_MipLevelForScale`'s threshold on a knife edge between id's x87 and the port's `f32`
+  (start, r1m7: one degree of yaw gives 99.98-99.997%); a random `func_counter` flashing
+  hip2m2's lightning style 32 (the view harness cannot share id's `rand()`); the flames of
+  wall torches and fires on r1m2/hip2m1 one frame apart (~0.1%, the Open list's
+  `ST_RAND` syncbase). Rogue's skin-group models (`sphere.mdl`, `p_shield.mdl`,
+  `timecore.mdl`) were in none of the views: not compared.
+- **P16 Hipnotic's start map** (the `rotate` agent's 93.3-93.5%). Two causes, neither in a
+  pack path: `oracle/rotate_check.py` runs id's renderer with its default
+  `D_DrawSpans8`, where the port draws `D_DrawSpans16` (`oracle_spans 16`: 97.85%); and
+  the spawn view is the knife edge of P15 — the side walls 160 units away at fov 90 put
+  their nearest visible point exactly at mip 0's threshold (`nearzi * xscale` = 1.0), and
+  yaw exactly 90 lines the floor's seams up with the rays (`d_mipscale 0` on both: the
+  walls match; yaw 91: 99.997%).
+- **P17 The edicts sweep** (checked). With P1-P2 in, what still differs is: the statics
+  (P4), monsters' random idle frames and wandering, things monsters start at random
+  (doors in r1m4/r1m7/r2m7 opened by a monster in their field, Hipnotic's scourge
+  triggers, random `func_counter`s, bubbles, lava balls), and hip2m4's rotating door
+  starting 0.2 s early (its trigger is under the player, who connects at 1.2 s, id's at
+  1.4: the Open list's connect-time item). id's console under the packs prints only
+  P8's lines and "'fog' / 'alpha' / 'property 1' is not a field" (the re-release's
+  worldspawn and entity keys; the port ignores them silently, as it ignores the
+  re-release's `.lit` files: same picture).
+- **P18 `sprint`/`centerprint` to a non-client** (noted, not pack-specific).
+  `server/msg.rs:233`/`250` print to the player whoever the QuakeC names; id's prints
+  "tried to sprint to a non-client" and nothing else. Hipnotic's `counter_use`
+  centerprints to its `activator`, which a monster can be.
+- **P19 `checkclient`** (noted): CENSUS L19's line-of-sight stand-in for the client PVS
+  serves 9 call sites in Hipnotic (1 in id1): its monsters wake by it more often.
+
+**For follow-up agents** (each Classic-relevant unless said; prove against id's C):
+
+- **B1 (P4): `makestatic` frees its edict.** Snapshot what `svc_spawnstatic` carries
+  (model, frame, colormap, skin, origin, angles) into a server-side signon list, `ED_Free`
+  the edict, and draw statics from that list in `client/cl_main.rs` (today the static
+  path keys off `Vm::is_static_edict` in the edict loop, ~628-720) and in
+  `quake-wasm/src/cl_walk.rs` (837, 922). Keep the floats or take id's wire bytes (the
+  Open list's statics item) — say which. Savegames: id's saves no statics (the map's
+  respawn rebuilds them); check the port's load does the same. Expect every edict number
+  after the first static to move, so the Classic identities (`census`, `edicts`, maybe
+  `play`) move toward id's numbering: re-record with notes. Proof: `census/packs.py`'s
+  "only in port" rows vanish; `r2m6` spawns in Classic at id's 546; the `edicts` check's
+  diffs shrink on id1. `sv_max_edicts` then stays as a 2026 extra for maps past 600.
+- **B2 (P5): `R_DrawSprite` for every sprite type.** Port `r_sprite.c`
+  (`R_SetupAndDrawSprite`: the four orientations, `R_ClipSpriteFace` against the
+  frustum) and `d_sprite.c` (`D_SpriteDrawSpans`, the scan-edge walkers, the
+  gradients), so a sprite is a projected, perspective-textured, z-tested polygon, not a
+  rectangle. It changes `SPR_VP_PARALLEL` (id1's explosions and bubbles) too: compare
+  with the oracle (`compare.py --modes ents` on a view with `s_explod.spr`; the `.ents`
+  carry sprites), re-record `play`'s demo hashes if they move. Hipnotic's bullet holes
+  (`+attack` on hip1m1, as P5) are the type-3 proof.
+- **B3 (P6): the re-release's strings.** A small table loaded from
+  `localization/loc_english.txt` on the search path (let `mission_paks.py` put the
+  re-release's file into each pack's `pak0.pak`); `var_string` substitutes `{0}`, `{1}`
+  in a `$key`'s text with the following arguments (each looked up when it is itself a
+  key) and otherwise concatenates as now; `svc_finale`/`svc_cutscene` texts and
+  centerprints look their key up at the client. Decide and say whether it is a 2026
+  extra or both profiles (id1's progs has no `$` strings, so Classic's proof does not
+  move either way); Ironwail's `LOC_Format` is the usual reading of the format.
+- **B4 (P7): the end of a pack.** Builtin #79 `finaleFinished` (true once the finale
+  text is fully out and the player presses a key, so `finale_check` moves on) and the
+  two `localcmd`s it leads to (`menu_credits`: the port's own end screen or the main
+  menu; `disconnect`: `cl_disconnect`). Prove by playing hipend's and r2m8's endings
+  through `quaketool census` or a scripted walk to their `ExitIntermission`.
+
+**Tools added** (committed): `census/packs.py`; `quaketool census`/`census-edicts` take a
+layered `a.pak,b.pak,c.pak`; `oracle_move` in `oracle/c/oracle.c`; `screen2d.py --game
+hipnotic|rogue --data DIR` with each pack's status-bar scenarios (the port's harness
+boots `$QUAKE_SCREEN_BASEDIR`/`$QUAKE_SCREEN_GAME`).
+
+**Not verified**: the end-of-pack flow (P7) dynamically; Rogue's skin groups; Hipnotic's
+`func_clock`, `effect_finale` camera and hipend cutscene against id's C; sound; any pack
+level in a browser. The 3-D sweep's views are static ones: entities in motion, monsters'
+attacks and Rogue's own monsters' models in action were not compared.

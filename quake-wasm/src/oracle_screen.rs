@@ -229,13 +229,23 @@ fn run(script: &str) {
 }
 
 /// The harness entry point: runs `$QUAKE_SCREEN_SCRIPT` (does nothing
-/// without it).
+/// without it). With `$QUAKE_SCREEN_BASEDIR` the game's files come from that
+/// `-basedir` instead of the shareware pak beside the crate, and with
+/// `$QUAKE_SCREEN_GAME` (`hipnotic`, `rogue`) that game directory layers over
+/// `id1` as `-hipnotic`/`-rogue` layer it — a mission pack's status bar
+/// against id's (`screen2d.py --game`).
 #[test]
 #[ignore]
 fn oracle_screen() {
     let Ok(path) = std::env::var("QUAKE_SCREEN_SCRIPT") else {
         return;
     };
+    if let Ok(base) = std::env::var("QUAKE_SCREEN_BASEDIR") {
+        let game = std::env::var("QUAKE_SCREEN_GAME").ok();
+        let mod_dirs: Vec<&str> = game.as_deref().into_iter().collect();
+        crate::common::init(std::path::Path::new(&base), &mod_dirs, false)
+            .unwrap_or_else(|e| panic!("-basedir {base}: {e}"));
+    }
     let script = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
     run(&script);
 }
