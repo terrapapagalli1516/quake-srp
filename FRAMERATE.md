@@ -580,24 +580,26 @@ at any rate, so its blocks rebake every frame whatever the step.
 1920x1080 --threads 1|8 --reps 3`: the live game standing at each view, the
 2026 video settings but the light styles, 4.6 s a run (the counters from one
 run of each mode, the times from three of each, interleaved, the counters
-off), native release build, 2026-10-03, load average 1–4. "Styled" is the
-surfaces drawn whose lightmap has a style past 0; the time is the 3-D view's
-mean per frame:
+off), native release build, 2026-10-03, load average 1–3, with the frame's
+bakes on the render threads (PERF_PLAN.md §13). "Styled" is the surfaces
+drawn whose lightmap has a style past 0; the time is the 3-D view's mean per
+frame:
 
 | view | styled | blocks rebaked a frame, 72 Hz / 480 Hz | 1 thread, ms, 72 / 480 Hz | 8 threads, ms, 72 / 480 Hz |
 |---|---|---|---|---|
-| e1m1 start | 14 | 1.27 → 9.64 / 0.19 → 9.13 | 3.75 → 3.81 / 3.87 → 3.99 | 1.08 → 1.13 / 1.08 → 1.13 |
-| e1m1 fluorescent corridor | 26 | 2.36 → 17.9 / 0.35 → 17.0 | 4.06 → 4.24 / 4.03 → 3.86 | 1.01 → 1.06 / 1.02 → 1.07 |
-| e1m5 slow pulse | 7 | 0.95 → 6.85 / 0.14 → 1.57 | 3.19 → 3.27 / 3.22 → 3.21 | 0.72 → 0.81 / 0.71 → 0.73 |
-| e2m2 start, torches | 18 | 2.50 → 18.0 / 0.38 → 9.01 | 3.36 → 3.50 / 3.10 → 3.21 | 0.82 → 0.95 / 0.80 → 0.89 |
-| e2m5 by the start, torches | 46 | 5.74 → 41.4 / 0.86 → 17.9 | 3.39 → 3.61 / 3.19 → 3.30 | 0.91 → 1.13 / 0.87 → 0.98 |
+| e1m1 start | 14 | 1.27 → 9.64 / 0.19 → 9.13 | 3.51 → 3.57 / 3.48 → 3.52 | 1.07 → 1.12 / 1.07 → 1.12 |
+| e1m1 fluorescent corridor | 26 | 2.36 → 17.9 / 0.35 → 17.0 | 3.37 → 3.44 / 3.35 → 3.41 | 1.01 → 1.06 / 1.01 → 1.06 |
+| e1m5 slow pulse | 7 | 0.95 → 6.85 / 0.14 → 1.57 | 3.04 → 3.14 / 3.02 → 3.04 | 0.72 → 0.79 / 0.70 → 0.72 |
+| e2m2 start, torches | 18 | 2.50 → 18.0 / 0.38 → 9.01 | 3.17 → 3.28 / 3.15 → 3.22 | 0.81 → 0.89 / 0.80 → 0.85 |
+| e2m5 by the start, torches | 46 | 5.74 → 41.4 / 0.86 → 17.9 | 3.27 → 3.49 / 3.22 → 3.34 | 0.88 → 1.00 / 0.85 → 0.93 |
 
-At most 0.22 ms a frame (e2m5 at 72 Hz, where nearly every frame rebakes
-every torch-lit block), 0.02–0.13 ms elsewhere, the same with 1 thread or 8:
-the blocks bake in `D_DrawSurfaces`' setup, before the bands, so with 8
-threads the same time is a larger share (up to 25% at 72 Hz, 13% at 480).
-The worst frame stays well inside 480 Hz's 2.08 ms. The 1-thread rows are
-within the timings' noise (one comes out 4% faster).
+At most 0.23 ms a frame on one thread (e2m5 at 72 Hz, where nearly every
+frame rebakes every torch-lit block), 0.02–0.11 elsewhere; on eight, 0.05–0.12
+ms (before the bakes went to the threads, the same 0.22 ms as on one: up to
+25% of the frame at 72 Hz, now 13%). A frame bakes 0.08–0.38M texels here,
+two to eleven threads' worth at `BAKE_TEXELS_PER_THREAD`, so the thread
+starts are a good part of what is left. The worst frame stays well inside
+480 Hz's 2.08 ms.
 
 ## Steady torches that flicker (`r_torchflicker`, `fleet/torchlight`)
 
@@ -671,45 +673,47 @@ facing it, where the most drawn surfaces are torch-lit), the 2026 video
 settings in both, the counters from one run of each, the 3-D view's median
 ms a frame from three of each, interleaved, the counters off, native release
 build, 2026-10-03, load 0–5. Each cell is without the shadows (the first
-build, `b22ba40`) → with them, run in the same sitting; the time is what the
-flicker adds to id's view (1080p: 3.9–5.0 ms on one thread, 1.4–1.7 on
+build, `b22ba40`) → with them, run in the same sitting (→ with the bakes on
+the threads, on eight); the time is what the flicker adds to id's view (1080p: 3.9–5.0 ms on one thread, 1.4–1.7 on
 eight; 1315x535: 1.6–2.0 and 0.8–1.1):
 
 1920x1080:
 
 | view | torch-lit surfaces | blocks rebaked a frame, 72 / 480 Hz | 1 thread, ms added, 72 / 480 Hz | 8 threads, ms added, 72 / 480 Hz |
 |---|---|---|---|---|
-| e1m2's start | 130 → 111 | 129 → 110 / 79 → 61 | 0.55 → 0.46 / 0.36 → 0.29 | 0.85 → 0.85 / 0.57 → 0.33 |
-| e1m3's flames | 154 → 135 | 154 → 134 / 107 → 85 | 1.15 → 1.03 / 0.98 → 0.84 | 1.58 → 1.45 / 1.28 → 0.97 |
-| e1m4's torches | 141 → 109 | 140 → 108 / 74 → 52 | 0.82 → 0.64 / 0.48 → 0.35 | 1.19 → 0.74 / 0.60 → 0.50 |
-| e2m6's torches | 142 → 121 | 142 → 121 / 114 → 82 | 0.60 → 0.50 / 0.51 → 0.39 | 1.02 → 0.71 / 0.63 → 0.51 |
-| e4m5's flames | 221 → 192 | 217 → 188 / 88 → 76 | 1.30 → 1.25 / 0.71 → 0.55 | 1.76 → 1.76 / 0.80 → 0.68 |
+| e1m2's start | 130 → 111 | 129 → 110 / 79 → 61 | 0.55 → 0.46 / 0.36 → 0.29 | 0.85 → 0.85 → 0.20 / 0.57 → 0.33 → 0.15 |
+| e1m3's flames | 154 → 135 | 154 → 134 / 107 → 85 | 1.15 → 1.03 / 0.98 → 0.84 | 1.58 → 1.45 → 0.48 / 1.28 → 0.97 → 0.29 |
+| e1m4's torches | 141 → 109 | 140 → 108 / 74 → 52 | 0.82 → 0.64 / 0.48 → 0.35 | 1.19 → 0.74 → 0.26 / 0.60 → 0.50 → 0.16 |
+| e2m6's torches | 142 → 121 | 142 → 121 / 114 → 82 | 0.60 → 0.50 / 0.51 → 0.39 | 1.02 → 0.71 → 0.53 / 0.63 → 0.51 → 0.23 |
+| e4m5's flames | 221 → 192 | 217 → 188 / 88 → 76 | 1.30 → 1.25 / 0.71 → 0.55 | 1.76 → 1.76 → 0.57 / 0.80 → 0.68 → 0.39 |
 
 1315x535 (a wide frame):
 
 | view | torch-lit surfaces | blocks rebaked a frame, 72 / 480 Hz | 1 thread, ms added, 72 / 480 Hz | 8 threads, ms added, 72 / 480 Hz |
 |---|---|---|---|---|
-| e1m2's start | 127 → 110 | 126 → 109 / 77 → 61 | 0.30 → 0.21 / 0.19 → 0.13 | 0.34 → 0.34 / 0.20 → 0.18 |
-| e1m3's flames | 174 → 154 | 174 → 154 / 120 → 98 | 0.70 → 0.62 / 0.52 → 0.44 | 0.79 → 0.62 / 0.59 → 0.50 |
-| e1m4's torches | 147 → 113 | 146 → 112 / 78 → 54 | 0.58 → 0.45 / 0.38 → 0.26 | 0.62 → 0.49 / 0.40 → 0.28 |
-| e2m6's torches | 144 → 121 | 144 → 121 / 115 → 82 | 0.37 → 0.32 / 0.33 → 0.22 | 0.41 → 0.34 / 0.39 → 0.25 |
-| e4m5's flames | 237 → 208 | 233 → 204 / 96 → 84 | 0.82 → 1.02 / 0.39 → 0.52 | 1.07 → 1.06 / 0.46 → 0.38 |
+| e1m2's start | 127 → 110 | 126 → 109 / 77 → 61 | 0.30 → 0.21 / 0.19 → 0.13 | 0.34 → 0.34 → 0.14 / 0.20 → 0.18 → 0.10 |
+| e1m3's flames | 174 → 154 | 174 → 154 / 120 → 98 | 0.70 → 0.62 / 0.52 → 0.44 | 0.79 → 0.62 → 0.22 / 0.59 → 0.50 → 0.18 |
+| e1m4's torches | 147 → 113 | 146 → 112 / 78 → 54 | 0.58 → 0.45 / 0.38 → 0.26 | 0.62 → 0.49 → 0.18 / 0.40 → 0.28 → 0.14 |
+| e2m6's torches | 144 → 121 | 144 → 121 / 115 → 82 | 0.37 → 0.32 / 0.33 → 0.22 | 0.41 → 0.34 → 0.17 / 0.39 → 0.25 → 0.13 |
+| e4m5's flames | 237 → 208 | 233 → 204 / 96 → 84 | 0.82 → 1.02 / 0.39 → 0.52 | 1.07 → 1.06 → 0.26 / 0.46 → 0.38 → 0.18 |
 
-So the flicker adds 0.3–1.3 ms a frame at 1080p on one thread and
-0.3–1.8 on eight, where it is a larger share: the bakes run in
-`D_DrawSurfaces`' setup, before the bands, on one thread. The shadows take
-about a sixth of it off (summed over the rows, 15% on one thread, 17% on
-eight; one row, e4m5 at 1315x535 on one thread, came out the other
-way in this noise). The rebakes are about 0.7 ns a texel, and a torch-lit
-room bakes about a texel a pixel of what it shows. demo1's timedemo
-(`quaketool timedemo demo1 --video modern --display 16:9 --res 1920x1080`,
-every message a frame, so 72 Hz's case; median of three, interleaved; before
-the shadows) ran 210 → 197 fps on one thread and 673 → 507 on eight. The
-lever is the serial bake: baking a frame's missed blocks on the band threads
-would divide this cost by about the thread count, for the dynamic lights and
-gliding styles too. (A cheaper flicker — each face's torches sampled at most
-120 times a second, at the face's own phase — would cut the 480 Hz rebakes
-by four at the price of a second clock per face; not built.)
+The third value on eight threads is with the frame's bakes on the render
+threads (PERF_PLAN.md §13), measured the same way in a later sitting; on
+one thread nothing changed (within ±0.1 ms of the second value). So the
+flicker adds 0.3–1.3 ms a frame at 1080p on one thread, and on eight, once
+the bakes went to the threads, 0.2–0.6 (it was 0.3–1.8: the bakes ran in
+`D_DrawSurfaces`' setup, before the bands, on one thread). The shadows took
+about a sixth off before that (summed over the rows, 15% on one thread, 17%
+on eight; one row, e4m5 at 1315x535 on one thread, came out the
+other way in this noise). The rebakes are about 0.7 ns a texel, and a
+torch-lit room bakes about a texel a pixel of what it shows. demo1's
+timedemo (`quaketool timedemo demo1 --video modern --display 16:9 --res
+1920x1080`, every message a frame, so 72 Hz's case) runs 199 fps on one
+thread and 567 on eight (494 with the bakes on one thread; PERF_PLAN.md §13).
+What is left serial on eight is mostly the edge scan. (A cheaper flicker —
+each face's torches sampled at most 120 times a second, at the face's own
+phase — would cut the 480 Hz rebakes by four at the price of a second clock
+per face; not built.)
 
 The torch set is found the first frame the extra is on, a map's load: the
 tool's traces, four samples a luxel and the samples pulled in, are most of
@@ -772,6 +776,7 @@ cd quake-rs && cargo build --release
 ./target/release/quaketool framerate ../quake-data/ID1/PAK0.PAK --lerpmove  # monsters between steps (5 s)
 ./target/release/quaketool framerate ../quake-data/ID1/PAK0.PAK,PAK1.PAK --lightstyles --res 1920x1080  # gliding lights' cost (8 min)
 ./target/release/quaketool framerate ../quake-data/ID1/PAK0.PAK,PAK1.PAK --torchflicker 1 --res 1920x1080 --secs 3  # flickering torches' cost (7 min)
+./target/release/quaketool framerate ../quake-data/ID1/PAK0.PAK,PAK1.PAK --bake --threads 1,2,4,8,16 --res 1920x1080  # the bakes on 1-16 threads (10 min)
 ./target/release/quaketool framerate ../quake-data/ID1/PAK0.PAK --torchflicker 1 --dump DIR --strengths 0,1 --rates 60 --res 960x540 --secs 10 --view arch=e1m2:1488,1240,296:270  # raw frames for a clip
 ```
 
