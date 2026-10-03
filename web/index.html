@@ -560,7 +560,7 @@ function onWorkerMessage(e) {
     console.log('[quake]', m.text);
     if (m.text.startsWith('quake: ')) engineError = m.text.slice(7);   // a Sys_Error, before it exits
     // Rust's allocation failure, before it aborts: the program's memory is
-    // full (the threads build's is a fixed 1 GiB, PLATFORM.md "Threads").
+    // full (the threads build's is a fixed 512 MiB, PLATFORM.md "Threads").
     if (m.text.startsWith('memory allocation of ')) {
       engineError = 'out of memory (' + m.text + '): a larger pixel size, in Video Options, needs less';
     }
@@ -613,9 +613,31 @@ function gameExited(m) {
   for (const pc of pendingCalls.values()) pc.reject(new Error('the game ended: ' + m.why));
   pendingCalls.clear();
   if (m.run !== 2) {
-    setStatus('the game stopped: ' + (engineError.startsWith('out of memory') ? engineError : m.why));
+    const why = engineError.startsWith('out of memory') ? engineError : m.why;
+    setStatus('the game stopped: ' + why);
     console.error('[quake]', m.why);
+    if (quake.ready) showStopped(why);
   }
+}
+// The game stopped while it ran (a trap, in the program or one of its
+// threads; a full memory; a Sys_Error): over the view, what stopped it and
+// the way back. Nothing of the program is left to ask: it is the page's own.
+function showStopped(why) {
+  if (document.getElementById('stopped')) return;
+  if (document.pointerLockElement) document.exitPointerLock();
+  const box = document.createElement('div');
+  box.id = 'stopped';
+  box.setAttribute('role', 'alert');
+  box.style.cssText = 'position:fixed;inset:0;z-index:100;display:flex;flex-direction:column;gap:1em;'
+    + 'align-items:center;justify-content:center;padding:2em;background:rgba(0,0,0,0.95);'
+    + 'color:#ddd;font:14px/1.4 monospace;text-align:center';
+  const text = document.createElement('div');
+  text.textContent = 'The game stopped: ' + String(why).split('\n')[0];
+  const again = document.createElement('button');
+  again.textContent = 'reload the page to play again';
+  again.onclick = () => location.reload();
+  box.append(text, again);
+  document.body.append(box);
 }
 // Host_Quit_f / M_Quit_Key decided to quit (the `Quit` record, written
 // once — quake-wasm/src/sys.rs's `maybe_quit`, "Sys_Quit"'s moment). A page
@@ -2332,6 +2354,17 @@ async function main() {
   sendRecord(IN.PRESENT, new Uint8Array([presenter.format]));
   worker = new Worker('wasi.js');
   worker.onmessage = onWorkerMessage;
+  // A thread that traps tells the page on this channel (its worker's
+  // parent, the program's, may be blocked waiting for it): the page then
+  // stops the program, threads and all, and says so (gameExited).
+  const crash = 'quake-crash-' + Math.random().toString(36).slice(2);
+  const crashChannel = new BroadcastChannel(crash);
+  crashChannel.onmessage = (e) => {
+    if (!e.data || e.data.t !== 'exit') return;
+    crashChannel.close();
+    worker.terminate();
+    gameExited(e.data);
+  };
   worker.onerror = (e) => { setStatus('error: ' + e.message); };
   // The server's files (pak0 always, pak1 if files.json offered and valid
   // one) are the base; the player's own kept ones come after, so one of
@@ -2341,7 +2374,7 @@ async function main() {
   const fileList = [['id1/pak0.pak', pak], ...serverFiles, ...files];
   const handed = [wasm.buffer, pak.buffer, ...serverFiles.map(([, d]) => d.buffer),
                   ...[...files].filter(([p]) => isPakPath(p)).map(([, d]) => d.buffer)];
-  worker.postMessage({ t: 'init', wasm: wasm.buffer, shared, audio: audioShared, files: fileList, args: commandLine(content.tracks) },
+  worker.postMessage({ t: 'init', wasm: wasm.buffer, shared, audio: audioShared, files: fileList, args: commandLine(content.tracks), crash },
                      handed);
   // paks in effect beyond the baseline pak0 (never counted itself, unless
   // the player's own storage overrides it — "Your Quake" already did this;

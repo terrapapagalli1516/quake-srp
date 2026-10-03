@@ -203,6 +203,7 @@ pub(crate) fn call(line: &str) -> Answer {
         // The checks' view of the frame and a place to look from.
         "frame_hash" => frame_hash(),
         "setpos" => setpos([real(0), real(1), real(2)]).into(),
+        "crash_a_thread" => crash_a_thread().into(),
         _ => bench_call(name, rest).unwrap_or_else(|| f64::NAN.into()),
     }
 }
@@ -222,6 +223,18 @@ fn frame_hash() -> Answer {
 /// QuakeC's `setorigin` would (`PF_setorigin`, builtin #2), in noclip so it
 /// stays — e.g. into e1m1's start pool (750 898 -354) for an underwater
 /// view. 1 when there is a live game to move.
+/// A deliberate crash in a thread, for `verify_crash.py`: a scoped thread
+/// that panics, which (`panic = "abort"`) traps its worker while this
+/// thread waits to join it — the case that froze the page. The page must end
+/// the game and say so. (A build without threads cannot start the thread:
+/// the main thread's panic ends it the ordinary way.)
+fn crash_a_thread() -> i32 {
+    std::thread::scope(|s| {
+        s.spawn(|| panic!("crash_a_thread: a deliberate crash in a thread (verify_crash.py)"));
+    });
+    0
+}
+
 fn setpos(origin: [f32; 3]) -> i32 {
     let mut moved = 0;
     crate::app::ensure_app(|a| {

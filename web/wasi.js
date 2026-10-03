@@ -73,8 +73,10 @@ onmessage = async (e) => {
   if (e.data.t === 'hello') { postMessage({ t: 'ready' }); return; }   // a thread worker, made
   if (e.data.t === 'thread') { runThread(e.data); return; }
   if (e.data.t !== 'init') return;
-  const { wasm, shared, audio: audioShared, files, args } = e.data;
+  const { wasm, shared, audio: audioShared, files, args, crash } = e.data;
   ctl = new Int32Array(shared, 0, CTL_BYTES / 4);
+  threads.shared = shared;
+  threads.crash = crash || null;
   ring = new Uint8Array(shared, CTL_BYTES, RING_BYTES);
   if (audioShared) sound.init(audioShared);
   for (const [path, data] of files) fs.files.set(path, { data, size: data.length });
@@ -85,7 +87,18 @@ onmessage = async (e) => {
     finish(3, 'compile: ' + err);
     return;
   }
-  const shared_memory = importedMemory(new Uint8Array(wasm));
+  let shared_memory;
+  try {
+    shared_memory = importedMemory(new Uint8Array(wasm));
+  } catch (err) {
+    // The browser would not make the memory the program declares (the
+    // threads build's fixed size, PLATFORM.md "Threads"): the game cannot
+    // run here. Said once, plainly, as a Sys_Error would be.
+    const mb = memoryLimits(new Uint8Array(wasm)).initial * 64 / 1024;
+    stderr.line(`quake: this browser would not give the game the ${mb} MB of memory it needs to run (${err && err.message || err})`);
+    finish(3, 'memory: ' + (err && err.message || err));
+    return;
+  }
   let argv = args || [];
   if (shared_memory && shared_memory.buffer instanceof SharedArrayBuffer) {
     // The page can read the program's memory: frames stay where the program
@@ -468,7 +481,8 @@ const threads = {
         if (!this.started[i]) {
           this.started[i] = true;
           this.pool[i].postMessage({ t: 'thread', module: this.module, memory: this.memory,
-                                     tid, arg, busy: this.busy, jobs: this.jobs, slot: i });
+                                     tid, arg, busy: this.busy, jobs: this.jobs, slot: i,
+                                     shared: this.shared, crash: this.crash });
         } else {
           Atomics.store(this.jobs, JOB * i + 1, tid);
           Atomics.store(this.jobs, JOB * i + 2, arg);
@@ -482,10 +496,32 @@ const threads = {
   },
 };
 
+// A thread trapped (a panic aborts, so it traps too): the program cannot go
+// on — whoever joins the thread would wait for ever, and the page with it.
+// End it as the main thread's trap ends it: the run state crashed (the
+// page stops asking for frames), every Sync waiter woken, and the reason
+// to the page on its own channel (the program's worker, this worker's
+// parent, may be blocked in that join and read no messages); the page then
+// stops the program's worker, and its threads with it.
+function threadCrashed(tid, err, crash) {
+  stderr.flush();
+  if (ctl) {
+    Atomics.store(ctl, C.RUN, 3);
+    Atomics.add(ctl, C.SYNCS, 1);
+    Atomics.notify(ctl, C.SYNCS);
+  }
+  if (crash && typeof BroadcastChannel === 'function') {
+    const ch = new BroadcastChannel(crash);
+    ch.postMessage({ t: 'exit', run: 3, why: `a thread stopped (${tid}): ` + String(err && err.stack || err) });
+    ch.close();
+  }
+}
+
 // In a thread's worker: instantiate the module, run the thread, free the
 // worker, and wait for the next thread `spawn` puts in this worker's slot.
-async function runThread({ module, memory: mem, tid, arg, busy, jobs, slot }) {
+async function runThread({ module, memory: mem, tid, arg, busy, jobs, slot, shared, crash }) {
   memory = mem;
+  if (shared) ctl = new Int32Array(shared, 0, CTL_BYTES / 4);
   let inst;
   try {
     inst = await WebAssembly.instantiate(module, importObject(module, [], mem));
@@ -500,7 +536,10 @@ async function runThread({ module, memory: mem, tid, arg, busy, jobs, slot }) {
     try {
       inst.exports.wasi_thread_start(tid, arg);
     } catch (err) {
-      if (!(err instanceof Exit)) console.error(`[quake thread ${tid}]`, err);
+      if (!(err instanceof Exit)) {
+        console.error(`[quake thread ${tid}]`, err);
+        threadCrashed(tid, err, crash);
+      }
     }
     stderr.flush();
     Atomics.store(busy, slot, 0);
@@ -513,10 +552,19 @@ async function runThread({ module, memory: mem, tid, arg, busy, jobs, slot }) {
   }
 }
 
+// A module's imported `env.memory`'s limits, in pages ({ initial, maximum,
+// shared }), or { initial: 0 } when it defines its own memory.
+function memoryLimits(bytes) {
+  let found = { initial: 0 };
+  importedMemory(bytes, (lim) => { found = lim; return null; });
+  return found;
+}
+
 // A module's imported `env.memory`, made shared with the limits the module
 // declares (the JS API does not tell them, so they come from the import
-// section), or null when it defines its own memory.
-function importedMemory(bytes) {
+// section), or null when it defines its own memory. `make` (the limits
+// to a memory) is the WebAssembly.Memory constructor by default.
+function importedMemory(bytes, make = (lim) => new WebAssembly.Memory(lim)) {
   let i = 8;
   const leb = () => { let r = 0, sh = 0, b; do { b = bytes[i++]; r += (b & 0x7f) * 2 ** sh; sh += 7; } while (b & 0x80); return r; };
   const name = () => { const n = leb(); i += n; return new TextDecoder().decode(bytes.subarray(i - n, i)); };
@@ -532,7 +580,7 @@ function importedMemory(bytes) {
         else if (kind === 2) {                                   // a memory
           const flags = bytes[i++], min = leb(), max = flags & 1 ? leb() : undefined;
           if (mod === 'env' && field === 'memory') {
-            return new WebAssembly.Memory({ initial: min, maximum: max, shared: !!(flags & 2) });
+            return make({ initial: min, maximum: max, shared: !!(flags & 2) });
           }
         }
       }
