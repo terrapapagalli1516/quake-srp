@@ -22,6 +22,7 @@ use super::torch::FaceTorches;
 /// Keeping a borrowed variant means a face with no dynamic light reads the exact
 /// same bytes the pre-dlight code did, so its rendered output is byte-identical:
 /// passing an empty dlight slice changes nothing.
+#[derive(Clone)]
 pub(super) enum Luxels<'a> {
     /// Borrowed static luxels, one byte each (`0..=255`).
     Static(&'a [u8]),
@@ -51,6 +52,7 @@ impl Luxels<'_> {
 /// into luxel coordinates. The lightmap shares the face's `texinfo.vecs` with the
 /// wall texture, so the same surface `(s,t)` the rasteriser already interpolates
 /// indexes both.
+#[derive(Clone)]
 pub(super) struct LightMap<'a> {
     pub(super) luxels: Luxels<'a>,
     pub(super) lmw: usize,

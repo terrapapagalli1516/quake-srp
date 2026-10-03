@@ -1194,7 +1194,7 @@ impl Renderer {
             Some(&*set)
         };
         let frame = Frame::with_torches(scene, w, h, torches);
-        let Some(world) = self.edge.build(&frame, &mut self.surfaces, &mut self.prof) else {
+        let Some(world) = self.edge.build(&frame, &mut self.surfaces, &mut self.prof, self.workers.threads()) else {
             return;
         };
         let entities = Entities::prepare(&frame, &mut self.prof);
