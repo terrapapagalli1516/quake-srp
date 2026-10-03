@@ -40,7 +40,7 @@ use crate::vm::HostTrace;
 pub use crate::vm::HostTrace as Trace;
 
 /// `DIST_EPSILON` — "1/32 epsilon to keep floating point happy" (world.c).
-const DIST_EPSILON: f32 = 0.03125;
+pub const DIST_EPSILON: f32 = 0.03125;
 
 thread_local! {
     /// Monotonic count of BSP box/line traces ([`trace_world`] + [`trace_submodel`]).

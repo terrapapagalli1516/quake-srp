@@ -821,6 +821,50 @@ impl Server {
         }
     }
 
+    /// Whether the edict a floor contact hit (a trace's `ent`) can be stood
+    /// on: `SV_FlyMove` latches `FL_ONGROUND` only when it is SOLID_BSP
+    /// (`trace.ent->v.solid == SOLID_BSP`). The world (edict 0) is SOLID_BSP
+    /// and must still count; a SOLID_BBOX/SOLID_SLIDEBOX box (monster, item,
+    /// player) must NOT become "ground" even when its top faces up.
+    fn is_ground(&self, hit: i32) -> bool {
+        hit == 0 || (hit > 0 && self.vm.solid(hit) == Solid::Bsp)
+    }
+
+    /// The uncapped walker's ground contact ([`Stepping::ground_probe`]; the
+    /// port's own, id's 72 Hz frame needs none): run after the walk move of
+    /// a walker that stood on the ground. If the move touched no floor, feel
+    /// for one the probe's depth below; a floor there is stood on as the
+    /// move's own contact would be (`SV_FlyMove`'s: set down at the trace's
+    /// standoff, the velocity clipped along it, `FL_ONGROUND` and
+    /// `groundentity`). Its touch function is not run: the next frame's
+    /// move, which starts inside the standoff, touches it. Classic: nothing.
+    fn keep_ground(&mut self, ent: i32) {
+        let depth = self.stepping.ground_probe();
+        if depth == 0.0
+            || self.vm.is_free_edict(ent)
+            || self.vm.flags(ent).contains(EntFlags::ONGROUND)
+        {
+            return;
+        }
+        let origin = self.vm.ent_vec(ent, self.vm.fo().origin);
+        let end = [origin[0], origin[1], origin[2] - depth];
+        let mins = self.vm.ent_vec(ent, self.vm.fo().mins);
+        let maxs = self.vm.ent_vec(ent, self.vm.fo().maxs);
+        let trace = sv_move(&mut self.vm, origin, end, mins, maxs, ent, false, false);
+        let floor = !trace.allsolid && trace.fraction < 1.0 && trace.plane_normal[2] > 0.7;
+        if !floor || !self.is_ground(trace.ent) {
+            return;
+        }
+        self.vm.set_ent_vec(ent, self.vm.fo().origin, trace.endpos);
+        let vel = self.vm.ent_vec(ent, self.vm.fo().velocity);
+        let (vel, _) = world::clip_velocity(vel, trace.plane_normal, 1.0);
+        self.vm.set_ent_vec(ent, self.vm.fo().velocity, vel);
+        let flags = self.vm.flags(ent);
+        self.vm.set_flags(ent, flags.with(EntFlags::ONGROUND));
+        self.vm.set_ent_int(ent, self.vm.fo().groundentity, trace.ent);
+        link_edict(&mut self.vm, ent);
+    }
+
     /// `SV_CheckVelocity` (sv_phys.c): clamp each velocity component to
     /// `±sv_maxvelocity` and scrub NaNs from velocity/origin.
     fn check_velocity(&mut self, ent: i32) {
@@ -1072,6 +1116,11 @@ impl Server {
                 self.check_stuck(ent);
                 let lead = if falls { self.gravity_lead(ent, dt) } else { 0.0 };
                 self.move_with_lead(ent, lead, |s| s.walk_move(ent, start_time, dt));
+                // Uncapped, a short frame's fall may stop short of the floor
+                // the walker stands on (`Stepping::ground_probe`).
+                if falls && flags.contains(EntFlags::ONGROUND) {
+                    self.keep_ground(ent);
+                }
             }
             MoveType::Fly => {
                 let (f, alive) = self.run_think(ent)?;
@@ -1202,15 +1251,7 @@ impl Server {
 
             if trace.plane_normal[2] > 0.7 {
                 blocked |= 1; // floor
-                // SV_FlyMove only latches FL_ONGROUND when the contacted floor
-                // is a SOLID_BSP edict (`trace.ent->v.solid == SOLID_BSP`). The
-                // world (edict 0) is SOLID_BSP and must still count; a
-                // SOLID_BBOX/SOLID_SLIDEBOX box (monster/item/player) must NOT
-                // become "ground" even when its top faces up.
-                let on_bsp = trace.ent == 0
-                    || (trace.ent > 0
-                        && self.vm.solid(trace.ent) == Solid::Bsp);
-                if on_bsp {
+                if self.is_ground(trace.ent) {
                     let flags = self.vm.flags(ent);
                     self.vm.set_flags(ent, flags.with(EntFlags::ONGROUND));
                     self.vm.set_ent_int(ent, self.vm.fo().groundentity, trace.ent.max(0));
@@ -2447,6 +2488,52 @@ mod tests {
             }
         }
         (apex, landed, server.vm.ent_get_vector(e, "origin")[0])
+    }
+
+    /// A player on `step_bsp` pushed at 300 u/s toward the 16-unit step,
+    /// stepped at `hz`: whether it stepped up, and in how many of the frames
+    /// of the 0.2 s after the step it was off the ground.
+    fn walk_up_step(hz: f64, stepping: Stepping) -> (bool, usize) {
+        let (img, g_const100, g_origin) = player_progs();
+        let mut server = Server::new(step_bsp(), Progs::parse(&img).expect("parse")).expect("server");
+        prime_player_globals(&mut server, g_const100, g_origin);
+        let p = server.connect_client().expect("connect");
+        server.vm.set_movetype(p, MoveType::Walk);
+        server.vm.ent_set_vector(p, "mins", [-16.0, -16.0, -24.0]);
+        server.vm.ent_set_vector(p, "maxs", [16.0, 16.0, 32.0]);
+        // Standing on the lower floor at the trace's standoff, as a move leaves it.
+        server.vm.ent_set_vector(p, "origin", [0.0, 0.0, 24.03125]);
+        server.vm.set_flags(p, server.vm.flags(p).with(EntFlags::ONGROUND));
+        let (mut stepped, mut off, mut t, mut end) = (false, 0, 0.0f64, 1.0f64);
+        while t < end {
+            let mut v = server.vm.ent_get_vector(p, "velocity");
+            v[0] = 300.0;
+            server.vm.ent_set_vector(p, "velocity", v);
+            server.client_frame_stepped(&UserCmd::default(), 1.0 / hz, stepping).expect("frame");
+            t += 1.0 / hz;
+            if !stepped && server.vm.ent_get_vector(p, "origin")[2] > 32.0 {
+                (stepped, end) = (true, t + 0.2);
+            } else if stepped && !server.vm.flags(p).contains(EntFlags::ONGROUND) {
+                off += 1;
+            }
+        }
+        (stepped, off)
+    }
+
+    /// A step up sets the player down at the trace's 1/32-unit standoff
+    /// above the step; id's 72 Hz frame then falls 0.15 units, touches the
+    /// step and keeps `FL_ONGROUND`, which the client's stair smoothing
+    /// needs to lift the eye at 80 u/s. A frame of id's code at 480 Hz falls
+    /// less than the standoff and drops the flag (the view then jumps the
+    /// whole step); the uncapped step keeps it at every rate.
+    #[test]
+    fn uncapped_walker_stays_on_the_ground_after_a_step_up() {
+        assert_eq!(walk_up_step(72.0, Stepping::Classic), (true, 0), "id's at 72 Hz");
+        for hz in [60.0, 144.0, 240.0, 309.0, 480.0, 1000.0] {
+            assert_eq!(walk_up_step(hz, Stepping::Uncapped), (true, 0), "uncapped at {hz} Hz");
+        }
+        let (stepped, off) = walk_up_step(480.0, Stepping::Classic);
+        assert!(stepped && off > 0, "id's per-frame code at 480 Hz leaves the ground ({off} frames)");
     }
 
     /// The uncapped step (`Stepping::Uncapped`) flies a jump and a bounce as
