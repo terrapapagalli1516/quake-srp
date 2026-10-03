@@ -124,6 +124,10 @@ pub(super) struct PolyFramebuffer<'b, 'a> {
     d_ziextrastep: i32,
     spans: Vec<SpanPackage>,
     next_span: usize,
+    /// The tests' reference: every span pixel by pixel through
+    /// [`PolyFramebuffer::plot`], never as a run of its row.
+    #[cfg(test)]
+    pixel_by_pixel: bool,
 }
 
 impl<'b, 'a> PolyFramebuffer<'b, 'a> {
@@ -179,6 +183,8 @@ impl<'b, 'a> PolyFramebuffer<'b, 'a> {
             // end marker; grown as triangles need them.
             spans: Vec::new(),
             next_span: 0,
+            #[cfg(test)]
+            pixel_by_pixel: false,
         }
     }
 
@@ -195,6 +201,24 @@ impl<'b, 'a> PolyFramebuffer<'b, 'a> {
             *z = z16 as i16;
             *p = if setup.skin.is_some() { pal_index } else { setup.flat };
         }
+    }
+
+    /// The `count` pixels from view-linear index `pdest` on as a run of one
+    /// row — its pixels and their `1/z` — when they are one: inside a row
+    /// of the view, and that row in the band. `None` otherwise (the pixels
+    /// are then reached one by one, [`PolyFramebuffer::plot`]: those
+    /// outside the band are not drawn).
+    #[inline]
+    fn row_run(&mut self, pdest: isize, count: i32) -> Option<(&mut [u8], &mut [i16])> {
+        #[cfg(test)]
+        if self.pixel_by_pixel {
+            return None;
+        }
+        let (pdest, count, w) = (usize::try_from(pdest).ok()?, usize::try_from(count).ok()?, self.band.width());
+        if w == 0 {
+            return None;
+        }
+        self.band.span(pdest % w, pdest / w, count)
     }
 
     /// `acolormap[texel + (light & 0xFF00)]` for the skin texel at `ptex`.
@@ -490,20 +514,48 @@ impl<'b, 'a> PolyFramebuffer<'b, 'a> {
             if lcount > 0 && sp.pdest < end && sp.pdest.saturating_add(lcount as isize) > first {
                 let (mut lpdest, mut lptex) = (sp.pdest, sp.ptex);
                 let (mut lsfrac, mut ltfrac, mut llight, mut lzi) = (sp.sfrac, sp.tfrac, sp.light, sp.zi);
-                for _ in 0..lcount {
-                    let pix = Self::shade(setup, lptex, llight);
-                    self.plot(lpdest, lzi, pix, setup);
-                    lpdest += 1;
-                    lzi = lzi.wrapping_add(self.r_zistepx);
-                    llight = llight.wrapping_add(self.r_lstepx);
-                    lptex += self.a_ststepxwhole;
-                    lsfrac += self.a_sstepxfrac;
-                    lptex += (lsfrac >> 16) as isize;
-                    lsfrac &= 0xFFFF;
-                    ltfrac += self.a_tstepxfrac;
-                    if ltfrac & 0x10000 != 0 {
-                        lptex += skinwidth;
-                        ltfrac &= 0xFFFF;
+                let (stepzi, steplight, stepwhole) = (self.r_zistepx, self.r_lstepx, self.a_ststepxwhole);
+                let (stepsfrac, steptfrac) = (self.a_sstepxfrac, self.a_tstepxfrac);
+                // id's inner loop, on the span's run of its row and of the
+                // z-buffer: the z test first, the texel only where it
+                // passes. (A span is a run of one row of the view, so of
+                // the band: `row_run` finds no run for one that is not,
+                // and that one goes pixel by pixel through the band.)
+                if let Some((prow, zrow)) = self.row_run(lpdest, lcount) {
+                    for (p, z) in prow.iter_mut().zip(zrow) {
+                        let z16 = lzi >> 16;
+                        if z16 >= i32::from(*z) {
+                            *z = z16 as i16;
+                            *p = if setup.skin.is_some() { Self::shade(setup, lptex, llight) } else { setup.flat };
+                        }
+                        lzi = lzi.wrapping_add(stepzi);
+                        llight = llight.wrapping_add(steplight);
+                        lptex += stepwhole;
+                        lsfrac += stepsfrac;
+                        lptex += (lsfrac >> 16) as isize;
+                        lsfrac &= 0xFFFF;
+                        ltfrac += steptfrac;
+                        if ltfrac & 0x10000 != 0 {
+                            lptex += skinwidth;
+                            ltfrac &= 0xFFFF;
+                        }
+                    }
+                } else {
+                    for _ in 0..lcount {
+                        let pix = Self::shade(setup, lptex, llight);
+                        self.plot(lpdest, lzi, pix, setup);
+                        lpdest += 1;
+                        lzi = lzi.wrapping_add(stepzi);
+                        llight = llight.wrapping_add(steplight);
+                        lptex += stepwhole;
+                        lsfrac += stepsfrac;
+                        lptex += (lsfrac >> 16) as isize;
+                        lsfrac &= 0xFFFF;
+                        ltfrac += steptfrac;
+                        if ltfrac & 0x10000 != 0 {
+                            lptex += skinwidth;
+                            ltfrac &= 0xFFFF;
+                        }
                     }
                 }
             }
@@ -758,6 +810,86 @@ mod tests {
         let mut c = Image::new(12, 12, 0);
         polyset_fill(&mut c, [(2, 2), (10, 10), (10, 2)], 1, 0, None);
         assert_eq!(count(&c), 0);
+    }
+
+    /// `D_PolysetDrawSpans8`'s inner loop on a span's run of its row (the z
+    /// test first, the texel where it passes) draws what the loop it
+    /// replaced drew, a pixel at a time through [`PolyFramebuffer::plot`]
+    /// with the texel fetched before the test: the same pixels and the same
+    /// 1/z, for random triangles (some hanging out of the view, whose spans
+    /// run past a row's end and are not runs), skins with and without a
+    /// colormap, a z-buffer that hides part of each, in a whole view, in
+    /// bands of three rows, and in a view placed inside a wider screen.
+    #[test]
+    fn spans_as_runs_of_their_rows_draw_what_pixel_by_pixel_draws() {
+        let mut seed = 0x1234_5678_9abc_def1u64;
+        let mut next = move |n: i64| -> i64 {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % n as u64) as i64
+        };
+        let (w, h) = (61usize, 37usize);
+        let (skinw, skinh) = (16usize, 12usize);
+        let skin: Vec<u8> = (0..skinw * skinh).map(|i| 1 + (i * 7 % 250) as u8).collect();
+        let cm: Vec<u8> = (0..COLORMAP_LEN).map(|i| (i * 31 + i / 256) as u8).collect();
+        let (mut drawn, mut hidden, mut by_pixel_spans) = (0usize, 0usize, 0usize);
+        for round in 0..400 {
+            let setup = AliasSetup {
+                transform: [[0.0; 4]; 3],
+                r_ambientlight: 0,
+                r_shadelight: 0.0,
+                plightvec: [0.0; 3],
+                ziscale: ALIAS_ZISCALE,
+                subdiv: false,
+                skin: (round % 7 != 0).then_some(&skin[..]),
+                skinwidth: skinw as i32,
+                seamfixup: 0,
+                colormap: (round % 3 != 0).then_some(&cm[..]),
+                flat: 99,
+            };
+            // Eight triangles a round: vertices in the view or up to 8
+            // pixels outside it, skin coordinates, light and 1/z at each.
+            let tris: Vec<[FinalVert; 3]> = (0..8)
+                .map(|_| {
+                    let out = if next(4) == 0 { 8 } else { 0 };
+                    [(); 3].map(|()| FinalVert {
+                        v: [
+                            (next(w as i64 + 2 * out) - out) as i32,
+                            (next(h as i64 + 2 * out) - out) as i32,
+                            (next((skinw as i64) << 16)) as i32,
+                            (next((skinh as i64) << 16)) as i32,
+                            (next(64 << 8)) as i32,
+                            (next(1 << 30)) as i32,
+                        ],
+                        flags: 0,
+                    })
+                })
+                .collect();
+            let z0: Vec<i16> = (0..w * h).map(|_| (next(1 << 14) - (1 << 12)) as i16).collect();
+            // (stride, x0, rows a band): the view alone, in bands, and placed.
+            for (stride, x0, rows) in [(w, 0, h), (w, 0, 3), (w + 9, 4, h), (w + 9, 4, 5)] {
+                let draw = |pixel_by_pixel: bool| {
+                    let mut screen = vec![0u8; stride * h];
+                    let mut z = z0.clone();
+                    for mut band in Band::placed(w, &mut screen, stride, x0, &mut z).split(rows) {
+                        let mut fb = PolyFramebuffer::new(&mut band);
+                        fb.pixel_by_pixel = pixel_by_pixel;
+                        for t in &tris {
+                            fb.polyset_draw(&setup, *t, true);
+                            fb.polyset_draw(&setup, [t[0], t[2], t[1]], true);
+                        }
+                    }
+                    (screen, z)
+                };
+                let (runs, pixels) = (draw(false), draw(true));
+                assert!(runs == pixels, "round {round}, stride {stride}, x0 {x0}, {rows} rows a band");
+                drawn += runs.1.iter().zip(&z0).filter(|(a, b)| a != b).count();
+                hidden += usize::from(runs.0.iter().filter(|&&p| p != 0).count() < w * h / 2);
+            }
+            by_pixel_spans += usize::from(tris.iter().any(|t| t.iter().any(|v| v.v[0] < 0 || v.v[0] >= w as i32)));
+        }
+        assert!(drawn > 100_000 && hidden > 100 && by_pixel_spans > 50, "{drawn} pixels drawn, {hidden}, {by_pixel_spans}");
     }
 
     #[test]
