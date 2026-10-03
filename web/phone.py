@@ -13,7 +13,8 @@ game. This script measures both on the phone itself, over USB:
   uv run --with playwright web/phone.py DEPLOY --local   # no phone: the local Chromium, a phone-sized page
 
 For each pixel size (--px, default 2,1) and thread count (--threads, default
-4,6,8) it runs `timedemo demo1`, then --secs (default 60) of `playdemo demo1`
+4,6,8) — and each value of one more cvar, if asked (--cvar r_perspspan=16,8,4,1)
+— it runs `timedemo demo1`, then --secs (default 60) of `playdemo demo1`
 paced by the page's own loop, and prints a row:
 
   size        the frame, in pixels
@@ -32,7 +33,7 @@ The phone: USB debugging on, plugged in, Chrome in front (the tab only runs
 there; if another app comes to the front the script waits and redoes the
 interrupted row; it restarts Chrome itself only from the launcher). Nothing
 on the phone is changed: with no DEPLOY the tab's own `vid_pixelsize` and
-`r_threads` are set for each row and put back at the end; with one, the page
+`r_threads` (and --cvar's) are set for each row and put back at the end; with one, the page
 is a new tab on `http://localhost:PORT` (a secure context, so the threads
 build runs), closed at the end with its storage cleared and the port
 forwarding removed. --top prints the busiest threads mid-row (which core
@@ -259,7 +260,7 @@ class Target:
         sound starts). The page's request for fullscreen is turned off first: made
         through DevTools it leaves Chrome's bars up and the page laid out wrong."""
         if self.pg.evaluate("getComputedStyle(document.getElementById('overlay')).display") != "none":
-            self.pg.evaluate("wrap.requestFullscreen = () => Promise.reject(new Error('the phone kit runs windowed'))")
+            self.pg.evaluate("() => { wrap.requestFullscreen = () => Promise.reject(new Error('the phone kit runs windowed')); }")
             w, h = self.pg.evaluate("[innerWidth, innerHeight]")
             self.tap(w / 2, h / 2)
             time.sleep(1.5)
@@ -315,16 +316,19 @@ class Target:
         return out
 
 
-def row(t, px, threads, secs, cool, top):
-    """One row: the settings, the timedemo, the play; redone if the tab left the
-    front or the phone was folded."""
+def row(t, px, threads, extra, secs, cool, top):
+    """One row: the settings (`extra`: one more cvar and its value, or None), the
+    timedemo, the play; redone if the tab left the front or the phone was folded."""
     while True:
         try:
             t.wait_front()
             t.exec(f"vid_pixelsize {px}")
             t.exec(f"r_threads {threads}")
+            if extra:
+                t.exec(" ".join(extra))
             time.sleep(1.0)
             r = {"px": px, "threads": t.call("render_threads"), "size": t.pg.evaluate("quake.size()"),
+                 "cvar": {extra[0]: t.cvar(extra[0])} if extra else {},
                  "at": time.strftime("%H:%M:%S"), "posture": posture() if t.phone else None, **t.pg.evaluate(VIEW)}
             if cool > 0:
                 r["cooled"] = t.cool(cool)
@@ -343,7 +347,8 @@ def fmt3(v):
 def show(r):
     """A row of the table (two lines when the machine's state is known)."""
     td, pl = r["timedemo"], r.get("play")
-    line = f"px {r['px']}  {r['threads']} thr  {r['size'][0]}x{r['size'][1]:<5}{'' if r['fullscreen'] else ' windowed'} timedemo {td['fps']:6.1f} fps"
+    line = f"px {r['px']}  {r['threads']} thr  " + "".join(f"{k} {v}  " for k, v in r["cvar"].items()) \
+        + f"{r['size'][0]}x{r['size'][1]:<5}{'' if r['fullscreen'] else ' windowed'} timedemo {td['fps']:6.1f} fps"
     if pl:
         line += f" | play {pl['fps']:5.1f} fps  >20ms {pl['over20']:<3} wait {fmt3(pl['wait'])}"
         if pl.get("step"):
@@ -376,6 +381,7 @@ def main():
     ap.add_argument("--local", action="store_true", help="no phone: the local Chromium at a phone's size (needs a deploy dir)")
     ap.add_argument("--px", default="2,1", help="pixel sizes (vid_pixelsize; 0 is Auto)")
     ap.add_argument("--threads", default="4,6,8", help="thread counts (r_threads; 0 is every thread)")
+    ap.add_argument("--cvar", default="", help="one more cvar to step, NAME=V1,V2,... (r_perspspan=16,8,4,1)")
     ap.add_argument("--secs", type=float, default=60, help="seconds of play a row (0: the timedemo only)")
     ap.add_argument("--cool", type=float, default=0, help="rest before each timedemo until no core is capped, at most this many seconds")
     ap.add_argument("--top", action="store_true", help="print the busiest threads mid-row")
@@ -414,7 +420,9 @@ def main():
         pg.wait_for_function("window.quake && quake.ready && quake.firstFrameAt > 0", timeout=180000)
         t = Target(pg, not a.local)
         t.wait_front()
-        saved = (t.cvar("vid_pixelsize"), t.cvar("r_threads"))
+        name, _, values = a.cvar.partition("=")
+        extras = [(name, v) for v in values.split(",") if v] if name else [None]
+        saved = {n: t.cvar(n) for n in ["vid_pixelsize", "r_threads"] + ([name] if name else [])}
         out = open(a.json, "a") if a.json else None
         try:
             if a.deploy:
@@ -428,17 +436,18 @@ def main():
                 out.write(json.dumps({"page": page, "url": pg.url, "at": time.strftime("%F %T")}) + "\n")
             for px in [int(x) for x in a.px.split(",")]:
                 for threads in [int(x) for x in a.threads.split(",")]:
-                    r = row(t, px, threads, a.secs, a.cool, a.top)
-                    show(r)
-                    if out:
-                        out.write(json.dumps(r) + "\n")
-                        out.flush()
+                    for extra in extras:
+                        r = row(t, px, threads, extra, a.secs, a.cool, a.top)
+                        show(r)
+                        if out:
+                            out.write(json.dumps(r) + "\n")
+                            out.flush()
         finally:
             # The tab as it was found: its own cvars back (a kept config.cfg with them).
-            t.exec(f"vid_pixelsize {saved[0]}")
-            t.exec(f"r_threads {saved[1]}")
+            for n, v in saved.items():
+                t.exec(f"{n} {v}")
             time.sleep(0.5)
-            print("cvars put back: vid_pixelsize", t.cvar("vid_pixelsize"), "r_threads", t.cvar("r_threads"), flush=True)
+            print("cvars put back:", ", ".join(f"{n} {t.cvar(n)}" for n in saved), flush=True)
             if a.deploy and not a.local:
                 # The kit's own tab: its storage cleared, the tab closed, the forwarding gone.
                 try:
