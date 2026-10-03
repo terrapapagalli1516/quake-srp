@@ -107,9 +107,18 @@ onmessage = async (e) => {
     postMessage({ t: 'memory', memory: shared_memory });
   }
   if (WebAssembly.Module.imports(module).some(i => i.module === 'wasi' && i.name === 'thread-spawn')) {
-    // Without its thread workers the program still runs, on its own thread
-    // (a `thread-spawn` then answers EAGAIN, and quake.wasm draws alone).
-    await threads.start(module, shared_memory).catch((err) => threads.abandon(err));
+    try {
+      await threads.start(module, shared_memory);
+    } catch (err) {
+      // The browser would not make the workers the threads build runs its
+      // threads in: the game does not run here — said once, plainly, like
+      // the refused memory above, and not on one thread instead (a game
+      // that quietly runs slower, in a mode nobody chose, is not a thing
+      // to keep track of: PLATFORM.md "Threads").
+      stderr.line(`quake: this browser would not start the worker threads the game needs to run (${err && err.message || err})`);
+      finish(3, 'threads: ' + (err && err.message || err));
+      return;
+    }
     // The threads it may use: the pool's and its own (quake-wasm's main.rs).
     argv = [...argv, '-hwthreads', String(threads.offer())];
   }
@@ -454,22 +463,24 @@ const threads = {
     this.started = new Array(n).fill(false);
     this.module = module;
     this.memory = memory;
-    await Promise.all(Array.from({ length: n }, () => new Promise((resolve, reject) => {
-      const w = new Worker(self.location.href);
-      w.onmessage = (e) => { if (e.data.t === 'ready') resolve(); };
-      w.onerror = (e) => reject(new Error('a thread worker failed: ' + e.message));
-      w.postMessage({ t: 'hello' });
-      this.pool.push(w);
-    })));
-  },
-  // The pool could not be made: none of it is used.
-  abandon(err) {
-    console.warn('[quake] no thread workers, the program runs alone:', err);
-    for (const w of this.pool) w.terminate();
-    this.pool = [];
+    try {
+      await Promise.all(Array.from({ length: n }, () => new Promise((resolve, reject) => {
+        const w = new Worker(self.location.href);
+        w.onmessage = (e) => { if (e.data.t === 'ready') resolve(); };
+        w.onerror = (e) => reject(new Error('a thread worker failed: ' + e.message));
+        w.postMessage({ t: 'hello' });
+        this.pool.push(w);
+      })));
+    } catch (err) {
+      // Not a pool the program can use: none of it stays (the caller stops).
+      for (const w of this.pool) w.terminate();
+      this.pool = [];
+      throw err;
+    }
   },
   // The threads the program may count on: this machine's, at most the pool
-  // plus the program's own.
+  // plus the program's own (the player's `threads` cvar goes lower, never
+  // higher).
   offer() {
     return Math.max(1, Math.min(navigator.hardwareConcurrency || 1, this.pool.length + 1));
   },
