@@ -90,7 +90,7 @@ def mouse_turn(pg):
     browser coalesces them into the refresh. Returns (refreshes a second,
     degrees turned right, degrees expected)."""
     pg.evaluate("exp.boot().then(() => exp.menu_cancel())")
-    pg.wait_for_function("exp.menu_visible().then(v => !v)", timeout=5000)
+    isolated.wait_until(pg, "exp.menu_visible().then(v => !v)", 5)
     time.sleep(0.3)
     pg.locator("#c").click(position={"x": 320, "y": 240})
     pg.wait_for_function("document.pointerLockElement === document.getElementById('c')", timeout=5000)
@@ -320,7 +320,7 @@ with sync_playwright() as p:
     pg.locator("#walkBtn").click()
     time.sleep(0.5)
     pg.keyboard.press("Escape")
-    pg.wait_for_function("exp.menu_visible().then(v => !v)", timeout=5000)
+    isolated.wait_until(pg, "exp.menu_visible().then(v => !v)", 5)
     time.sleep(0.3)
     check("walk mode entered (in_walk_mode)", pg.evaluate("exp.in_walk_mode()") == 1)
     # (4) Chip: visible in unlocked walk mode with the menu down.
@@ -510,8 +510,8 @@ with sync_playwright() as p:
         # reserved Esc; simulated -- headless can't deliver a real lock-Esc)
         # opens the in-game menu.
         pg.evaluate("document.exitPointerLock()")
-        pg.wait_for_function("exp.menu_visible().then(v => v === 1)", timeout=5000)
-        check("Esc-driven lock loss opens the in-game menu", True)
+        check("Esc-driven lock loss opens the in-game menu",
+              isolated.wait_until(pg, "exp.menu_visible().then(v => v === 1)", 5, raising=False))
         check("chip hides while the menu is up",
               pg.evaluate("!lockChip.classList.contains('show')"))
         pg.locator("#wrap").screenshot(path=os.path.join(WEB, "verify_input_menu.png"))
@@ -522,8 +522,8 @@ with sync_playwright() as p:
         check("menu: Esc backs out of the submenu (menu still up)",
               pg.evaluate("exp.menu_visible()") == 1)
         pg.keyboard.press("Escape")   # main screen -> closed
-        pg.wait_for_function("exp.menu_visible().then(v => !v)", timeout=5000)
-        check("menu: Esc on the main screen closes it", True)
+        check("menu: Esc on the main screen closes it",
+              isolated.wait_until(pg, "exp.menu_visible().then(v => !v)", 5, raising=False))
         # No auto-grab: the pointer is still free; the chip invites the click.
         check("no auto re-lock after the menu closes",
               pg.evaluate("document.pointerLockElement === null"))
@@ -535,7 +535,7 @@ with sync_playwright() as p:
                              timeout=5000)
         check("next canvas click re-captures the mouse", True)
         pg.evaluate("document.exitPointerLock()")
-        pg.wait_for_function("exp.menu_visible().then(v => v === 1)", timeout=5000)
+        isolated.wait_until(pg, "exp.menu_visible().then(v => v === 1)", 5)
         pg.keyboard.press("Escape")   # leave the menu closed for the next phase
         time.sleep(0.3)
 
@@ -622,7 +622,7 @@ with sync_playwright() as p:
     check("AZERTY: the key in W's place is keynum w (+forward), not z",
           held == [1, 0] and pg.evaluate("exp.key_is_down(119)") == 0, str(held))
     pg.keyboard.press("Backquote")
-    pg.wait_for_function("exp.console_visible().then(v => v === 1)", timeout=5000)
+    isolated.wait_until(pg, "exp.console_visible().then(v => v === 1)", 5)
     azerty("keydown")
     azerty("keyup")
     pg.keyboard.press("Enter")
@@ -637,7 +637,7 @@ with sync_playwright() as p:
     # +forward); headless delivers them, so each step reads the engine's
     # keys while they are still down here.
     held = lambda: pg.evaluate("quake.text('keys_held')")
-    pg.wait_for_function("exp.menu_visible().then(v => !v)", timeout=5000)
+    isolated.wait_until(pg, "exp.menu_visible().then(v => !v)", 5)
     # (8a) The pointer lock ends (the browser's Esc: exitPointerLock).
     pg.locator("#c").click(position={"x": 320, "y": 240})
     pg.wait_for_function("document.pointerLockElement === document.getElementById('c')", timeout=5000)
@@ -645,13 +645,13 @@ with sync_playwright() as p:
     pg.mouse.down()
     check("lock: W and the fire button held", held() == "w MOUSE1", repr(held()))
     pg.evaluate("document.exitPointerLock()")
-    pg.wait_for_function("exp.menu_visible().then(v => v === 1)", timeout=5000)
+    isolated.wait_until(pg, "exp.menu_visible().then(v => v === 1)", 5)
     check("lock lost: the engine holds no key, the drag is over",
           held() == "" and pg.evaluate("dragging") is False, repr(held()))
     pg.keyboard.up("w")
     pg.mouse.up()
     pg.keyboard.press("Escape")
-    pg.wait_for_function("exp.menu_visible().then(v => !v)", timeout=5000)
+    isolated.wait_until(pg, "exp.menu_visible().then(v => !v)", 5)
     # (8b) The window blurs (Alt-Tab, a click elsewhere).
     pg.keyboard.down("w")
     pg.keyboard.down("Shift")

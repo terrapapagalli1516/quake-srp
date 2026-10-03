@@ -31,7 +31,7 @@ with sync_playwright() as p:
     time.sleep(1.0)
     pg.keyboard.press("Escape")
     # `exp.name()` asks the program (a Promise: answered between two frames).
-    pg.wait_for_function("exp.menu_visible().then(v => !v)", timeout=5000)
+    isolated.wait_until(pg, "exp.menu_visible().then(v => !v)", 5)
     time.sleep(0.3)
 
     grab = """() => {

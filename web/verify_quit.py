@@ -49,7 +49,7 @@ with sync_playwright() as p:
     pg.evaluate("document.getElementById('walkBtn').click()")
     time.sleep(1.0)
     pg.keyboard.press("Escape")
-    pg.wait_for_function("exp.menu_visible().then(v => !v)", timeout=12000)
+    isolated.wait_until(pg, "exp.menu_visible().then(v => !v)", 12)
     pg.keyboard.press("Alt+Enter")
     try:
         pg.wait_for_function("!!document.fullscreenElement", timeout=12000)
@@ -74,7 +74,7 @@ with sync_playwright() as p:
     # covered by verify_extras.py; menu_cancel reaches the same Key_Event as
     # Escape inside the engine without any of that).
     pg.evaluate("exp.menu_cancel()")       # the menu, over the still-fullscreen, still-locked game
-    pg.wait_for_function("exp.menu_visible().then(v => !!v)", timeout=12000)
+    isolated.wait_until(pg, "exp.menu_visible().then(v => !!v)", 12)
     pg.evaluate("exp.menu_up()")           # Main's last item is Quit
     pg.evaluate("exp.menu_select()")       # raises the confirm prompt
     # A generous timeout: each automation call is its own round trip through
@@ -131,7 +131,7 @@ with sync_playwright() as p:
     pg.evaluate("document.getElementById('walkBtn').click()")
     time.sleep(1.0)
     pg.keyboard.press("Escape")
-    pg.wait_for_function("exp.menu_visible().then(v => !v)", timeout=12000)
+    isolated.wait_until(pg, "exp.menu_visible().then(v => !v)", 12)
     pg.evaluate("quake.callLine('console_toggle')")
     pg.evaluate("quake.callLine('exec quit')")
     try:

@@ -228,7 +228,7 @@ with sync_playwright() as p:
 
     # --- map e2m1: from pak1, with its level's track (e1m1's data: sounds 6).
     call("exec map e2m1")
-    pg.wait_for_function("quake.text('map_name').then(m => m === 'maps/e2m1.bsp')", timeout=20000)
+    isolated.wait_until(pg, "quake.text('map_name').then(m => m === 'maps/e2m1.bsp')", 20)
     pg.wait_for_function("quake.cd.state().track === 6 && quake.cd.state().playing", timeout=10000)
     check(True, "map e2m1 loads from pak1 and plays track 6")
     time.sleep(0.5)
@@ -422,7 +422,7 @@ with sync_playwright() as p:
     pg4.wait_for_function("quake.cd.state().track === 2 && quake.cd.state().playing", timeout=10000)
     check(True, "demo1's attract loop plays hipnotic's own track 2")
     call("exec map hip1m1", page=pg4)
-    pg4.wait_for_function("quake.callLine('map_name').then(r => r.text === 'maps/hip1m1.bsp')", timeout=20000)
+    isolated.wait_until(pg4, "quake.callLine('map_name').then(r => r.text === 'maps/hip1m1.bsp')", 20)
     # hip1m1.bsp here is literally e1m1.bsp (HIP_PAK0, above) — PAK1's own
     # test, further up, established e1m1's level data wants CD track 6.
     pg4.wait_for_function("quake.cd.state().track === 6 && quake.cd.state().playing", timeout=10000)

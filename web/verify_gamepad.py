@@ -137,7 +137,7 @@ with sync_playwright() as p:
     press(pg, A)
     check("   D-pad up, A: Single Player", call(pg, "menu_screen_id") == 1)
     press(pg, A)
-    pg.wait_for_function("quake.call('in_walk_mode').then(v => v === 1)", timeout=10000)
+    isolated.wait_until(pg, "quake.call('in_walk_mode').then(v => v === 1)", 10)
     time.sleep(0.5)
     check("   A on New Game starts the game", call(pg, "menu_visible") == 0 and call(pg, "in_walk_mode") == 1)
     check("   the console heard IN_StartupJoystick", "joystick detected" in pg.evaluate("quake.text('console_text')"))

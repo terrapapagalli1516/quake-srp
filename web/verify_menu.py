@@ -239,13 +239,9 @@ with sync_playwright() as p:
     check("Enter applies the highlighted mode", (wv, hv) == (800, 500), f"{w0} -> {wv}x{hv}")
     check("...and native resolution is visibly off now", pg.evaluate("quake.text('cvar', 'vid_native')") == "0")
     # The program writes config.cfg on the next frame (Host_WriteConfiguration)
-    # and the page keeps it.
-    try:
-        pg.wait_for_function("quake.kept('id1/config.cfg').then(t => !!t && t.includes('_vid_resolution 800x500'))",
-                             timeout=5000)
-        kept = True
-    except Exception:
-        kept = False
+    # and the page keeps it, a cvar as `name "value"`.
+    kept = bool(isolated.wait_until(
+        pg, "quake.kept('id1/config.cfg').then(t => !!t && t.includes('_vid_resolution \"800x500\"'))", 5, raising=False))
     check("config.cfg keeps it", kept, str(pg.evaluate("quake.kept('id1/config.cfg')")))
     check("the mode never touches viewsize", pg.evaluate("exp.viewsize()") == 100)
     # Reversible: wrapping Up from the first preset reaches a native row
@@ -270,7 +266,7 @@ with sync_playwright() as p:
     pg.evaluate("document.getElementById('walkBtn').click()")
     time.sleep(1.0)
     key("Escape")           # close the boot menu
-    pg.wait_for_function("exp.menu_visible().then(v => !v)", timeout=5000)
+    isolated.wait_until(pg, "exp.menu_visible().then(v => !v)", 5)
     time.sleep(0.3)
 
     grab_lum = """() => {
@@ -357,7 +353,7 @@ with sync_playwright() as p:
     pg.keyboard.press("o"); time.sleep(0.1)
     check("the grab bound the new key", pg.evaluate("exp.menu_bind_grabbing()") == 0)
     key("Escape"); key("Escape"); key("Escape")   # Keys -> Options -> Main -> closed
-    pg.wait_for_function("exp.menu_visible().then(v => !v)", timeout=5000)
+    isolated.wait_until(pg, "exp.menu_visible().then(v => !v)", 5)
     turn_around()                                 # retrace the free corridor
     d_new = walk_dist(0.7, "o")
     time.sleep(0.9)                               # let friction stop the coast
@@ -421,7 +417,7 @@ with sync_playwright() as p:
     check("New Game in a running game asks first (menu stays)",
           vis() == 1 and scr() == SP)
     key("y")                # "Are you sure?" -> y: start.bsp, menu closes
-    pg.wait_for_function("exp.menu_visible().then(v => !v)", timeout=15000)
+    isolated.wait_until(pg, "exp.menu_visible().then(v => !v)", 15)
     check("New Game keeps the Mouse speed cvar",
           abs(pg.evaluate("exp.mouse_sensitivity()") - sens_set) < 1e-5)
     check("New Game keeps viewsize", pg.evaluate("exp.viewsize()") == 90)

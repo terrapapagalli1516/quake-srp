@@ -146,8 +146,7 @@ with sync_playwright() as p:
     pg.evaluate("document.getElementById('walkBtn').click()")
     time.sleep(1.0)
     key("Escape")                                  # the boot menu away
-    pg.wait_for_function("Promise.all([exp.menu_visible(), exp.in_walk_mode()]).then(([m, w]) => !m && w === 1)",
-                         timeout=5000)
+    isolated.wait_until(pg, "Promise.all([exp.menu_visible(), exp.in_walk_mode()]).then(([m, w]) => !m && w === 1)", 5)
     time.sleep(0.5)
     W, H = pg.evaluate("Promise.all([exp.width(), exp.height()])")
     x0, y0 = (W - pw) // 2, (H - 48 - ph) // 2
