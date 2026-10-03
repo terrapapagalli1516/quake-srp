@@ -3,8 +3,16 @@
 menus, and offline play through the service worker (web/sw.js), in headless
 Chromium emulating a phone held sideways (844x390 CSS pixels at
 devicePixelRatio 3, `isMobile`, `hasTouch`). Taps are Playwright's
-touchscreen; drags are CDP touch events (Input.dispatchTouchEvent), so this
-check is Chromium's only.
+touchscreen; drags are CDP touch events (Input.dispatchTouchEvent), so the
+whole check is Chromium's.
+
+QUAKE_BROWSER=firefox runs the part Playwright's Firefox can drive: taps
+(its touchscreen has nothing else: no drag, no second finger, no hold),
+`hasTouch` without `isMobile` (Firefox has none; its coarse pointer needs
+only `hasTouch`). Each check that needs a drag or a held finger is SKIPped
+with the reason: 3's stick, look, two thumbs, FIRE and JUMP, and 2b's held
+arrow (a quick tap of it runs). The rest, 95 of Chromium's 102 checks, runs
+on Gecko's touch events and pointer events.
 
   1. The page: touch.js loads on the coarse pointer, the touch layout fills
      the screen, "tap to start"; the rotate prompt shows upright and a tap
@@ -121,12 +129,22 @@ PICK_PROBE_JS = """(() => {
 })();"""
 
 
-passed, failed = 0, 0
+# Playwright's Firefox has no CDP session and its touchscreen only taps
+# (module docstring): the drags and holds below go through `touches`/`drag`
+# in Chromium and are SKIPped, or run as a tap, in Firefox.
+FIREFOX = os.environ.get("QUAKE_BROWSER", "chromium") == "firefox"
+
+passed, failed, skipped = 0, 0, 0
 def check(name, ok, detail=""):
     global passed, failed
     print(("PASS" if ok else "FAIL"), name, detail)
     if ok: passed += 1
     else: failed += 1
+
+def skip(name, why):
+    global skipped
+    print("SKIP", name, f"({why})")
+    skipped += 1
 
 # The client point of a point of the menu's 320x200 layout: quake-rs
 # menu.rs menu_layout_point run backwards (the 2-D scale, the centred menu),
@@ -154,14 +172,16 @@ NO_FULLSCREEN_JS = "HTMLElement.prototype.requestFullscreen = () => Promise.reje
 def main():
     httpd = serve(PORT, True)
     with sync_playwright() as p:
-        br = p.chromium.launch(headless=True, args=["--no-sandbox", "--autoplay-policy=no-user-gesture-required"])
-        ctx = br.new_context(**PHONE)
+        br = isolated.launch(p, ["--no-sandbox", "--autoplay-policy=no-user-gesture-required"])
+        # Firefox has no `isMobile`; `hasTouch` alone gives it the coarse pointer.
+        phone = lambda **o: br.new_context(**{k: v for k, v in o.items() if not (FIREFOX and k == "is_mobile")})
+        ctx = phone(**PHONE)
         ctx.add_init_script(NO_FULLSCREEN_JS)
         pg = ctx.new_page()
         errs = []
         pg.on("console", lambda m: errs.append(m.text) if m.type == "error" else None)
         pg.on("pageerror", lambda e: errs.append("PAGEERROR: " + str(e)))
-        cdp = ctx.new_cdp_session(pg)
+        cdp = None if FIREFOX else ctx.new_cdp_session(pg)
 
         def touches(kind, points):
             cdp.send("Input.dispatchTouchEvent", {"type": kind, "touchPoints": [
@@ -212,10 +232,13 @@ def main():
         def pad_tap(sel, seconds=0.0):
             box = pg.locator(sel).bounding_box()
             pt = (box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
-            touches("touchStart", [(77, pt)])
-            if seconds:
-                time.sleep(seconds)
-            touches("touchEnd", [])
+            if FIREFOX:                                    # taps only: no hold
+                pg.touchscreen.tap(*pt)
+            else:
+                touches("touchStart", [(77, pt)])
+                if seconds:
+                    time.sleep(seconds)
+                touches("touchEnd", [])
             time.sleep(0.15)
         def goto_row(target):
             """Step the pad's UP/DOWN until the menu's cursor is on `target`."""
@@ -277,46 +300,51 @@ def main():
 
         # --- 3. Play -------------------------------------------------------------
         pg.screenshot(path=os.path.join(WEB, "verify_touch_play.png"))
-        before = listener()
-        drag([(1, (150, 280))], [(150, 220)], hold=1.5)   # the stick, thumb up: forward
-        time.sleep(0.2)
-        after = listener()
-        walked = ((after[0] - before[0]) ** 2 + (after[1] - before[1]) ** 2) ** 0.5
-        check("the stick walks", walked > 100, f"{walked:.0f} units")
-        time.sleep(0.3)
-        still = listener()
-        time.sleep(0.3)
-        check("let go, the player stops", abs(listener()[0] - still[0]) + abs(listener()[1] - still[1]) < 2)
-        yaw = lambda l: math.degrees(math.atan2(l[4], l[3]))
-        y0 = yaw(listener())
-        drag([(2, (600, 200))], [(700, 200)])             # look: a drag right
-        time.sleep(0.2)
-        turned = (y0 - yaw(listener()) + 540) % 360 - 180
-        check("a drag on the right turns the view right", 15 < turned < 60, f"{turned:.1f} degrees")
-        # Stick and look at once (two thumbs).
-        before = listener()
-        drag([(3, (150, 280)), (4, (600, 200))], [(150, 220), (650, 200)], hold=0.5)
-        after = listener()
-        check("two thumbs: walk and turn together",
-              ((after[0] - before[0]) ** 2 + (after[1] - before[1]) ** 2) ** 0.5 > 30
-              and abs(yaw(after) - yaw(before)) > 5)
-        shells = field("ammo_shells")
-        fire = pg.locator("#tFire").bounding_box()
-        fx, fy = fire["x"] + fire["width"] / 2, fire["y"] + fire["height"] / 2
-        touches("touchStart", [(5, (fx, fy))])
-        time.sleep(0.3)
-        touches("touchEnd", [])
-        time.sleep(0.4)
-        check("FIRE shoots", field("ammo_shells") < shells, f"shells {shells:.0f} -> {field('ammo_shells'):.0f}")
-        z0 = listener()[2]
-        jump = pg.locator("#tJump").bounding_box()
-        touches("touchStart", [(6, (jump["x"] + 30, jump["y"] + 30))])
-        top = z0
-        for _ in range(12):
-            time.sleep(0.05)
-            top = max(top, listener()[2])
-        touches("touchEnd", [])
-        check("JUMP jumps", top - z0 > 20, f"{top - z0:.0f} units up")
+        if FIREFOX:
+            for name in ("the stick walks", "let go, the player stops", "a drag on the right turns the view right",
+                         "two thumbs: walk and turn together", "FIRE shoots", "JUMP jumps"):
+                skip(name, "a drag, a second finger or a held one: Playwright's Firefox touchscreen only taps")
+        else:
+            before = listener()
+            drag([(1, (150, 280))], [(150, 220)], hold=1.5)   # the stick, thumb up: forward
+            time.sleep(0.2)
+            after = listener()
+            walked = ((after[0] - before[0]) ** 2 + (after[1] - before[1]) ** 2) ** 0.5
+            check("the stick walks", walked > 100, f"{walked:.0f} units")
+            time.sleep(0.3)
+            still = listener()
+            time.sleep(0.3)
+            check("let go, the player stops", abs(listener()[0] - still[0]) + abs(listener()[1] - still[1]) < 2)
+            yaw = lambda l: math.degrees(math.atan2(l[4], l[3]))
+            y0 = yaw(listener())
+            drag([(2, (600, 200))], [(700, 200)])             # look: a drag right
+            time.sleep(0.2)
+            turned = (y0 - yaw(listener()) + 540) % 360 - 180
+            check("a drag on the right turns the view right", 15 < turned < 60, f"{turned:.1f} degrees")
+            # Stick and look at once (two thumbs).
+            before = listener()
+            drag([(3, (150, 280)), (4, (600, 200))], [(150, 220), (650, 200)], hold=0.5)
+            after = listener()
+            check("two thumbs: walk and turn together",
+                  ((after[0] - before[0]) ** 2 + (after[1] - before[1]) ** 2) ** 0.5 > 30
+                  and abs(yaw(after) - yaw(before)) > 5)
+            shells = field("ammo_shells")
+            fire = pg.locator("#tFire").bounding_box()
+            fx, fy = fire["x"] + fire["width"] / 2, fire["y"] + fire["height"] / 2
+            touches("touchStart", [(5, (fx, fy))])
+            time.sleep(0.3)
+            touches("touchEnd", [])
+            time.sleep(0.4)
+            check("FIRE shoots", field("ammo_shells") < shells, f"shells {shells:.0f} -> {field('ammo_shells'):.0f}")
+            z0 = listener()[2]
+            jump = pg.locator("#tJump").bounding_box()
+            touches("touchStart", [(6, (jump["x"] + 30, jump["y"] + 30))])
+            top = z0
+            for _ in range(12):
+                time.sleep(0.05)
+                top = max(top, listener()[2])
+            touches("touchEnd", [])
+            check("JUMP jumps", top - z0 > 20, f"{top - z0:.0f} units up")
         w0 = field("weapon")
         tap_el("#tWeapon")
         time.sleep(0.3)
@@ -350,9 +378,12 @@ def main():
         pad_tap("#tPadRight")
         check("the pad's RIGHT steps a slider's cvar", gamma() != g0, f"{g0} -> {gamma()}")
         g1 = gamma()
-        pad_tap("#tPadRight", seconds=1.2)                 # held: the repeat
-        moved = abs(gamma() - g1)
-        check("holding RIGHT moves several notches", moved >= 0.1, f"{g1} -> {gamma()} ({moved / 0.05:.1f} notches)")
+        if FIREFOX:
+            skip("holding RIGHT moves several notches", "a held finger: Playwright's Firefox touchscreen only taps")
+        else:
+            pad_tap("#tPadRight", seconds=1.2)             # held: the repeat
+            moved = abs(gamma() - g1)
+            check("holding RIGHT moves several notches", moved >= 0.1, f"{g1} -> {gamma()} ({moved / 0.05:.1f} notches)")
         call("exec gamma 1")                               # back to default
 
         goto_row(0)                                        # Customize controls
@@ -533,7 +564,7 @@ def main():
         # native resolution's whole-pixel quantization rounds differently at
         # a different ratio, so this is not just the same math re-run.
         PHONE_26 = dict(viewport={"width": 1012, "height": 412}, device_scale_factor=2.6, is_mobile=True, has_touch=True)
-        ctx3 = br.new_context(**PHONE_26)
+        ctx3 = phone(**PHONE_26)
         ctx3.add_init_script(NO_FULLSCREEN_JS)
         pg3 = ctx3.new_page()
         errs3 = []
@@ -602,19 +633,22 @@ def main():
         # browser makes the pointerdown, pointerup and click itself.
         packs = pack_deploy()
         httpd4 = serve(PORT + 2, True, packs)
-        ctx4 = br.new_context(**PHONE_26)
+        ctx4 = phone(**PHONE_26)
         ctx4.add_init_script(NO_FULLSCREEN_JS)
         ctx4.add_init_script(PICK_PROBE_JS)
         pg4 = ctx4.new_page()
         errs4 = []
         pg4.on("console", lambda m: errs4.append(m.text) if m.type == "error" else None)
         pg4.on("pageerror", lambda e: errs4.append("PAGEERROR: " + str(e)))
-        cdp4 = ctx4.new_cdp_session(pg4)
+        cdp4 = None if FIREFOX else ctx4.new_cdp_session(pg4)
         base4 = f"http://127.0.0.1:{PORT + 2}/index.html"
         def finger(x, y):
-            cdp4.send("Input.dispatchTouchEvent", {"type": "touchStart", "touchPoints": [{"x": x, "y": y, "id": 9}]})
-            time.sleep(0.06)
-            cdp4.send("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
+            if FIREFOX:
+                pg4.touchscreen.tap(x, y)
+            else:
+                cdp4.send("Input.dispatchTouchEvent", {"type": "touchStart", "touchPoints": [{"x": x, "y": y, "id": 9}]})
+                time.sleep(0.06)
+                cdp4.send("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
             time.sleep(0.25)
         def finger_on(sel):
             box = pg4.locator(sel).bounding_box()
@@ -757,7 +791,7 @@ def main():
         ctx2.close()
         plain.shutdown()
         br.close()
-    print(f"done: {passed} passed, {failed} failed")
+    print(f"done: {passed} passed, {failed} failed" + (f", {skipped} skipped" if skipped else ""))
     sys.exit(1 if failed else 0)
 
 
