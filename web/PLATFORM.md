@@ -1369,7 +1369,9 @@ on several threads (quake-rs `render/band.rs`: row bands after the edge scan,
 the same pixels for any count). `wasi.js`:
 
 - makes the shared memory with the limits the module's import section
-  declares (the JS API does not tell them, so `importedMemory` reads them);
+  declares (the JS API does not tell them, so `importedMemory` reads them):
+  for the game, initial = maximum = 1 GiB, a memory that never grows (below,
+  "A memory that never grows");
 - before the program starts, makes a pool of thread workers (as many as
   `navigator.hardwareConcurrency`, 2–16), each another instance of
   `wasi.js` — a worker made after its parent has blocked may never start;
@@ -1389,6 +1391,52 @@ the same pixels for any count). `wasi.js`:
 A thread has the clocks, randomness, sleep and stderr (to its worker's
 console: the parent never reads messages again). The files, stdin and
 stdout stay the main program's, and a thread cannot spawn threads yet.
+
+**A thread's stack** is what `std` asks wasi-libc's `pthread_create` for:
+1 MiB (`std::thread`'s wasip1 `DEFAULT_MIN_STACK_SIZE`; the bands' and the
+bakes' scoped threads ask nothing more), allocated from the program's own
+heap, with no guard below it — linear memory has no unmapped pages. A
+thread that recurses past it does not fault: it writes over whatever the
+heap holds below its stack (the review of the bakes measured 1500 KiB of
+frames silently overwriting the heap). Nothing the threads run recurses
+deeply: the light tool's trace (quake-rs `render/torch.rs`'s `test_line`)
+goes as deep as the world's node tree, tens of frames.
+
+**A memory that never grows.** In Chromium a worker thread can trap —
+`RuntimeError: memory access out of bounds`, in `calloc` or wherever it
+first touches the memory — when another thread grows the shared memory
+(`memory.grow`, from `malloc`'s `sbrk`) while it runs: one thread grows the
+heap, another is handed and touches what lies in the new pages. The game hit
+it about one page load in four on the registered episode
+(`verify_content.py`, a worker of the torch set's build after a map load:
+2 of 12 runs) once its threads allocated as the heap grew; 40 lines of safe
+Rust show it alone (`threadcheck`'s last stage: eight scoped threads each
+allocating and keeping buffers, so the heap grows under them) — 6 of 20
+Chromium runs trapped, 0 of 10 in Firefox. With the memory linked at
+initial = maximum, so that `sbrk` never grows it, 0 of 40 (and `verify_content.py`
+24 of 24). So `quake-wasm/build.rs` links the threads build that way, 1 GiB
+(`QUAKE_WASM_GROWABLE=1` links it growable again), the program checks the
+size at startup (a line on stderr if it is not), and `verify_threads.py`
+runs `threadcheck` repeatedly and fails on any trap (`--growable` shows the
+old link still trapping). The single-thread build has no shared memory and
+no workers, and keeps its growable one. The behaviour is Chromium's (seen
+here in its headless shell on Linux); the mechanism inside V8 and an
+upstream report are for later (this round's research notes).
+
+**What 1 GiB holds.** The paks stay in the page's file store and are read as
+the game asks, so the program's memory is its frames (about 14 bytes a
+pixel: the 8-bit frame, the 16-bit z-buffer, the RGBA slots) and its caches.
+Measured with a growable build (its size is the heap's high-water mark)
+through every map of a game, each looked all the way round, in Chromium:
+id1 (pak0 and pak1) 64 MB at 1886×996 and 153 MB at 3806×2076 (4K, pixel
+size 1); Scourge of Armagon 68 and 153; Dissolution of Eternity 68 and 154;
+8K at pixel size 1 would be about 500 MB. 1 GiB was the threads build's
+maximum already, and on a Linux desktop the page's resident memory with it
+fixed is the growable build's (Chromium, all processes: 984 MB against 972):
+what is not touched is reserved, not resident. A full memory stops the game
+cleanly on the main thread — `memory allocation of N bytes failed`, then
+`std`'s abort — and the page says "the game stopped: out of memory ...: a
+larger pixel size, in Video Options, needs less" (a 96 MiB build at 4K).
 
 **The renderer's threads** are the cvar `r_threads` (quake-wasm `App::
 render_threads`, the typed `quake_rs::render::Threads`): 0, the default,
