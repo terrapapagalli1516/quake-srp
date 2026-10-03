@@ -3611,3 +3611,86 @@ past 600. No map of id1 or either pack needs it. Its docs and console help say s
 - `CL_ParseStatic`'s `MAX_STATIC_ENTITIES` (128, "Too many static entities") is not
   modelled. No map checked reaches it: `r1m1`'s 106 statics are the packs' most, and
   the shareware maps have at most 44 (`e1m3`).
+
+## Demo playback draws id's dynamic lights (2026-10-03, branch `fleet/demolights`)
+
+AUDIT's open item "no dynamic lights in demo playback" (Round 4, fix-client F13).
+In id's client a recorded demo is lit as live play is: `CL_RelinkEntities` makes a
+light for every relinked entity with `EF_MUZZLEFLASH`, `EF_BRIGHTLIGHT` or
+`EF_DIMLIGHT` (the view entity's flash included) and for a model flagged `EF_ROCKET`,
+`CL_ParseTEnt` one for `TE_EXPLOSION` and `TE_EXPLOSION2`, and `CL_DecayLights` runs
+after every frame. The port's demo path made none, in both profiles: the attract
+loop, the first thing a visitor sees, was darker than id's wherever a shotgun, a
+rocket or a grenade went off (`cl_demo.rs`: "EF_ROCKET's dlight is not drawn").
+
+**What is shared.** Not a second feed of the walk's lights, but the same calls. The C
+spells each light once, where it is made; so does the port, in `dlight.rs`:
+`DynamicLights::relink_effects` (the three effect bits, in the C's order and with its
+`rand()&31`), `relink_rocket` and `explosion`, and `spawn_temp_entity` (the shared
+`CL_ParseTEnt` half) takes the pool, so a temp entity's particles, light and sound are
+one call. `walk_frame` and `render_demo_frame` both call them; the walk's edicts reach
+`relink_effects` through `Server::lit_entities` (which replaces `entity_dlights` and
+its `EntityDlight` structs: the derivation of a light from `effects` lives in one
+place), the demo's entities through their snapshots. `playtest`'s own simplified TE
+code (a dev report) now agrees that the tarbaby's blob has no light.
+
+**What the demo does with them.**
+- Each relinked entity's lights are made at the origin and angles it is relinked at
+  (`CL_LerpPoint`'s fraction: a light follows its entity between messages), in entity
+  order with the view entity in its place; a static is never relinked, so lights
+  nothing. The view entity's angles (the way the recorded player faces, which aim its
+  flash) are now recorded (`DemoFrame::view_entity_angles`).
+- Temp entities spawn their light as the message is read, at the clock it is read at.
+- `die` and the death test use `cl.time` as the C has it: a `double` clock against a
+  `float` `die` (`DynamicLights` takes `f64`). In a demo `cl.time` is the host's
+  running sum; the first run of the oracle comparison differed in 36 of 17,500 frames,
+  all explosions' last frames, 0.5 s on, where the float clock rounds the other way.
+  The live walk passes its float clock, widened: id's `cl.time` there is the server's
+  float.
+- The pool is id's `cl_dlights`: 32 slots cleared at the start, never freed (a dead
+  light keeps its slot and its key until something takes the slot), so `CL_AllocDlight`
+  picks the slot id's does (before: freed slots lost their keys). Decay is
+  `cl.time - cl.oldtime` after the frame is drawn; the playback starting over clears it
+  (`CL_ClearState`). `timedemo` draws them too (each message is its frame).
+- 2026's extras keep working: the torch flicker and the threaded bakes are the
+  renderer's (`a_recorded_explosion_changes_the_frame_the_same_on_any_thread_count`),
+  `r_lerpmodels`' flash snap reads the recorded effects as before, and with
+  `r_lerpmove` a monster's light follows where it is drawn (the glide), where the live
+  walk's follows the server's origin (it keeps "everything else" there).
+
+**Proof** (`oracle/README.md`, "Demo playback", "Demo lights in pixels").
+- `demo_lerp.py` compares the lights slot for slot over the 17,500 frames of the loop
+  against id's `cl_dlights` (`oracle_trace`'s new `D` lines): every frame MATCH, in all
+  four runs. Per frame the same slots, keys, origins, decays, minlights and `die`; the
+  radius exactly for the 2,145 explosion and 8,184 rocket light-frames, and a flash's
+  `200 + (rand()&31)` inside its window (the 3,410 flash light-frames; id's draw is
+  stirred every host frame and differs from run to run, the port's own draw is the
+  one thing it cannot share).
+- `demo_lights.py`, 51 demo frames in pixels (the 3-D view, 320x200, the page's
+  aspect): where the radii are exact (26 frames: explosions, rockets) the port's
+  playback frame is id's to 99.96-100.00% (min / median 99.96 / 100.00; before, with no
+  lights, 3.72 / 95.55: `demo1:358`, a grenade's first frame, 14.42 -> 100.00); with a
+  flash (25 frames) 44.53 / 90.54 against id's 99.83 / 99.99 once id's own radius is
+  handed over (before 18.17 / 65.76; `demo1:323`, the shotgun's flash, 75.65 -> 91.34 ->
+  100.00). The shortfall is the radius draw alone: the match follows the distance
+  between the port's draw and id's.
+- Unit tests: each effect's light (radius, die, decay, origin, minlight, key, the
+  jitter's window and one draw per light), the 32-slot allocation slot by slot (a dead
+  light's key still wins, the first dead slot, the fallback to slot 0, the 33rd light),
+  decay, `CL_ParseTEnt`'s lights (only the two explosions), `Server::lit_entities`, and
+  playback: the recorded flash equals the live call's light for the same entity state,
+  a light follows its entity's interpolated origin, the view entity's flash is aimed by
+  its own angles and takes its place among the entity numbers, a flash is remade every
+  frame its message holds it and outlives it by 0.1 s, a rocket's light, an explosion's
+  decay and death, timedemo and the loop wrap.
+- `classic_check` ALL PASS with `play.demo1..3`'s frame hashes re-recorded (nine
+  values: at 320x200 demo1 9 of the 22 sampled frames moved, demo2 4, demo3 13 — the
+  ones with a flash, a rocket or an explosion in view); the demos' sound tallies and
+  every walk, fire and quad hash unchanged (the live walk's lights are made by the same
+  calls and the pool's slot order does not reach a pixel), and goldens, timedemo, census,
+  edicts, oracle, screen2d, demolerp and sound as before.
+
+**Not done.** A frame's flash radius is the port's own `rand()&31`: the match with id's
+frame cannot be exact where one is in view, as it cannot be between two runs of id's own
+game. Mission-pack demos were not run (the id1 attract loop is the only recorded
+stream in the tree).
