@@ -115,7 +115,7 @@ pub struct SettingRow {
 
 /// The settings page's rows, in order: the profile, then each departure the
 /// profiles switch ([`crate::cvar::Cvars::modern`] says which are on in 2026).
-pub const SETTING_ROWS: [SettingRow; 18] = [
+pub const SETTING_ROWS: [SettingRow; 19] = [
     SettingRow {
         cvar: "profile",
         label: "               Profile",
@@ -150,6 +150,12 @@ pub const SETTING_ROWS: [SettingRow; 18] = [
         cvar: "wasm_scaled2d",
         label: "      Scaled 2-D layer",
         help: ["Status bar, menus and text at", "id's proportions, whole pixels"],
+        kind: RowKind::Toggle,
+    },
+    SettingRow {
+        cvar: "scr_sbaroverlay",
+        label: "    Status bar overlay",
+        help: ["The view fills the screen and", "the status bar is drawn over it"],
         kind: RowKind::Toggle,
     },
     SettingRow {
@@ -2451,9 +2457,10 @@ fn draw_options_screen(
 /// Under them the notes, from x=[`EXTRAS_NOTE_X`] (right of the plaque,
 /// `qplaque` being 32 wide at x=16): the white [`EXTRAS_HEADER`] a row below
 /// the list — right under it once the rows leave no room for the gap in the
-/// 200-line screen (17 rows do not) — and the highlighted row's help lines
-/// right under the header, at most [`EXTRAS_NOTE_COLS`] columns and
-/// [`EXTRAS_HELP_LINES`] of them.
+/// 200-line screen (17 rows do not), and gone once they leave room for no
+/// more than the help's own two lines (19 do not: [`EXTRAS_HEADER_SHOWN`]) —
+/// and the highlighted row's help lines right under the header, at most
+/// [`EXTRAS_NOTE_COLS`] columns and [`EXTRAS_HELP_LINES`] of them.
 const EXTRAS_ROW_Y0: f32 = OPTIONS_ROW_Y0;
 const EXTRAS_NOTE_X: f32 = 64.0;
 const EXTRAS_NOTE_COLS: usize = (MENU_VIRT_W as usize - EXTRAS_NOTE_X as usize) / 8;
@@ -2468,7 +2475,14 @@ const EXTRAS_HEADER_Y: f32 = if EXTRAS_LIST_END + OPTIONS_ROW_STEP + EXTRAS_NOTE
 } else {
     EXTRAS_LIST_END
 };
-const EXTRAS_HELP_Y: f32 = EXTRAS_HEADER_Y + OPTIONS_ROW_STEP;
+/// Whether the page draws [`EXTRAS_HEADER`]: the last of the notes to go as
+/// the list grows, after the gap and the console line ([`EXTRAS_HELP_LINES`]),
+/// once the header and a row's two help lines no longer fit under the list.
+/// What it says the page says anyway: it opens from Options' "Classic / 2026"
+/// row, and its own first row's help is "Classic: id's Quake, every row
+/// off". (This round's `scr_sbaroverlay` makes 19 rows, and drops it.)
+const EXTRAS_HEADER_SHOWN: bool = EXTRAS_LIST_END + 3.0 * OPTIONS_ROW_STEP <= 200.0;
+const EXTRAS_HELP_Y: f32 = if EXTRAS_HEADER_SHOWN { EXTRAS_HEADER_Y + OPTIONS_ROW_STEP } else { EXTRAS_LIST_END };
 /// How many of a row's three help lines ([`extras_help_lines`]: its own
 /// two, then its console line) actually fit between [`EXTRAS_HELP_Y`] and
 /// the 200-line screen's bottom. Up to 17 rows in [`SETTING_ROWS`] all
@@ -2494,8 +2508,8 @@ const EXTRAS_HEADER: &str = "Not in id's Quake";
 /// [`SETTING_ROWS`] row an Options row — the right-justified `M_Print` label
 /// at x=16, its value at x=220 (`M_DrawCheckbox`'s "on" / "off" for a
 /// toggle), the 4 Hz flashing cursor at x=200 — and under the rows the
-/// [`EXTRAS_HEADER`] in white and up to [`EXTRAS_HELP_LINES`] of the
-/// highlighted row's bronze help lines.
+/// [`EXTRAS_HEADER`] in white (when it fits, [`EXTRAS_HEADER_SHOWN`]) and up
+/// to [`EXTRAS_HELP_LINES`] of the highlighted row's bronze help lines.
 #[allow(clippy::too_many_arguments)]
 fn draw_extras_screen(
     image: &mut Image,
@@ -2520,7 +2534,9 @@ fn draw_extras_screen(
     }
     let cy = EXTRAS_ROW_Y0 + menu.cursor() as f32 * OPTIONS_ROW_STEP;
     draw_char_scaled(image, cc, OPTIONS_CURSOR_X, cy, cursor_glyph, scale, ox, oy);
-    draw_string_scaled(image, cc, EXTRAS_NOTE_X, EXTRAS_HEADER_Y, EXTRAS_HEADER, scale, ox, oy);
+    if EXTRAS_HEADER_SHOWN {
+        draw_string_scaled(image, cc, EXTRAS_NOTE_X, EXTRAS_HEADER_Y, EXTRAS_HEADER, scale, ox, oy);
+    }
     if let Some(row) = SETTING_ROWS.get(menu.cursor()) {
         for (i, line) in extras_help_lines(row).iter().take(EXTRAS_HELP_LINES).enumerate() {
             let y = EXTRAS_HELP_Y + i as f32 * 8.0;
@@ -4225,16 +4241,20 @@ mod tests {
         // The settings page, as M_Options_Draw: plaque + OPTIONS title, the
         // rows from y=32 (bronze labels, values at x=220), the cursor at x=200
         // while the 4 Hz blink shows it; under them, right of the plaque, the
-        // white header a row below the list and the row's help lines right under it,
-        // at x=64.
+        // white header (while it fits) and the row's help lines right under
+        // it, at x=64.
         m.set_cursor(ROW_PROFILE);
         m.select(&mut s);
         let mut img = Image::new(320, 200, 0);
         draw_menu(&mut img, &m, &s, &pics, Some(&cc), clock(0.0, 0.3));
         assert_eq!(img.pixels[4 * 320 + 16], 9, "qplaque at (16,4)");
         assert_eq!(img.pixels[4 * 320 + 100], 8, "the OPTIONS title centred at y=4");
-        let header_y = EXTRAS_HEADER_Y as usize;
-        assert_eq!(px(&img, 64, header_y), 6, "the header is M_PrintWhite");
+        let help_y = EXTRAS_HELP_Y as usize;
+        if EXTRAS_HEADER_SHOWN {
+            assert_eq!(px(&img, 64, EXTRAS_HEADER_Y as usize), 6, "the header is M_PrintWhite");
+        } else {
+            assert!(!img.pixels.contains(&6), "no white header once the list leaves no room for it");
+        }
         for (i, row) in SETTING_ROWS.iter().enumerate() {
             let y = 32 + i * 8;
             let first = row.label.bytes().position(|b| b != b' ').unwrap();
@@ -4242,7 +4262,8 @@ mod tests {
             assert_eq!(px(&img, 220, y), 5, "row {i}'s value at x=220");
         }
         assert_eq!(px(&img, 200, 32), 7, "the cursor on row 0 at x=200 (realtime 0.3: on)");
-        assert_eq!(px(&img, 64, header_y + 8), 5, "row 0's help, bronze, under the header");
+        assert_eq!(px(&img, 64, help_y), 5, "row 0's help, bronze, under the header or the list");
+        assert_eq!(px(&img, 64, help_y + 8), 5, "...both its lines");
         // Nothing but the plaque in its columns: every note starts right of it.
         for y in 30..200 {
             for x in 16..48 {
@@ -4261,7 +4282,7 @@ mod tests {
         draw_menu(&mut img, &m, &s, &pics, Some(&cc), clock(0.0, 0.3));
         assert_eq!(px(&img, 220 + 16, 40), 0, "\"on\" is two characters");
         assert_eq!(px(&img, 220 + 16, 48), 5, "\"off\" is three");
-        assert_eq!(px(&img, 64, header_y + 8), 5, "row 2's help once the cursor moves");
+        assert_eq!(px(&img, 64, help_y), 5, "row 2's help once the cursor moves");
         assert_eq!(px(&img, 200, 48), 7, "the cursor on row 2");
         // Without conchars only the pics draw; nothing panics.
         let mut img = Image::new(320, 200, 0);

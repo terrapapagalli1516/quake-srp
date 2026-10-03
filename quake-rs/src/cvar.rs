@@ -28,7 +28,7 @@ use crate::client::lerpmodels::LerpModels;
 use crate::client::lerpmove::LerpMove;
 use crate::render::Threads;
 use crate::snd::SoundMode;
-use crate::screen::{VIEWSIZE_DEFAULT, VIEWSIZE_MAX, VIEWSIZE_MIN, VIEWSIZE_STEP};
+use crate::screen::{SbarLayout, VIEWSIZE_DEFAULT, VIEWSIZE_MAX, VIEWSIZE_MIN, VIEWSIZE_STEP};
 use crate::vm::{MAX_EDICTS, MAX_EDICTS_LIMIT};
 
 /// The port's pixel sizes for [`Cvars::pixel_size`]: 0 is Auto, 1..=4 a
@@ -99,6 +99,11 @@ pub struct Cvars {
     /// largest whole multiple of id's 320x200 that fits, where id draws it
     /// 1:1 ([`crate::draw::screen_2d`]).
     pub scaled_2d: bool,
+    /// `scr_sbaroverlay`: the 3-D view fills the frame and the status bar is
+    /// drawn over its bottom ([`SbarLayout::Overlay`], QuakeSpasm's
+    /// `scr_sbaralpha` layout with the bar opaque), so the game shows either
+    /// side of the bar, where id's view stops above it and tiles its sides.
+    pub sbar_layout: SbarLayout,
     /// `vid_native`: the picture fills the window at the window's own aspect,
     /// rendered at its device pixels divided by [`Cvars::pixel_size`], with
     /// square pixels and views past id's 1280x1024 (the renderer's `hires`);
@@ -196,6 +201,7 @@ impl Cvars {
             show_fps: false,
             exact_persp: false,
             scaled_2d: false,
+            sbar_layout: SbarLayout::Classic,
             native: false,
             pixel_size: 0,
             fov_adapt: false,
@@ -216,15 +222,15 @@ impl Cvars {
     /// The 2026 profile's: an idealized software-rendered Quake on a 2026
     /// machine. A frame every display refresh, the window filled at native
     /// resolution in whole chunky pixels with a Hor+ field of view, the 2-D
-    /// layer at id's proportions, the crosshair, monsters that glide between
-    /// their steps and whose animation blends between frames, Always Run,
-    /// mouse look, Space to swim up, Alt+Enter for fullscreen and touch controls
-    /// on a phone. Show FPS and exact perspective stay off: the readout is
-    /// clutter, and id's 16-pixel spans are part of the look. A gamepad
-    /// works as a modern twin-stick pad ([`JoyCvars::modern`]). The edict
-    /// pool grows past id's 600 (`max_edicts`, QuakeSpasm's own default) —
-    /// invisible on every map id or the mission packs shipped, room for
-    /// bigger ones.
+    /// layer at id's proportions with the status bar over a full-frame view,
+    /// the crosshair, monsters that glide between their steps and whose
+    /// animation blends between frames, Always Run, mouse look, Space to swim
+    /// up, Alt+Enter for fullscreen and touch controls on a phone. Show FPS
+    /// and exact perspective stay off: the readout is clutter, and id's
+    /// 16-pixel spans are part of the look. A gamepad works as a modern
+    /// twin-stick pad ([`JoyCvars::modern`]). The edict pool grows past id's
+    /// 600 (`max_edicts`, QuakeSpasm's own default) — invisible on every map
+    /// id or the mission packs shipped, room for bigger ones.
     pub fn modern() -> Cvars {
         Cvars {
             cl_forwardspeed: 400.0,
@@ -232,6 +238,7 @@ impl Cvars {
             crosshair: true,
             uncapped: true,
             scaled_2d: true,
+            sbar_layout: SbarLayout::Overlay,
             native: true,
             fov_adapt: true,
             freelook: true,
@@ -454,6 +461,9 @@ pub const CVARS: &[Cvar] = &[
         get: |c| flag(c.exact_persp), set: |c, v| c.exact_persp = on(v) },
     Cvar { name: "wasm_scaled2d", archive: true, departure: true, help: "2-D layer at id's proportions",
         get: |c| flag(c.scaled_2d), set: |c, v| c.scaled_2d = on(v) },
+    Cvar { name: "scr_sbaroverlay", archive: true, departure: true, help: "status bar over a full-frame view",
+        get: |c| flag(c.sbar_layout == SbarLayout::Overlay),
+        set: |c, v| c.sbar_layout = if on(v) { SbarLayout::Overlay } else { SbarLayout::Classic } },
     Cvar { name: "vid_native", archive: true, departure: true, help: "fill the window, native pixels",
         get: |c| flag(c.native), set: |c, v| c.native = on(v) },
     Cvar { name: "vid_pixelsize", archive: true, departure: true, help: "0 auto, 1..4 pixels a pixel",

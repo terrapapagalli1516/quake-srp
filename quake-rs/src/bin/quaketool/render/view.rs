@@ -347,7 +347,7 @@ pub fn cmd_view(args: &[String]) -> CmdResult {
         // warp buffer's view, stretched over the screen by D_WarpScreen. (With
         // --vrect the view is drawn unwarped.)
         if dowarp && vrect.is_none() {
-            let r = quake_rs::screen::warp_vrect(w, h, 120.0, false, video.cvars.hires);
+            let r = quake_rs::screen::warp_vrect(w, h, 120.0, false, quake_rs::screen::SbarLayout::Classic, video.cvars.hires);
             let mut wopts = opts;
             wopts.screen = Some(render::ScreenPlace { x: r.x, y: r.y, vid_w: w, vid_h: h });
             let scene = render::Scene { width: r.w, height: r.h, options: wopts, ..scene };

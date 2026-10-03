@@ -895,14 +895,14 @@ fn render_demo_frame(
     // SCR_CalcRefdef: the same viewsize framing as live play (the C's demo IS
     // the client rendering a recorded stream).
     lap(Phase::Sim);
-    let refdef = render::calc_refdef(render_w, render_h, d.viewsize, f.intermission != 0);
+    let refdef = render::calc_refdef(render_w, render_h, d.viewsize, f.intermission != 0, d.sbar_layout);
     let vrect = refdef.vrect;
     // R_SetupFrame's r_dowarp: a submerged recorded POV renders into the warp
     // buffer (at most 320x200) like live play.
     let eye_contents = crate::world::point_contents(&d.bsp, cam.pos);
     let dowarp = eye_contents <= crate::bsp::CONTENTS_WATER;
     let rvrect = if dowarp {
-        crate::screen::warp_vrect(render_w, render_h, d.viewsize, f.intermission != 0, vid.video.hires)
+        crate::screen::warp_vrect(render_w, render_h, d.viewsize, f.intermission != 0, d.sbar_layout, vid.video.hires)
     } else {
         vrect
     };
@@ -1015,6 +1015,7 @@ fn render_demo_frame(
             show_scores: d.show_scores,
             face_pain: v.time <= d.faceanimtime,
             sb_lines: refdef.sb_lines,
+            sbar_layout: d.sbar_layout,
         };
         render::draw_hud_into(&mut img, &hud);
     }

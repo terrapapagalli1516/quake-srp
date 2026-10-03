@@ -6,8 +6,8 @@ Chromium. The page opens as `?classic` (every departure off, id's keys):
   1. Options' 14th row, "Classic / 2026" (the port's): left/right switch the
      whole profile (the 2026 one turns wasm_uncapped and wasm_scaled2d on),
      Enter opens the settings page (menu_screen_id 10), whose rows switch
-     each setting (Uncapped framerate row 1, Show FPS row 13, Exact
-     perspective row 14: left/right/Enter), Esc returns to Options; the
+     each setting (Uncapped framerate row 1, Show FPS row 14, Exact
+     perspective row 15: left/right/Enter), Esc returns to Options; the
      wasm_* console variables set the same settings, with the console's
      history and Tab completion. Screenshots: verify_extras_options.png,
      verify_extras.png (the page), verify_extras_fps.png (the readout).
@@ -150,13 +150,13 @@ with sync_playwright() as p:
     pg.locator("#c").screenshot(path=os.path.join(WEB, "verify_extras.png"))
     key("ArrowDown"); key("ArrowRight")    # row 1: Uncapped framerate
     check("Right toggles Uncapped framerate", ext() == 1)
-    key("ArrowDown", 12); key("Enter")     # row 13: Show FPS
+    key("ArrowDown", 13); key("Enter")     # row 14: Show FPS
     check("Enter toggles Show FPS", ext() == 3)
     key("ArrowLeft")
     check("Left toggles it back", ext() == 1)
-    key("ArrowUp", 12); key("ArrowLeft")
+    key("ArrowUp", 13); key("ArrowLeft")
     check("all off again", ext() == 0)
-    key("ArrowDown", 13); key("ArrowRight")  # row 14: Exact perspective
+    key("ArrowDown", 14); key("ArrowRight")  # row 15: Exact perspective
     check("Right toggles Exact perspective", ext() == 4)
     key("ArrowLeft")
     check("...and back off", ext() == 0)

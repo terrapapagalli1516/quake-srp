@@ -1105,10 +1105,12 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
     // current server clock; the worldspawn populated the styles at spawn time.
     let light_styles = w.server.lightstyle_scales(w.clock);
     // SCR_CalcRefdef / R_SetVrect: the viewsize picks the 3-D view rectangle
-    // (the view sits ABOVE the status bar, projected about its own centre) and
-    // how much status bar shows; an intermission is always full screen.
+    // (in id's layout the view sits ABOVE the status bar; with the 2026 bar
+    // over the view it takes the bar's rows too; either way it is projected
+    // about its own centre) and how much status bar shows; an intermission
+    // is always full screen.
     lap(Phase::Sim);
-    let refdef = render::calc_refdef(render_w, render_h, w.viewsize, intermission);
+    let refdef = render::calc_refdef(render_w, render_h, w.viewsize, intermission, w.sbar_layout);
     let vrect = refdef.vrect;
     // R_SetupFrame's r_dowarp (r_waterwarp 1): with the eye's leaf in water,
     // slime or lava the view is rendered into the (at most 320x200) warp
@@ -1116,7 +1118,7 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
     let eye_contents = crate::world::point_contents(&w.bsp, eye);
     let dowarp = eye_contents <= crate::bsp::CONTENTS_WATER;
     let rvrect = if dowarp {
-        crate::screen::warp_vrect(render_w, render_h, w.viewsize, intermission, vid.video.hires)
+        crate::screen::warp_vrect(render_w, render_h, w.viewsize, intermission, w.sbar_layout, vid.video.hires)
     } else {
         vrect
     };
@@ -1290,6 +1292,7 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
             show_scores: km.showscores,
             face_pain: w.server.time() <= w.faceanimtime,
             sb_lines: refdef.sb_lines,
+            sbar_layout: w.sbar_layout,
         };
         render::draw_hud_into(&mut img, &hud);
     }

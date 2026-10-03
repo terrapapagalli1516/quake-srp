@@ -193,6 +193,7 @@ pub(crate) fn step(dt: f32) -> i32 {
         let km = derive_key_move(&a.settings.cvars, &a.settings.binds, &a.keys_held);
         let viewsize = a.settings.cvars.viewsize;
         let crosshair = a.settings.cvars.crosshair;
+        let sbar_layout = a.settings.cvars.sbar_layout;
         let lerpmove = a.settings.cvars.lerpmove;
         let lerpmodels = a.settings.cvars.lerpmodels;
         // Host_EndGame on the demo's svc_disconnect: once a demo has shown its
@@ -212,6 +213,7 @@ pub(crate) fn step(dt: f32) -> i32 {
             wk.key_move = km;
             wk.viewsize = viewsize;
             wk.crosshair = crosshair;
+            wk.sbar_layout = sbar_layout;
             wk.stepping = stepping;
             wk.lerpmove = lerpmove;
             wk.lerpmodels = lerpmodels;
@@ -223,6 +225,7 @@ pub(crate) fn step(dt: f32) -> i32 {
             d.renderer.set_threads(threads);
             d.viewsize = viewsize;
             d.crosshair = crosshair;
+            d.sbar_layout = sbar_layout;
             d.stepping = stepping;
             d.lerpmove = lerpmove;
             d.lerpmodels = lerpmodels;
@@ -248,6 +251,7 @@ pub(crate) fn step(dt: f32) -> i32 {
                 if let Some(d) = a.demo.as_mut() {
                     d.viewsize = viewsize;
                     d.crosshair = crosshair;
+                    d.sbar_layout = sbar_layout;
                     d.stepping = stepping;
                     d.lerpmove = lerpmove;
                     d.lerpmodels = lerpmodels;
@@ -309,7 +313,7 @@ pub(crate) fn step(dt: f32) -> i32 {
                 a.walk.as_ref().map(|wk| wk.intermission != 0)
             };
             if let (Some(false), Some(img), Some(cc)) = (intermission, img.as_mut(), a.conchars.as_ref()) {
-                let sb_lines = render::calc_refdef(w, h, viewsize, false).sb_lines;
+                let sb_lines = render::calc_refdef(w, h, viewsize, false, sbar_layout).sb_lines;
                 render::draw_fps(img, cc, a.show_fps.shown(), sb_lines);
             }
         }
@@ -572,8 +576,11 @@ mod tests {
         crate::host_cmd::execute_console_command("crosshair 0");
         step(0.0);
         let without = APP.with(|c| c.borrow().as_ref().unwrap().present.rgba());
-        // The view above the scaled status bar (viewsize 100: 48 rows x 5).
-        let vrect = render::calc_refdef(w, h, 100.0, false).vrect;
+        // The view fills the frame under the scaled status bar (2026's
+        // scr_sbaroverlay; viewsize 100: the bar 48 rows x 5): the + at the
+        // frame's centre.
+        let vrect = render::calc_refdef(w, h, 100.0, false, render::SbarLayout::Overlay).vrect;
+        assert_eq!((vrect.w, vrect.h), (w, h));
         let (cx, cy) = (vrect.x + vrect.w / 2, vrect.y + vrect.h / 2);
         let differing: Vec<(usize, usize)> = (0..w * h)
             .filter(|&i| with[i * 4..i * 4 + 3] != without[i * 4..i * 4 + 3])
@@ -623,6 +630,49 @@ mod tests {
         assert!(run(144.0, 3, 1)[150..].iter().all(|&f| f == 144), "uncapped 144 Hz");
         assert!(run(144.0, 3, 2)[80..].iter().all(|&f| f == 72), "the cap's 72 at 144 Hz");
         assert!(run(100.0, 3, 2)[60..].iter().all(|&f| f == 50), "the cap's 50 at 100 Hz");
+    }
+
+    /// 2026's status bar over the view, end to end on a 16:9 window (the 2-D
+    /// layer at 5x: a 384x216 screen, the bar's 320 columns centred with 32
+    /// either side): the bar itself is byte for byte the same in both
+    /// layouts (its pics are opaque), its sides show the game instead of the
+    /// backtile, and the view above it is the whole frame's, not the rows
+    /// above the bar.
+    #[test]
+    fn the_2026_status_bar_sits_over_a_full_frame_view() {
+        assert_eq!(boot(), 1);
+        close_menu();
+        use_2026();
+        crate::vid::set_window(1920, 1080, 1.0);
+        step(0.0);
+        let (w, h) = APP.with(|c| {
+            let b = c.borrow();
+            (b.as_ref().unwrap().render_w, b.as_ref().unwrap().render_h)
+        });
+        assert_eq!((w, h), (1920, 1080));
+        assert_eq!(quake_rs::screen::status_bar_rows(w, h, 100.0, false), 240, "48 rows x 5");
+        let grab = || APP.with(|c| c.borrow().as_ref().unwrap().present.rgba());
+        step(0.0);
+        let over = grab();
+        crate::host_cmd::execute_console_command("scr_sbaroverlay 0");
+        step(0.0);
+        let id = grab();
+        let px = |img: &[u8], x: usize, y: usize| img[(y * w + x) * 4..(y * w + x) * 4 + 3].to_vec();
+        let region_differs = |xs: std::ops::Range<usize>, ys: std::ops::Range<usize>| {
+            ys.clone().any(|y| xs.clone().any(|x| px(&over, x, y) != px(&id, x, y)))
+        };
+        let (bar_top, bar_x0, bar_x1) = (h - 240, 32 * 5, w - 32 * 5);
+        for y in bar_top..h {
+            for x in bar_x0..bar_x1 {
+                assert_eq!(px(&over, x, y), px(&id, x, y), "({x},{y}): the bar is the same bar");
+            }
+        }
+        assert!(region_differs(0..bar_x0, bar_top..h), "the left side shows the game, not the backtile");
+        assert!(region_differs(bar_x1..w, bar_top..h), "the right side too");
+        assert!(region_differs(0..w, 0..bar_top), "the view above is the full frame's");
+        crate::host_cmd::execute_console_command("scr_sbaroverlay 1");
+        step(0.0);
+        assert_eq!(grab(), over, "on again: the same frame");
     }
 
     #[test]

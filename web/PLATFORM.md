@@ -1234,9 +1234,11 @@ phone size, Screen size (viewsize) and resolution — the thing a touch
 control must never cover is the one piece of the page the program itself
 draws, not the page. The program reports it: `sbar_height` (an automation
 call, `quake_rs::screen::status_bar_rows`) answers the framebuffer rows,
-bottom-anchored, the status bar covers *this frame* — the same arithmetic
-`calc_refdef` uses to keep the 3-D view off the bar, so it is exactly right
-for every `viewsize` (0, 24 or 48 virtual rows), the "scaled 2-D" extra's
+bottom-anchored, the status bar covers *this frame* — the rows `calc_refdef`
+keeps the 3-D view above in id's layout (2026's "Status bar overlay",
+`scr_sbaroverlay`, runs the view on under the bar and draws the bar over it,
+but the bar's rows are the same), so it is exactly right for every
+`viewsize` (0, 24 or 48 virtual rows), the "scaled 2-D" extra's
 whole-number blow-up, and an intermission (always full screen, so 0). The
 page turns that into a CSS custom property, `--bar` (`touch.js`'s
 `refreshBar`/`applyBar`): the frame rows at the canvas box's own CSS-pixel-

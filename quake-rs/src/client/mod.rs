@@ -158,6 +158,11 @@ pub struct Walk {
     /// The `crosshair` cvar this frame: `V_RenderView` draws the `+` over
     /// the finished view ([`render::draw_crosshair`]). Set like `viewsize`.
     pub crosshair: bool,
+    /// The `scr_sbaroverlay` setting this frame: whether the 3-D view stops
+    /// above the status bar (id's) or fills the frame under it
+    /// ([`render::SbarLayout`], with `viewsize` [`render::calc_refdef`]'s
+    /// input). Set like `viewsize`.
+    pub sbar_layout: render::SbarLayout,
     /// How this frame steps the game ([`Stepping`]): Classic, id's per-frame
     /// code, unless the host runs uncapped. Set by the host each frame, like
     /// `key_move`.
@@ -411,6 +416,8 @@ pub struct DemoPlay {
     pub viewsize: f32,
     /// The `crosshair` cvar this frame (see `Walk::crosshair`).
     pub crosshair: bool,
+    /// The `scr_sbaroverlay` setting this frame (see `Walk::sbar_layout`).
+    pub sbar_layout: render::SbarLayout,
     /// How this frame steps playback ([`Stepping`]), set by the host each
     /// frame like `viewsize`.
     pub stepping: Stepping,
@@ -509,6 +516,7 @@ impl DemoPlay {
             notify: ConNotify::default(),
             viewsize: render::VIEWSIZE_DEFAULT,
             crosshair: false,
+            sbar_layout: render::SbarLayout::Classic,
             stepping: Stepping::Classic,
             lerpmove: LerpMove::Classic,
             glides: StepGlides::default(),
@@ -632,6 +640,7 @@ pub fn assemble_walk(
         notify: ConNotify::default(),
         viewsize: render::VIEWSIZE_DEFAULT,
         crosshair: false,
+        sbar_layout: render::SbarLayout::Classic,
         stepping: Stepping::Classic,
         lerpmove: LerpMove::Classic,
         glides: StepGlides::default(),
