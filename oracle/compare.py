@@ -50,9 +50,11 @@ import numpy as np
 from PIL import Image
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+from oraclebin import ensure_oracle  # noqa: E402,F401  (the tools that import this module take it from here)
+
 PROJECT = HERE.parent
 DEFAULT_PAK = PROJECT / "quake-data" / "ID1" / "PAK0.PAK"
-ORACLE_BIN = HERE / "build" / "quake-oracle"
 BUCKETS = [(0, 0), (1, 4), (5, 8), (9, 16), (17, 32), (33, 64), (65, 255)]
 
 
@@ -117,15 +119,6 @@ def read_pnm(path: Path) -> np.ndarray:
     ch = 3 if kind == b"P6" else 1
     arr = np.frombuffer(raw, dtype=np.uint8, count=w * h * ch, offset=pos)
     return arr.reshape((h, w, 3) if ch == 3 else (h, w))
-
-
-def ensure_oracle(explicit: str | None = None) -> Path:
-    if explicit:
-        return Path(explicit).resolve()
-    if not ORACLE_BIN.exists():
-        print("building the C oracle (oracle/build.sh) ...", file=sys.stderr)
-        subprocess.run([str(HERE / "build.sh")], check=True)
-    return ORACLE_BIN
 
 
 def ensure_quaketool(explicit: str | None) -> Path:

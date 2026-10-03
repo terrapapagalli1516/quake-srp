@@ -6,7 +6,7 @@ drivers, renders the **same view, clock and entities** as the port, and a script
 diffs the two frames pixel for pixel.
 
 ```sh
-oracle/build.sh               # once (~20 s, docker); again after editing oracle/c/*
+oracle/build.sh               # ~20 s, docker (the tools run it themselves when the binary is missing or older than oracle/c/*)
 uv run oracle/compare.py      # e1m1/2/3/7 x world/ents, 320x200: table + side-by-side PNGs
 oracle/characterise.sh        # re-derive every number and crop in this README (~10 s)
 uv run oracle/screen2d.py     # the 2-D layer (status bar, menus, console, ...): see its section

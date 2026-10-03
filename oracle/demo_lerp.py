@@ -42,8 +42,10 @@ import tempfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+from oraclebin import ensure_oracle  # noqa: E402
+
 PROJECT = HERE.parent
-ORACLE = HERE / "build" / "quake-oracle"
 QUAKETOOL = PROJECT / "quake-rs" / "target" / "release" / "quaketool"
 PAK = PROJECT / "quake-data" / "ID1" / "PAK0.PAK"
 # The port's host step, 1/72 s as the f32 the page and quaketool play use.
@@ -202,9 +204,10 @@ def main():
     ap.add_argument("--frames", type=int, default=17500, help="frames to trace (default: the loop and into demo1 again)")
     ap.add_argument("--tol", type=float, default=0.01, help="position/angle tolerance (units, degrees)")
     ap.add_argument("--keep", type=Path, help="write the traces here")
-    ap.add_argument("--oracle", type=Path, default=ORACLE)
+    ap.add_argument("--oracle", type=Path, help="id's C oracle binary (default oracle/build/quake-oracle, rebuilt if stale)")
     ap.add_argument("--quaketool", type=Path, default=QUAKETOOL)
     a = ap.parse_args()
+    a.oracle = ensure_oracle(a.oracle)
     for p in (a.oracle, a.quaketool, PAK):
         if not p.exists():
             sys.exit(f"missing {p} (oracle/build.sh; cargo build --release in quake-rs; the pak)")

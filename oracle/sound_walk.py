@@ -52,8 +52,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+from oraclebin import ORACLE_BIN as ORACLE, ensure_oracle  # noqa: E402
+
 PROJECT = HERE.parent
-ORACLE = HERE / "build" / "quake-oracle"
 DEFAULT_PAK = PROJECT / "quake-data" / "ID1" / "PAK0.PAK"
 # The port's host step, 1/72 s as the f32 the page and quaketool use (demo_lerp.py).
 DT = "0.01388888899236917"
@@ -168,13 +170,6 @@ def show(k: tuple) -> str:
     if k[0] == "static":
         return f"static x{k[1]} ({len(set(s[1] for s in k[2]))} samples)"
     return " ".join(str(v) for v in k)
-
-
-def ensure_oracle() -> None:
-    sources = list((HERE / "c").glob("*.c")) + [HERE / "build.sh"]
-    if not ORACLE.exists() or any(p.stat().st_mtime > ORACLE.stat().st_mtime for p in sources):
-        print("building the C oracle (oracle/build.sh) ...", file=sys.stderr)
-        subprocess.run([str(HERE / "build.sh")], check=True, capture_output=True)
 
 
 def ensure_quaketool(explicit: str | None) -> Path:
