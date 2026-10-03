@@ -162,7 +162,8 @@ enum StaticDraw {
     Alias(EntityDesc),
     Brush(render::BModelInstance),
     External(String, [f32; 3]),
-    Sprite(String, [f32; 3], usize),
+    /// Model, origin, angles, frame.
+    Sprite(String, [f32; 3], [f32; 3], usize),
 }
 
 /// A `makestatic` entity waiting for [`static_is_visible`]: what it draws as,
@@ -608,9 +609,12 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
     // borrowing `ExternalBModel` list is built below, after the cache is final, so
     // the immutable cache borrow does not clash with reading the server here.
     let mut ext_descs: Vec<(String, [f32; 3])> = Vec::new();
-    // Sprite-model entities (name, origin, frame): the explosion flash, bubbles.
-    // Resolved against the sprite cache after the loop (disjoint borrows).
-    let mut sprite_descs: Vec<(String, [f32; 3], usize)> = Vec::new();
+    // Sprite-model entities (name, origin, angles, frame, and how many alias
+    // entries came before it: R_DrawEntitiesOnList draws both kinds in one
+    // list): the explosion flash, bubbles. Resolved against the sprite cache
+    // after the loop (disjoint borrows).
+    type SpriteDesc = (String, [f32; 3], [f32; 3], usize, usize);
+    let mut sprite_descs: Vec<SpriteDesc> = Vec::new();
     // Drop trail history for any edict that is currently free. When `ED_Free`
     // recycles a slot for a new trailed entity (rocket/grenade/gib), a stale
     // `trail_org[ent]` from the previous occupant would make R_RocketTrail draw a
@@ -697,10 +701,13 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
             }
             continue;
         }
-        // Sprite-model entities (s_explod.spr explosion flash, bubbles): a camera-
-        // facing billboard at the entity origin, current `frame` for the animation.
+        // Sprite-model entities (s_explod.spr explosion flash, bubbles, the
+        // mission packs' bullet holes): a poster at the entity origin, turned
+        // by its angles when the sprite is SPR_ORIENTED (render/sprite.rs),
+        // current `frame` for the animation.
         if m.ends_with(".spr") {
             let origin = w.server.vm.ent_vec(ent, w.server.vm.fo().origin);
+            let angles = w.server.vm.ent_vec(ent, w.server.vm.fo().angles);
             let frame = w.server.vm.ent_float(ent, w.server.vm.fo().frame).max(0.0) as usize;
             if is_static {
                 // Mod_LoadSpriteModel: ±maxwidth/2 across, ±maxheight/2 up
@@ -709,11 +716,11 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
                     let hw = (spr.header.width / 2) as f32;
                     let hh = (spr.header.height / 2) as f32;
                     let (emins, emaxs) = offset_box(origin, [-hw, -hw, -hh], [hw, hw, hh]);
-                    let draw = StaticDraw::Sprite(m, origin, frame);
+                    let draw = StaticDraw::Sprite(m, origin, angles, frame);
                     statics.push(StaticDesc { draw, emins, emaxs });
                 }
             } else {
-                sprite_descs.push((m, origin, frame));
+                sprite_descs.push((m, origin, angles, frame, descs.len()));
             }
             continue;
         }
@@ -933,8 +940,8 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
                 StaticDraw::Alias(d) => descs.push(d),
                 StaticDraw::Brush(b) => bmodels.push(b),
                 StaticDraw::External(name, origin) => ext_descs.push((name, origin)),
-                StaticDraw::Sprite(name, origin, frame) => {
-                    sprite_descs.push((name, origin, frame))
+                StaticDraw::Sprite(name, origin, angles, frame) => {
+                    sprite_descs.push((name, origin, angles, frame, descs.len()))
                 }
             }
         }
@@ -991,12 +998,25 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
             _ => None,
         })
         .collect();
-    // Sprite-model entities: resolve each (name, origin, frame) against the sprite
-    // cache, dropping any whose .spr was missing/unparseable.
+    // Sprite-model entities: resolve each (name, origin, angles, frame) against
+    // the sprite cache, dropping any whose .spr was missing/unparseable, each
+    // after the resolved models that came before it on the list.
+    let resolved_before: Vec<usize> = std::iter::once(0)
+        .chain(descs.iter().scan(0, |n, (name, ..)| {
+            *n += usize::from(matches!(w.model_cache.get(name), Some(Some(_))));
+            Some(*n)
+        }))
+        .collect();
     let sprites: Vec<render::SpriteInstance> = sprite_descs
         .iter()
-        .filter_map(|(name, origin, frame)| match w.sprite_cache.get(name) {
-            Some(Some(spr)) => Some(render::SpriteInstance { sprite: spr, origin: *origin, frame: *frame }),
+        .filter_map(|(name, origin, angles, frame, k)| match w.sprite_cache.get(name) {
+            Some(Some(spr)) => Some(render::SpriteInstance {
+                sprite: spr,
+                origin: *origin,
+                angles: *angles,
+                frame: *frame,
+                models_before: resolved_before[*k],
+            }),
             _ => None,
         })
         .collect();

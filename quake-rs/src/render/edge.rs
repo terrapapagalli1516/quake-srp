@@ -422,6 +422,38 @@ fn child_ref(c: i16) -> i32 {
     c as i32
 }
 
+/// `R_ViewChanged`'s `screenedge`: the normals, in view space (right, up,
+/// forward), of the planes through the eye and the view's left, right, top
+/// and bottom sides, from the fields of view the projection implies
+/// (`horizontalFieldOfView` = width / xscale, `verticalFieldOfView` = height
+/// / yscale).
+pub(super) fn screen_edges(w: usize, h: usize, xscale: f32, yscale: f32) -> [Vec3; 4] {
+    let hfov = w as f32 / xscale;
+    let vfov = h as f32 / yscale;
+    [
+        vector_normalize([-1.0 / (0.5 * hfov), 0.0, 1.0]),
+        vector_normalize([1.0 / (0.5 * hfov), 0.0, 1.0]),
+        vector_normalize([0.0, -1.0 / (0.5 * vfov), 1.0]),
+        vector_normalize([0.0, 1.0 / (0.5 * vfov), 1.0]),
+    ]
+}
+
+/// `R_TransformFrustum`: the view's four sides (`screenedge`) as planes
+/// `(normal, dist)` in the frame whose axes are `vpn`, `vright`, `vup` and
+/// whose eye is `modelorg` — `view_clipplanes`. A point is inside a side
+/// where `dot(normal, p) - dist >= 0`.
+pub(super) fn frustum_planes(screenedge: &[Vec3; 4], vpn: Vec3, vright: Vec3, vup: Vec3, modelorg: Vec3) -> [(Vec3, f32); 4] {
+    screenedge.map(|se| {
+        let v = [se[2], -se[0], se[1]];
+        let v2 = [
+            v[1] * vright[0] + v[2] * vup[0] + v[0] * vpn[0],
+            v[1] * vright[1] + v[2] * vup[1] + v[0] * vpn[1],
+            v[1] * vright[2] + v[2] * vup[2] + v[0] * vpn[2],
+        ];
+        (v2, dot(modelorg, v2))
+    })
+}
+
 impl EdgeState {
     /// A renderer's edge state before any map: everything at zero.
     pub(super) fn new() -> EdgeState {
@@ -603,17 +635,7 @@ impl EdgeState {
         self.vup = vup;
         self.r_origin = cam.pos;
         self.modelorg = cam.pos;
-        // R_ViewChanged: the screen-edge planes through the view's sides, from
-        // the fields of view the projection implies (horizontalFieldOfView =
-        // width / xscale, verticalFieldOfView = height / yscale).
-        let hfov = wf / xscale;
-        let vfov = hf / yscale;
-        self.screenedge = [
-            vector_normalize([-1.0 / (0.5 * hfov), 0.0, 1.0]),
-            vector_normalize([1.0 / (0.5 * hfov), 0.0, 1.0]),
-            vector_normalize([0.0, -1.0 / (0.5 * vfov), 1.0]),
-            vector_normalize([0.0, 1.0 / (0.5 * vfov), 1.0]),
-        ];
+        self.screenedge = screen_edges(w, h, xscale, yscale);
         for (i, c) in self.clip.iter_mut().enumerate() {
             c.leftedge = i == 0;
             c.rightedge = i == 1;
@@ -635,17 +657,10 @@ impl EdgeState {
 
     /// `R_TransformFrustum`: the view's sides in the current model's frame.
     fn transform_frustum(&mut self) {
-        let (vpn, vright, vup) = (self.vpn, self.vright, self.vup);
-        for i in 0..4 {
-            let se = self.screenedge[i];
-            let v = [se[2], -se[0], se[1]];
-            let v2 = [
-                v[1] * vright[0] + v[2] * vup[0] + v[0] * vpn[0],
-                v[1] * vright[1] + v[2] * vup[1] + v[0] * vpn[1],
-                v[1] * vright[2] + v[2] * vup[2] + v[0] * vpn[2],
-            ];
-            self.clip[i].normal = v2;
-            self.clip[i].dist = dot(self.modelorg, v2);
+        let planes = frustum_planes(&self.screenedge, self.vpn, self.vright, self.vup, self.modelorg);
+        for (c, (normal, dist)) in self.clip.iter_mut().zip(planes) {
+            c.normal = normal;
+            c.dist = dist;
         }
     }
 
