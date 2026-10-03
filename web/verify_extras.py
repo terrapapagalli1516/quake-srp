@@ -1,17 +1,23 @@
 #!/usr/bin/env -S uv run --with playwright --script
-"""Verify Options > Classic / 2026 and its settings page, the settings the
-page keeps across reloads, and Esc in fullscreen, end-to-end in headless
+"""Verify Options > Classic / 2026, its settings hub and pages, the settings
+the page keeps across reloads, and Esc in fullscreen, end-to-end in headless
 Chromium. The page opens as `?classic` (every engine departure off):
 
   1. Options' 14th row, "Classic / 2026" (the port's): left/right switch the
      whole profile (the 2026 one turns wasm_uncapped, wasm_exactpersp and
      wasm_scaled2d on),
-     Enter opens the settings page (menu_screen_id 10), whose rows switch
-     each setting (Uncapped framerate row 1, Show FPS row 14, Exact
-     perspective row 15: left/right/Enter), Esc returns to Options; the
-     wasm_* console variables set the same settings, with the console's
-     history and Tab completion. Screenshots: verify_extras_options.png,
-     verify_extras.png (the page), verify_extras_fps.png (the readout).
+     Enter opens the settings hub (menu_screen_id 10), whose rows open the
+     pages (12 Picture and sound, 13 Motion and light, 14 Controls); their
+     rows switch each setting (Picture: Uncapped framerate row 0, Exact
+     perspective row 6, Show FPS row 8; Motion: Fluid sky row 2, Gliding
+     lights row 3, the Torch flicker slider row 4, five steps to 1;
+     Controls: Wheel weapons row 1 binds and unbinds the wheel:
+     left/right/Enter), Esc returns from a page to the hub on its row and
+     from the hub to Options; the wasm_* console variables set the same
+     settings, with the console's history and Tab completion. Screenshots:
+     verify_extras_options.png, verify_extras.png (the hub),
+     verify_extras_motion.png (the torch slider at 1), verify_extras_fps.png
+     (the readout).
   2. wasm_uncapped through the real program: a second of 1/144 s steps runs
      72 host frames with the cap (id's), 144 without.
   3. On frozen frames: wasm_showfps changes only the box in the top-left
@@ -54,6 +60,7 @@ PORT = isolated.port(8175)
 httpd = isolated.serve(WEB, PORT)
 
 OPTIONS, EXTRAS = 5, 10
+PICTURE, MOTION, CONTROLS = 12, 13, 14   # the hub's pages (menu_screen_id)
 
 passed, failed = 0, 0
 def check(name, ok, detail=""):
@@ -145,24 +152,56 @@ with sync_playwright() as p:
     check("...Classic / 2026: right switches to 2026", prof() == "2026" and ext() == 13, str(ext()))
     key("ArrowLeft")
     check("left: back to Classic", prof() == "classic" and ext() == 0)
+    cur = lambda: pg.evaluate("exp.menu_cursor()")
+    cvar = lambda name: pg.evaluate(f"quake.text('cvar', '{name}')")
+    def bind_of(k):
+        """The console's answer to `bind K`: '"K" = "..."', or "is not bound"."""
+        pg.evaluate(f"quake.callLine('exec bind {k}')")
+        return pg.evaluate("quake.text('console_text')").splitlines()[-1]
     key("Enter")
-    check("Enter opens the settings page", scr() == EXTRAS)
+    check("Enter opens the settings hub", scr() == EXTRAS and cur() == 0)
     time.sleep(0.3)
     pg.locator("#c").screenshot(path=os.path.join(WEB, "verify_extras.png"))
-    key("ArrowDown"); key("ArrowRight")    # row 1: Uncapped framerate
+    key("ArrowDown"); key("Enter")
+    check("the hub's row 1 opens Picture and sound", scr() == PICTURE and cur() == 0, f"{scr()} {cur()}")
+    key("ArrowRight")                      # row 0: Uncapped framerate
     check("Right toggles Uncapped framerate", ext() == 1)
-    key("ArrowDown", 13); key("Enter")     # row 14: Show FPS
+    key("ArrowDown", 8); key("Enter")      # row 8: Show FPS
     check("Enter toggles Show FPS", ext() == 3)
     key("ArrowLeft")
     check("Left toggles it back", ext() == 1)
-    key("ArrowUp", 13); key("ArrowLeft")
+    key("ArrowUp", 8); key("ArrowLeft")
     check("all off again", ext() == 0)
-    key("ArrowDown", 14); key("ArrowRight")  # row 15: Exact perspective
+    key("ArrowDown", 6); key("ArrowRight")  # row 6: Exact perspective
     check("Right toggles Exact perspective", ext() == 4)
     key("ArrowLeft")
     check("...and back off", ext() == 0)
     key("Escape")
-    check("Esc returns to Options", scr() == OPTIONS)
+    check("Esc returns to the hub, on Picture and sound's row", scr() == EXTRAS and cur() == 1)
+    key("ArrowDown"); key("Enter")
+    check("row 2 opens Motion and light", scr() == MOTION and cur() == 0)
+    key("ArrowDown", 2); key("Enter")      # row 2: Fluid sky
+    key("ArrowDown"); key("ArrowRight")    # row 3: Gliding lights
+    check("Fluid sky and Gliding lights switch r_fluidsky and r_lerplightstyles",
+          (cvar("r_fluidsky"), cvar("r_lerplightstyles")) == ("1", "1"))
+    key("ArrowDown"); key("ArrowRight", 5)  # row 4: Torch flicker, 0.2 a step
+    check("the Torch flicker slider: five steps right from Classic's 0 is 2026's 1",
+          cvar("r_torchflicker") == "1", cvar("r_torchflicker"))
+    time.sleep(0.3)
+    pg.locator("#c").screenshot(path=os.path.join(WEB, "verify_extras_motion.png"))
+    key("ArrowLeft", 6)
+    key("ArrowUp"); key("ArrowLeft"); key("ArrowUp"); key("Enter")
+    check("...and all three back to Classic's",
+          (cvar("r_fluidsky"), cvar("r_lerplightstyles"), cvar("r_torchflicker")) == ("0", "0", "0"))
+    key("Escape"); key("ArrowDown"); key("Enter")
+    check("row 3 opens Controls", scr() == CONTROLS and cur() == 0)
+    key("ArrowDown"); key("Enter")         # row 1: Wheel weapons
+    check("Wheel weapons binds the wheel's cycle (Classic leaves it unbound)",
+          bind_of("MWHEELUP") == '"MWHEELUP" = "impulse 10"' and bind_of("MWHEELDOWN") == '"MWHEELDOWN" = "impulse 12"')
+    key("ArrowLeft")
+    check("...and unbinds it", bind_of("MWHEELUP") == '"MWHEELUP" is not bound')
+    key("Escape"); key("Escape")
+    check("Esc Esc returns to Options", scr() == OPTIONS)
     key("Enter")
     check("...on the Classic / 2026 row", scr() == EXTRAS)
     key("Escape"); key("Escape"); key("Escape")

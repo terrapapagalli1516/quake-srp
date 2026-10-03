@@ -68,11 +68,12 @@ pub(crate) mod fixtures;
 pub use crate::console::{draw_console, draw_notify, Console};
 pub use crate::draw::conchars_pic;
 pub use crate::menu::{
-    draw_menu, draw_menu_over_console, Menu, MenuAction, MenuClock, MenuPics, MenuScreen, MenuSound, RowKind, SettingRow,
+    draw_menu, draw_menu_over_console, ExtrasPage, Menu, MenuAction, MenuClock, MenuPics, MenuScreen, MenuSound, RowKind,
+    SettingRow,
     BIND_ATTACK, BIND_BACK, BIND_CENTERVIEW, BIND_CHANGEWEAPON, BIND_FORWARD, BIND_JUMP,
     BIND_LEFT, BIND_LOOKDOWN, BIND_LOOKUP, BIND_MOVEDOWN, BIND_MOVELEFT, BIND_MOVERIGHT,
     BIND_MOVEUP, BIND_RIGHT, BIND_SIZEDOWN, BIND_SIZEUP, BIND_SPEED, BIND_STRAFE, NEW_GAME_MAP,
-    NUM_HELP_PAGES, RESOLUTION_PRESETS, SETTING_ROWS,
+    NUM_HELP_PAGES, RESOLUTION_PRESETS,
 };
 pub use crate::sbar::{
     draw_finale_overlay, draw_hud_into, draw_intermission_overlay, status_bar_rect, Hud, IntermissionStats,

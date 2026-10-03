@@ -169,7 +169,7 @@ of spare frame buffers, the 2-D layer's scale flag, a hull cache and a trace cou
 | module | id's C | what |
 |---|---|---|
 | `draw`, `screen`, `sbar` | `draw.c`, `screen.c`, `sbar.c` | pics and text, the view rectangle and the composed screen, the status bar |
-| `menu`, `console`, `keys` | `menu.c`, `console.c`, `keys.c` | every menu (and the Classic / 2026 page), the console, key bindings |
+| `menu`, `console`, `keys` | `menu.c`, `console.c`, `keys.c` | every menu (and the Classic / 2026 settings: a hub and three pages), the console, key bindings |
 | `snd::dma`, `snd::mix`, `snd::mem` | `snd_dma.c`, `snd_mix.c`, `snd_mem.c` | id's mixer: channels, spatialization, painting, resampling |
 | `cd_audio` | `cd_win.c` | which CD track plays; the host plays it |
 | `cvar`, `cmd`, `settings` | `cvar.c`, `cmd.c` | typed console variables, the command table, profiles and `config.cfg` |

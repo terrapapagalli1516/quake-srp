@@ -7,7 +7,10 @@ asked for):
   1. THE FIRST GESTURE — a pad button takes the click-to-play scrim away.
   2. THE MENUS (2026, `joy_menukeys`) — Start opens the menu over the attract
      demo, the D-pad moves, A enters, B backs out, and A on Single Player >
-     New Game starts the game.
+     New Game starts the game. The settings hub and its pages as Options:
+     Options > Classic / 2026, A opens the hub, A on Motion and light its
+     page, the D-pad's right steps the Torch flicker slider, B backs out a
+     screen at a time (the page, the hub, Options).
   3. A WALK — the left stick walks the player through e1m1's start, the right
      stick turns the view.
   4. RUMBLE — the right trigger (AUX8, +attack) fires the rocket launcher:
@@ -133,6 +136,33 @@ with sync_playwright() as p:
     check("   D-pad down, A: Multiplayer", call(pg, "menu_screen_id") == 4)
     press(pg, B)
     check("   B backs out to Main", call(pg, "menu_visible") == 1 and call(pg, "menu_screen_id") == 0)
+    press(pg, DDOWN)
+    press(pg, A)                       # Options (Main's row 2)
+    press(pg, DUP)                     # row 0 wraps to the 14th, Classic / 2026
+    press(pg, A)
+    check("   Options > Classic / 2026, A: the settings hub", call(pg, "menu_screen_id") == 10)
+    press(pg, DDOWN)
+    press(pg, DDOWN)
+    press(pg, A)
+    check("   D-pad down twice, A: Motion and light", call(pg, "menu_screen_id") == 13)
+    torch = lambda: pg.evaluate("quake.text('cvar', 'r_torchflicker')")
+    for _ in range(4):
+        press(pg, DDOWN)               # row 4, Torch flicker
+    t0 = torch()
+    press(pg, DRIGHT)
+    press(pg, DRIGHT)
+    check("   the D-pad's right steps the torch slider (2026's 1, two steps)", (t0, torch()) == ("1", "1.4"),
+          f"{t0} -> {torch()}")
+    press(pg, DLEFT)
+    press(pg, DLEFT)
+    press(pg, B)
+    check("   B: back on the hub, on the page's row",
+          call(pg, "menu_screen_id") == 10 and call(pg, "menu_cursor") == 2 and torch() == "1")
+    press(pg, B)
+    check("   B: Options", call(pg, "menu_screen_id") == 5)
+    press(pg, B)
+    press(pg, DUP)
+    check("   B: Main (on Options; D-pad up, Multiplayer again)", call(pg, "menu_screen_id") == 0 and call(pg, "menu_cursor") == 1)
     press(pg, DUP)
     press(pg, A)
     check("   D-pad up, A: Single Player", call(pg, "menu_screen_id") == 1)

@@ -263,8 +263,9 @@ pub(crate) fn menu_point(x: f32, y: f32) -> i32 {
 /// record carries it, and the browser checks read it (the screen transitions:
 /// Multiplayer opens, Save gates, Video applies). 0 Main, 1 SinglePlayer,
 /// 2 Load, 3 Save, 4 Multiplayer, 5 Options, 6 Keys, 7 Video, 8 Help, 9 Quit,
-/// 10 the port's settings page (Options > Classic / 2026), 11 Multiplayer >
-/// Setup.
+/// 10 the port's settings hub (Options > Classic / 2026), 11 Multiplayer >
+/// Setup, then the hub's pages: 12 Picture and sound, 13 Motion and light,
+/// 14 Controls.
 pub(crate) fn menu_screen_id() -> i32 {
     APP.with(|c| {
         c.borrow()
@@ -282,6 +283,9 @@ pub(crate) fn menu_screen_id() -> i32 {
                 render::MenuScreen::Quit => 9,
                 render::MenuScreen::Extras => 10,
                 render::MenuScreen::Setup => 11,
+                render::MenuScreen::ExtrasPage(render::ExtrasPage::Picture) => 12,
+                render::MenuScreen::ExtrasPage(render::ExtrasPage::Motion) => 13,
+                render::MenuScreen::ExtrasPage(render::ExtrasPage::Controls) => 14,
             })
             .unwrap_or(0)
     })
@@ -473,8 +477,10 @@ mod tests {
         menu_left();
         assert_eq!(settings().profile, Profile::Classic, "left: back");
         menu_select();
-        assert_eq!(menu_screen_id(), 10, "Enter opens the settings page");
+        assert_eq!(menu_screen_id(), 10, "Enter opens the settings hub");
         menu_down();
+        menu_select();
+        assert_eq!(menu_screen_id(), 12, "...and its row Picture and sound, that page");
         menu_right(); // Uncapped framerate
         assert_eq!(extras(), 1);
         menu_down();
@@ -482,7 +488,22 @@ mod tests {
         menu_right(); // Pixel size: auto -> 1
         assert_eq!(settings().cvars.pixel_size, 1);
         menu_cancel();
-        assert_eq!(menu_screen_id(), 5, "Esc returns to Options");
+        assert_eq!(menu_screen_id(), 10, "Esc returns to the hub");
+        menu_down();
+        menu_select();
+        assert_eq!(menu_screen_id(), 13, "Motion and light");
+        for _ in 0..4 {
+            menu_down(); // Torch flicker, a slider
+        }
+        menu_right();
+        assert_eq!(settings().cvars.torches.value(), 0.2, "Classic's 0, a step right");
+        menu_cancel();
+        menu_down();
+        menu_select();
+        assert_eq!(menu_screen_id(), 14, "Controls");
+        menu_cancel();
+        menu_cancel();
+        assert_eq!(menu_screen_id(), 5, "Esc Esc returns to Options");
         menu_select(); // ...on its row
         assert_eq!(menu_screen_id(), 10);
         // The checks' shorthand for the first four; other bits are dropped.
