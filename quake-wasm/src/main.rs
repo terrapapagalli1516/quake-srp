@@ -148,7 +148,23 @@ fn mod_dirs() -> (Vec<String>, bool) {
     (dirs, game_dir.is_some())
 }
 
+/// The threads build's startup check: its shared memory must be the fixed
+/// size `build.rs` links (initial = maximum), or a thread may trap when
+/// another grows it (web/PLATFORM.md, "Threads"). Says so on stderr if not.
+fn check_fixed_memory() {
+    #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
+    {
+        let have = core::arch::wasm32::memory_size::<0>() as u64 * 65536;
+        match option_env!("QUAKE_WASM_FIXED_MEMORY").and_then(|v| v.parse::<u64>().ok()) {
+            Some(want) if have == want => {}
+            Some(want) => eprintln!("quake: the threads build's memory is {have} bytes, not the fixed {want}: it may grow"),
+            None => eprintln!("quake: the threads build was linked with a growable memory (QUAKE_WASM_GROWABLE)"),
+        }
+    }
+}
+
 fn main() -> ExitCode {
+    check_fixed_memory();
     // IN_StartupJoystick's `-nojoy`: no pad is ever read.
     let nojoy = std::env::args().any(|a| a == "-nojoy");
     // COM_InitFilesystem: a Sys_Error here (a pack that is not one, a
