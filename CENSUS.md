@@ -97,7 +97,7 @@ Engineering, not faithfulness: `Vm::intern` never de-duplicates (every `setmodel
 ## Rule departures on by default (other than Always Run)
 
 *Settled on 2026-09-26 (`q26/settings`). Each is a setting of the 2026 profile:
-`freelook`, the WASD bindings, `vid_fkey`, `cl_jumpswim`. Classic has none of them
+`freelook`, the WASD bindings, `vid_altenter` (`vid_fkey` until 2026-10-02), `cl_jumpswim`. Classic has none of them
 (`AUDIT.md`, "The profiles and the departures").*
 
 The rule: faithful by default, Always Run the only default departure. These are
@@ -109,7 +109,7 @@ or accept and record):
 | Mouse look | off: mouse Y moves forward/back; `+mlook` (`\`, MOUSE3) holds it | `+mlook` permanently held under pointer lock | quake-wasm `mouse_move` |
 | WASD | default.cfg: `a` = `+lookup`, `d` = `+moveup`, `w`/`s` unbound | `w`/`s`/`a`/`d` move, overriding id's `a`/`d` | `render::default_bindings` |
 | Tab | `+showscores` | ✅ `+showscores` again (F11, 37a75c3) | `web/index.html` |
-| `f` | unbound | toggles fullscreen | `web/index.html` |
+| Alt+Enter (`f` until 2026-10-02) | ALT `+strafe`, ENTER `+jump` (`f` unbound) | toggles fullscreen | `web/index.html` |
 | Space in water/fly | `+jump` only (PlayerJump's 100 u/s swim-up) | also adds `upmove` (swims up ~140 u/s; rises in fly/noclip) | quake-wasm `KeyMove` / key handling |
 
 Opt-in departures, off by default, live on Options > Web extras (`wasm_*`

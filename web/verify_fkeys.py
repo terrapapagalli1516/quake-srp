@@ -136,13 +136,13 @@ with sync_playwright() as p:
         "unverified here whether a real windowed browser keeps it, as PLATFORM.md says it should)",
     )
 
-    pg.keyboard.press("f")  # 2026's fullscreen toggle (vid_fkey)
+    pg.keyboard.press("Alt+Enter")  # 2026's fullscreen key (vid_altenter)
     try:
         pg.wait_for_function("!!document.fullscreenElement", timeout=12000)
         got_fullscreen = True
     except Exception:
         got_fullscreen = False
-    check("F enters fullscreen", got_fullscreen,
+    check("Alt+Enter enters fullscreen", got_fullscreen,
           "(a user gesture to headless Chromium; a real fail here, not a flake)")
     if got_fullscreen:
         before = console_text(pg)

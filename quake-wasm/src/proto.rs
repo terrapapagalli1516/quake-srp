@@ -229,8 +229,9 @@ pub(crate) const STATE_TIMEDEMO: u32 = 16;
 /// Native resolution (`vid_native`): the page fills its box with the frame,
 /// `pixel_size` device pixels to a frame pixel, instead of a 4:3 box.
 pub(crate) const STATE_NATIVE: u32 = 32;
-/// `vid_fkey`: the page's `f` toggles fullscreen.
-pub(crate) const STATE_FKEY: u32 = 64;
+/// `vid_altenter`: the page's Alt+Enter toggles fullscreen (and the game
+/// never sees the chord).
+pub(crate) const STATE_ALT_ENTER: u32 = 64;
 /// `in_touch`: on a touch screen, the page shows its touch controls for play.
 pub(crate) const STATE_TOUCH: u32 = 128;
 /// The menu waits for y or n (the Quit prompt, New Game's question): a touch

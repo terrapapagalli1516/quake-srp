@@ -44,19 +44,19 @@ with sync_playwright() as p:
     pg.goto(f"http://127.0.0.1:{PORT}/index.html", wait_until="load")
     pg.wait_for_function("window.quake && quake.ready", timeout=120000)
 
-    # Boot walk (2026 default: F is bound to fullscreen, vid_fkey on), close
+    # Boot walk (2026 default: Alt+Enter is the fullscreen key, vid_altenter), close
     # the menu, and capture fullscreen + the pointer.
     pg.evaluate("document.getElementById('walkBtn').click()")
     time.sleep(1.0)
     pg.keyboard.press("Escape")
     pg.wait_for_function("exp.menu_visible().then(v => !v)", timeout=12000)
-    pg.keyboard.press("f")
+    pg.keyboard.press("Alt+Enter")
     try:
         pg.wait_for_function("!!document.fullscreenElement", timeout=12000)
         got_fullscreen = True
     except Exception:
         got_fullscreen = False
-    check("F enters fullscreen", got_fullscreen,
+    check("Alt+Enter enters fullscreen", got_fullscreen,
           "(a user gesture to headless Chromium; a real fail here, not a flake)")
     pg.locator("#c").click()
     try:
