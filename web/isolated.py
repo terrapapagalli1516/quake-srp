@@ -212,7 +212,9 @@ def launch(p, args=(), prefs=None):
     (`firefox`, `webkit`; Playwright's builds). Chromium's command-line
     `args` only go to Chromium, Firefox's `prefs` only to Firefox; Firefox
     also gets the equivalent of `--autoplay-policy=no-user-gesture-required`
-    as a preference."""
+    as a preference. (Firefox has WebGL2 headless only when `DISPLAY` is set,
+    to an X server with a GPU behind it: the page's other path, the 2-D
+    canvas, is what it takes without. PLATFORM.md, "Build, serve, deploy".)"""
     name = os.environ.get("QUAKE_BROWSER", "chromium")
     if name == "chromium":
         return p.chromium.launch(headless=True, args=list(args) + gpu_flags())

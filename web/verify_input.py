@@ -448,9 +448,9 @@ with sync_playwright() as p:
     def wheel_notches(steps):
         return pg.evaluate("""async steps => {
             const c = document.getElementById('c'), n0 = { ...wheelFired };
-            for (const [deltaY, gap, legacy] of steps) {
+            for (const [deltaY, gap, legacy, deltaMode = 0] of steps) {
               if (gap) await new Promise(r => setTimeout(r, gap));
-              const e = new WheelEvent('wheel', { deltaY, deltaMode: 0, cancelable: true, bubbles: true });
+              const e = new WheelEvent('wheel', { deltaY, deltaMode, cancelable: true, bubbles: true });
               Object.defineProperty(e, 'wheelDeltaY', { value: legacy ?? -Math.round(3 * deltaY) });
               c.dispatchEvent(e);
             }
@@ -471,6 +471,17 @@ with sync_playwright() as p:
          [(144, 200, -240)], [2, 0]),
         ("Chrome on a Mac: a trackpad's 40 px steps (wheelDeltaY -120 = 3 x 40) 16 ms apart accumulate",
          [(40, 200, -120)] + [(40, 16, -120)] * 9, [4, 0]),
+        # Firefox's notches are lines (deltaMode 1) with the notch count in
+        # wheelDeltaY: 6 lines on Linux (measured, Firefox 155, X11: a
+        # headed run), 3 on Windows by its source. Three quick ones are three
+        # whatever the lines: the 6-line ones were five, a notch's 200 px
+        # counted twice in a stream.
+        ("Firefox on Linux: 6-line notches (deltaMode 1, wheelDeltaY -120) 30 ms apart are three",
+         [(6, 200, -120, 1), (6, 30, -120, 1), (6, 30, -120, 1)], [3, 0]),
+        ("Firefox on Windows: 3-line notches 30 ms apart are three, back up one",
+         [(3, 200, -120, 1), (3, 30, -120, 1), (3, 30, -120, 1), (-3, 300, 120, 1)], [3, 1]),
+        ("Firefox on a Mac: lines with no ticks (wheelDeltaY 0) fall to the lone and stream rules, 3 lines a notch",
+         [(3, 200, 0, 1), (3, 30, 0, 1), (3, 30, 0, 1)], [3, 0]),
     ]:
         got = wheel_notches(steps)
         check(f"wheel: {name}", got == want, f"down {got[0]}, up {got[1]}; want {want}")

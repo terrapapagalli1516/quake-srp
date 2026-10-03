@@ -17,6 +17,10 @@ headless Chromium's is without $QUAKE_GPU) and with `?canvas2d`; on WebGL2
 it also sends the frames through the staging copy, and loses the context and
 restores it.
 
+A headless Firefox has WebGL2 only with a display to ask (`DISPLAY` set, the
+GPU behind it; with none the page takes the 2-D canvas and the WebGL2 parts
+are skipped): run it both ways (PLATFORM.md, "Build, serve, deploy").
+
 Usage: verify_present.py [webdir]   ($QUAKE_BROWSER, $QUAKE_GPU: see isolated.py)"""
 import time
 from playwright.sync_api import sync_playwright

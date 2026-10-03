@@ -38,9 +38,10 @@
 
 Screenshots (in the web dir): verify_settings_2026.png, verify_settings_classic.png,
 verify_settings_video_native.png.
-Also passes with QUAKE_BROWSER=firefox, whose headless build ignores the
-context's devicePixelRatio: section 2 is skipped there. Not verified: a real
-high-DPI screen, a GPU compositor, Safari.
+Also passes with QUAKE_BROWSER=firefox, where Playwright loses the context's
+devicePixelRatio on a cross-origin isolated page (this one; a plain page
+keeps it): section 2 is skipped there. Not verified: a real high-DPI
+screen, a GPU compositor, Safari.
 
 Usage: verify_settings.py [webdir]   (a deploy dir — PLATFORM.md.)
 """
@@ -230,7 +231,7 @@ with sync_playwright() as p:
     pg = page(ctx)
     boot(pg)
     if pg.evaluate("devicePixelRatio") != 2:
-        print("SKIP the devicePixelRatio 2 checks (this browser ignores the context's device_scale_factor)")
+        print("SKIP the devicePixelRatio 2 checks (this browser lost the context's device_scale_factor on the isolated page)")
     else:
         pg.evaluate("quake.callLine('exec r_threads 1')")
         walk(pg)
