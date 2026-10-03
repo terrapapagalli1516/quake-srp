@@ -106,6 +106,7 @@ impl Server {
             entities,
             player: None,
             lightstyles: std::array::from_fn(|_| String::new()),
+            statics: Vec::new(),
             map_name: String::new(),
             client_spawn_parms: [0.0; NUM_SPAWN_PARMS],
             svs_serverflags: 0.0, // Host_Map_f: "haven't completed an episode yet"
@@ -300,8 +301,7 @@ impl Server {
     /// itself needs a `modelindex`, a non-empty `model`, and one of the leaves
     /// it touched at its last link (`ent->leafnums`) in the fat PVS at the
     /// client's eye (`origin + view_ofs`); the client is always sent. The world
-    /// (edict 0) and free edicts are `false` (a freed edict's `modelindex` is 0),
-    /// and so are `makestatic` statics, which the C freed into the signon.
+    /// (edict 0) and free edicts are `false` (a freed edict's `modelindex` is 0).
     ///
     /// On the client, `CL_RelinkEntities` then relinks exactly these, minus any
     /// whose model is null (`modelindex` 0 — possible only for the client
@@ -319,7 +319,7 @@ impl Server {
         });
         for (e, slot) in sent.iter_mut().enumerate().skip(1) {
             let ent = e as i32;
-            if vm.is_free_edict(ent) || vm.is_static_edict(ent) {
+            if vm.is_free_edict(ent) {
                 continue;
             }
             if Some(ent) == clent {

@@ -16,7 +16,9 @@
 //! reliable buffer. This single-process server has no netcode, so each lands
 //! in the server's [`Outbox`] instead — [`SoundEvent`], [`StaticSound`],
 //! [`ParticleBurst`], [`GameMessage`], [`TempEntityEvent`], [`SvcEvent`] —
-//! which the `Server::drain_*` methods below hand to the front-end.
+//! which the `Server::drain_*` methods below hand to the front-end; and
+//! `makestatic`'s [`StaticEntity`]s, which the server keeps for the level
+//! ([`Server::statics`]).
 
 use super::Server;
 use crate::vm::Vm;
@@ -42,6 +44,9 @@ pub struct Outbox {
     sounds: Vec<SoundEvent>,
     /// The signon's `svc_spawnstaticsound`s ([`Server::drain_static_sounds`]).
     static_sounds: Vec<StaticSound>,
+    /// The signon's `svc_spawnstatic`s (`PF_makestatic`), not yet moved to
+    /// the server's own list ([`Server::statics`]).
+    pub(super) statics: Vec<StaticEntity>,
     /// `svc_particle`s ([`Server::drain_particles`]).
     particles: Vec<ParticleBurst>,
     /// `svc_print`s and `svc_centerprint`s ([`Server::drain_messages`]).
@@ -161,6 +166,38 @@ pub struct StaticSound {
     pub attenuation: f32,
 }
 
+// ---------------------------------------------------------------------------
+// Static entities (PF_makestatic).
+//
+// `PF_makestatic` (pr_cmds.c) wrote an `svc_spawnstatic` into the signon and
+// freed the edict at once; the client's `CL_ParseStatic` kept the record in
+// `cl_static_entities` and `R_AddEfrags` hung it on the leaves its box
+// touches, to be drawn whenever one of them is in the view's PVS, never
+// relinked. Like the light styles, the list is map state the server OWNS
+// ([`Server::statics`]): the builtin sends each record to the outbox, and the
+// server moves them to its list after each QuakeC window.
+// ---------------------------------------------------------------------------
+
+/// One `svc_spawnstatic`: what `PF_makestatic` wrote of the edict before
+/// freeing it, as `CL_ParseStatic` read it back — the bytes, and the origin
+/// and angles through `MSG_WriteCoord`/`MSG_WriteAngle` ([`wire_coord`],
+/// [`wire_angle`]), which is what id's client drew. (The colormap byte is not
+/// kept: `CL_ParseStatic` gives every static `vid.colormap`.)
+#[derive(Debug, Clone, PartialEq)]
+pub struct StaticEntity {
+    /// The model: `cl.model_precache[modelindex]` of `SV_ModelIndex
+    /// (ent->v.model)`, by name (empty for index 0: no model, never drawn).
+    pub model: String,
+    /// `ent->v.frame` as `MSG_WriteByte` sent it.
+    pub frame: u8,
+    /// `ent->v.skin` as `MSG_WriteByte` sent it.
+    pub skin: u8,
+    /// `ent->v.origin`, each through [`wire_coord`].
+    pub origin: [f32; 3],
+    /// `ent->v.angles`, each through [`wire_angle`].
+    pub angles: [f32; 3],
+}
+
 /// Box centre of an entity: `origin + 0.5*(mins + maxs)`, the point
 /// `SV_StartSound`/`PF_ambientsound` wrote for the emission coordinate.
 fn entity_sound_origin(vm: &Vm, e: i32) -> [f32; 3] {
@@ -182,6 +219,16 @@ fn entity_sound_origin(vm: &Vm, e: i32) -> [f32; 3] {
 #[must_use]
 pub fn wire_coord(f: f32) -> f32 {
     f32::from((f * 8.0) as i32 as i16) * (1.0 / 8.0)
+}
+
+/// An angle as it crossed the wire: `MSG_WriteAngle` sent `((int)f*256/360)
+/// & 255` (whole degrees truncated toward zero, then 256 steps) and
+/// `MSG_ReadAngle` read back `MSG_ReadChar() * (360.0/256)`, signed: 270
+/// arrives as -90.
+#[must_use]
+pub fn wire_angle(f: f32) -> f32 {
+    let b = ((f as i32).wrapping_mul(256) / 360) & 255;
+    f32::from(b as u8 as i8) * (360.0 / 256.0)
 }
 
 // ---------------------------------------------------------------------------
@@ -933,6 +980,23 @@ impl Server {
     /// `S_StaticSound` kept a persistent channel.
     pub fn drain_static_sounds(&mut self) -> Vec<StaticSound> {
         self.take_outbox(|o| &mut o.static_sounds)
+    }
+
+    /// The level's static entities: every `svc_spawnstatic` the QuakeC wrote
+    /// into the signon (`makestatic`), in order. The client draws them
+    /// (`cl_static_entities`); their edicts are already free.
+    pub fn statics(&self) -> &[StaticEntity] {
+        &self.statics
+    }
+
+    /// Move the `makestatic` records the QuakeC sent since the last call to
+    /// the server's list (see "Static entities" above). A record sent after
+    /// the client's signon is drawn at once here; id's client would only have
+    /// seen it at its next signon. No progs does that: id1's and both mission
+    /// packs' `makestatic`s are all in spawn functions.
+    pub(super) fn apply_statics(&mut self) {
+        let sent = self.take_outbox(|o| &mut o.statics);
+        self.statics.extend(sent);
     }
 
     /// Take and clear the queued on-screen messages (`centerprint`/`sprint`/

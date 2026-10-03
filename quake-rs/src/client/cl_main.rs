@@ -15,7 +15,7 @@ use crate::mdl::Mdl;
 use crate::particles::{TrailHead, TrailStep};
 use crate::stepping::advance_clock;
 use crate::render::{self, Camera, ModelInstance, Viewmodel};
-use crate::server::{wire_coord, EntFlags, MoveType, SoundEvent, UserCmd};
+use crate::server::{wire_angle, wire_coord, EntFlags, MoveType, SoundEvent, StaticEntity, UserCmd};
 use crate::vm::{Fld, Glb};
 use crate::tent::BeamModel;
 
@@ -32,7 +32,7 @@ use super::view::{
     BONUS_PERCENT, FACE_ANIM_TIME, V_KICKTIME,
 };
 use super::{
-    backtile_for, color_for_name, lap, net_angle, render_options, s_update, view_hook, ClientFrame,
+    backtile_for, color_for_name, lap, render_options, s_update, view_hook, ClientFrame,
     Listener, Phase, SoundCall, Vid, Walk,
 };
 
@@ -49,8 +49,8 @@ fn apply_fixangle(w: &mut Walk) {
         return;
     }
     let a = w.server.vm.ent_vec(p, w.server.vm.fo().angles);
-    w.pitch = clamp_pitch(net_angle(a[0]));
-    w.yaw = net_angle(a[1]);
+    w.pitch = clamp_pitch(wire_angle(a[0]));
+    w.yaw = wire_angle(a[1]);
     w.server.vm.set_ent_float(p, w.server.vm.fo().fixangle, 0.0);
 }
 
@@ -154,7 +154,7 @@ pub fn server_items(server: &crate::server::Server, player: i32) -> i32 {
 /// Owned visible-entity descriptor gathered from the server before rendering:
 /// `(model name, origin, angles, frame, shirt/pants colour, skin, blend)`.
 /// `blend` is `r_lerpmodels`' ([`ModelInstance::blend`]) — `None` for a
-/// static (its frame never changes after `makestatic`).
+/// static (its frame never changes).
 type EntityDesc = (String, [f32; 3], [f32; 3], usize, [u8; 3], i32, Option<(usize, f32)>);
 
 /// What a static entity draws as, gathered before the camera is known.
@@ -165,8 +165,8 @@ enum StaticDraw {
     Sprite(String, [f32; 3], usize),
 }
 
-/// A `makestatic` entity waiting for [`static_is_visible`]: what it draws as,
-/// and the box `R_AddEfrags` splits into leaves — `origin + model->mins` ..
+/// A static entity waiting for [`static_is_visible`]: what it draws as, and
+/// the box `R_AddEfrags` splits into leaves — `origin + model->mins` ..
 /// `origin + model->maxs`.
 struct StaticDesc {
     draw: StaticDraw,
@@ -191,6 +191,41 @@ pub fn static_is_visible(bsp: &Bsp, view_pvs: &[bool], emins: [f32; 3], emaxs: [
         !seen
     });
     seen
+}
+
+/// `CL_ParseStatic` + `R_AddEfrags` for one of the signon's statics: what it
+/// draws as, at the record's origin, angles, frame and skin, and its efrag box
+/// (`origin + model->mins` .. `origin + model->maxs`). `None` for no model
+/// (`R_AddEfrags`' `if (!ent->model) return;`) or one the client could not load.
+fn static_desc(w: &Walk, st: &StaticEntity) -> Option<StaticDesc> {
+    let StaticEntity { model: m, origin, angles, .. } = st;
+    let (origin, angles, frame) = (*origin, *angles, usize::from(st.frame));
+    let (draw, mins, maxs) = if let Some(num) = m.strip_prefix('*') {
+        // model->mins/maxs of "*N": the submodel's spread bounds.
+        let model_index = num.parse::<usize>().ok()?;
+        let sub = w.bsp.models.get(model_index)?;
+        let inst = render::BModelInstance { model_index, origin, frame: frame as i32, angles };
+        (StaticDraw::Brush(inst), sub.mins, sub.maxs)
+    } else if m.ends_with(".bsp") && *m != w.map_name {
+        // model->mins/maxs: the box's own model 0 bounds.
+        let bm = w.bmodel_cache.get(m)?.as_ref()?.models.first()?;
+        (StaticDraw::External(m.clone(), origin), bm.mins, bm.maxs)
+    } else if m.ends_with(".spr") {
+        // Mod_LoadSpriteModel: ±maxwidth/2 across, ±maxheight/2 up (integer
+        // halves).
+        let spr = w.sprite_cache.get(m)?.as_ref()?;
+        let (hw, hh) = ((spr.header.width / 2) as f32, (spr.header.height / 2) as f32);
+        (StaticDraw::Sprite(m.clone(), origin, frame), [-hw, -hw, -hh], [hw, hw, hh])
+    } else if m.ends_with(".mdl") {
+        // A static's frame never changes: no blend.
+        let desc = (m.clone(), origin, angles, frame, color_for_name(m), i32::from(st.skin), None);
+        let h = ALIAS_MODEL_HALF;
+        (StaticDraw::Alias(desc), [-h; 3], [h; 3])
+    } else {
+        return None;
+    };
+    let (emins, emaxs) = offset_box(origin, mins, maxs);
+    Some(StaticDesc { draw, emins, emaxs })
 }
 
 /// Box `origin + mins` .. `origin + maxs`.
@@ -558,16 +593,15 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
             now,
         );
     }
-    // 3. Make sure every live entity's alias model is cached (runtime-spawned
-    //    entities — gibs, projectiles — can appear after boot).
+    // 3. Make sure every live entity's model is cached (runtime-spawned
+    //    entities — gibs, projectiles — can appear after boot), and every
+    //    static's.
     // (The name is borrowed from the string heap; only a miss allocates.)
     let n = w.server.vm.num_edicts();
     let f_model = w.server.vm.fo().model;
-    for e in 0..n {
-        if w.server.vm.is_free_edict(e as i32) {
-            continue;
-        }
-        let m = w.server.vm.ent_str(e as i32, f_model);
+    let vm = &w.server.vm;
+    let live = (0..n as i32).filter(|&e| !vm.is_free_edict(e)).map(|e| vm.ent_str(e, f_model));
+    for m in live.chain(w.server.statics().iter().map(|st| st.model.as_str())) {
         if m.ends_with(".mdl") && !w.model_cache.contains_key(m) {
             let parsed = w.pak.read_file(m).ok().flatten().and_then(|b| Mdl::parse(&b).ok());
             w.model_cache.insert(m.to_string(), parsed);
@@ -622,9 +656,6 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
         w.trail_org
             .retain(|&e, _| !vm.is_free_edict(e));
     }
-    // Static entities wait for the camera: R_StoreEfrags draws one when a leaf
-    // it touches is in the view's PVS (after the camera, below).
-    let mut statics: Vec<StaticDesc> = Vec::new();
     let smooth = w.lerpmove == LerpMove::Smooth;
     let smooth_frames = w.lerpmodels == LerpModels::Smooth;
     for e in 0..n {
@@ -632,10 +663,7 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
         if ent == w.player || w.server.vm.is_free_edict(ent) {
             continue;
         }
-        // A makestatic entity is a client static, never relinked: no trail, no
-        // spin, no EF_* light; drawn through its efrags.
-        let is_static = w.server.vm.is_static_edict(ent);
-        if !is_static && !is_relinked(ent) {
+        if !is_relinked(ent) {
             // Not sent this frame: CL_RelinkEntities nulls its model. When it
             // is sent again CL_ParseUpdate forcelinks it to the new origin, so
             // its trail restarts there.
@@ -665,16 +693,7 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
                 // doors/plats/buttons, turning live for the mission packs'
                 // func_rotate_door/func_rotate_train/func_rotate_entity.
                 let angles = w.server.vm.ent_vec(ent, w.server.vm.fo().angles);
-                let inst = render::BModelInstance { model_index: idx, origin, frame, angles };
-                if is_static {
-                    // model->mins/maxs of "*N": the submodel's spread bounds.
-                    if let Some(m) = w.bsp.models.get(idx) {
-                        let (emins, emaxs) = offset_box(origin, m.mins, m.maxs);
-                        statics.push(StaticDesc { draw: StaticDraw::Brush(inst), emins, emaxs });
-                    }
-                } else {
-                    bmodels.push(inst);
-                }
+                bmodels.push(render::BModelInstance { model_index: idx, origin, frame, angles });
             }
             continue;
         }
@@ -683,17 +702,7 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
         if m.ends_with(".bsp") {
             if m != w.map_name {
                 let origin = w.server.vm.ent_vec(ent, w.server.vm.fo().origin);
-                if is_static {
-                    // model->mins/maxs: the box's own model 0 bounds.
-                    let bounds = w.bmodel_cache.get(&m).and_then(|b| b.as_ref()?.models.first());
-                    if let Some(bm) = bounds {
-                        let (emins, emaxs) = offset_box(origin, bm.mins, bm.maxs);
-                        let draw = StaticDraw::External(m, origin);
-                        statics.push(StaticDesc { draw, emins, emaxs });
-                    }
-                } else {
-                    ext_descs.push((m, origin));
-                }
+                ext_descs.push((m, origin));
             }
             continue;
         }
@@ -702,19 +711,7 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
         if m.ends_with(".spr") {
             let origin = w.server.vm.ent_vec(ent, w.server.vm.fo().origin);
             let frame = w.server.vm.ent_float(ent, w.server.vm.fo().frame).max(0.0) as usize;
-            if is_static {
-                // Mod_LoadSpriteModel: ±maxwidth/2 across, ±maxheight/2 up
-                // (integer halves).
-                if let Some(Some(spr)) = w.sprite_cache.get(&m) {
-                    let hw = (spr.header.width / 2) as f32;
-                    let hh = (spr.header.height / 2) as f32;
-                    let (emins, emaxs) = offset_box(origin, [-hw, -hw, -hh], [hw, hw, hh]);
-                    let draw = StaticDraw::Sprite(m, origin, frame);
-                    statics.push(StaticDesc { draw, emins, emaxs });
-                }
-            } else {
-                sprite_descs.push((m, origin, frame));
-            }
+            sprite_descs.push((m, origin, frame));
             continue;
         }
         if !m.ends_with(".mdl") {
@@ -723,19 +720,6 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
         let origin = w.server.vm.ent_vec(ent, w.server.vm.fo().origin);
         let frame = w.server.vm.ent_float(ent, w.server.vm.fo().frame).max(0.0) as usize;
         let color = color_for_name(&m);
-        if is_static {
-            let angles = w.server.vm.ent_vec(ent, w.server.vm.fo().angles);
-            let skin = w.server.vm.ent_float(ent, w.server.vm.fo().skin).max(0.0) as i32;
-            let h = ALIAS_MODEL_HALF;
-            let (emins, emaxs) = offset_box(origin, [-h; 3], [h; 3]);
-            statics.push(StaticDesc {
-                // A static's frame never changes after `makestatic`: no blend.
-                draw: StaticDraw::Alias((m, origin, angles, frame, color, skin, None)),
-                emins,
-                emaxs,
-            });
-            continue;
-        }
         // The model header flags (rocket/grenade/gib/tracer trails + EF_ROTATE).
         let cached_mdl = w.model_cache.get(&m).and_then(|o| o.as_ref());
         let mflags = cached_mdl.map(|md| md.header.flags).unwrap_or(0);
@@ -795,6 +779,11 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
     } else {
         w.frame_lerps.clear();
     }
+
+    // The signon's statics (cl_static_entities), each hung on the leaves its
+    // box touches (R_AddEfrags); they wait for the camera: R_StoreEfrags draws
+    // one when a leaf it touches is in the view's PVS (after the camera, below).
+    let statics: Vec<StaticDesc> = w.server.statics().iter().filter_map(|st| static_desc(w, st)).collect();
 
     // Emit the collected trails (after the entity loop to keep the borrows
     // disjoint). Each trails from its head to its new origin; EF_ROCKET also

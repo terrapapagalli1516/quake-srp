@@ -614,4 +614,22 @@ mod tests {
         assert_eq!(netname(&text.replace(named, "")), "player", "an old save");
         assert_eq!(netname(&text.replace(named, "\"netname\" \"Ranger\"\n")), "Ranger");
     }
+
+    /// id's saves hold no statics: `PF_makestatic` freed their edicts, so
+    /// `ED_Write` writes each as an empty block, and `Host_Loadgame_f`'s
+    /// `SV_SpawnServer` re-runs the map's spawn functions, whose makestatic
+    /// calls rebuild the signon. The start map's torches and flames come back
+    /// from a save the same, and its file names none of them.
+    #[test]
+    fn a_save_holds_no_statics_and_its_load_rebuilds_them() {
+        let w = crate::app::build_walk_map("maps/start.bsp").expect("start boots");
+        assert!(w.server.statics().len() > 30, "start's torches and flames");
+        let text = w.server.write_savegame();
+        for class in ["light_torch_small_walltorch", "light_flame_large_yellow"] {
+            assert!(!text.contains(class), "no {class} block in the save");
+        }
+        let loaded = build_walk_savegame(&text).expect("loads");
+        assert_eq!(loaded.server.statics(), w.server.statics(), "the map's spawn rebuilt them");
+        assert_eq!(loaded.server.vm.num_edicts(), w.server.vm.num_edicts(), "the save's slots");
+    }
 }

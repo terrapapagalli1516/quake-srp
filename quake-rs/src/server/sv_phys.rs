@@ -86,8 +86,9 @@ impl Server {
         self.end_physics_frame(host_frametime);
 
         // A think may have called lightstyle() (e.g. a trigger toggling a light);
-        // apply those writes to the owned table.
+        // apply those writes to the owned table (and any makestatic's).
         self.apply_lightstyles();
+        self.apply_statics();
 
         Ok(FrameReport {
             thinks_fired,
@@ -1005,8 +1006,9 @@ impl Server {
         self.end_physics_frame(host_frametime);
 
         // A think may have called lightstyle() (e.g. a trigger toggling a light);
-        // apply those writes to the owned table.
+        // apply those writes to the owned table (and any makestatic's).
         self.apply_lightstyles();
+        self.apply_statics();
 
         Ok(FrameReport {
             thinks_fired,

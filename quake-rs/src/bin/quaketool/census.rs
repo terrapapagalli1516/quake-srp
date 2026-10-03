@@ -402,7 +402,7 @@ fn census_map(pak: &Pak, progs_bytes: &[u8], map: &str, rand: &Rc<QRand>, o: &mu
         let _ = writeln!(o, "  spawn-time: {l}");
     }
     let statics = spawn_log.iter().filter(|l| l.starts_with("makestatic(")).count();
-    let _ = writeln!(o, "  spawn-time makestatic calls: {statics} (the C frees these edicts; the port keeps them)");
+    let _ = writeln!(o, "  spawn-time makestatic calls: {statics} (their edicts freed into the signon)");
 
     // 1. idle
     idle(&mut server, pak, &mut run, 3.0, 0);

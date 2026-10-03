@@ -30,7 +30,7 @@ mod tests {
     };
     use quake_rs::client::host_cmd::{try_changelevel, try_restart};
     use quake_rs::server::EntFlags;
-    use quake_rs::client::net_angle;
+    use quake_rs::server::wire_angle;
     use quake_rs::client::SoundCall;
     use quake_rs::tent::BeamModel;
 
@@ -489,14 +489,14 @@ mod tests {
     /// PutClientInServer gave the player (Host_Spawn_f's setangle).
     #[test]
     fn setangle_quantises_like_the_wire_and_spawns_face_the_spot() {
-        assert_eq!(net_angle(90.0), 90.0);
-        assert_eq!(net_angle(45.0), 45.0);
-        assert_eq!(net_angle(270.0), -90.0, "byte 192 reads back as char -64");
-        assert_eq!(net_angle(10.9), 7.0 * 360.0 / 256.0, "(int)10.9*256/360 = 7");
-        assert_eq!(net_angle(-90.0), -90.0);
+        assert_eq!(wire_angle(90.0), 90.0);
+        assert_eq!(wire_angle(45.0), 45.0);
+        assert_eq!(wire_angle(270.0), -90.0, "byte 192 reads back as char -64");
+        assert_eq!(wire_angle(10.9), 7.0 * 360.0 / 256.0, "(int)10.9*256/360 = 7");
+        assert_eq!(wire_angle(-90.0), -90.0);
         let w = build_walk().expect("e1m1 boots");
         let spot = crate::app::player_start(&w.bsp.entities).expect("e1m1 has a start").1;
-        assert_eq!(w.yaw, net_angle(spot), "the view faces info_player_start's angle");
+        assert_eq!(w.yaw, wire_angle(spot), "the view faces info_player_start's angle");
         assert_eq!(w.pitch, 0.0);
         assert_eq!(w.server.vm.ent_get_float(w.player, "fixangle"), 0.0);
     }
@@ -838,7 +838,7 @@ mod tests {
     }
 
     /// The start map facing north (yaw 90), settled; and the first alias-model
-    /// entity that is neither the player nor a static, to move around.
+    /// entity that is not the player, to move around.
     fn start_facing_north() -> (Walk, i32) {
         let mut w = build_walk_map("maps/start.bsp").expect("start boots");
         w.yaw = 90.0;
@@ -849,10 +849,7 @@ mod tests {
         let vm = &w.server.vm;
         let e = (1..vm.num_edicts() as i32)
             .find(|&e| {
-                e != w.player
-                    && !vm.is_free_edict(e)
-                    && !vm.is_static_edict(e)
-                    && vm.ent_string_ref(e, "model").ends_with(".mdl")
+                e != w.player && !vm.is_free_edict(e) && vm.ent_string_ref(e, "model").ends_with(".mdl")
             })
             .expect("an alias-model entity");
         (w, e)
@@ -927,7 +924,7 @@ mod tests {
         assert!(pixels_differing(&shown, &hidden) > 0, "and drawn");
     }
 
-    /// C1 for statics: `makestatic` entities are drawn when a leaf their box
+    /// C1 for statics: the signon's statics are drawn when a leaf their box
     /// touches (R_AddEfrags) is in the view's PVS (R_MarkLeaves), which on the
     /// start map keeps some torches and drops others; the kept ones draw.
     #[test]
@@ -935,35 +932,34 @@ mod tests {
         let (mut w, _) = start_facing_north();
         let (eye, _) = w.server.player_view();
         let view_pvs = w.bsp.leaf_pvs(render::point_in_leaf(&w.bsp, eye).unwrap_or(0));
-        let vm = &w.server.vm;
-        let statics: Vec<i32> = (1..vm.num_edicts() as i32).filter(|&e| vm.is_static_edict(e)).collect();
+        let statics = w.server.statics();
         let h = ALIAS_MODEL_HALF;
-        let visible: Vec<i32> = statics
+        let visible = statics
             .iter()
-            .copied()
-            .filter(|&e| {
-                let (lo, hi) = offset_box(vm.ent_get_vector(e, "origin"), [-h; 3], [h; 3]);
-                vm.ent_string_ref(e, "model").ends_with(".mdl") && static_is_visible(&w.bsp, &view_pvs, lo, hi)
+            .filter(|st| {
+                let (lo, hi) = offset_box(st.origin, [-h; 3], [h; 3]);
+                st.model.ends_with(".mdl") && static_is_visible(&w.bsp, &view_pvs, lo, hi)
             })
-            .collect();
+            .count();
         assert!(statics.len() > 30, "start's torches and flames are statics ({})", statics.len());
         assert!(
-            !visible.is_empty() && visible.len() < statics.len(),
-            "some statics in the view's PVS, not all ({} of {})",
-            visible.len(),
+            visible > 0 && visible < statics.len(),
+            "some statics in the view's PVS, not all ({visible} of {})",
             statics.len()
         );
-        assert!(
-            statics.iter().all(|&e| !w.server.entities_sent_to_client()[e as usize]),
-            "a static is never a sent entity"
-        );
+        // PF_makestatic freed their edicts: no live entity carries their models.
+        let vm = &w.server.vm;
+        let static_model = |e: i32| statics.iter().any(|st| st.model == vm.ent_string_ref(e, "model"));
+        assert_eq!(vm.live_edicts().filter(|&e| static_model(e)).count(), 0, "a static is no edict");
         let rng = w.prng;
         let (shown, shown_models) = rerender(&mut w, rng);
-        for &e in &visible {
-            w.server.vm.ent_set_float(e, "modelindex", 0.0);
+        // Without their alias models (as if the pak had none) the client draws
+        // none of the torches and flames.
+        for st in w.server.statics().iter().filter(|st| st.model.ends_with(".mdl")) {
+            w.model_cache.insert(st.model.clone(), None);
         }
         let (hidden, hidden_models) = rerender(&mut w, rng);
-        assert_eq!(shown_models, hidden_models + visible.len() as u64, "the visible statics reach the renderer");
+        assert_eq!(shown_models, hidden_models + visible as u64, "the visible statics reach the renderer");
         assert!(pixels_differing(&shown, &hidden) > 0, "and draw");
     }
 

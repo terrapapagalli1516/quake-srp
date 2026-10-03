@@ -26,7 +26,7 @@ use super::msg::{
 use super::pr_edict::parse_float;
 use super::sv_move::{bi_checkbottom, bi_movetogoal, bi_walkmove};
 use super::sv_world::{link_edict, sv_move};
-use super::{EntFlags, Solid, SV_MAXVELOCITY};
+use super::{wire_angle, wire_coord, EntFlags, Solid, StaticEntity, SV_MAXVELOCITY};
 use crate::math::{add as v_add, angle_vectors, sub as v_sub, Vec3};
 use crate::vm::{Builtin, Vm};
 use crate::Result;
@@ -304,8 +304,8 @@ pub(super) fn bi_changeyaw(vm: &mut Vm) -> Result<()> {
 
 /// A benign no-op builtin: consumes its arguments and returns nothing. Used for
 /// the remaining network / client-routing builtins that have no world effect in
-/// this headless server (`setspawnparms`). (`makestatic` marks the edict a
-/// client static via [`bi_makestatic`]; `stuffcmd` queues
+/// this headless server (`setspawnparms`). (`makestatic` sends the edict's
+/// `svc_spawnstatic` via [`bi_makestatic`]; `stuffcmd` queues
 /// its text via [`bi_stuffcmd`]; `sound` queues a
 /// [`SoundEvent`] via [`bi_sound`]; `ambientsound` records a [`StaticSound`]
 /// via [`bi_ambientsound`]; `particle` queues a [`ParticleBurst`] via
@@ -315,16 +315,27 @@ fn bi_noop(_vm: &mut Vm) -> Result<()> {
     Ok(())
 }
 
-/// `PF_makestatic` (#69): `void(entity e) makestatic`. The C writes an
-/// `svc_spawnstatic` (model, frame, colormap, skin, origin, angles) into the
-/// signon and frees the edict; the client then draws that snapshot as a
-/// static entity — through efrags on the leaves it touches, never relinked
-/// (no trails, no `EF_*` lights, no spin). The port keeps the edict alive
-/// (edict numbering and savegames follow it; see `CENSUS.md`) and marks it
-/// static ([`Vm::make_static`]) so the client draws it the static way.
+/// `PF_makestatic` (#69): `void(entity e) makestatic`. Writes the edict's
+/// `svc_spawnstatic` (model, frame, skin, origin, angles: a
+/// [`StaticEntity`], as id's client read it) into the signon and frees the
+/// edict — "throw the entity away now" — so the next `spawn()` reuses its
+/// slot, as id's `ED_Alloc` does. The client draws the record through
+/// efrags, never relinked: no trail, no `EF_*` light, no spin.
+/// (`SV_ModelIndex`'s `Sys_Error` for a model never precached is not
+/// modelled: this port's `setmodel` precaches what it is given.)
 fn bi_makestatic(vm: &mut Vm) -> Result<()> {
     let e = vm.arg_entity(0);
-    vm.make_static(e);
+    let fo = vm.fo();
+    let byte = |f: f32| f as i32 as u8; // MSG_WriteByte of a float: (int), low 8 bits
+    let st = StaticEntity {
+        model: vm.ent_str(e, fo.model).to_string(),
+        frame: byte(vm.ent_float(e, fo.frame)),
+        skin: byte(vm.ent_float(e, fo.skin)),
+        origin: vm.ent_vec(e, fo.origin).map(wire_coord),
+        angles: vm.ent_vec(e, fo.angles).map(wire_angle),
+    };
+    vm.with_host(|_, h| h.outbox().statics.push(st));
+    vm.free_edict(e);
     Ok(())
 }
 
@@ -563,7 +574,7 @@ pub fn install_engine_builtins(vm: &mut Vm) {
     put(46, bi_localcmd); // localcmd (honours restart / changelevel / map; else no-op)
     put(67, bi_movetogoal); // movetogoal (SV_MoveToGoal)
     put(68, bi_precache_file); // precache_file
-    put(69, bi_makestatic); // makestatic (marks a client static)
+    put(69, bi_makestatic); // makestatic (an svc_spawnstatic; frees the edict)
     put(70, bi_changelevel); // changelevel (records the deferred map swap)
     put(72, bi_cvar_set); // cvar_set (honours "skill"; else benign no-op)
     put(74, bi_ambientsound); // ambientsound (records a StaticSound loop)
@@ -579,6 +590,44 @@ mod tests {
     use crate::progs::{Op, Progs, Statement, OFS_RETURN};
     use crate::server::testutil::*;
     use crate::server::{Server, WorldModel};
+
+    // ---------------------------------------------------------- makestatic
+
+    /// PF_makestatic writes the edict's svc_spawnstatic — the bytes, and the
+    /// origin and angles as MSG_WriteCoord/MSG_WriteAngle sent them — and
+    /// frees the edict ("throw the entity away now"), so the next ED_Alloc
+    /// takes the slot at once (freed at sv.time 1, inside the first two
+    /// seconds' relaxed policy).
+    #[test]
+    fn makestatic_records_the_wire_static_and_frees_the_edict() {
+        let mut b = Builder::new();
+        b.add_field("model", EV_STRING, 1);
+        b.add_field("frame", EV_FLOAT, 2);
+        b.add_field("skin", EV_FLOAT, 3);
+        b.add_field("origin", EV_VECTOR, 4);
+        b.add_field("angles", EV_VECTOR, 7);
+        b.entityfields = 10;
+        let mut server = Server::new(empty_bsp(), Progs::parse(&b.build()).expect("parse")).expect("server");
+        let e = server.vm.spawn();
+        server.vm.ent_set_string(e, "model", "progs/flame.mdl");
+        server.vm.ent_set_float(e, "frame", 3.7);
+        server.vm.ent_set_float(e, "skin", 1.0);
+        server.vm.ent_set_vector(e, "origin", [100.3, -50.06, 24.0]);
+        server.vm.ent_set_vector(e, "angles", [0.0, 270.0, 10.9]);
+        server.vm.set_gi(crate::progs::OFS_PARM0, e);
+        server.vm.call_builtin(69, 1).expect("makestatic");
+        assert!(server.vm.is_free_edict(e), "ED_Free (ent)");
+        server.apply_statics();
+        let wire = StaticEntity {
+            model: "progs/flame.mdl".into(),
+            frame: 3,
+            skin: 1,
+            origin: [100.25, -50.0, 24.0],
+            angles: [0.0, -90.0, 7.0 * 360.0 / 256.0],
+        };
+        assert_eq!(server.statics(), [wire]);
+        assert_eq!(server.vm.spawn(), e, "the next spawn takes the freed slot");
+    }
 
     // ------------------------------------------------------------ objerror
 
