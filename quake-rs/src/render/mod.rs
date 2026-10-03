@@ -987,8 +987,9 @@ pub struct Renderer {
     /// id's z-buffer, `d_pzbuffer`: the 16-bit 1/z of every pixel of the view,
     /// `(1/z * 0x8000 * 0x10000) >> 16` (larger is nearer). Never cleared:
     /// every frame's world spans write all of it (`D_DrawZSpans`), and the
-    /// entities test and write it.
+    /// entities test and write it. The last view's is its first `zlen`.
     zbuf: Vec<i16>,
+    zlen: usize,
     /// `D_WarpScreen`'s tables, kept across underwater frames.
     warp: warp::WarpTables,
     prof: stats::Profiler,
@@ -1036,6 +1037,7 @@ impl Renderer {
             surfaces: surf::SurfaceCaches::default(),
             torches: None,
             zbuf: Vec::new(),
+            zlen: 0,
             warp: warp::WarpTables::default(),
             prof: stats::Profiler::default(),
             workers: band::Workers::default(),
@@ -1178,7 +1180,15 @@ impl Renderer {
         if self.map != Some(MapShape::of(scene.world)) {
             self.begin_map(scene.world);
         }
-        self.zbuf.resize(w.saturating_mul(h), 0);
+        // The z-buffer is as large as the largest view drawn and never
+        // shrinks: the 2026 overlay's small windows follow the frame's view
+        // every frame, and growing back would fill megabytes with zeros that
+        // the spans overwrite.
+        let pixels = w.saturating_mul(h);
+        if self.zbuf.len() < pixels {
+            self.zbuf.resize(pixels, 0);
+        }
+        self.zlen = pixels;
         // EXTRA (r_torchflicker): the steady torches, found the first frame
         // the extra is on, at their scales for this frame's time.
         let video = scene.options.video;
@@ -1206,7 +1216,7 @@ impl Renderer {
         }
         let t = self.prof.now();
         let (edge, prof, workers) = (&self.edge, &self.prof, self.workers);
-        let whole = band::Band::placed(w, rows, stride, x0, &mut self.zbuf);
+        let whole = band::Band::placed(w, rows, stride, x0, &mut self.zbuf[..pixels]);
         let bands = workers.run(whole, h, || prof.for_band(), |band, prof| {
             let tw = prof.now();
             let drawn = edge.draw_band(band, &frame, &world);
@@ -1257,7 +1267,7 @@ impl Renderer {
     /// The z-buffer the last frame left.
     #[cfg(test)]
     pub(crate) fn zbuf(&self) -> &[i16] {
-        &self.zbuf
+        &self.zbuf[..self.zlen]
     }
 
     /// `D_WarpScreen` (`d_scan.c`), for an underwater frame: `view`, rendered
