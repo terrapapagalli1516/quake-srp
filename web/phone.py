@@ -399,7 +399,8 @@ def show(r):
     """A row of the table (two lines when the machine's state is known)."""
     td, pl = r["timedemo"], r.get("play")
     line = f"px {r['px']}  {r['threads']} thr  " + "".join(f"{k} {v}  " for k, v in r["cvar"].items()) \
-        + f"{r['size'][0]}x{r['size'][1]:<5}{'' if r['fullscreen'] else ' windowed'} timedemo {td['fps']:6.1f} fps"
+        + f"{r['size'][0]}x{r['size'][1]:<5}{'' if r['fullscreen'] else ' windowed'}{' UPRIGHT' if r['size'][1] > r['size'][0] else ''}" \
+        + f" timedemo {td['fps']:6.1f} fps"
     if pl:
         line += f" | play {pl['fps']:5.1f} fps  >20ms {pl['over20']:<3} wait {fmt3(pl['wait'])}"
         if pl.get("step"):
@@ -496,6 +497,13 @@ def main():
             t = Target(pg, True)
             if not pg.evaluate(VIEW)["fullscreen"]:
                 print("  (the page did not go fullscreen: its rows are windowed)", flush=True)
+        if t.phone and pg.evaluate("!!document.fullscreenElement && innerHeight > innerWidth"):
+            # Fullscreen but upright (the phone lies flat): the game is played
+            # sideways, and the page's own fullscreen button locks it so.
+            pg.evaluate("screen.orientation.lock('landscape').then(() => true).catch(() => false)")
+            time.sleep(2.5)
+        # (A run stopped while it rested the phone leaves the page's ticks paused.)
+        pg.evaluate("() => { if (quake.paused) quake.resume(); }")
         name, _, values = a.cvar.partition("=")
         extras = [(name, v) for v in values.split(",") if v] if name else [None]
         saved = {n: t.cvar(n) for n in ["vid_pixelsize", "r_threads"] + ([name] if name else [])}
