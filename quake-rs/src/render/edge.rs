@@ -45,8 +45,8 @@ use super::sky::{draw_sky_span, sky_dome_scale, sky_texture, SkyView};
 use super::stats::Profiler;
 use super::torch::FaceTorches;
 use super::surf::{
-    classify_surface, face_world_poly, texture_animation, MipView, SurfBlock, SurfKind, SurfaceCaches,
-    SurfaceRequest,
+    bake_all, classify_surface, face_world_poly, texture_animation, BakeJob, MipView, SurfBlock, SurfKind, Surface,
+    SurfaceCaches, SurfaceRequest,
 };
 use super::vis::point_in_leaf;
 use super::world::{self, face_grads};
@@ -499,6 +499,7 @@ impl EdgeState {
         frame: &Frame<'_, 'a>,
         caches: &mut SurfaceCaches,
         prof: &mut Profiler,
+        threads: usize,
     ) -> Option<WorldDraw<'a>> {
         let (w, h) = (frame.w, frame.h);
         if w == 0 || h == 0 || w > super::HIRES_MAXWIDTH || h > super::HIRES_MAXHEIGHT {
@@ -567,7 +568,7 @@ impl EdgeState {
         let t2 = lap();
         self.scan_edges();
         let t3 = lap();
-        let world = self.prepare_surfaces(frame, caches, prof, &ents, &bits);
+        let world = self.prepare_surfaces(frame, caches, prof, &ents, &bits, threads);
         self.dlight_bits = bits;
         if prof.on() {
             let t4 = lap();
@@ -1879,6 +1880,7 @@ impl EdgeState {
     /// span, how its spans are painted and its `1/z` plane, the surface cache
     /// consulted and any block baked (`D_CacheSurface`) — everything the
     /// bands need, decided once.
+    #[allow(clippy::too_many_arguments)]
     fn prepare_surfaces<'a>(
         &mut self,
         frame: &Frame<'_, 'a>,
@@ -1886,6 +1888,7 @@ impl EdgeState {
         prof: &mut Profiler,
         ents: &[Ent<'a>],
         bits: &[u32],
+        threads: usize,
     ) -> WorldDraw<'a> {
         let (cam, opts) = (&frame.cam, &frame.scene.options);
         let Projection { cx, cy, xscale, yscale } = Projection::new(cam, &frame.geom, opts.aspect());
@@ -1910,6 +1913,9 @@ impl EdgeState {
         let pass = FacePass { frame, sview: &sview, mipview: &mipview, ents, bits, light_dir, clear };
         let mut faces = 0u64;
         let mut surfs = Vec::with_capacity(self.surfs.len());
+        // The blocks to bake, and the surfaces waiting for one.
+        caches.begin_frame();
+        let (mut jobs, mut waiting) = (Vec::new(), Vec::new());
         for si in 0..self.surfs.len() {
             let s = self.surfs[si];
             if si == 0 || s.spans == NONE {
@@ -1924,26 +1930,46 @@ impl EdgeState {
                 let paint = if s.flags & SURF_DRAWSKY != 0 {
                     sky_tex.map_or(Paint::Fill(clear), Paint::Sky)
                 } else {
-                    self.prepare_face(&s, &pass, caches, prof)
+                    let (paint, job) = self.prepare_face(&s, &pass, caches, &mut jobs, prof);
+                    if let Some(job) = job {
+                        waiting.push((surfs.len(), job));
+                    }
+                    paint
                 };
                 (paint, [s.d_ziorigin, s.d_zistepu, s.d_zistepv])
             };
             surfs.push(Some(SurfDraw { paint, zi }));
         }
         prof.add(|st| st.faces_drawn += faces);
+        // The frame's bakes, on the render threads; then each waiting
+        // surface and cache entry takes its block.
+        let t = prof.now();
+        let blocks = bake_all(&jobs, threads);
+        if let Some(t) = t {
+            prof.add(|st| st.surf_bake_ns += t.elapsed().as_nanos() as u64);
+        }
+        caches.baked(&blocks);
+        for (si, job) in waiting {
+            if let Some(Some(SurfDraw { paint: Paint::Cached { block, .. }, .. })) = surfs.get_mut(si) {
+                block.block = blocks[job].clone();
+            }
+        }
         WorldDraw { surfs, sky, persp: opts.persp() }
     }
 
     /// How one wall or liquid surface is painted (`D_DrawSurfaces`' turbulent
     /// and cached branches, and the port's fallbacks for textureless or unlit
-    /// faces), its lightmap built and its block baked or found in the cache.
+    /// faces), its lightmap built and its block found in the cache — or its
+    /// bake added to `jobs`, the index given with the paint, whose block is
+    /// put in once the frame's bakes are done.
     fn prepare_face<'a>(
         &mut self,
         s: &Surf,
         pass: &FacePass<'_, '_, 'a>,
         caches: &mut SurfaceCaches,
+        jobs: &mut Vec<BakeJob<'a>>,
         prof: &mut Profiler,
-    ) -> Paint<'a> {
+    ) -> (Paint<'a>, Option<usize>) {
         let FacePass { frame, sview, mipview, ents, bits, light_dir, clear } = *pass;
         let scene = frame.scene;
         let (light_styles, colormap, time) = (scene.light_styles, scene.colormap, scene.time);
@@ -1972,7 +1998,7 @@ impl EdgeState {
             ..*sview
         };
         let Some(grads) = face_grads(bsp, face, &local_sview, eye, ti) else {
-            return Paint::Fill(clear);
+            return (Paint::Fill(clear), None);
         };
         let face_bits = if e.world_bsp { bits.get(fi).copied().unwrap_or(0) } else { 0 };
         // The steady torches lighting it (`r_torchflicker`): the world's
@@ -2004,37 +2030,38 @@ impl EdgeState {
         match tex {
             Some((tex_index, mt)) if !mt.pixels.is_empty() && mt.width > 0 && mt.height > 0 => {
                 if turbulent {
-                    return Paint::Turb { grads, mt };
+                    return (Paint::Turb { grads, mt }, None);
                 }
-                let block = match (lightmap.as_ref(), colormap) {
-                    (Some(lm), Some(cm)) => {
-                        let req = SurfaceRequest {
+                let found = match (lightmap, colormap) {
+                    (Some(lightmap), Some(colormap)) => caches.surface(
+                        SurfaceRequest {
                             slot: e.world_bsp.then_some(fi),
                             face,
                             texture: tex_index,
                             mt,
-                            lightmap: lm,
-                            colormap: cm,
+                            lightmap,
+                            colormap,
                             light_styles,
                             torches,
                             dlit: any_dlight_reaches(bsp, face, e.dlights, face_bits),
                             // D_MipLevelForScale on the surface's nearest 1/z
                             mip: ti.map_or(0, |t| mipview.level_for_nearzi(s.nearzi, t)),
-                        };
-                        caches.surface(&req, prof)
-                    }
-                    _ => None,
+                        },
+                        jobs,
+                        prof,
+                    ),
+                    (lightmap, _) => Surface::PerPixel(lightmap),
                 };
-                match block {
-                    Some(block) => {
+                match found {
+                    Surface::Block(block, job) => {
                         prof.add(|st| st.surf_hits += 1);
                         let grads = grads.mip_scaled(block.mip);
                         let fixed = BlockFixed::new(&grads, block.texmins, block.bw, block.bh);
-                        Paint::Cached { grads, fixed, block }
+                        (Paint::Cached { grads, fixed, block }, job)
                     }
-                    None => {
+                    Surface::PerPixel(lightmap) => {
                         prof.add(|st| st.surf_misses += 1);
-                        Paint::Texels { grads, texture: Some(mt), shade, lightmap }
+                        (Paint::Texels { grads, texture: Some(mt), shade, lightmap }, None)
                     }
                 }
             }
@@ -2044,10 +2071,11 @@ impl EdgeState {
                 // texture lit by the lightmap when there is one.
                 let key = ti.map(|t| t.miptex as i64).unwrap_or(face.texinfo as i64);
                 let colour = hash_index(key);
-                match lightmap {
+                let paint = match lightmap {
                     Some(lm) => Paint::Flat { grads, colour, shade, lightmap: lm },
                     None => Paint::Fill(shade_index(scene.palette, colour, shade)),
-                }
+                };
+                (paint, None)
             }
         }
     }
@@ -2262,7 +2290,7 @@ mod tests {
         let mut edge = EdgeState::new();
         edge.begin_map(&world);
         let (mut caches, mut prof) = (SurfaceCaches::default(), Profiler::default());
-        assert!(edge.build(&Frame::new(&scene, w, h), &mut caches, &mut prof).is_none());
+        assert!(edge.build(&Frame::new(&scene, w, h), &mut caches, &mut prof, 1).is_none());
     }
 
     #[test]

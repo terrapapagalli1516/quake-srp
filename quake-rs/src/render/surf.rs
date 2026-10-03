@@ -211,6 +211,10 @@ struct SurfCacheEntry {
     block: Arc<Vec<u8>>,
     bw: usize,
     bh: usize,
+    /// Asked for this frame and not baked yet: its job in the frame's bake
+    /// list ([`SurfaceCaches::surface`]), the block to come
+    /// ([`SurfaceCaches::baked`]).
+    pending: Option<usize>,
 }
 
 /// The world's per-face caches, the [`Renderer`](super::Renderer)'s: each is
@@ -232,6 +236,10 @@ pub(super) struct SurfaceCaches {
     geoms: Vec<Option<Vec<Vec3>>>,
     lights: Vec<Option<LightCacheEntry>>,
     blocks: Vec<[Option<SurfCacheEntry>; NUM_MIPS]>,
+    /// The (face, mip level) entries this frame's lookups left pending.
+    pending: Vec<(usize, usize)>,
+    /// What a pending block reads as until it is baked: nothing.
+    unbaked: Arc<Vec<u8>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -358,24 +366,108 @@ pub(super) struct SurfBlock {
     pub(super) mip: u32,
 }
 
+/// A lit surface block to bake: `R_DrawSurface`'s inputs for one face at
+/// one mip level, the frame's to own ([`SurfaceCaches::surface`] makes it),
+/// baked by [`BakeJob::bake`] on whichever thread — a pure function of the
+/// job, so the block is the same on any.
+pub(super) struct BakeJob<'a> {
+    /// The face's lightmap for this frame (`R_BuildLightMap`'s, dynamic and
+    /// torch light in).
+    lightmap: LightMap<'a>,
+    /// The texture's level `mip`, `smax x tmax`.
+    tex: &'a [u8],
+    smax: usize,
+    tmax: usize,
+    /// `texturemins`, at mip 0.
+    texmins: [i32; 2],
+    mip: u32,
+    bw: usize,
+    bh: usize,
+    colormap: &'a [u8],
+}
+
+impl BakeJob<'_> {
+    /// The block's texels: the bake's work.
+    pub(super) fn texels(&self) -> usize {
+        self.bw * self.bh
+    }
+
+    /// `R_DrawSurface`: the block, `bw * bh` palette indices.
+    pub(super) fn bake(&self) -> Arc<Vec<u8>> {
+        let lm = &self.lightmap;
+        let mut light = Vec::new();
+        lm.blocklights_into(&mut light);
+        let mut block = vec![0u8; self.texels()];
+        draw_surface_block(self.tex, self.smax, self.tmax, self.texmins, self.mip, &light, lm.lmw, self.colormap, &mut block, self.bw, self.bh);
+        Arc::new(block)
+    }
+}
+
+/// The texels of baking below which a frame's bakes stay on the calling
+/// thread, and the texels each further thread must have to be woken: a
+/// thread's start costs about 10 µs natively (a wake-up of a pooled worker
+/// in the page), and a texel about 0.7 ns, so a thread pays for itself from
+/// some 15,000 texels of work; twice that, so a few small bakes (a
+/// frame's usual: a dynamic light's few blocks, a light style's step)
+/// never wake one.
+const BAKE_TEXELS_PER_THREAD: usize = 32 * 1024;
+
+/// Bake `jobs` ([`BakeJob::bake`]) on up to `threads` threads — one per
+/// [`BAKE_TEXELS_PER_THREAD`] of their texels — the largest first so the
+/// threads end together; the blocks in the jobs' order. Each block is its
+/// job's alone, so they are the same for any thread count.
+pub(super) fn bake_all(jobs: &[BakeJob], threads: usize) -> Vec<Arc<Vec<u8>>> {
+    let threads = bake_threads(jobs.iter().map(BakeJob::texels).sum(), threads);
+    if threads == 1 {
+        return jobs.iter().map(BakeJob::bake).collect();
+    }
+    let mut order: Vec<usize> = (0..jobs.len()).collect();
+    order.sort_by_key(|&i| std::cmp::Reverse(jobs[i].texels()));
+    let baked = super::band::map_jobs(threads, &order, |&i| jobs[i].bake());
+    let mut blocks: Vec<Option<Arc<Vec<u8>>>> = vec![None; jobs.len()];
+    for (&i, block) in order.iter().zip(baked) {
+        blocks[i] = Some(block);
+    }
+    blocks.into_iter().map(|b| b.expect("every job baked")).collect()
+}
+
+/// The threads to bake `texels` of blocks on, of the renderer's `threads`:
+/// one per [`BAKE_TEXELS_PER_THREAD`], at least one.
+fn bake_threads(texels: usize, threads: usize) -> usize {
+    threads.min(texels / BAKE_TEXELS_PER_THREAD).max(1)
+}
+
+/// What [`SurfaceCaches::surface`] found for a face.
+pub(super) enum Surface<'a> {
+    /// A lit block: from the cache, or — with the index of its job in the
+    /// frame's bake list — to be baked before the frame is drawn (its
+    /// `block` empty until then).
+    Block(SurfBlock, Option<usize>),
+    /// No block (no usable colormap, no texture, an empty or oversized
+    /// block): the face is lit per pixel, with its lightmap given back.
+    PerPixel(Option<LightMap<'a>>),
+}
+
 /// What `D_CacheSurface` is asked for: one face's texture, lit, at one mip
-/// level.
-pub(super) struct SurfaceRequest<'a> {
+/// level — what a bake reads borrowed for the frame (`'a`), the rest only
+/// for the lookup (`'r`).
+pub(super) struct SurfaceRequest<'r, 'a> {
     /// The face's number in the world, whose cache slot the block goes in, or
     /// `None` for an external brush model's face (baked fresh, never cached:
     /// its numbers are its own `b_*.bsp`'s).
     pub(super) slot: Option<usize>,
-    pub(super) face: &'a crate::bsp::DFace,
+    pub(super) face: &'r crate::bsp::DFace,
     /// The (animated) texture's index in `bsp.textures`, and the texture.
     pub(super) texture: usize,
     pub(super) mt: &'a crate::bsp::MipTex,
-    /// The face's lightmap for this frame, dynamic light included when `dlit`.
-    pub(super) lightmap: &'a LightMap<'a>,
+    /// The face's lightmap for this frame, dynamic light included when `dlit`
+    /// (the bake's, if it comes to one).
+    pub(super) lightmap: LightMap<'a>,
     pub(super) colormap: &'a [u8],
-    pub(super) light_styles: &'a [f32; LIGHTSTYLES],
+    pub(super) light_styles: &'r [f32; LIGHTSTYLES],
     /// The steady torches lighting the face, at this frame's scales (the
     /// 2026 `r_torchflicker`; [`FaceTorches::NONE`] with it off).
-    pub(super) torches: FaceTorches<'a>,
+    pub(super) torches: FaceTorches<'r>,
     /// A dynamic light reaches the face ([`any_dlight_reaches`]).
     pub(super) dlit: bool,
     pub(super) mip: u32,
@@ -391,6 +483,7 @@ impl SurfaceCaches {
         self.lights.resize(n_faces, None);
         self.blocks.clear();
         self.blocks.resize(n_faces, Default::default());
+        self.pending.clear();
     }
 
     /// The bytes the lit-surface cache holds (every baked block of every face
@@ -399,39 +492,49 @@ impl SurfaceCaches {
         self.blocks.iter().flatten().flatten().fold((0, 0), |(bytes, n), e| (bytes + e.block.len(), n + 1))
     }
 
-    /// Build (and cache) a face's lit+colormapped surface block at mip level
-    /// `req.mip`: `D_CacheSurface`. Returns the block, or `None` (the caller
-    /// keeps the per-pixel path) when there is no usable colormap, the texture
-    /// is missing, or the block would be empty or exceed [`SURF_BLOCK_MAX`]. A
-    /// texture without its levels 1..3 (the synthetic ones in tests) is baked
-    /// at mip 0.
+    /// Find a face's lit+colormapped surface block at mip level `req.mip` —
+    /// `D_CacheSurface` — or make the job that bakes it: [`Surface::Block`],
+    /// with the job's index in `jobs` when it is to be baked. The frame's
+    /// jobs are baked together once every surface is looked up (on the
+    /// render threads, [`super::band::map_jobs`]), and handed back with
+    /// [`SurfaceCaches::baked`] before the frame is drawn. [`Surface::PerPixel`]
+    /// (the caller keeps the per-pixel path) when there is no usable colormap,
+    /// the texture is missing, or the block would be empty or exceed
+    /// [`SURF_BLOCK_MAX`]. A texture without its levels 1..3 (the synthetic
+    /// ones in tests) is baked at mip 0.
     ///
     /// A dynamically lit face is baked like any other — `R_BuildLightMap` runs
     /// `R_AddDynamicLights`, then `R_DrawSurface` — and its entry marked
-    /// `dlight`, as the C marks `cache->dlight`: a dlit block is never a hit,
-    /// so the light is rebaked every frame it is live and the first frame after
-    /// it dies rebuilds the block without it. The hit test is the C's: same
-    /// texture, same style values, no dlight now or at the bake — per face and
-    /// mip level (`surface->cachespots[miplevel]`).
+    /// `dlight`, as the C marks `cache->dlight`: a dlit block is never a hit
+    /// in a later frame, so the light is rebaked every frame it is live and
+    /// the first frame after it dies rebuilds the block without it. The hit
+    /// test is the C's: same texture, same style values, no dlight now or at
+    /// the bake — per face and mip level (`surface->cachespots[miplevel]`).
+    /// A face asked for twice in a frame (an inline model drawn by two
+    /// entities) finds the first ask's pending entry and shares its job,
+    /// dynamic light or not: the same face in the same frame is the same
+    /// block. A miss replaces the entry at once, as the C's did, so a frame's
+    /// lookups see what one-by-one baking would have left.
     ///
     /// The bake is `R_DrawSurface`: the block is `extents >> miplevel` texels a
     /// side (`surfwidth`), made of one `16 >> miplevel` square per pair of
     /// lightmap columns and rows, each lit by `R_DrawSurfaceBlock8_mip0..3`'s
     /// integer interpolation ([`draw_surface_block`]).
-    pub(super) fn surface(&mut self, req: &SurfaceRequest, prof: &mut Profiler) -> Option<SurfBlock> {
-        let (mt, lm) = (req.mt, req.lightmap);
+    pub(super) fn surface<'a>(&mut self, req: SurfaceRequest<'_, 'a>, jobs: &mut Vec<BakeJob<'a>>, prof: &mut Profiler) -> Surface<'a> {
+        let mt = req.mt;
+        let lm = req.lightmap;
         if req.colormap.len() < COLORMAP_LEN {
-            return None;
+            return Surface::PerPixel(Some(lm));
         }
         let mip = if (req.mip as usize) < NUM_MIPS && mt.mip(req.mip as usize).is_some() { req.mip } else { 0 };
-        let tex = mt.mip(mip as usize)?;
+        let Some(tex) = mt.mip(mip as usize) else { return Surface::PerPixel(Some(lm)) };
         let (smax, tmax) = ((mt.width as usize) >> mip, (mt.height as usize) >> mip);
         // `surfwidth = extents[0] >> miplevel`; `extents = (lmw - 1) * 16`.
         let bw = lm.lmw.saturating_sub(1).saturating_mul(16) >> mip;
         let bh = lm.lmh.saturating_sub(1).saturating_mul(16) >> mip;
-        let total = bw.checked_mul(bh)?;
+        let Some(total) = bw.checked_mul(bh) else { return Surface::PerPixel(Some(lm)) };
         if smax == 0 || tmax == 0 || bw == 0 || bh == 0 || total > SURF_BLOCK_MAX {
-            return None;
+            return Surface::PerPixel(Some(lm));
         }
         let (scales, n_styles) = style_scales(req.face, req.light_styles);
         // A style past 0: an animated (or switched) light, which rebakes the
@@ -442,43 +545,46 @@ impl SurfaceCaches {
         // texturemins are whole multiples of 16, so `>> mip` is exact.
         let texmins_i = [lm.texmins[0] as i32, lm.texmins[1] as i32];
         let texmins = [(texmins_i[0] >> mip) as f32, (texmins_i[1] >> mip) as f32];
-        let bake = |prof: &mut Profiler| -> Arc<Vec<u8>> {
-            prof.add(|s| s.surf_texels_baked += total as u64);
-            let mut light = Vec::new();
-            lm.blocklights_into(&mut light);
-            let mut block = vec![0u8; total];
-            draw_surface_block(tex, smax, tmax, texmins_i, mip, &light, lm.lmw, req.colormap, &mut block, bw, bh);
-            Arc::new(block)
-        };
         let made = |block| SurfBlock { block, bw, bh, texmins, mip };
+        let unbaked = self.unbaked.clone();
+        let bake = |prof: &mut Profiler| -> usize {
+            prof.add(|s| s.surf_texels_baked += total as u64);
+            jobs.push(BakeJob { lightmap: lm, tex, smax, tmax, texmins: texmins_i, mip, bw, bh, colormap: req.colormap });
+            jobs.len() - 1
+        };
 
         // An external brush model's face (a `b_*.bsp` box): baked fresh every
         // frame, never cached — its face numbers are its own bsp's. They are
         // tiny (a 6-face box), so an unconditional bake is cheap.
         let Some(slot) = req.slot else {
             prof.add(|s| s.surf_bypass_baked += 1);
-            return Some(made(bake(prof)));
+            let job = bake(prof);
+            return Surface::Block(made(unbaked), Some(job));
         };
         let spot = self.blocks.get_mut(slot).map(|spots| &mut spots[mip as usize]);
-        // HIT (`D_CacheSurface`): no dynamic light now or in the bake, same
-        // texture, same resolved style scales -> reuse the baked block.
         if let Some(Some(e)) = spot.as_deref() {
-            if !req.dlit
-                && !e.dlight
-                && e.texture == req.texture
+            let same = e.texture == req.texture
                 && e.n_styles == n_styles
                 && e.bw == bw
                 && e.bh == bh
                 && e.style_scales[..n_styles] == scales[..n_styles]
-                && req.torches.key_is(&e.torches)
-            {
+                && req.torches.key_is(&e.torches);
+            // This frame's own ask for the same block: share its bake.
+            if let (true, Some(job)) = (same && e.dlight == req.dlit, e.pending) {
                 prof.add(|s| s.surf_cache_hits += 1);
-                return Some(made(e.block.clone()));
+                return Surface::Block(made(unbaked), Some(job));
+            }
+            // HIT (`D_CacheSurface`): no dynamic light now or in the bake,
+            // same texture, same resolved style scales.
+            if same && !req.dlit && !e.dlight && e.pending.is_none() {
+                prof.add(|s| s.surf_cache_hits += 1);
+                return Surface::Block(made(e.block.clone()), None);
             }
         }
-        // MISS: bake and store, marked `dlight` when a light is folded in.
+        // MISS: a bake, its entry stored now (marked `dlight` when a light is
+        // folded in) and its block when the frame's bakes are done.
         prof.add(|s| s.surf_baked += 1);
-        let block = bake(prof);
+        let job = bake(prof);
         if let Some(e) = spot {
             *e = Some(SurfCacheEntry {
                 style_scales: scales,
@@ -486,12 +592,69 @@ impl SurfaceCaches {
                 torches: req.torches.key(),
                 texture: req.texture,
                 dlight: req.dlit,
-                block: block.clone(),
+                block: unbaked.clone(),
                 bw,
                 bh,
+                pending: Some(job),
             });
+            self.pending.push((slot, mip as usize));
         }
-        Some(made(block))
+        Surface::Block(made(unbaked), Some(job))
+    }
+
+    /// The frame's bakes are done: `blocks[job]` is job `job`'s block. Every
+    /// entry this frame left pending takes its job's.
+    pub(super) fn baked(&mut self, blocks: &[Arc<Vec<u8>>]) {
+        for (slot, mip) in self.pending.drain(..) {
+            if let Some(e) = self.blocks.get_mut(slot).and_then(|spots| spots[mip].as_mut()) {
+                if let Some(job) = e.pending.take() {
+                    e.block = blocks[job].clone();
+                }
+            }
+        }
+    }
+
+    /// A frame that ended before its bakes (it never does but by a panic)
+    /// leaves no pending entry to the next: forget them.
+    pub(super) fn begin_frame(&mut self) {
+        for (slot, mip) in self.pending.drain(..) {
+            if let Some(spot) = self.blocks.get_mut(slot).map(|spots| &mut spots[mip]) {
+                if spot.as_ref().is_some_and(|e| e.pending.is_some()) {
+                    *spot = None;
+                }
+            }
+        }
+    }
+
+    /// Every lit block the cache holds: (face, mip level, texture, whether a
+    /// dynamic light is in it, its bytes), in face order (the tests').
+    #[cfg(test)]
+    pub(super) fn block_entries(&self) -> Vec<(usize, usize, usize, bool, Vec<u8>)> {
+        let mut out = Vec::new();
+        for (slot, spots) in self.blocks.iter().enumerate() {
+            for (mip, e) in spots.iter().enumerate() {
+                if let Some(e) = e {
+                    assert!(e.pending.is_none(), "face {slot} mip {mip} left pending");
+                    out.push((slot, mip, e.texture, e.dlight, e.block.to_vec()));
+                }
+            }
+        }
+        out
+    }
+
+    /// [`SurfaceCaches::surface`] as one frame of one face: looked up, baked
+    /// and handed back (the tests').
+    #[cfg(test)]
+    pub(super) fn surface_now(&mut self, req: SurfaceRequest<'_, '_>, prof: &mut Profiler) -> Option<SurfBlock> {
+        self.begin_frame();
+        let mut jobs = Vec::new();
+        let Surface::Block(mut block, job) = self.surface(req, &mut jobs, prof) else { return None };
+        let blocks: Vec<_> = jobs.iter().map(BakeJob::bake).collect();
+        self.baked(&blocks);
+        if let Some(job) = job {
+            block.block = blocks[job].clone();
+        }
+        Some(block)
     }
 }
 
@@ -993,6 +1156,203 @@ mod tests {
         bsp
     }
 
+    // -- The frame's bakes on the render threads (bake_all, band::map_jobs) --
+
+    /// The bake test's scene at frame `k` of a run: the lightmapped room seen
+    /// from a corner, its second style stepping, a light moving across it.
+    fn baking_scene<'a>(world: &'a Bsp, pal: &'a Palette, cm: &'a [u8], styles: &'a [f32; LIGHTSTYLES], dls: &'a [DynamicLight]) -> Scene<'a> {
+        let cam = Camera::looking_at([-200.0, -200.0, 40.0], [0.0, 0.0, 0.0], 90.0);
+        Scene { light_styles: styles, dlights: dls, colormap: Some(cm), ..Scene::new(world, cam, 211, 157, pal) }
+    }
+
+    fn baking_styles(k: usize) -> [f32; LIGHTSTYLES] {
+        let mut styles = NEUTRAL_LIGHTSTYLE_SCALES;
+        styles[1] = [0.25, 0.25, 0.5, 1.0, 1.5, 1.5][k % 6];
+        styles
+    }
+
+    fn baking_lights(k: usize) -> Vec<DynamicLight> {
+        if k % 3 == 2 {
+            return Vec::new();
+        }
+        vec![DynamicLight::new([-150.0 + 60.0 * k as f32, 0.0, -60.0], 250.0, f32::MAX, 0.0, 0.0, 0)]
+    }
+
+    /// The frame is the same on any number of threads — 1 bakes every block
+    /// on the calling thread, more share the bakes out — and so is what the
+    /// cache keeps; the frames bake enough to go to the threads.
+    #[test]
+    fn the_bakes_give_the_same_frame_and_cache_on_any_thread_count() {
+        let world = demo_room_with_walls(lightmapped_demo_room(60, 90));
+        let (cm, pal) = ramp_colormap();
+        let run = |threads: usize| {
+            let mut r = Renderer::new();
+            r.set_threads(threads);
+            let mut frames = Vec::new();
+            let mut most = 0;
+            for k in 0..8 {
+                let (styles, dls) = (baking_styles(k), baking_lights(k));
+                r.stats_begin();
+                frames.push(r.render(&baking_scene(&world, &pal, &cm, &styles, &dls)).pixels);
+                most = most.max(r.stats_end().surf_texels_baked as usize);
+            }
+            (frames, r.surfaces.block_entries(), most)
+        };
+        let (one, cache, most) = run(1);
+        assert!(bake_threads(most, 8) > 1, "a frame bakes enough for the threads ({most} texels)");
+        for threads in [2, 3, 8, 16] {
+            let (frames, entries, _) = run(threads);
+            for (k, (a, b)) in frames.iter().zip(&one).enumerate() {
+                assert!(a == b, "{threads} threads, frame {k}");
+            }
+            assert!(entries == cache, "{threads} threads: the cache");
+        }
+    }
+
+    /// Warm or cold, the frame and the blocks are the same: a renderer that
+    /// drew the run's earlier frames holds, for every block a fresh one bakes
+    /// for the last frame, the same block.
+    #[test]
+    fn the_bakes_are_the_same_cold_or_warm() {
+        let world = demo_room_with_walls(lightmapped_demo_room(60, 90));
+        let (cm, pal) = ramp_colormap();
+        let (mut warm, mut cold) = (Renderer::new(), Renderer::new());
+        warm.set_threads(8);
+        cold.set_threads(8);
+        let last = 7;
+        for k in 0..=last {
+            let (styles, dls) = (baking_styles(k), baking_lights(k));
+            let w = warm.render(&baking_scene(&world, &pal, &cm, &styles, &dls)).pixels;
+            if k == last {
+                assert!(w == cold.render(&baking_scene(&world, &pal, &cm, &styles, &dls)).pixels, "frame {k}");
+            }
+        }
+        let held = warm.surfaces.block_entries();
+        let fresh = cold.surfaces.block_entries();
+        assert!(!fresh.is_empty());
+        for e in &fresh {
+            assert!(held.contains(e), "face {} mip {}: warm and cold differ", e.0, e.1);
+        }
+    }
+
+    /// An inline model drawn by two entities in one frame is one face in the
+    /// cache: e1m2's model 52 (the bars by the start) twice, lit by a
+    /// dynamic light or not — a cold renderer's first frame shares bakes
+    /// (its hits are the second copy's) and bakes each block it keeps once;
+    /// on any thread count (when id's pak is here).
+    #[test]
+    fn a_face_two_entities_draw_is_baked_once() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../quake-data/ID1/PAK0.PAK");
+        let Ok(pak) = crate::pak::Pak::open(&path) else {
+            eprintln!("skipped: no shareware pak at {}", path.display());
+            return;
+        };
+        let read = |n: &str| pak.read_file(n).expect("read").expect(n);
+        let world = Bsp::parse(&read("maps/e1m2.bsp")).expect("e1m2");
+        let pal = crate::render::parse_palette(&read("gfx/palette.lmp")).expect("palette");
+        let cm = read("gfx/colormap.lmp");
+        let cam = Camera { pos: [1496.0, 1664.0, 288.0], yaw: 270.0, pitch: 0.0, roll: 0.0, fov_deg: 90.0 };
+        let at = |z: f32| crate::render::BModelInstance { model_index: 52, origin: [0.0, -200.0, z], frame: 0, angles: [0.0; 3] };
+        let (one, two) = ([at(40.0)], [at(40.0), at(-40.0)]);
+        // Every surface at mip 0, so the copies ask for the same blocks.
+        let options = crate::render::RenderOptions { mip: MipCvars { mipscale: 0.0, mipcap: 0.0 }, ..Default::default() };
+        let mut styles = NEUTRAL_LIGHTSTYLE_SCALES;
+        styles[0] = 264.0 / 256.0;
+        for dls in [Vec::new(), vec![DynamicLight::new([1496.0, 1464.0, 288.0], 300.0, f32::MAX, 0.0, 0.0, 0)]] {
+            let frame = |bm: &[crate::render::BModelInstance], threads| {
+                let mut r = Renderer::new();
+                r.set_threads(threads);
+                r.stats_begin();
+                let scene = Scene { bmodels: bm, light_styles: &styles, dlights: &dls, colormap: Some(&cm), options, ..Scene::new(&world, cam, 320, 200, &pal) };
+                let img = r.render(&scene).pixels;
+                (img, r.stats_end(), r.surfaces.block_entries().len())
+            };
+            let (a, _, _) = frame(&one, 1);
+            let (b, st, kept) = frame(&two, 1);
+            assert!(a != b, "the second copy is drawn");
+            assert!(st.surf_cache_hits > 0, "the copies share blocks");
+            assert_eq!(st.surf_baked as usize, kept, "lit {}: every block baked once", !dls.is_empty());
+            let (b8, st8, _) = frame(&two, 8);
+            assert!(b8 == b && st8.surf_baked == st.surf_baked, "8 threads");
+        }
+    }
+
+    /// The 2026 frame on a real map — e1m3's torch-lit flames (the torches
+    /// flickering, every lit block rebaked each frame), a rocket's light
+    /// moving through them — is the same on 1 to 16 threads, frame after
+    /// frame, and its bakes went to the threads (when id's pak is here).
+    #[test]
+    fn a_torch_lit_view_is_the_same_on_any_thread_count() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../quake-data/ID1/PAK0.PAK");
+        let Ok(pak) = crate::pak::Pak::open(&path) else {
+            eprintln!("skipped: no shareware pak at {}", path.display());
+            return;
+        };
+        let read = |n: &str| pak.read_file(n).expect("read").expect(n);
+        let world = Bsp::parse(&read("maps/e1m3.bsp")).expect("e1m3");
+        let pal = crate::render::parse_palette(&read("gfx/palette.lmp")).expect("palette");
+        let cm = read("gfx/colormap.lmp");
+        let cam = Camera { pos: [-1352.0, -720.0, -50.0], yaw: 90.0, pitch: 0.0, roll: 0.0, fov_deg: 90.0 };
+        let options = crate::render::RenderOptions { video: crate::render::VideoCvars::MODERN, ..Default::default() };
+        let mut styles = NEUTRAL_LIGHTSTYLE_SCALES;
+        styles[0] = 264.0 / 256.0;
+        let run = |threads: usize| {
+            let mut r = Renderer::new();
+            r.set_threads(threads);
+            let mut frames = Vec::new();
+            let mut most = 0u64;
+            for k in 0..12 {
+                let dl = [DynamicLight::new([-1352.0, -600.0 + 40.0 * k as f32, -40.0], 250.0, f32::MAX, 0.0, 0.0, 0)];
+                let scene = Scene { time: 3.0 + k as f32 / 144.0, light_styles: &styles, dlights: &dl, colormap: Some(&cm), options, ..Scene::new(&world, cam, 480, 270, &pal) };
+                r.stats_begin();
+                frames.push(r.render(&scene).pixels);
+                most = most.max(r.stats_end().surf_texels_baked);
+            }
+            (frames, most)
+        };
+        let (one, most) = run(1);
+        assert!(bake_threads(most as usize, 16) >= 4, "the frames bake enough for several threads ({most} texels)");
+        for threads in [2, 3, 8, 16] {
+            let (frames, _) = run(threads);
+            for (k, (a, b)) in frames.iter().zip(&one).enumerate() {
+                assert!(a == b, "{threads} threads, frame {k}");
+            }
+        }
+    }
+
+    /// A frame bakes only what it draws: looking down at the room's floor,
+    /// the floor is baked and the ceiling behind the eye is not.
+    #[test]
+    fn nothing_undrawn_is_baked() {
+        let world = demo_room_with_walls(lightmapped_demo_room(60, 90));
+        let (cm, pal) = ramp_colormap();
+        let cam = Camera::looking_at([0.0, -10.0, 120.0], [0.0, 0.0, -128.0], 90.0);
+        let mut r = Renderer::new();
+        r.render(&Scene { colormap: Some(&cm), ..Scene::new(&world, cam, 160, 120, &pal) });
+        let baked: Vec<usize> = r.surfaces.block_entries().iter().map(|e| e.0).collect();
+        assert!(baked.contains(&0) && !baked.contains(&1), "{baked:?}");
+    }
+
+    /// One thread, or work too small to pay for another, bakes on the calling
+    /// thread: no thread is started. The jobs' results come back in their
+    /// order however many threads ran them.
+    #[test]
+    fn small_bakes_stay_on_the_calling_thread() {
+        assert_eq!(bake_threads(0, 16), 1);
+        assert_eq!(bake_threads(BAKE_TEXELS_PER_THREAD * 2 - 1, 16), 1);
+        assert_eq!(bake_threads(BAKE_TEXELS_PER_THREAD * 3, 16), 3);
+        assert_eq!(bake_threads(BAKE_TEXELS_PER_THREAD * 100, 8), 8);
+        assert_eq!(bake_threads(BAKE_TEXELS_PER_THREAD * 100, 1), 1);
+        let me = std::thread::current().id();
+        let one = crate::render::band::map_jobs(8, &[7], |&j| (j, std::thread::current().id()));
+        assert_eq!(one, [(7, me)], "one job: the calling thread");
+        let all = crate::render::band::map_jobs(1, &[1, 2, 3], |&j| (j, std::thread::current().id()));
+        assert!(all.iter().all(|&(_, t)| t == me));
+        let jobs: Vec<u64> = (0..500).collect();
+        let squares = crate::render::band::map_jobs(8, &jobs, |&j| j * j);
+        assert_eq!(squares, jobs.iter().map(|j| j * j).collect::<Vec<_>>());
+    }
+
     #[test]
     fn external_models_bypass_and_dont_evict_world_surf_cache() {
         // REGRESSION (performance): external brush models (the b_*.bsp item boxes)
@@ -1247,7 +1607,7 @@ mod tests {
             face: &face,
             texture: 0,
             mt,
-            lightmap: &lm,
+            lightmap: lm.clone(),
             colormap: &cm,
             light_styles: &styles,
             torches: FaceTorches::NONE,
@@ -1257,7 +1617,7 @@ mod tests {
         let mut caches = SurfaceCaches::default();
         caches.begin_map(1);
         let mut prof = counting();
-        let mut get = |mip: u32, prof: &mut Profiler| caches.surface(&req(Some(0), &mt, mip), prof).expect("block");
+        let mut get = |mip: u32, prof: &mut Profiler| caches.surface_now(req(Some(0), &mt, mip), prof).expect("block");
         for mip in 0..4u32 {
             let sb = get(mip, &mut prof);
             assert_eq!(sb.mip, mip);
@@ -1283,7 +1643,7 @@ mod tests {
         // A texture without levels 1..3 is baked at mip 0 whatever is asked.
         let mut flat = leveled_miptex();
         flat.mips = Default::default();
-        let sb = caches.surface(&req(None, &flat, 2), &mut prof).expect("block");
+        let sb = caches.surface_now(req(None, &flat, 2), &mut prof).expect("block");
         assert_eq!((sb.mip, sb.bw, sb.bh), (0, 64, 48));
     }
 
@@ -1362,7 +1722,7 @@ mod tests {
             face: &face,
             texture: 0,
             mt: &mt,
-            lightmap: &lm,
+            lightmap: lm.clone(),
             colormap: &cm,
             light_styles: &NEUTRAL_LIGHTSTYLE_SCALES,
             torches: FaceTorches::NONE,
@@ -1373,7 +1733,7 @@ mod tests {
         caches.begin_map(1);
         let mut prof = counting();
         for mip in 0..4u32 {
-            let sb = caches.surface(&req(mip), &mut prof).expect("block");
+            let sb = caches.surface_now(req(mip), &mut prof).expect("block");
             let (bw, bh) = (64 >> mip, 48 >> mip);
             let mut want = vec![0u8; bw * bh];
             let level = mt.mip(mip as usize).expect("level");
@@ -1381,7 +1741,7 @@ mod tests {
             assert_eq!((sb.mip, sb.bw, sb.bh), (mip, bw, bh));
             assert_eq!(*sb.block, want, "mip {mip}");
             // Lit again: rebaked, never a hit.
-            let _ = caches.surface(&req(mip), &mut prof);
+            let _ = caches.surface_now(req(mip), &mut prof);
         }
         let st = prof.end();
         assert_eq!((st.surf_baked, st.surf_cache_hits), (8, 0));
@@ -1434,3 +1794,4 @@ mod tests {
         assert_eq!(caches.geom(&bsp_b, 0, &face_b), Some(&direct_b[..]));
     }
 }
+

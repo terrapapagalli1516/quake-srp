@@ -14,7 +14,9 @@
 //! What must be decided for the whole frame first — the edge scan, the
 //! surface cache (`D_CacheSurface`), the alias models' vertices and clipping,
 //! the particles' projection — is done once, before the bands, and handed to
-//! them read-only. One thread is the same code with one band, drawn on the
+//! them read-only. The surface cache's bakes, the blocks the frame finds
+//! stale, are independent of one another, and run on the threads too, as
+//! jobs ([`map_jobs`]), once every block is looked up and before the bands. One thread is the same code with one band, drawn on the
 //! calling thread. A band's pixels are the view's own rows or, drawn straight
 //! into the screen, the screen's rows under the view ([`Band::placed`]).
 //!
@@ -27,6 +29,7 @@
 //! milliseconds of pixels at the sizes where threads pay.
 
 use std::ops::Range;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, PoisonError};
 
 /// Rows `y0..` of a `w`-wide view: their pixels and their 16-bit `1/z`,
@@ -225,6 +228,50 @@ impl Workers {
             out
         })
     }
+}
+
+/// `f` of each of `jobs`, in the jobs' order, run on up to `threads`
+/// threads, the calling thread one of them: the frame's independent pieces
+/// of work that are not rows (the lit-surface blocks the frame bakes,
+/// `surf::BakeJob`), each result a function of its job alone, so any split
+/// gives the same results. The threads take the jobs one at a time from a
+/// shared counter as they come free, so the caller orders them largest
+/// first to end together; a thread that does not start leaves its jobs to
+/// the others. One thread (or one job) is `f` on each in turn on the
+/// calling thread: no spawn.
+pub(crate) fn map_jobs<J, R, F>(threads: usize, jobs: &[J], f: F) -> Vec<R>
+where
+    J: Sync,
+    R: Send,
+    F: Fn(&J) -> R + Sync,
+{
+    let threads = threads.clamp(1, jobs.len().max(1));
+    if threads == 1 {
+        return jobs.iter().map(f).collect();
+    }
+    // Each thread's results with the indices of the jobs it took.
+    let next = AtomicUsize::new(0);
+    let work = || {
+        let mut done = Vec::new();
+        loop {
+            let i = next.fetch_add(1, Ordering::Relaxed);
+            let Some(job) = jobs.get(i) else { break };
+            done.push((i, f(job)));
+        }
+        done
+    };
+    let ran: Vec<Vec<(usize, R)>> = std::thread::scope(|s| {
+        let helpers: Vec<_> = (1..threads).filter_map(|_| std::thread::Builder::new().spawn_scoped(s, work).ok()).collect();
+        let mut out = vec![work()];
+        // A worker that panicked panics the frame, as one thread would.
+        out.extend(helpers.into_iter().map(|h| h.join().unwrap_or_else(|e| std::panic::resume_unwind(e))));
+        out
+    });
+    let mut slots: Vec<Option<R>> = std::iter::repeat_with(|| None).take(jobs.len()).collect();
+    for (i, r) in ran.into_iter().flatten() {
+        slots[i] = Some(r);
+    }
+    slots.into_iter().map(|r| r.expect("every job ran")).collect()
 }
 
 /// Run `f` on runs of rows of `dst` — `dst_row` elements a row, `rows` rows

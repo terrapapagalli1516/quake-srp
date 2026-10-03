@@ -271,7 +271,8 @@ const COMMANDS: &[Command] = &[
         usage: "<pak> [--rates 60,144,240,480,jitter] [--only NAMES] [--markdown] [--check] \
                 | --budget [--res WxH,...] | --lerpmove [--rates LIST] [--strip DIR] \
                 | --lightstyles [--rates LIST] [--res WxH] [--threads N] [--reps N] [--secs S] [--view NAME=MAP:X,Y,Z:YAW]... \
-                | --torchflicker S [the same] [--dump DIR [--strengths LIST]]",
+                | --torchflicker S [the same] [--dump DIR [--strengths LIST]] \
+                | --bake [--threads LIST] [the same]",
         about: "play scripted scenarios at 72 Hz and each rate; how each quantity differs (FRAMERATE.md)",
         run: |a| Ok(Out::Text(framerate::cmd_framerate(&a[0], &a[1..])?)),
     },

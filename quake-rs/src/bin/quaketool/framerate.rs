@@ -9,6 +9,9 @@
 //! [--threads N] [--reps N] [--secs S] [--view NAME=MAP:X,Y,Z:YAW]...` — what
 //! the gliding light styles (`r_lerplightstyles`) cost: surfaces rebaked
 //! and the 3-D view's time per frame, standing where lights animate.
+//! `quaketool framerate <pak>[,<pak>...] --bake [--threads LIST] [the same
+//! options]` — what the frame's lit-surface bakes cost on 1 to 16 threads:
+//! the 3-D view's time and its serial part where many blocks rebake.
 //! `quaketool framerate <pak>[,<pak>...] --torchflicker S [the same options]
 //! [--dump DIR [--strengths LIST]]` — the same for the steady torches'
 //! flicker (`r_torchflicker` at strength S), standing by torches; with
@@ -1510,7 +1513,9 @@ fn write_strip(pak: &Pak, dir: &str) -> Result<(), String> {
 
 /// A view `--lightstyles` and `--torchflicker` measure: the player standing
 /// at `origin` on `maps/<map>.bsp`, looking along `yaw`, `pitch` degrees
-/// down.
+/// down — and with `fire`, firing rockets all the while (god mode, the
+/// rocket launcher in hand): explosions and muzzle flashes, the dynamic
+/// lights that rebake what they touch.
 #[derive(Clone, Debug)]
 struct StyleView {
     name: String,
@@ -1518,22 +1523,29 @@ struct StyleView {
     origin: [f32; 3],
     yaw: f32,
     pitch: f32,
+    fire: bool,
 }
 
 impl StyleView {
-    /// `NAME=MAP:X,Y,Z:YAW[:PITCH]` (`--view`).
+    /// `NAME=MAP:X,Y,Z:YAW[:PITCH[:fire]]` (`--view`).
     fn parse(s: &str) -> Result<StyleView, String> {
-        let bad = || format!("--view: expected NAME=MAP:X,Y,Z:YAW[:PITCH], got {s:?}");
+        let bad = || format!("--view: expected NAME=MAP:X,Y,Z:YAW[:PITCH[:fire]], got {s:?}");
         let (name, rest) = s.split_once('=').ok_or_else(bad)?;
         let mut parts = rest.split(':');
-        let (Some(map), Some(xyz), Some(yaw), pitch, None) = (parts.next(), parts.next(), parts.next(), parts.next(), parts.next())
+        let (Some(map), Some(xyz), Some(yaw), pitch, fire, None) =
+            (parts.next(), parts.next(), parts.next(), parts.next(), parts.next(), parts.next())
         else {
             return Err(bad());
         };
         let v: Vec<f32> = xyz.split(',').map(|p| p.trim().parse()).collect::<Result<_, _>>().map_err(|_| bad())?;
         let origin: [f32; 3] = v.try_into().map_err(|_| bad())?;
         let pitch = pitch.map_or(Ok(0.0), str::parse).map_err(|_| bad())?;
-        Ok(StyleView { name: name.into(), map: map.into(), origin, yaw: yaw.parse().map_err(|_| bad())?, pitch })
+        let fire = match fire {
+            None => false,
+            Some("fire") => true,
+            Some(_) => return Err(bad()),
+        };
+        Ok(StyleView { name: name.into(), map: map.into(), origin, yaw: yaw.parse().map_err(|_| bad())?, pitch, fire })
     }
 }
 
@@ -1567,14 +1579,30 @@ const TORCH_VIEWS: &[&str] = &[
     "e4m5-flames=e4m5:-854,-1046,-264:-135",
 ];
 
+/// The views `--bake` measures without `--view`: where a frame rebakes the
+/// most lit blocks — the torch-lit views (e1m2's start, e1m3's flames and,
+/// with `pak1.pak`, e4m5's), the light-style glide's worst (e2m5 by the
+/// start), and a rocket fight: e1m1's start, firing rockets into the room
+/// ahead.
+const BAKE_VIEWS: &[&str] = &[
+    "e1m2-start=e1m2:1496,1664,288:270",
+    "e1m3-flames=e1m3:-1352,-720,-72:90",
+    "e4m5-flames=e4m5:-854,-1046,-264:-135",
+    "e2m5-glide=e2m5:-864,-1100,-142:225",
+    "e1m1-rockets=e1m1:480,-352,88:90:0:fire",
+];
+
 /// One run's frames: per frame, the surfaces whose lightmap carries a style
 /// past 0 and those a steady torch flickers on, the blocks the surface cache
-/// baked and their texels (with the renderer's counters on), or the 3-D
-/// view's time in seconds (with them off).
+/// baked and their texels, and the 3-D view's time less its bands' (the
+/// frame's serial part: the edge scan, the surface cache, the models'
+/// setup), with the renderer's counters on; or the 3-D view's time in
+/// seconds, with them off.
 #[derive(Default)]
 struct StyleRun {
     styled: Vec<f64>,
     torchlit: Vec<f64>,
+    serial_s: Vec<f64>,
     baked: Vec<f64>,
     texels: Vec<f64>,
     view_s: Vec<f64>,
@@ -1588,6 +1616,10 @@ fn style_run(pak: &Pak, view: &StyleView, rate: Rate, vid: Vid, threads: usize, 
     s.w.renderer.set_threads(threads);
     s.teleport(view.origin, view.yaw);
     s.w.pitch = view.pitch;
+    if view.fire {
+        s.arm(IT_ROCKET_LAUNCHER);
+        s.w.in_attack = true;
+    }
     let mut run = StyleRun::default();
     let (warm, end) = (s.t + 1.0, s.t + 1.0 + secs);
     while s.t < end - 1e-9 {
@@ -1607,6 +1639,7 @@ fn style_run(pak: &Pak, view: &StyleView, rate: Rate, vid: Vid, threads: usize, 
             let st = s.w.renderer.stats_end();
             run.styled.push(st.surf_styled as f64);
             run.torchlit.push(st.surf_torchlit as f64);
+            run.serial_s.push((lap_times()[1] - st.bands_ns as f64 * 1e-9).max(0.0));
             run.baked.push(st.surf_baked as f64);
             run.texels.push(st.surf_texels_baked as f64);
         } else {
@@ -1640,6 +1673,49 @@ fn torches_report(pak: &Pak, rates: &[Rate], views: &[StyleView], res: (usize, u
     let modes = [render::TorchFlicker::OFF, strength].map(|torches| render::VideoCvars { torches, ..render::VideoCvars::MODERN });
     let title = format!("r_torchflicker at {}x{}, {threads} thread(s), {secs} s a run; 0 → {}", res.0, res.1, strength.value());
     ab_report(pak, &title, modes, rates, views, res, threads, reps, secs)
+}
+
+/// `--bake [--rates LIST] [--res WxH] [--threads LIST] [--reps N] [--secs S]
+/// [--view NAME=MAP:X,Y,Z:YAW[:PITCH[:fire]]]...`: the 2026 profile's frame
+/// (the torches flickering, the light styles gliding) at each view, rate and
+/// thread count: the blocks rebaked and their texels per frame, the 3-D
+/// view's median and p95 ms (over `reps` runs of each thread count,
+/// interleaved, the counters off) and its serial part — the view's time less
+/// its bands' wall time, median, from a run with the counters on — as ms and
+/// as a share of the view. What the lit-surface bakes cost on 1 to 16
+/// threads.
+#[allow(clippy::too_many_arguments)]
+fn bake_report(pak: &Pak, rates: &[Rate], views: &[StyleView], res: (usize, usize), threads: &[usize], reps: usize, secs: f64) -> String {
+    let mut o = String::new();
+    let vid = Vid { width: res.0, height: res.1, display_aspect: res.0 as f64 / res.1 as f64, video: render::VideoCvars::MODERN, ..VID };
+    let mean = |xs: &[f64]| xs.iter().sum::<f64>() / xs.len().max(1) as f64;
+    let _ = writeln!(o, "lit-surface bakes at {}x{}, the 2026 frame, {secs} s a run, threads {threads:?}", res.0, res.1);
+    quake_rs::client::set_lap_hook(Some(lap));
+    for view in views {
+        if pak.read_file(&format!("maps/{}.bsp", view.map)).ok().flatten().is_none() {
+            let _ = writeln!(o, "{}: maps/{}.bsp is not in the pak (skipped)", view.name, view.map);
+            continue;
+        }
+        let _ = writeln!(o, "{} — maps/{}.bsp at {:?} looking {}{}", view.name, view.map, view.origin, view.yaw, if view.fire { ", firing rockets" } else { "" });
+        for &rate in rates {
+            let counts: Vec<StyleRun> = threads.iter().map(|&t| style_run(pak, view, rate, vid, t, secs, true)).collect();
+            let mut times: Vec<Vec<f64>> = vec![Vec::new(); threads.len()];
+            for _ in 0..reps {
+                for (k, &t) in threads.iter().enumerate() {
+                    times[k].extend(style_run(pak, view, rate, vid, t, secs, false).view_s);
+                }
+            }
+            let _ = writeln!(o, "  {:>6} Hz: blocks rebaked/frame {}; texels baked/frame {}", rate.label(), fmt(mean(&counts[0].baked)), fmt(mean(&counts[0].texels)));
+            for (k, &t) in threads.iter().enumerate() {
+                let (med, p95) = median_p95(&mut times[k]);
+                let (serial, _) = median_p95(&mut counts[k].serial_s.clone());
+                let _ = writeln!(o, "    {t:>2} threads: 3-D view ms/frame median {med:.3}, p95 {p95:.3}; serial {serial:.3} ms ({:.0}%)  ({} frames)",
+                    100.0 * serial / med.max(1e-9), times[k].len());
+            }
+        }
+    }
+    quake_rs::client::set_lap_hook(None);
+    o
 }
 
 /// Per view and rate, the two video settings `modes`, A → B: the styled and
@@ -1858,6 +1934,8 @@ pub fn cmd_framerate(pak_path: &str, rest: &[String]) -> Result<String, String> 
     let (mut lerpmove, mut strip) = (false, None::<String>);
     // `--lightstyles`' own: 72 Hz is a rate like any other there.
     let (mut lightstyles, mut views, mut style_rates) = (false, Vec::new(), vec![Rate::Hz(72), Rate::Hz(480)]);
+    // `--bake`'s: the thread counts.
+    let (mut bake, mut thread_list) = (false, vec![1usize, 2, 4, 8, 16]);
     // `--torchflicker`'s: the strength, and `--dump`'s directory and strengths.
     let (mut torchflicker, mut dump, mut strengths) = (None::<f32>, None::<String>, vec![0.0, 0.5, 1.0]);
     // `--exactpersp`'s: spans against exact perspective.
@@ -1891,6 +1969,7 @@ pub fn cmd_framerate(pak_path: &str, rest: &[String]) -> Result<String, String> 
             }
             "--lightstyles" => lightstyles = true,
             "--exactpersp" => exactpersp = true,
+            "--bake" => bake = true,
             "--torchflicker" => {
                 let v = rest.get(i + 1).ok_or("--torchflicker needs a strength")?;
                 torchflicker = Some(v.parse().map_err(|_| format!("--torchflicker: bad strength {v:?}"))?);
@@ -1913,7 +1992,10 @@ pub fn cmd_framerate(pak_path: &str, rest: &[String]) -> Result<String, String> 
                 let v = rest.get(i + 1).ok_or_else(|| format!("{} needs a number", rest[i]))?;
                 let bad = || format!("{}: bad number {v:?}", rest[i]);
                 match rest[i].as_str() {
-                    "--threads" => threads = v.parse().ok().filter(|&n| n > 0).ok_or_else(bad)?,
+                    "--threads" => {
+                        thread_list = v.split(',').map(|t| t.parse().ok().filter(|&n| n > 0).ok_or_else(bad)).collect::<Result<_, _>>()?;
+                        threads = thread_list[0];
+                    }
                     "--reps" => reps = v.parse().ok().filter(|&n| n > 0).ok_or_else(bad)?,
                     _ => secs = v.parse().ok().filter(|&s: &f64| s > 0.0).ok_or_else(bad)?,
                 }
@@ -1943,6 +2025,14 @@ pub fn cmd_framerate(pak_path: &str, rest: &[String]) -> Result<String, String> 
         }
         let size = super::parse_res(res.split(',').next().unwrap_or("1920x1080"), render::VideoCvars::MODERN)?;
         return Ok(persp_report(&pak, &style_rates, &views, size, threads, reps, secs));
+    }
+    if bake {
+        style_rates.retain(|r| matches!(r, Rate::Hz(_)));
+        if views.is_empty() {
+            views = BAKE_VIEWS.iter().map(|v| StyleView::parse(v)).collect::<Result<_, _>>()?;
+        }
+        let size = super::parse_res(res.split(',').next().unwrap_or("1920x1080"), render::VideoCvars::MODERN)?;
+        return Ok(bake_report(&pak, &style_rates, &views, size, &thread_list, reps, secs));
     }
     if let Some(strength) = torchflicker {
         style_rates.retain(|r| matches!(r, Rate::Hz(_)));
