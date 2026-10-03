@@ -737,11 +737,29 @@ pub fn backtile_for(
     gfx_wad.and_then(|g| g.qpic("backtile").ok())
 }
 
+/// The frame's 3-D view straight into `img` at its place
+/// ([`render::Renderer::render_into`]), and with 2026's status bar overlay
+/// the world under it, beside the bar ([`draw_world_below`]'s windows), in
+/// the same pass: one round of the renderer's threads a frame, where the
+/// view and then each window were three. The same pixels.
+pub fn draw_view(renderer: &mut render::Renderer, scene: &render::Scene, refdef: &render::Refdef, img: &mut render::Image) {
+    let bar = render::status_bar_rect(img.w, img.h, refdef.sb_lines);
+    // (At most three parts: no list on the heap.)
+    let mut windows = [render::ViewRect { x: 0, y: 0, w: 0, h: 0 }; 3];
+    let mut n = 0;
+    for part in refdef.below_parts(bar) {
+        windows[n] = part;
+        n += 1;
+    }
+    renderer.render_into_with(scene, &windows[..n], img);
+}
+
 /// EXTRA (2026's status bar overlay, [`render::SbarLayout::Overlay`]), not
 /// id: the world under the view, beside the status bar, drawn into `img` once
 /// the view is — each part of [`render::Refdef::below_parts`] a window onto
 /// `scene`'s view ([`render::Renderer::render_window`]), so no pixel of the
-/// view changes. Nothing without [`render::Refdef::below`].
+/// view changes. Nothing without [`render::Refdef::below`]. ([`draw_view`]
+/// draws the view and these in one pass.)
 pub fn draw_world_below(renderer: &mut render::Renderer, scene: &render::Scene, refdef: &render::Refdef, img: &mut render::Image) {
     let bar = render::status_bar_rect(img.w, img.h, refdef.sb_lines);
     for part in refdef.below_parts(bar) {

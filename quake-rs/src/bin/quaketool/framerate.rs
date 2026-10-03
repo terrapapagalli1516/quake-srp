@@ -1814,8 +1814,9 @@ fn serial_report(pak: &Pak, rates: &[Rate], views: &[StyleView], res: (usize, us
                 let ms = |f: &dyn Fn(&render::RenderStats) -> u64| st.iter().map(|s| f(s) as f64).sum::<f64>() / 1e6 / st.len().max(1) as f64;
                 let _ = writeln!(
                     o,
-                    "    {t:>2} threads: frame {frame:.3} ms (p95 {frame95:.3}) = game {game:.3} + 3-D {view3d:.3} + 2-D {layer2d:.3}; counted: {:.1} views, {:.3} ms, alone {:.3} = setup {:.3} + walk {:.3} + brush {:.3} + scan {:.3} + lookups {:.3} + entities {:.3}; bands {:.3} (their bakes {:.3}, every thread's)",
+                    "    {t:>2} threads: frame {frame:.3} ms (p95 {frame95:.3}) = game {game:.3} + 3-D {view3d:.3} + 2-D {layer2d:.3}; counted: {:.1} views in {:.1} rounds of threads, {:.3} ms, alone {:.3} = setup {:.3} + walk {:.3} + brush {:.3} + scan {:.3} + lookups {:.3} + entities {:.3}; bands {:.3} (their bakes {:.3}, every thread's)",
                     ms(&|s| s.views) * 1e6,
+                    ms(&|s| s.thread_rounds) * 1e6,
                     ms(&|s| s.view_ns),
                     ms(&|s| s.view_ns.saturating_sub(s.bands_ns)),
                     ms(&|s| s.view_setup_ns),

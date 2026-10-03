@@ -987,7 +987,8 @@ pub struct Renderer {
     /// id's z-buffer, `d_pzbuffer`: the 16-bit 1/z of every pixel of the view,
     /// `(1/z * 0x8000 * 0x10000) >> 16` (larger is nearer). Never cleared:
     /// every frame's world spans write all of it (`D_DrawZSpans`), and the
-    /// entities test and write it. The last view's is its first `zlen`.
+    /// entities test and write it. A frame's views have theirs one after
+    /// the other in it; the first's is its first `zlen`.
     zbuf: Vec<i16>,
     zlen: usize,
     /// `D_WarpScreen`'s tables, kept across underwater frames.
@@ -1095,7 +1096,7 @@ impl Renderer {
         let (w, h) = scene.options.video.clamp_to_max(scene.width, scene.height);
         // The frame's pixels, on a spare buffer (see [`recycle_image`]).
         let mut image = Image::reused_uncleared(w, h);
-        self.draw(scene, w, h, &mut image.pixels, w, 0);
+        self.draw(&[Placed::at(scene, 0, 0)], &mut image.pixels, w);
         image
     }
 
@@ -1106,16 +1107,43 @@ impl Renderer {
     /// as it was. A view that does not fit in `screen` (never the client's)
     /// is drawn apart and copied in as far as it fits.
     pub fn render_into(&mut self, scene: &Scene, screen: &mut Image) {
+        self.render_into_with(scene, &[], screen);
+    }
+
+    /// [`Renderer::render_into`], and in the same pass of the renderer's
+    /// threads the world under the view in each of `windows`
+    /// ([`Renderer::render_window`]'s rectangles: 2026's status bar overlay,
+    /// the corners beside the bar) — the same pixels as drawing the view and
+    /// then each window, in one round of threads instead of one each.
+    pub fn render_into_with(&mut self, scene: &Scene, windows: &[ViewRect], screen: &mut Image) {
         let (w, h) = scene.options.video.clamp_to_max(scene.width, scene.height);
         let (x, y) = scene.options.screen.map_or((0, 0), |p| (p.x, p.y));
-        let sw = screen.w;
-        let fits = x + w <= sw && y + h <= screen.h && screen.pixels.len() >= sw.saturating_mul(screen.h);
-        if fits {
-            self.draw(scene, w, h, &mut screen.pixels[y * sw..(y + h) * sw], sw, x);
-        } else {
+        let (sw, sh) = (screen.w, screen.h);
+        let whole = screen.pixels.len() >= sw.saturating_mul(sh);
+        if !(whole && x + w <= sw && y + h <= sh) {
             let view = self.render(scene);
             screen.blit(&view, x, y, self.threads());
             recycle_image(view);
+            for &part in windows {
+                self.render_window(scene, part, screen);
+            }
+            return;
+        }
+        let (mut views, mut apart) = (vec![Placed::at(scene, x, y)], Vec::new());
+        for &part in windows {
+            let Some(window) = window_scene(scene, part, screen) else { continue };
+            // A window the cvars would clamp, or past the screen (never the
+            // overlay's): on its own, after.
+            let unclamped = window.options.video.clamp_to_max(part.w, part.h) == (part.w, part.h);
+            if unclamped && part.x + part.w <= sw && part.y + part.h <= sh {
+                views.push(Placed { scene: window, x: part.x, y: part.y });
+            } else {
+                apart.push(part);
+            }
+        }
+        self.draw(&views, &mut screen.pixels, sw);
+        for part in apart {
+            self.render_window(scene, part, screen);
         }
     }
 
@@ -1129,32 +1157,23 @@ impl Renderer {
     /// the view's place (none: the top-left corner of a screen of `screen`'s
     /// size). A part above or left of the view draws nothing.
     pub fn render_window(&mut self, scene: &Scene, part: ViewRect, screen: &mut Image) {
-        let (w, h) = scene.options.video.clamp_to_max(scene.width, scene.height);
-        let place = scene.options.screen.unwrap_or(ScreenPlace { x: 0, y: 0, vid_w: screen.w, vid_h: screen.h });
-        if part.x < place.x || part.y < place.y {
-            return;
+        if let Some(window) = window_scene(scene, part, screen) {
+            self.render_into(&window, screen);
         }
-        let window = ViewWindow { x: part.x - place.x, y: part.y - place.y, view_w: w, view_h: h };
-        let options = RenderOptions {
-            screen: Some(ScreenPlace { x: part.x, y: part.y, ..place }),
-            window: Some(window),
-            ..scene.options
-        };
-        self.render_into(&Scene { width: part.w, height: part.h, options, ..*scene }, screen);
     }
 
     /// [`Renderer::render`] with the world continued `below` rows under the
     /// view, its full width (one window, [`Renderer::render_window`]'s): a
     /// `w x (h + below)` image whose first `h` rows are exactly `render`'s
-    /// (`below` 0: `render` itself).
+    /// (`below` 0: `render` itself), the view and the window drawn in one
+    /// round of the threads.
     /// The underwater warp's source when the 2026 overlay draws under the
     /// view ([`Renderer::warp_into`]'s `below`), so the wobble runs on into
     /// the corners from the view's own rows.
     pub fn render_extended(&mut self, scene: &Scene, below: usize) -> Image {
         let (w, h) = scene.options.video.clamp_to_max(scene.width, scene.height);
         let mut image = Image::reused_uncleared(w, h + below);
-        let (view_rows, below_rows) = image.pixels.split_at_mut(w * h);
-        self.draw(scene, w, h, view_rows, w, 0);
+        let mut views = vec![Placed::at(scene, 0, 0)];
         if below > 0 {
             let place = scene.options.screen.unwrap_or(ScreenPlace { x: 0, y: 0, vid_w: w, vid_h: h + below });
             let options = RenderOptions {
@@ -1162,67 +1181,92 @@ impl Renderer {
                 window: Some(ViewWindow { x: 0, y: h, view_w: w, view_h: h }),
                 ..scene.options
             };
-            self.draw(&Scene { width: w, height: below, options, ..*scene }, w, below, below_rows, w, 0);
+            views.push(Placed { scene: Scene { width: w, height: below, options, ..*scene }, x: 0, y: h });
         }
+        self.draw(&views, &mut image.pixels, w);
         image
     }
 
-    /// The frame of `scene`, `w x h` (already clamped), into `rows`: `stride`
-    /// pixels a row, the view at column `x0` of each. What the whole frame
-    /// decides is done first — the world's edges, spans and surfaces (the
-    /// surface cache looked up), the entities up to their rasterisers — and
-    /// then, on the renderer's threads in one round, the blocks the cache
-    /// lacked are baked and every band of the view draws from it all.
-    fn draw(&mut self, scene: &Scene, w: usize, h: usize, rows: &mut [u8], stride: usize, x0: usize) {
-        if w == 0 || h == 0 {
-            return;
+    /// A frame's `views` into `rows` (`stride` pixels a row), each at its
+    /// place: in one round of the threads, or, should one overlap an
+    /// earlier one ([`band::Target::bands_with`]; a frame's view and its
+    /// windows never do), those before it first and the rest after.
+    fn draw(&mut self, mut views: &[Placed], rows: &mut [u8], stride: usize) {
+        while !views.is_empty() {
+            let together = (1..views.len())
+                .find(|&k| views[..k].iter().any(|v| !v.target(&mut []).bands_with(&views[k].target(&mut []))))
+                .unwrap_or(views.len());
+            let (round, rest) = views.split_at(together);
+            self.draw_round(round, rows, stride);
+            views = rest;
         }
+    }
+
+    /// The views of one round into `rows` (`stride` pixels a row): they
+    /// share no pixel, and are views of one world at one time (a frame's
+    /// view and its windows). What each view decides whole is done first,
+    /// view after view — the world's edges, spans and surfaces (the surface
+    /// cache looked up), the entities up to their rasterisers — and then, on
+    /// the renderer's threads in one round, the blocks the cache lacked are
+    /// baked and every band of every view draws from it all.
+    fn draw_round(&mut self, views: &[Placed], rows: &mut [u8], stride: usize) {
+        let Some(first) = views.first().map(|v| &v.scene) else { return };
         let t_view = self.prof.now();
-        if self.map != Some(MapShape::of(scene.world)) {
-            self.begin_map(scene.world);
+        if self.map != Some(MapShape::of(first.world)) {
+            self.begin_map(first.world);
         }
-        // The z-buffer is as large as the largest view drawn and never
-        // shrinks: the 2026 overlay's small windows follow the frame's view
-        // every frame, and growing back would fill megabytes with zeros that
-        // the spans overwrite.
-        let pixels = w.saturating_mul(h);
+        // The z-buffers, one after the other in one buffer as large as the
+        // largest frame drawn. It never shrinks: growing back would fill
+        // megabytes with zeros that the spans overwrite.
+        let pixels: usize = views.iter().map(|v| v.size().0.saturating_mul(v.size().1)).sum();
         if self.zbuf.len() < pixels {
             self.zbuf.resize(pixels, 0);
         }
-        self.zlen = pixels;
+        self.zlen = views[0].size().0.saturating_mul(views[0].size().1);
         // EXTRA (r_torchflicker): the steady torches, found the first frame
         // the extra is on, at their scales for this frame's time.
-        let video = scene.options.video;
+        let video = first.options.video;
         let torches = if video.torches.is_off() {
             None
         } else {
             let threads = self.workers.threads();
-            let set = self.torches.get_or_insert_with(|| torch::TorchSet::build(scene.world, threads));
-            set.animate(scene.time, video.lightstyles, video.torches);
+            let set = self.torches.get_or_insert_with(|| torch::TorchSet::build(first.world, threads));
+            set.animate(first.time, video.lightstyles, video.torches);
             Some(&*set)
         };
-        let frame = Frame::with_torches(scene, w, h, torches);
         if let Some(t) = t_view {
             let ns = t.elapsed().as_nanos() as u64;
             self.prof.add(|s| s.view_setup_ns += ns);
         }
-        // The blocks the surface cache does not have are the frame's bakes,
-        // done by the threads that draw it before their bands.
+        // Each view up to its bands. The blocks the surface cache does not
+        // have are the round's bakes, done by its threads before their bands.
         self.surfaces.begin_frame();
         let mut jobs = Vec::new();
-        let Some(world) = self.edge.build(&frame, &mut self.surfaces, &mut jobs, &mut self.prof) else {
-            return;
-        };
-        let bakes = surf::Bakes::new(jobs);
-        let t_entities = self.prof.now();
-        let entities = Entities::prepare(&frame, &mut self.prof);
-        if let Some(t) = t_entities {
-            let ns = t.elapsed().as_nanos() as u64;
-            self.prof.add(|s| s.entity_setup_ns += ns);
+        let (mut ready, mut targets) = (Vec::new(), Vec::new());
+        let mut z = &mut self.zbuf[..pixels];
+        for view in views {
+            let (w, h) = view.size();
+            let (mine, rest) = std::mem::take(&mut z).split_at_mut(w.saturating_mul(h));
+            z = rest;
+            if w == 0 || h == 0 {
+                continue;
+            }
+            let frame = Frame::with_torches(&view.scene, w, h, torches);
+            let Some(world) = self.edge.build(&frame, &mut self.surfaces, &mut jobs, &mut self.prof) else {
+                continue;
+            };
+            let t_entities = self.prof.now();
+            let entities = Entities::prepare(&frame, &mut self.prof);
+            if let Some(t) = t_entities {
+                let ns = t.elapsed().as_nanos() as u64;
+                self.prof.add(|s| s.entity_setup_ns += ns);
+            }
+            ready.push((frame, world, entities));
+            targets.push(view.target(mine));
         }
+        let bakes = surf::Bakes::new(jobs);
         let t = self.prof.now();
         let (prof, workers) = (&self.prof, self.workers);
-        let whole = band::Band::placed(w, rows, stride, x0, &mut self.zbuf[..pixels]);
         let start = || {
             let (t, mut prof) = (prof.now(), prof.for_band());
             bakes.work();
@@ -1232,9 +1276,10 @@ impl Renderer {
             }
             prof
         };
-        let bands = workers.run(whole, h, start, |band, prof| {
+        let bands = workers.run(rows, stride, targets, start, |view, band, prof| {
+            let (frame, world, entities) = &ready[view];
             let tw = prof.now();
-            let drawn = world.draw_band(band, &frame, &bakes);
+            let drawn = world.draw_band(band, frame, &bakes);
             if let Some(tw) = tw {
                 let ns = tw.elapsed().as_nanos() as u64;
                 prof.add(|s| {
@@ -1250,18 +1295,22 @@ impl Renderer {
             self.prof.absorb(b);
         }
         self.surfaces.baked(&bakes.finish());
-        self.edge.recycle(world);
+        let drawn = ready.len() as u64;
+        for (_, world, _) in ready {
+            self.edge.recycle(world);
+        }
         if let Some(t) = t {
             let ns = t.elapsed().as_nanos() as u64;
             self.prof.add(|s| {
                 s.bands_ns += ns;
                 s.band_threads += threads;
+                s.thread_rounds += u64::from(threads > 1);
             });
         }
         if let Some(t) = t_view {
             let ns = t.elapsed().as_nanos() as u64;
             self.prof.add(|s| {
-                s.views += 1;
+                s.views += drawn;
                 s.view_ns += ns;
             });
         }
@@ -1281,7 +1330,7 @@ impl Renderer {
         self.workers = band::Workers::new(threads);
     }
 
-    /// The z-buffer the last frame left.
+    /// The z-buffer the last frame's (first) view left.
     #[cfg(test)]
     pub(crate) fn zbuf(&self) -> &[i16] {
         &self.zbuf[..self.zlen]
@@ -1308,6 +1357,45 @@ impl Renderer {
         }
         recycle_image(view);
     }
+}
+
+/// One view of a frame and where it is drawn: `scene`, with its top-left
+/// corner at column `x`, row `y` of the rows the frame is drawn into.
+struct Placed<'a> {
+    scene: Scene<'a>,
+    x: usize,
+    y: usize,
+}
+
+impl<'a> Placed<'a> {
+    fn at(scene: &Scene<'a>, x: usize, y: usize) -> Placed<'a> {
+        Placed { scene: *scene, x, y }
+    }
+
+    /// The view's size as drawn: no mode is larger than the cvars allow.
+    fn size(&self) -> (usize, usize) {
+        self.scene.options.video.clamp_to_max(self.scene.width, self.scene.height)
+    }
+
+    /// The view as the threads' round takes it, with its `1/z`.
+    fn target<'z>(&self, z: &'z mut [i16]) -> band::Target<'z> {
+        let (w, h) = self.size();
+        band::Target { w, h, x0: self.x, y0: self.y, z }
+    }
+}
+
+/// The scene of a window onto `scene`'s view ([`Renderer::render_window`]):
+/// the rectangle `part` of `screen`, projected as the view. `None` for a
+/// part above or left of the view's place.
+fn window_scene<'a>(scene: &Scene<'a>, part: ViewRect, screen: &Image) -> Option<Scene<'a>> {
+    let (w, h) = scene.options.video.clamp_to_max(scene.width, scene.height);
+    let place = scene.options.screen.unwrap_or(ScreenPlace { x: 0, y: 0, vid_w: screen.w, vid_h: screen.h });
+    if part.x < place.x || part.y < place.y {
+        return None;
+    }
+    let window = ViewWindow { x: part.x - place.x, y: part.y - place.y, view_w: w, view_h: h };
+    let options = RenderOptions { screen: Some(ScreenPlace { x: part.x, y: part.y, ..place }), window: Some(window), ..scene.options };
+    Some(Scene { width: part.w, height: part.h, options, ..*scene })
 }
 
 /// A frame's entities ready for the bands: `R_DrawEntitiesOnList`'s alias
@@ -1981,6 +2069,76 @@ mod tests {
         let moved = Scene { options: RenderOptions { screen: Some(ScreenPlace { x: 10, y: 10, vid_w: vw, vid_h: vh + 40 }), ..place }, ..view };
         r.render_window(&moved, crate::screen::ViewRect { x: 0, y: 0, w: 10, h: 10 }, &mut none);
         assert!(none.pixels.iter().all(|&p| p == 1));
+    }
+
+    #[test]
+    fn a_view_and_its_windows_in_one_round_are_the_view_and_then_each_window() {
+        // render_into_with draws the view and the overlay's windows under it
+        // in one round of the threads: the screen, the z of the view and the
+        // surface cache are what render_into and then render_window for each
+        // leave — a lit room with a dynamic light on its floor (blocks baked
+        // in the round, some asked for by the view and by a window), a model
+        // and particles — on any thread count. The third window shares rows
+        // with the two corners only in part (a view not standing on the
+        // status bar: the strip between it and the bar), and the fourth
+        // lies over the first: that one is drawn after, in a second round.
+        let bsp = fixtures::lightmapped_demo_room(100, 200);
+        let pal = fixtures::ramp_palette();
+        let cm: Vec<u8> = (0..light::COLORMAP_LEN).map(|i| (i % 256 + 3 * (i / 256)) as u8).collect();
+        let mdl = fixtures::tiny_mdl();
+        let cam = Camera::looking_at([-200.0, -150.0, 60.0], [0.0, 0.0, -100.0], 90.0);
+        let models = [ModelInstance::with_frame(&mdl, [-80.0, 0.0, -90.0], 30.0, 0, [200, 40, 40])];
+        let particles: Vec<(Vec3, u8)> = (0..100).map(|i| ([-120.0 + 2.0 * i as f32, 0.0, -100.0], 77)).collect();
+        let dlights = [crate::dlight::DynamicLight::new([-60.0, -40.0, -100.0], 200.0, f32::MAX, 0.0, 0.0, 0)];
+        let mut styles = NEUTRAL_LIGHTSTYLE_SCALES;
+        styles[1] = 0.5;
+        let (sw, sh, vw, vh) = (200, 150, 180, 100);
+        let options = RenderOptions { screen: Some(ScreenPlace { x: 10, y: 6, vid_w: sw, vid_h: sh }), ..RenderOptions::default() };
+        let view = Scene {
+            time: 0.7,
+            models: &models,
+            particles: &particles,
+            dlights: &dlights,
+            light_styles: &styles,
+            colormap: Some(&cm),
+            options,
+            ..Scene::new(&bsp, cam, vw, vh, &pal)
+        };
+        let rect = |x, y, w, h| crate::screen::ViewRect { x, y, w, h };
+        let corners = [rect(10, 106, 50, 40), rect(140, 106, 50, 40)];
+        let with_middle = [corners[0], corners[1], rect(60, 106, 80, 12)];
+        let with_one_over = [corners[0], corners[1], rect(60, 106, 80, 12), rect(40, 120, 30, 20)];
+        for windows in [&corners[..], &with_middle[..], &with_one_over[..]] {
+            let one_by_one = |threads: usize| {
+                let mut r = Renderer::new();
+                r.set_threads(threads);
+                let mut screen = Image::new(sw, sh, 1);
+                r.render_into(&view, &mut screen);
+                let z = r.zbuf().to_vec();
+                for &part in windows {
+                    r.render_window(&view, part, &mut screen);
+                }
+                (screen, z, r.surfaces.block_entries())
+            };
+            let (screen, z, cache) = one_by_one(1);
+            assert!(screen.pixels[(106 + 20) * sw + 30] != 1 && screen.pixels[(106 + 20) * sw + 100] == 1, "the corners drawn");
+            for threads in [1, 2, 4, 8] {
+                let mut r = Renderer::new();
+                r.set_threads(threads);
+                r.stats_begin();
+                let mut together = Image::new(sw, sh, 1);
+                r.render_into_with(&view, windows, &mut together);
+                let stats = r.stats_end();
+                assert!(together.pixels == screen.pixels, "{threads} threads, {} windows: the screen", windows.len());
+                // (A window drawn after, in its own round, has the z-buffer last.)
+                assert!(windows.len() > 3 || r.zbuf() == z, "{threads} threads: the view's z");
+                assert!(r.surfaces.block_entries() == cache, "{threads} threads: the surface cache");
+                assert_eq!(stats.views as usize, 1 + windows.len());
+                let rounds = if threads == 1 { 0 } else { 1 + u64::from(windows.len() > 3) };
+                assert_eq!(stats.thread_rounds, rounds, "{threads} threads, {} windows", windows.len());
+                assert!(one_by_one(threads).0.pixels == screen.pixels, "{threads} threads, one by one");
+            }
+        }
     }
 
     #[test]

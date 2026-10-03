@@ -102,8 +102,11 @@ pub struct RenderStats {
     /// entities, on every thread): with one thread their sum, with several
     /// less — the timers above add each thread's time.
     pub bands_ns: u64,
-    /// The threads that drew the bands, summed over the frames.
+    /// The threads that drew the bands, summed over the frames, and the
+    /// rounds of threads started for them (none with one thread): each wakes
+    /// its helpers, asleep since the last frame on a display's pace.
     pub band_threads: u64,
+    pub thread_rounds: u64,
     /// The views drawn (`R_RenderView`s: a frame's view, and with the 2026
     /// status bar overlay the windows beside the bar), and their whole wall
     /// time: less `bands_ns`, what a frame does on the calling thread alone.
@@ -134,7 +137,7 @@ impl RenderStats {
         surf_torchlit: 0, surf_bake_ns: 0,
         alias_models: 0, alias_accepted: 0, alias_tris: 0,
         edges_emitted: 0, surfs_emitted: 0, spans_emitted: 0, edges_peak: 0, surfs_peak: 0,
-        bands_ns: 0, band_threads: 0,
+        bands_ns: 0, band_threads: 0, thread_rounds: 0,
         views: 0, view_ns: 0, view_setup_ns: 0, surf_lookup_ns: 0, entity_setup_ns: 0,
     };
 
@@ -148,7 +151,7 @@ impl RenderStats {
             world_surf_ns, surf_cache_hits, surf_baked, surf_bypass_baked, surf_texels_baked, surf_styled,
             surf_torchlit, surf_bake_ns,
             alias_models, alias_accepted, alias_tris, edges_emitted, surfs_emitted, spans_emitted,
-            edges_peak, surfs_peak, bands_ns, band_threads,
+            edges_peak, surfs_peak, bands_ns, band_threads, thread_rounds,
             views, view_ns, view_setup_ns, surf_lookup_ns, entity_setup_ns,
         } = *o;
         for (sum, add) in [
@@ -172,7 +175,7 @@ impl RenderStats {
             (&mut self.alias_tris, alias_tris), (&mut self.edges_emitted, edges_emitted),
             (&mut self.surfs_emitted, surfs_emitted), (&mut self.spans_emitted, spans_emitted),
             (&mut self.bands_ns, bands_ns), (&mut self.band_threads, band_threads),
-            (&mut self.views, views), (&mut self.view_ns, view_ns),
+            (&mut self.thread_rounds, thread_rounds), (&mut self.views, views), (&mut self.view_ns, view_ns),
             (&mut self.view_setup_ns, view_setup_ns), (&mut self.surf_lookup_ns, surf_lookup_ns),
             (&mut self.entity_setup_ns, entity_setup_ns),
         ] {

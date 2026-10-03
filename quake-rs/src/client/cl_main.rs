@@ -33,7 +33,7 @@ use super::view::{
     BONUS_PERCENT, FACE_ANIM_TIME, V_KICKTIME,
 };
 use super::{
-    backtile_for, color_for_name, draw_world_below, lap, render_options, s_update, view_hook, warp_below, ClientFrame,
+    backtile_for, color_for_name, draw_view, lap, render_options, s_update, view_hook, warp_below, ClientFrame,
     Listener, Phase, SoundCall, Vid, Walk,
 };
 
@@ -1168,8 +1168,7 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
     let warp_view = if dowarp {
         Some(w.renderer.render_extended(&scene, below))
     } else {
-        w.renderer.render_into(&scene, &mut img);
-        draw_world_below(&mut w.renderer, &scene, &refdef, &mut img);
+        draw_view(&mut w.renderer, &scene, &refdef, &mut img);
         None
     };
     lap(Phase::Render3d);
