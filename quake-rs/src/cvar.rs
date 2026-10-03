@@ -26,7 +26,7 @@
 use crate::client::in_win::JoyCvars;
 use crate::client::lerpmodels::LerpModels;
 use crate::client::lerpmove::LerpMove;
-use crate::render::Threads;
+use crate::render::{SkyScroll, Threads};
 use crate::snd::SoundMode;
 use crate::screen::{VIEWSIZE_DEFAULT, VIEWSIZE_MAX, VIEWSIZE_MIN, VIEWSIZE_STEP};
 use crate::vm::{MAX_EDICTS, MAX_EDICTS_LIMIT};
@@ -134,6 +134,10 @@ pub struct Cvars {
     /// between its frames ([`LerpModels::Smooth`], `client::lerpmodels`)
     /// instead of snapping to each one, as id's client does.
     pub lerpmodels: LerpModels,
+    /// `r_fluidsky`: the sky's cloud layer scrolls by its exact offset
+    /// ([`SkyScroll::Fluid`], `render::sky`) instead of `R_MakeSky`'s whole
+    /// texels, eight jumps a second.
+    pub sky: SkyScroll,
     /// `snd_modern`: which of id's mixers plays ([`SoundMode`]): the 2026 one
     /// (its faults fixed, `snd::Fixes::ALL`, at the device's rate) instead
     /// of id's as written at 11025 Hz.
@@ -204,6 +208,7 @@ impl Cvars {
             alt_enter: false,
             lerpmove: LerpMove::Classic,
             lerpmodels: LerpModels::Classic,
+            sky: SkyScroll::Classic,
             sound: SoundMode::Classic,
             threads: Threads::Auto,
             max_edicts: MAX_EDICTS as u32,
@@ -217,14 +222,14 @@ impl Cvars {
     /// machine. A frame every display refresh, the window filled at native
     /// resolution in whole chunky pixels with a Hor+ field of view, the 2-D
     /// layer at id's proportions, the crosshair, monsters that glide between
-    /// their steps and whose animation blends between frames, Always Run,
-    /// mouse look, Space to swim up, Alt+Enter for fullscreen and touch controls
-    /// on a phone. Show FPS and exact perspective stay off: the readout is
-    /// clutter, and id's 16-pixel spans are part of the look. A gamepad
-    /// works as a modern twin-stick pad ([`JoyCvars::modern`]). The edict
-    /// pool grows past id's 600 (`max_edicts`, QuakeSpasm's own default) —
-    /// invisible on every map id or the mission packs shipped, room for
-    /// bigger ones.
+    /// their steps and whose animation blends between frames, clouds that
+    /// glide across the sky, Always Run, mouse look, Space to swim up,
+    /// Alt+Enter for fullscreen and touch controls on a phone. Show FPS and
+    /// exact perspective stay off: the readout is clutter, and id's 16-pixel
+    /// spans are part of the look. A gamepad works as a modern twin-stick pad
+    /// ([`JoyCvars::modern`]). The edict pool grows past id's 600
+    /// (`max_edicts`, QuakeSpasm's own default) — invisible on every map id
+    /// or the mission packs shipped, room for bigger ones.
     pub fn modern() -> Cvars {
         Cvars {
             cl_forwardspeed: 400.0,
@@ -240,6 +245,7 @@ impl Cvars {
             joy: JoyCvars::modern(),
             lerpmove: LerpMove::Smooth,
             lerpmodels: LerpModels::Smooth,
+            sky: SkyScroll::Fluid,
             sound: SoundMode::Modern,
             max_edicts: 8192,
             touch: true,
@@ -473,6 +479,9 @@ pub const CVARS: &[Cvar] = &[
     Cvar { name: "r_lerpmodels", archive: true, departure: true, help: "animation frames blend together",
         get: |c| flag(c.lerpmodels == LerpModels::Smooth),
         set: |c, v| c.lerpmodels = if on(v) { LerpModels::Smooth } else { LerpModels::Classic } },
+    Cvar { name: "r_fluidsky", archive: true, departure: true, help: "sky clouds glide, not texel steps",
+        get: |c| flag(c.sky == SkyScroll::Fluid),
+        set: |c, v| c.sky = if on(v) { SkyScroll::Fluid } else { SkyScroll::Classic } },
     Cvar { name: "snd_modern", archive: true, departure: true, help: "2026 mixer: device rate, fixes",
         get: |c| flag(c.sound == SoundMode::Modern),
         set: |c, v| c.sound = if on(v) { SoundMode::Modern } else { SoundMode::Classic } },

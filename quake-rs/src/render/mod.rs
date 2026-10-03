@@ -94,6 +94,7 @@ pub use view::{
 };
 pub use vis::point_in_leaf;
 pub use band::Threads;
+pub use sky::SkyScroll;
 pub use video::{FovMode, VideoCvars, HIRES_MAXHEIGHT, HIRES_MAXWIDTH, MAXHEIGHT, MAXWIDTH};
 pub use world::{BModelInstance, ExternalBModel};
 pub(crate) use band::map_rows;
