@@ -129,6 +129,14 @@ A gamepad or a touch screen also works. The mouse wheel switches weapons in 2026
 1996 controls (the arrows, no mouse look, no gamepad, Always Run off) type `idcontrols` in
 the console.
 
+**If the mouse feels slow on a Mac:** macOS 26 hands a browser one mouse move per screen
+refresh, and of a fast mouse's reports in between only one seems to count, so a 1000 Hz
+gaming mouse turns about an eighth as far on a 120 Hz screen and a sixteenth on a 60 Hz
+one (Chrome and Safari alike). Raise **Options > Mouse Speed** (`sensitivity 20` in the
+console goes past the slider's end), or set the mouse to poll at 125 Hz, which also keeps
+the fine aim. The numbers are in [web/PLATFORM.md](web/PLATFORM.md#input), "The mouse
+against the trackpad".
+
 ## Classic and 2026
 
 Every difference from id's game is a named setting. Classic turns the engine ones off; 2026,
