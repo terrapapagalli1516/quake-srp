@@ -157,10 +157,13 @@ play with the same ones, and a switch leaves them as they are.
 In both profiles the renderer splits each frame across all CPU cores, and the picture is the
 same on any number of them.
 
-To switch, use **Options > Classic / 2026**, the address (`?classic` or `?2026`), or the
-console (`profile classic`). The choice is saved in `config.cfg`, in the browser's storage,
-and that file keeps only what you changed. [AUDIT.md](AUDIT.md) ("The profiles and the
-departures") lists every setting and why it exists.
+To switch, use **Options > Classic / 2026** (left and right), the address (`?classic` or
+`?2026`), or the console (`profile classic`). Enter on that row opens the settings, one
+page each for **Picture and sound**, **Motion and light** (the torches' flicker is there)
+and **Controls**, where every setting can be changed alone. The choice is saved in
+`config.cfg`, in the browser's storage, and that file keeps only what you changed.
+[AUDIT.md](AUDIT.md) ("The profiles and the departures") lists every setting and why it
+exists.
 
 In either profile the page can be installed as an app, and it works offline. It also
 plays the registered game and the mission packs from your own copies

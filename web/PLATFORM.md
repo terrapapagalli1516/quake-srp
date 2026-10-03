@@ -1244,7 +1244,8 @@ The page only plays what it paints.
   so the sound stops and goes on where the game does.
 
 **Classic and 2026.** The setting is `snd_modern` (`Cvars::sound`, a
-`quake_rs::snd::SoundMode`; "Full-rate sound" on the Classic / 2026 page),
+`quake_rs::snd::SoundMode`; Options > Classic / 2026 > Picture and sound >
+"Full-rate sound"),
 a departure: off in the Classic profile, on in 2026. Classic
 is id's mixer as written (`Fixes::NONE`) at id's `desired_speed`, 11025 Hz,
 mixing id's 0.1 s ahead. The 2026 mixer (`Fixes::ALL`: the loop seam, exact
@@ -1605,7 +1606,8 @@ the key a player would press: Enter on a picture list's item (Main,
 Single Player, Multiplayer: 20-line items, a fingertip) at once; on a text
 list (8-line rows: 10–13 CSS px on a phone) a first tap moves the cursor
 and a second on the highlighted row acts — Enter, or left/right of an
-Options slider's knob; Help pages by halves. A drag moves the cursor with
+Options slider's knob (or a settings page's: Torch flicker); Help pages by
+halves. A drag moves the cursor with
 the finger without acting, which is the easy way onto a small row.
 
 **The menu pad.** A text list's 8-line rows (10–13 CSS px on a phone, a
@@ -1628,7 +1630,10 @@ for a release. Hidden where a pad key would be wrong: while the menu asks
 y or n (STATE 256) and while Customize controls waits for a key to bind
 (STATE 8, `BIND_GRAB`) — every other mode, and Classic too (a phone still
 has no keys). Help pages already take ◀▶ (id's `M_Help_Key`); the pad's
-presses reach them the same way. Taps and drags on the menu are unchanged;
+presses reach them the same way, and the settings hub and its pages
+(Options > Classic / 2026) take OK, ▲▼ and ◀▶ as Options does — ◀▶ step
+Torch flicker's slider — and BACK backs out a screen at a time; so does a
+gamepad's A, B and D-pad (`joy_menukeys`). Taps and drags on the menu are unchanged;
 the pad is in addition.
 
 **The phone's keyboard.** KEYBOARD focuses a hidden text field (in the
