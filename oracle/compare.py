@@ -184,12 +184,48 @@ def run_c(args, case: str, mapname: str, ents: bool, out: Path) -> dict:
         cmd += extra_flags
         if args.aspect is not None:
             cmd += ["-oracle_aspect", str(args.aspect)]
+        if args.oracle_dt is not None:
+            cmd += ["-oracle_dt", repr(args.oracle_dt)]
         cmd += ["+exec", "oracle.cfg"]
         res = subprocess.run(cmd, cwd=base, capture_output=True, text=True, timeout=120)
         meta_path = out / f"{case}.c.json"
         if res.returncode != 0 or not meta_path.exists():
             sys.exit(f"C oracle failed for {case} (rc {res.returncode}):\n{res.stdout[-3000:]}{res.stderr[-2000:]}")
     return json.loads(meta_path.read_text())
+
+
+def frame_dlights(args, qt: Path, meta: dict) -> list[list[float]]:
+    """The lights [x, y, z, radius, minlight] the port's frame gets, by --dlights:
+    `id`: the ones id's frame was lit with (its json); `none`: no lights, what
+    a demo's playback drew before the port made its own; `demoN`: the lights
+    the port's own playback of demo N has at id's cl.time (`quaketool play
+    --trace`, one 1/72 s host frame at a time: id's side has to be run with
+    --oracle-dt 0.01388888899236917 for the two clocks to meet)."""
+    mode = args.dlights
+    if mode == "id":
+        return meta.get("dlights", [])
+    if mode == "none":
+        return []
+    if not mode.startswith("demo"):
+        sys.exit(f"--dlights: id, none or demoN, not {mode!r}")
+    with tempfile.TemporaryDirectory(prefix="quake-play-") as tmp:
+        trace = Path(tmp) / "port.trace"
+        subprocess.run([str(qt), "play", str(args.pak), mode, str(meta["frame"] + 30), "--hash-every", "0",
+                        "--trace", str(trace)], check=True, capture_output=True, timeout=300)
+        lines = trace.read_text().splitlines()
+    want = meta["time"]
+    for i, line in enumerate(lines):
+        if line.startswith("F ") and abs(float(line.split(" t=")[1].split()[0]) - want) < 1e-9:
+            lights = []
+            for l in lines[i + 1:]:
+                if l.startswith("F "):
+                    break
+                if l.startswith("D "):
+                    p = l.split()  # D slot key x y z radius die decay minlight
+                    lights.append([float(v) for v in p[3:7]] + [float(p[9])])
+            return lights
+    sys.exit(f"--dlights {mode}: the port's playback has no frame at cl.time {want!r} "
+             f"(id's side needs --oracle-dt 0.01388888899236917)")
 
 
 def run_port(args, qt: Path, case: str, mapname: str, meta: dict, ents: bool, out: Path) -> str:
@@ -221,9 +257,15 @@ def run_port(args, qt: Path, case: str, mapname: str, meta: dict, ents: bool, ou
     parts = out / f"{case}.c.parts"
     if parts.exists():
         cmd += ["--particles", str(parts)]
-    # id's live dynamic lights (muzzle flashes, explosions: e.g. --c-cmd +attack)
-    for dl in meta.get("dlights", []):
+    # The dynamic lights the port's frame is lit with (--dlights): id's live ones
+    # (muzzle flashes, explosions: e.g. --c-cmd +attack) by default.
+    for dl in frame_dlights(args, qt, meta):
         cmd += ["--dlight", ",".join(repr(float(v)) for v in dl)]
+    # id's light styles of the frame (`d_lightstylevalue`), not the ones the port
+    # derives from the clock: a demo's styles are the recording's, which the map's own
+    # animation does not know (a frame's `cl.time` also reaches R_AnimateLight a tenth earlier)
+    if args.id_lightstyles:
+        cmd += ["--style-values", ",".join(str(int(v)) for v in meta["lightstyles"])]
     if args.viewmodel and meta["viewmodel"]["model"]:
         vm = meta["viewmodel"]
         cmd += ["--viewmodel", f'{vm["model"]}:{vm["frame"]}',
@@ -345,6 +387,17 @@ def main() -> None:
     ap.add_argument("--aspect", type=float,
                     help="vid.aspect, both renderers (default 1.0, square pixels; 0.8333333 = id's "
                          "16:10 modes on a 4:3 monitor, what the browser page shows)")
+    ap.add_argument("--oracle-dt", type=float,
+                    help="id's host frame step in seconds (-oracle_dt; default the oracle's 0.1). "
+                         "0.01388888899236917 is the port's 1/72 s, the step `quaketool play` runs at")
+    ap.add_argument("--id-lightstyles", action="store_true",
+                    help="hand the port id's light styles of the frame (d_lightstylevalue, from its json) "
+                         "instead of the ones it derives from the clock; for demo frames, whose styles are the "
+                         "recording's")
+    ap.add_argument("--dlights", default="id",
+                    help="the dynamic lights the port's frame is lit with: id (id's own cl_dlights of the "
+                         "frame, default), none, or demoN (the lights the port's playback of demo N makes "
+                         "at the same cl.time; needs --oracle-dt 0.01388888899236917)")
     ap.add_argument("--crop", action="append", default=[], help="name:x,y,w,h — zoomed crop per case")
     ap.add_argument("--pak", type=Path, default=DEFAULT_PAK)
     ap.add_argument("--pak1", type=Path,

@@ -10,10 +10,11 @@ id's WinQuake (the oracle, oracle/build/quake-oracle) plays the attract loop
 from boot at a fixed 72 Hz (-oracle_dt: every host frame is exactly the
 port's 1/72 s step) and writes one record per rendered frame (oracle_trace):
 cl.time, cl.oldtime, cl.mtime[0..1], cl.viewangles, the view entity's
-relinked origin, cl.velocity and every entity on cl_visedicts. The port's
-`quaketool play demo1 --trace` writes the same records from its client.
-This script runs both, splits the traces into demos (a demo change restarts
-the clock) and compares them frame by frame.
+relinked origin, cl.velocity, every entity on cl_visedicts and every dynamic
+light R_PushDlights marks (its slot in cl_dlights, key, origin, radius, die,
+decay, minlight). The port's `quaketool play demo1 --trace` writes the same
+records from its client. This script runs both, splits the traces into demos
+(a demo change restarts the clock) and compares them frame by frame.
 
     uv run oracle/demo_lerp.py                 # the whole loop, into demo1 again (17,500 frames)
     uv run oracle/demo_lerp.py --frames 2000   # the first 2000 frames
@@ -22,6 +23,15 @@ the clock) and compares them frame by frame.
 Clocks must agree to 1e-9 s, positions and angles to --tol (x87 float
 excess precision in the oracle leaves ulp-level differences), entity sets
 exactly. The first differing frame of each kind is printed.
+
+The lights must be the same set in every frame, slot for slot (the slot is
+the light's bit in the surfaces' dlightbits, so it is part of id's state): the
+same key, origin (--tol), decay and minlight, `die` to 1e-4 (a float, from
+a double clock). The radius is the same except where id's draws `rand()&31`
+for it (a muzzle flash 200+, a bright light 400+, a dim light 200+): there
+the port's own draw must be in the same 0..31 window, which is all that two
+different generators can share. An explosion's (decaying 350) and a
+rocket's (200) are exact.
 """
 
 import argparse
@@ -41,7 +51,8 @@ DT = "0.01388888899236917"
 
 
 def parse(path: Path):
-    """[(frame dict, {entnum: (model, origin, angles, frame)})] per rendered frame."""
+    """[(frame dict, {entnum: (model, origin, angles, frame)}, {slot: light})] per
+    rendered frame; a light is {key, org, radius, die, decay, minlight}."""
     frames = []
     for line in path.read_text().splitlines():
         p = line.split()
@@ -56,12 +67,16 @@ def parse(path: Path):
                     kv[key] = [float(val)]
                 else:
                     kv[key].append(float(tok))
-            frames.append((kv, {}))
+            frames.append((kv, {}, {}))
         elif p[0] == "E" and frames:
             num = int(p[1])
             if num >= 0:
                 vals = [float(x) for x in p[3:9]]
                 frames[-1][1][num] = (p[2], vals[:3], vals[3:6], int(p[9]))
+        elif p[0] == "D" and frames:
+            v = [float(x) for x in p[3:]]
+            frames[-1][2][int(p[1])] = {"key": int(p[2]), "org": v[:3], "radius": v[3], "die": v[4],
+                                       "decay": v[5], "minlight": v[6]}
     return frames
 
 
@@ -83,13 +98,72 @@ def angle_diff(a, b):
     return min(d, 360.0 - d)
 
 
+LIGHT_DIE_TOL = 1e-4
+# Entities whose models carry id's EF_ROCKET: their light is exactly 200.
+ROCKET_MODELS = ("progs/missile.mdl", "progs/lavaball.mdl")
+
+
+def light_kind(light, ents):
+    """What made id's light: explosion (decaying), muzzle flash (minlight 32),
+    bright light (400 + rand()&31), rocket (an EF_ROCKET model's entity), else
+    a dim light (200 + rand()&31)."""
+    if light["decay"] > 0:
+        return "explosion"
+    if light["minlight"] == 32:
+        return "muzzle flash"
+    if light["radius"] >= 400:
+        return "bright light"
+    if ents.get(light["key"], ("",))[0] in ROCKET_MODELS:
+        return "rocket"
+    return "dim light"
+
+
+def compare_lights(cl, pl, ce, tol):
+    """The differences between id's lights `cl` and the port's `pl` of one frame
+    ({slot: light}): [(kind of difference, detail)]."""
+    diffs = []
+    if set(cl) != set(pl):
+        diffs.append(("light set", f"slots id {sorted(cl)} port {sorted(pl)}"))
+    for slot in sorted(set(cl) & set(pl)):
+        c, p = cl[slot], pl[slot]
+        where = f"slot {slot}"
+        if c["key"] != p["key"]:
+            diffs.append(("light key", f"{where}: id {c['key']} port {p['key']}"))
+        if max(abs(a - b) for a, b in zip(c["org"], p["org"])) > tol:
+            diffs.append(("light origin", f"{where}: id {c['org']} port {p['org']}"))
+        if c["decay"] != p["decay"] or c["minlight"] != p["minlight"]:
+            diffs.append(("light params", f"{where}: id decay {c['decay']} min {c['minlight']}, "
+                                          f"port decay {p['decay']} min {p['minlight']}"))
+        if abs(c["die"] - p["die"]) > LIGHT_DIE_TOL:
+            diffs.append(("light die", f"{where}: id {c['die']} port {p['die']}"))
+        kind = light_kind(c, ce)
+        if kind in ("explosion", "rocket"):
+            if abs(c["radius"] - p["radius"]) > 0.01:
+                diffs.append(("light radius", f"{where} {kind}: id {c['radius']} port {p['radius']}"))
+        else:
+            base = 400.0 if kind == "bright light" else 200.0
+            if not (0 <= c["radius"] - base < 32 and 0 <= p["radius"] - base < 32):
+                diffs.append(("light radius", f"{where} {kind}: id {c['radius']} port {p['radius']} "
+                                              f"outside {base}..{base + 31}"))
+    return diffs
+
+
 def compare(cdemo, pdemo, tol, label):
     worst = {"clock": 0.0, "angles": 0.0, "vorg": 0.0, "vel": 0.0, "ent_origin": 0.0, "ent_angles": 0.0}
     first = {}
     set_mismatch = 0
+    kinds, lit_frames, light_diffs = {}, [0, 0], 0
     n = min(len(cdemo), len(pdemo))
     for i in range(n):
-        (cf, ce), (pf, pe) = cdemo[i], pdemo[i]
+        (cf, ce, cl), (pf, pe, pl) = cdemo[i], pdemo[i]
+        lit_frames[0] += bool(cl)
+        lit_frames[1] += bool(pl)
+        for light in cl.values():
+            kinds[light_kind(light, ce)] = kinds.get(light_kind(light, ce), 0) + 1
+        ld = compare_lights(cl, pl, ce, tol)
+        light_diffs += bool(ld)
+        for kind, detail in ld:
+            first.setdefault(kind, (i, detail))
         diffs = {
             "clock": max(abs(cf["t"][0] - pf["t"][0]), abs(cf["old"][0] - pf["old"][0])),
             "angles": max(angle_diff(a, b) for a, b in zip(cf["ang"], pf["ang"])),
@@ -115,6 +189,9 @@ def compare(cdemo, pdemo, tol, label):
           f"{'MATCH' if ok else 'DIFFER'}")
     print("  worst |diff|: " + ", ".join(f"{k} {v:.3g}" for k, v in worst.items())
           + f"; entity-set mismatches {set_mismatch}")
+    made = ", ".join(f"{k} {v}" for k, v in sorted(kinds.items())) or "none"
+    print(f"  dynamic lights: frames lit {lit_frames[0]} in id's, {lit_frames[1]} in the port's; "
+          f"frames whose lights differ {light_diffs}; id's lights drawn (light-frames): {made}")
     for k, v in first.items():
         print(f"  first {k} beyond tolerance at frame {v[0]}: {v[1]}")
     return ok

@@ -23,7 +23,7 @@ use crate::tent::BeamModel;
 use super::cl_input::{
     clamp_pitch, KeyMove, CL_ANGLESPEEDKEY, CL_PITCHSPEED, CL_YAWSPEED, SPEED, V_CENTERSPEED,
 };
-use super::cl_tent::{rocket_trail_type, spawn_temp_entity};
+use super::cl_tent::{rocket_trail_type, spawn_temp_entity, TRAIL_ROCKET};
 use super::host::host_error;
 use super::host_cmd::{try_changelevel, try_restart, IT_INVISIBILITY};
 use super::lerpmodels::{self, LerpModels};
@@ -94,16 +94,6 @@ fn parse_client_damage(w: &mut Walk, ent_origin: [f32; 3]) {
     w.v_dmg_pitch = pd.pitch;
     w.v_dmg_time = V_KICKTIME;
     w.faceanimtime = w.server.time() + FACE_ANIM_TIME;
-}
-
-/// The dynamic lights R_PushDlights marks this frame: every slot with a
-/// radius whose `die` has not passed (`die < cl.time || !radius` is skipped),
-/// at its current — not yet decayed — radius.
-pub fn pushed_dlights(
-    dlights: &crate::dlight::DynamicLights,
-    now: f32,
-) -> Vec<crate::dlight::DynamicLight> {
-    dlights.active().into_iter().filter(|dl| dl.die >= now).collect()
 }
 
 /// `cl.punchangle` as SV_WriteClientdataToMessage sends it: each component
@@ -570,17 +560,9 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
             }
             continue; // beams spawn no particles / sounds / dlights here
         }
-        // Explosions spawn a decaying dynamic light (CL_ParseTEnt): radius 350,
-        // die now+0.5, decay 300, minlight 0, key 0 -> a fresh slot each one.
-        {
-            use crate::server::te_consts::*;
-            // Only TE_EXPLOSION and TE_EXPLOSION2 flash a dynamic light in id's
-            // CL_ParseTEnt; TE_TAREXPLOSION (blob) does NOT.
-            if matches!(ev.te_type, TE_EXPLOSION | TE_EXPLOSION2) {
-                w.dlights.alloc(0, ev.pos, 350.0, now + 0.5, 300.0, 0.0, now);
-            }
-        }
-        if let Some(name) = spawn_temp_entity(&mut w.particles, ev, now, &mut w.prng) {
+        // The explosions' light (CL_ParseTEnt's CL_AllocDlight) is made with
+        // their particles, by the call a demo's playback makes as well.
+        if let Some(name) = spawn_temp_entity(&mut w.particles, &mut w.dlights, ev, f64::from(now), &mut w.prng) {
             // CL_ParseTEnt read the position with MSG_ReadCoord, so the sound
             // starts to the 1/8 unit (the particles above still start at the
             // unrounded position: an open item, in the particles' code).
@@ -617,30 +599,22 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
     let is_relinked =
         |e: i32| usize::try_from(e).ok().and_then(|e| relinked.get(e)).copied() == Some(true);
 
-    // 2d. Entity light effects (EF_MUZZLEFLASH / BRIGHTLIGHT / DIMLIGHT) from the
-    //     relinked edicts. The rand()&31 radius jitter is added here (entity_dlights
-    //     stays a pure query). Then decay + retire the whole pool for this frame.
+    // 2d. Entity light effects (EF_MUZZLEFLASH / BRIGHTLIGHT / DIMLIGHT) of the
+    //     relinked edicts, by the call a demo's entities make
+    //     (`DynamicLights::relink_effects`). The pool is decayed after the
+    //     frame is drawn.
     let smooth_frames = w.lerpmodels == LerpModels::Smooth;
-    for ed in w.server.entity_dlights() {
-        if !is_relinked(ed.key) {
+    for e in w.server.lit_entities() {
+        if !is_relinked(e.key) {
             continue;
         }
+        let flashed = w.dlights.relink_effects(e.key, e.origin, e.angles, e.effects, f64::from(now), &mut w.prng);
         // r_lerpmodels: the same relink keeps a flashing entity's animation
         // from blending across the flare (`FrameLerps::muzzle_flash`) — the
         // player's flash is the view weapon's.
-        if smooth_frames && ed.muzzleflash {
-            w.frame_lerps.muzzle_flash(if ed.key == w.player { lerpmodels::VIEWMODEL } else { ed.key });
+        if smooth_frames && flashed {
+            w.frame_lerps.muzzle_flash(if e.key == w.player { lerpmodels::VIEWMODEL } else { e.key });
         }
-        let jitter = w.prng.next_range(32) as f32;
-        w.dlights.alloc(
-            ed.key,
-            ed.origin,
-            ed.radius_base + jitter,
-            now + ed.life,
-            0.0,
-            ed.minlight,
-            now,
-        );
     }
     // 3. Make sure every live entity's model is cached (runtime-spawned
     //    entities — gibs, projectiles — can appear after boot), and every
@@ -842,8 +816,8 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
         if let Some(head) = w.trail_org.get_mut(&ent) {
             w.particles.spawn_trail(head, neworg, ttype, step, &mut w.tracercount, &mut w.prng);
         }
-        if ttype == 0 {
-            w.dlights.alloc(ent, neworg, 200.0, now + 0.01, 0.0, 0.0, now);
+        if ttype == TRAIL_ROCKET {
+            w.dlights.relink_rocket(ent, neworg, f64::from(now));
         }
     }
 
@@ -1118,7 +1092,7 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
     // walls: R_PushDlights skips `die < cl.time || !radius`. A light is drawn
     // at the radius it was allocated with; CL_DecayLights shrinks it after the
     // frame (below).
-    let active_dlights = pushed_dlights(&w.dlights, now);
+    let active_dlights = w.dlights.active(f64::from(now));
     // The animated light-style scales (torch flicker, pulsing lights) at the
     // current server clock, stepped as id's or gliding (`r_lerplightstyles`,
     // the video cvars'); the worldspawn populated the styles at spawn time.
@@ -1176,7 +1150,7 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
     // Host_Frame runs CL_DecayLights after SCR_UpdateScreen: `radius -=
     // (cl.time - cl.oldtime)*decay` — 0 while paused, nothing fades or dies.
     if dt.is_finite() && dt > 0.0 && !paused {
-        w.dlights.advance(dt, now);
+        w.dlights.advance(dt, f64::from(now));
     }
 
     // 5b. Colour shifts (V_UpdatePalette, the software build's palette shift):

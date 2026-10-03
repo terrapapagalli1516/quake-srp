@@ -390,6 +390,11 @@ pub struct DemoFrame {
     pub view_entity_origin: [f32; 3],
     /// The view entity's `msg_origins[1]`.
     pub view_prev_origin: [f32; 3],
+    /// The view entity's `msg_angles[0]` and `[1]`: the way the recorded player's
+    /// model faces (the camera's are [`DemoFrame::view_angles`]). Relinked,
+    /// they aim its muzzle flash's light.
+    pub view_entity_angles: [f32; 3],
+    pub view_prev_entity_angles: [f32; 3],
     /// The view entity's update set `ent->forcelink` (see [`EntSnapshot::forcelink`]).
     pub view_forcelink: bool,
     /// The view entity's `ent->effects` (see [`EntSnapshot::effects`]; the
@@ -1058,6 +1063,10 @@ fn snapshot(cl: &mut ClientState) -> DemoFrame {
         .entities
         .get(cl.viewentity)
         .map_or(([0.0; 3], [0.0; 3], true), |ve| (ve.msg_origins[0], ve.msg_origins[1], ve.forcelink));
+    let (view_entity_angles, view_prev_entity_angles) = cl
+        .entities
+        .get(cl.viewentity)
+        .map_or(([0.0; 3], [0.0; 3]), |ve| (ve.msg_angles[0], ve.msg_angles[1]));
     let mut view_origin = view_entity_origin;
     view_origin[2] += cl.viewheight;
     // CL_RelinkEntities reads `effects` of an entity the newest message
@@ -1137,6 +1146,8 @@ fn snapshot(cl: &mut ClientState) -> DemoFrame {
         prev_view_angles: cl.mviewangles[1],
         view_entity_origin,
         view_prev_origin,
+        view_entity_angles,
+        view_prev_entity_angles,
         view_forcelink,
         view_effects,
         viewheight: cl.viewheight,
