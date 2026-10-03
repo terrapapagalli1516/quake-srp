@@ -8,10 +8,11 @@
 use crate::bsp::Bsp;
 use crate::math::Vec3;
 use super::light::{
-    any_dlight_reaches, face_lightmap_dyn, LightMap, Luxels, COLORMAP_LEN,
+    any_dlight_reaches, face_lightmap_with, LightMap, Luxels, COLORMAP_LEN,
     LIGHTSTYLES, STYLE_NONE,
 };
 use super::stats::Profiler;
+use super::torch::FaceTorches;
 use std::sync::Arc;
 
 /// Reconstruct a face's world-space polygon into `out`. Returns false if any
@@ -173,6 +174,10 @@ struct LightCacheEntry {
     /// animate at 10 Hz, so at 60 fps the scales are unchanged ~5/6 frames.
     style_scales: [f32; crate::bsp::MAXLIGHTMAPS],
     n_styles: usize,
+    /// The scales of the steady torches lighting the face at build time
+    /// ([`FaceTorches::key`]; empty with `r_torchflicker` off): valid only
+    /// while they are bit-identical too.
+    torches: Box<[f32]>,
     /// The combined luxel grid (no dynamic light folded in: a dlit face is
     /// rebuilt every frame and never stored).
     luxels: Vec<f32>,
@@ -193,6 +198,8 @@ struct SurfCacheEntry {
     /// lightmap cache — a torch tick rebuilds the block).
     style_scales: [f32; crate::bsp::MAXLIGHTMAPS],
     n_styles: usize,
+    /// The steady torches' scales at bake time, as the lightmap cache's.
+    torches: Box<[f32]>,
     /// The texture baked in (`cache->texture`): an animated wall's frame index
     /// into `bsp.textures`, so the next animation frame rebuilds the block.
     texture: usize,
@@ -366,6 +373,9 @@ pub(super) struct SurfaceRequest<'a> {
     pub(super) lightmap: &'a LightMap<'a>,
     pub(super) colormap: &'a [u8],
     pub(super) light_styles: &'a [f32; LIGHTSTYLES],
+    /// The steady torches lighting the face, at this frame's scales (the
+    /// 2026 `r_torchflicker`; [`FaceTorches::NONE`] with it off).
+    pub(super) torches: FaceTorches<'a>,
     /// A dynamic light reaches the face ([`any_dlight_reaches`]).
     pub(super) dlit: bool,
     pub(super) mip: u32,
@@ -427,6 +437,8 @@ impl SurfaceCaches {
         // A style past 0: an animated (or switched) light, which rebakes the
         // block whenever its value changes.
         prof.add(|s| s.surf_styled += u64::from(req.face.styles.iter().take_while(|&&st| st != STYLE_NONE).any(|&st| st != 0)));
+        // A steady torch flickers on it (`r_torchflicker`): the same.
+        prof.add(|s| s.surf_torchlit += u64::from(!req.torches.is_empty()));
         // texturemins are whole multiples of 16, so `>> mip` is exact.
         let texmins_i = [lm.texmins[0] as i32, lm.texmins[1] as i32];
         let texmins = [(texmins_i[0] >> mip) as f32, (texmins_i[1] >> mip) as f32];
@@ -458,6 +470,7 @@ impl SurfaceCaches {
                 && e.bw == bw
                 && e.bh == bh
                 && e.style_scales[..n_styles] == scales[..n_styles]
+                && req.torches.key_is(&e.torches)
             {
                 prof.add(|s| s.surf_cache_hits += 1);
                 return Some(made(e.block.clone()));
@@ -470,6 +483,7 @@ impl SurfaceCaches {
             *e = Some(SurfCacheEntry {
                 style_scales: scales,
                 n_styles,
+                torches: req.torches.key(),
                 texture: req.texture,
                 dlight: req.dlit,
                 block: block.clone(),
@@ -598,7 +612,8 @@ impl SurfaceCaches {
     }
 
     /// The lightmap of world face `idx` (`face` is `bsp.faces[idx]`) for this
-    /// frame's light styles and dynamic lights, through the lightmap cache.
+    /// frame's light styles, steady torches (`torches`, the 2026
+    /// `r_torchflicker`) and dynamic lights, through the lightmap cache.
     ///
     /// Behaviour, by case:
     ///  * **Static borrow** (`face_lightmap_dyn` returns `Luxels::Static`, the
@@ -607,8 +622,8 @@ impl SurfaceCaches {
     ///  * **Dynamic light reaches the face** — rebuilt EVERY frame (dlights
     ///    move). The result is NOT stored, and any cached entry for this face
     ///    is dropped, so the dlight is never silently lost on a later frame.
-    ///  * **Owned combine, no dlight** (animated styles) — keyed by the
-    ///    resolved style scale values. On a hit the cached luxels are cloned
+    ///  * **Owned combine, no dlight** (animated styles, flickering torches)
+    ///    — keyed by the resolved style scale values and the torches' scales. On a hit the cached luxels are cloned
     ///    into a fresh `LightMap` (bit-identical to a rebuild: the combine is
     ///    deterministic). On a miss it is rebuilt and stored.
     pub(super) fn world_lightmap<'a>(
@@ -617,6 +632,7 @@ impl SurfaceCaches {
         idx: usize,
         face: &crate::bsp::DFace,
         light_styles: &[f32; LIGHTSTYLES],
+        torches: FaceTorches,
         dlights: &[crate::dlight::DynamicLight],
         // The face's `R_MarkLights` mask for this frame (see [`mark_dlights`]).
         dlightbits: u32,
@@ -639,11 +655,13 @@ impl SurfaceCaches {
             if let Some(e) = entry {
                 *e = None;
             }
-            return face_lightmap_dyn(bsp, face, poly, light_styles, dlights, dlightbits);
+            return face_lightmap_with(bsp, face, poly, light_styles, torches, dlights, dlightbits);
         }
         // No dlight: try the cache.
         let entry = match entry {
-            Some(Some(e)) if e.n_styles == n_styles && e.style_scales[..n_styles] == scales[..n_styles] => {
+            Some(Some(e))
+                if e.n_styles == n_styles && e.style_scales[..n_styles] == scales[..n_styles] && torches.key_is(&e.torches) =>
+            {
                 // HIT: clone the stored combined luxels (deterministic build ->
                 // bit-identical to rebuilding).
                 return Some(LightMap {
@@ -657,11 +675,12 @@ impl SurfaceCaches {
         };
         // MISS: build fresh (no dlights -> the pure static/style combine), then
         // cache it if it is the owned combine.
-        let built = face_lightmap_dyn(bsp, face, poly, light_styles, &[], 0)?;
+        let built = face_lightmap_with(bsp, face, poly, light_styles, torches, &[], 0)?;
         if let (Luxels::Owned(v), Some(e)) = (&built.luxels, entry) {
             *e = Some(LightCacheEntry {
                 style_scales: scales,
                 n_styles,
+                torches: torches.key(),
                 luxels: v.clone(),
                 lmw: built.lmw,
                 lmh: built.lmh,
@@ -677,6 +696,7 @@ mod tests {
     use super::*;
     use crate::dlight::DynamicLight;
     use crate::render::{demo_room, Camera, Palette, Renderer, Scene};
+    use super::super::light::face_lightmap_dyn;
     use crate::render::fixtures::render_once;
     use crate::render::fixtures::{lightmapped_demo_room, one_face_bsp_zplane, two_style_face_bsp};
     use crate::render::light::{ALL_DLIGHT_BITS, NEUTRAL_LIGHTSTYLE_SCALES};
@@ -799,8 +819,8 @@ mod tests {
 
         // First call: MISS -> builds + caches. Second call (same key): HIT.
         let mut caches = caches_with_poly(&bsp, &poly);
-        let first = caches.world_lightmap(&bsp, 0, &face, &scales, &[], 0).expect("present");
-        let second = caches.world_lightmap(&bsp, 0, &face, &scales, &[], 0).expect("present");
+        let first = caches.world_lightmap(&bsp, 0, &face, &scales, FaceTorches::NONE, &[], 0).expect("present");
+        let second = caches.world_lightmap(&bsp, 0, &face, &scales, FaceTorches::NONE, &[], 0).expect("present");
 
         // The cached luxels must be BIT-identical to a fresh, cache-free build.
         let fresh = face_lightmap_dyn(&bsp, &face, &poly, &scales, &[], 0).expect("present");
@@ -826,11 +846,11 @@ mod tests {
         // second result must reflect the NEW scale, not the stale cached one.
         let mut s_half = NEUTRAL_LIGHTSTYLE_SCALES;
         s_half[1] = 0.5;
-        let half = caches.world_lightmap(&bsp, 0, &face, &s_half, &[], 0).expect("present");
+        let half = caches.world_lightmap(&bsp, 0, &face, &s_half, FaceTorches::NONE, &[], 0).expect("present");
 
         let mut s_full = NEUTRAL_LIGHTSTYLE_SCALES;
         s_full[1] = 1.0;
-        let full = caches.world_lightmap(&bsp, 0, &face, &s_full, &[], 0).expect("present");
+        let full = caches.world_lightmap(&bsp, 0, &face, &s_full, FaceTorches::NONE, &[], 0).expect("present");
 
         // Compare against fresh builds at each scale.
         let fresh_full = face_lightmap_dyn(&bsp, &face, &poly, &s_full, &[], 0).expect("present");
@@ -857,7 +877,7 @@ mod tests {
         let mut scales = NEUTRAL_LIGHTSTYLE_SCALES;
         scales[1] = 0.5;
         let mut caches = caches_with_poly(&bsp_a, &poly);
-        let _ = caches.world_lightmap(&bsp_a, 0, &face_a, &scales, &[], 0).expect("present");
+        let _ = caches.world_lightmap(&bsp_a, 0, &face_a, &scales, FaceTorches::NONE, &[], 0).expect("present");
 
         // World B: a DIFFERENT world with different lightmap bytes at face 0.
         // `R_NewMap` empties the (face-index-keyed) cache, so face 0 is rebuilt
@@ -868,7 +888,7 @@ mod tests {
         caches.begin_map(bsp_b.faces.len());
         caches.geoms[0] = Some(poly_b.clone());
 
-        let got = caches.world_lightmap(&bsp_b, 0, &face_b, &scales, &[], 0).expect("present");
+        let got = caches.world_lightmap(&bsp_b, 0, &face_b, &scales, FaceTorches::NONE, &[], 0).expect("present");
         let fresh_b = face_lightmap_dyn(&bsp_b, &face_b, &poly_b, &scales, &[], 0).expect("present");
         match (&got.luxels, &fresh_b.luxels) {
             (Luxels::Owned(g), Luxels::Owned(fb)) => {
@@ -893,9 +913,9 @@ mod tests {
         // First, populate any cache via a dlight-free neutral call (static borrow,
         // not cached). Then a reaching dlight: must own the buffer and brighten.
         let mut caches = caches_with_poly(&bsp, &poly);
-        let _ = caches.world_lightmap(&bsp, 0, &face, &NEUTRAL_LIGHTSTYLE_SCALES, &[], 0);
+        let _ = caches.world_lightmap(&bsp, 0, &face, &NEUTRAL_LIGHTSTYLE_SCALES, FaceTorches::NONE, &[], 0);
         let lit = caches
-            .world_lightmap(&bsp, 0, &face, &NEUTRAL_LIGHTSTYLE_SCALES, std::slice::from_ref(&dl), ALL_DLIGHT_BITS)
+            .world_lightmap(&bsp, 0, &face, &NEUTRAL_LIGHTSTYLE_SCALES, FaceTorches::NONE, std::slice::from_ref(&dl), ALL_DLIGHT_BITS)
             .expect("present");
         assert!(matches!(lit.luxels, Luxels::Owned(_)), "a dlit face must own the dlit buffer");
         // Must match the direct (cache-free) dlit build exactly.
@@ -1228,6 +1248,7 @@ mod tests {
             lightmap: &lm,
             colormap: &cm,
             light_styles: &styles,
+            torches: FaceTorches::NONE,
             dlit: false,
             mip,
         };
@@ -1342,6 +1363,7 @@ mod tests {
             lightmap: &lm,
             colormap: &cm,
             light_styles: &NEUTRAL_LIGHTSTYLE_SCALES,
+            torches: FaceTorches::NONE,
             dlit: true,
             mip,
         };

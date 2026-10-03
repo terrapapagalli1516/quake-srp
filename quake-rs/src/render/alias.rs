@@ -8,7 +8,7 @@
 use crate::bsp::Bsp;
 use crate::math::{dot, Vec3};
 use super::{nearest_index, Camera, Frame, ViewGeom};
-use super::light::{r_light_point, COLORMAP_LEN, LIGHTSTYLES};
+use super::light::{r_light_point_hit, COLORMAP_LEN, LIGHTSTYLES};
 use super::polyse::PolyFramebuffer;
 use super::stats::Profiler;
 
@@ -472,16 +472,26 @@ fn alias_check_bbox(view: &AliasView, ent: &AliasEntity) -> Option<i32> {
 /// (`alight_t`): `R_LightPoint` at the origin (at least 24 for the gun), plus
 /// every dynamic light reaching it (`radius - distance`) into the ambient, then
 /// ambient clamped to 128 and ambient + shade to 192. Returns (ambient, shade).
+///
+/// EXTRA (`r_torchflicker`, 2026): with `torches`, the luxel `R_LightPoint`
+/// reads moves as the wall and floor luxels do — by its steady torches'
+/// change this frame — so a model by a torch flickers with the floor it
+/// stands on. `None` is id's.
 fn alias_entity_light(
     bsp: &Bsp,
     origin: Vec3,
     light_styles: &[f32; LIGHTSTYLES],
+    torches: Option<&super::torch::TorchSet>,
     dlights: &[crate::dlight::DynamicLight],
     viewmodel: bool,
 ) -> (i32, i32) {
     // R_LightPoint's integer (`r >>= 8` of the style-scaled sum; the float sum
     // here is exact, so its floor is that integer).
-    let mut j = r_light_point(bsp, origin, light_styles).floor() as i32;
+    let (mut r, hit) = r_light_point_hit(bsp, origin, light_styles);
+    if let (Some(t), Some((face, luxel))) = (torches, hit) {
+        r = (r + t.face(face).at(luxel) * light_styles[0]).max(0.0);
+    }
+    let mut j = r.floor() as i32;
     if viewmodel && j < 24 {
         j = 24; // "allways give some light on gun"
     }
@@ -887,7 +897,7 @@ pub(super) fn prepare_alias_model<'a>(
         s.alias_accepted += 1;
         s.alias_tris += inst.mdl.header.numtris.max(0) as u64;
     });
-    let light = alias_entity_light(scene.world, inst.origin, scene.light_styles, scene.dlights, false);
+    let light = alias_entity_light(scene.world, inst.origin, scene.light_styles, frame.torches, scene.dlights, false);
     alias_prepare(&view, &ent, trivial_accept, light, false, scene.time, scene.colormap)
 }
 
@@ -1013,7 +1023,7 @@ pub(super) fn prepare_viewmodel<'a>(frame: &Frame<'_, 'a>, vm: &Viewmodel<'a>) -
         skinnum: 0,
         color: nearest_index(scene.palette, [180, 180, 180]),
     };
-    let light = alias_entity_light(scene.world, origin, scene.light_styles, scene.dlights, true);
+    let light = alias_entity_light(scene.world, origin, scene.light_styles, frame.torches, scene.dlights, true);
     alias_prepare(&view, &ent, 0, light, true, scene.time, scene.colormap)
 }
 
@@ -1788,7 +1798,7 @@ mod tests {
         // No lightdata: R_LightPoint is 255 -> ambient clamps to 128 and the
         // shade to 192 - 128.
         let bsp = demo_room();
-        assert_eq!(alias_entity_light(&bsp, [0.0; 3], &NEUTRAL_LIGHTSTYLE_SCALES, &[], false), (128, 64));
+        assert_eq!(alias_entity_light(&bsp, [0.0; 3], &NEUTRAL_LIGHTSTYLE_SCALES, None, &[], false), (128, 64));
         // R_AliasSetupLighting: (255 - 128) << 6, shade * 64, and the light
         // vector {-1,0,0} in the model's frame (identity here).
         let axes = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];

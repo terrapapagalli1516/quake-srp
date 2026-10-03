@@ -26,7 +26,7 @@
 use crate::client::in_win::JoyCvars;
 use crate::client::lerpmodels::LerpModels;
 use crate::client::lerpmove::LerpMove;
-use crate::render::{Crosshair, SkyScroll, Threads};
+use crate::render::{Crosshair, SkyScroll, Threads, TorchFlicker};
 use crate::snd::SoundMode;
 use crate::screen::{SbarLayout, VIEWSIZE_DEFAULT, VIEWSIZE_MAX, VIEWSIZE_MIN, VIEWSIZE_STEP};
 use crate::server::LerpLightStyles;
@@ -178,6 +178,11 @@ pub struct Cvars {
     /// `server::lightstyle_scales_at`) instead of snapping ten times a second,
     /// as id's `R_AnimateLight` does.
     pub lightstyles: LerpLightStyles,
+    /// `r_torchflicker`: how much the steady torches (style 0, as LIGHT.EXE
+    /// baked them) flicker about their light, as if the mapper had given each
+    /// a flicker style — 0 off, 1 that style's swing, at most 2
+    /// ([`TorchFlicker`], `render::torch`).
+    pub torches: TorchFlicker,
 }
 
 impl Default for Cvars {
@@ -228,6 +233,7 @@ impl Cvars {
             touch_accel: 0.0,
             joy: JoyCvars::classic(),
             lightstyles: LerpLightStyles::Classic,
+            torches: TorchFlicker::OFF,
         }
     }
 
@@ -266,6 +272,7 @@ impl Cvars {
             max_edicts: 8192,
             touch: true,
             lightstyles: LerpLightStyles::Smooth,
+            torches: TorchFlicker::MODERN,
             ..Cvars::classic()
         }
     }
@@ -525,6 +532,8 @@ pub const CVARS: &[Cvar] = &[
     Cvar { name: "r_lerplightstyles", archive: true, departure: true, help: "flickering lights glide, not snap",
         get: |c| flag(c.lightstyles == LerpLightStyles::Smooth),
         set: |c, v| c.lightstyles = if on(v) { LerpLightStyles::Smooth } else { LerpLightStyles::Classic } },
+    Cvar { name: "r_torchflicker", archive: true, departure: true, help: "steady torches flicker, 0 off, to 2",
+        get: |c| number_string(c.torches.value()), set: |c, v| c.torches = TorchFlicker::from_value(atof(v)) },
 ];
 
 /// A renamed cvar's old name, and the name it has now. A `config.cfg` saved

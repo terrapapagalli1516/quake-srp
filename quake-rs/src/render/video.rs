@@ -40,6 +40,7 @@
 //! [`light_styles`](super::Scene::light_styles).)
 
 use super::sky::SkyScroll;
+use super::torch::TorchFlicker;
 use crate::server::LerpLightStyles;
 
 /// id's widest and tallest view (`r_shared.h`: `MAXWIDTH` 1280, `MAXHEIGHT`
@@ -135,6 +136,9 @@ pub struct VideoCvars {
     /// How the animated light styles step: id's ten snaps a second, or
     /// gliding (`r_lerplightstyles`).
     pub lightstyles: LerpLightStyles,
+    /// How much the steady torches flicker (`r_torchflicker`): off in
+    /// Classic, as LIGHT.EXE baked them.
+    pub torches: TorchFlicker,
 }
 
 impl VideoCvars {
@@ -145,6 +149,7 @@ impl VideoCvars {
         hires: false,
         sky: SkyScroll::Classic,
         lightstyles: LerpLightStyles::Classic,
+        torches: TorchFlicker::OFF,
     };
     /// Every extra on: what a 2026 display wants.
     pub const MODERN: VideoCvars = VideoCvars {
@@ -152,6 +157,7 @@ impl VideoCvars {
         hires: true,
         sky: SkyScroll::Fluid,
         lightstyles: LerpLightStyles::Smooth,
+        torches: TorchFlicker::MODERN,
     };
 }
 

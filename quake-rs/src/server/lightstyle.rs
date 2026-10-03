@@ -129,6 +129,16 @@ fn lightstyle_value(map: &[u8], i: i64, frac: f32, lerp: LerpLightStyles) -> i32
     }
 }
 
+/// `map`'s value at `letters` along it — the letter `floor(letters)`, gliding
+/// toward the next by the fraction ([`lightstyle_value`]): a light style is
+/// at `time * 10`. The steady torches' flicker (`render::torch`) reads
+/// world.qc's flicker patterns through it, each at its own phase.
+pub(crate) fn lightstyle_value_at(map: &[u8], letters: f64, lerp: LerpLightStyles) -> i32 {
+    let p = if letters.is_finite() { letters } else { 0.0 };
+    let i = p.floor();
+    lightstyle_value(map, i as i64, (p - i) as f32, lerp)
+}
+
 /// `R_AnimateLight` (r_light.c) over an arbitrary style table: the per-style
 /// brightness scale at game `time`, one entry per [`MAX_LIGHTSTYLES`] index,
 /// stepped as id's or gliding ([`LerpLightStyles`]). Shared by

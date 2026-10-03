@@ -8,6 +8,7 @@
 use crate::bsp::Bsp;
 use crate::math::{dot, Vec3};
 use super::surf::face_world_poly;
+use super::torch::FaceTorches;
 
 // ---------------------------------------------------------------------------
 // BSP lightmaps (Quake's baked static lighting from the LIGHTING lump)
@@ -453,8 +454,38 @@ fn face_lightmap<'a>(
     face_lightmap_dyn(bsp, face, world_poly, &NEUTRAL_LIGHTSTYLE_SCALES, &[], 0)
 }
 
+/// [`face_lightmap_with`] with no torch flicker: the lightmap unit tests'.
+#[cfg(test)]
+pub(super) fn face_lightmap_dyn<'a>(
+    bsp: &'a Bsp,
+    face: &crate::bsp::DFace,
+    world_poly: &[Vec3],
+    light_styles: &[f32; LIGHTSTYLES],
+    dlights: &[crate::dlight::DynamicLight],
+    dlightbits: u32,
+) -> Option<LightMap<'a>> {
+    face_lightmap_with(bsp, face, world_poly, light_styles, FaceTorches::NONE, dlights, dlightbits)
+}
+
+/// EXTRA (`r_torchflicker`, [`super::torch`]): the steady torches' change
+/// to a face's luxels this frame, added to the style combine `base` — or to
+/// the borrowed style-0 bytes `samples`, owned now — before any dynamic
+/// light. A face no torch moves this frame keeps `base` as it is, so with the
+/// extra off (or no torch near) the lightmap is id's, bit for bit. The
+/// torches' light is in the style-0 block, so it is scaled by style 0's
+/// value (`scale0`).
+fn add_torch_flicker(base: Option<Vec<f32>>, samples: &[u8], torches: FaceTorches, scale0: f32) -> Option<Vec<f32>> {
+    if torches.is_still() {
+        return base;
+    }
+    let mut buf = base.unwrap_or_else(|| samples.iter().map(|&b| f32::from(b)).collect());
+    torches.add_to(&mut buf, scale0);
+    Some(buf)
+}
+
 /// Compute a face's lightmap: the multi-style combine (`R_BuildLightMap`) scaled
-/// by `light_styles`, plus any dynamic lights in `dlights` that reach the face
+/// by `light_styles`, the steady torches' flicker (`torches`, the 2026
+/// extra), plus any dynamic lights in `dlights` that reach the face
 /// (`R_AddDynamicLights`). Returns `None` if the face is fullbright.
 ///
 /// `None` (the caller's fallback shade) when there is no `lighting` lump, the
@@ -470,11 +501,12 @@ fn face_lightmap<'a>(
 /// rendered pixels — are byte-identical to the pre-style renderer. Otherwise the
 /// [`LightMap`] owns an `f32` grid: `(sum of style blocks * style scale)` plus any
 /// dynamic-light contributions, clamped by `factor_at`.
-pub(super) fn face_lightmap_dyn<'a>(
+pub(super) fn face_lightmap_with<'a>(
     bsp: &'a Bsp,
     face: &crate::bsp::DFace,
     world_poly: &[Vec3],
     light_styles: &[f32; LIGHTSTYLES],
+    torches: FaceTorches,
     dlights: &[crate::dlight::DynamicLight],
     // The face's `surf->dlightbits` mask from the `R_MarkLights` BSP recursion
     // (see [`mark_dlights`]); [`ALL_DLIGHT_BITS`] where marking does not apply.
@@ -543,6 +575,7 @@ pub(super) fn face_lightmap_dyn<'a>(
             StyleCombine::StaticBlock | StyleCombine::TooShort => None,
             StyleCombine::Combined(buf) => Some(buf),
         };
+    let base = add_torch_flicker(base, samples, torches, light_styles[0]);
 
     // Add any reaching dynamic lights on top of the (possibly style-combined)
     // base. When `base` is None and no light reaches (or `dlights` is empty), the
@@ -566,7 +599,7 @@ pub(super) fn face_lightmap_dyn<'a>(
 /// For each axis `j` in 0..2 the surface coordinate of every vertex `p` is
 /// `p·vecs[j].xyz + vecs[j][3]`; tracking its min/max gives
 /// `texmins[j] = floor(min/16)*16` and `extent[j] = (ceil(max/16) - floor(min/16))*16`.
-fn surface_extents(ti: &crate::bsp::TexInfo, world_poly: &[Vec3]) -> Option<([i32; 2], [i32; 2])> {
+pub(super) fn surface_extents(ti: &crate::bsp::TexInfo, world_poly: &[Vec3]) -> Option<([i32; 2], [i32; 2])> {
     if world_poly.len() < 3 {
         return None;
     }
@@ -620,24 +653,37 @@ fn surface_extents(ti: &crate::bsp::TexInfo, world_poly: &[Vec3]) -> Option<([i3
 /// of 256 mapped to neutral). SAFETY: the recursion is depth-bounded and every
 /// index is `.get()`-checked, so corrupt node/plane/face data yields a default
 /// (no light) rather than a panic or unbounded recursion.
+#[cfg(test)]
 pub(super) fn r_light_point(bsp: &Bsp, p: Vec3, light_styles: &[f32; LIGHTSTYLES]) -> f32 {
+    r_light_point_hit(bsp, p, light_styles).0
+}
+
+/// [`r_light_point`], and the luxel it read: `(face, luxel)` — the world face
+/// the ray landed on and the luxel's index in its grid — when that face has
+/// samples. The steady torches' flicker ([`super::torch`]) moves a model's
+/// light by that luxel's change.
+pub(super) fn r_light_point_hit(bsp: &Bsp, p: Vec3, light_styles: &[f32; LIGHTSTYLES]) -> LightPoint {
     if bsp.lighting.is_empty() {
-        return 255.0; // C: `if (!worldmodel->lightdata) return 255;`
+        return (255.0, None); // C: `if (!worldmodel->lightdata) return 255;`
     }
     let headnode = match bsp.models.first().and_then(|m| m.headnode.first().copied()) {
         Some(h) => h,
-        None => return 0.0,
+        None => return (0.0, None),
     };
     let end = [p[0], p[1], p[2] - 2048.0];
     let depth = bsp.nodes.len().saturating_add(2);
     match recursive_light_point(bsp, headnode, p, end, light_styles, depth) {
-        Some(r) => r.max(0.0),
-        None => 0.0, // C: `if (r == -1) r = 0;`
+        Some((r, hit)) => (r.max(0.0), hit),
+        None => (0.0, None), // C: `if (r == -1) r = 0;`
     }
 }
 
+/// What `R_LightPoint` read: the brightness, and the `(face, luxel)` it came
+/// from when the face has samples.
+pub(super) type LightPoint = (f32, Option<(usize, usize)>);
+
 /// One step of `RecursiveLightPoint`. `node` is a child reference (negative =>
-/// leaf, "didn't hit anything"). Returns `Some(brightness)` on a hit,
+/// leaf, "didn't hit anything"). Returns `Some(brightness, luxel)` on a hit,
 /// `None` for "didn't hit anything" (the C `-1`). `depth` bounds the recursion.
 fn recursive_light_point(
     bsp: &Bsp,
@@ -646,7 +692,7 @@ fn recursive_light_point(
     end: Vec3,
     light_styles: &[f32; LIGHTSTYLES],
     depth: usize,
-) -> Option<f32> {
+) -> Option<LightPoint> {
     if depth == 0 {
         return None;
     }
@@ -708,7 +754,7 @@ fn light_point_check_node(
     node: &crate::bsp::DNode,
     mid: Vec3,
     light_styles: &[f32; LIGHTSTYLES],
-) -> Option<f32> {
+) -> Option<LightPoint> {
     use crate::bsp::TEX_SPECIAL;
     let first = node.firstface as usize;
     let count = node.numfaces as usize;
@@ -758,17 +804,17 @@ fn light_point_check_node(
 
         // The point is on this surface. With no samples the C returns 0.
         if face.lightofs < 0 {
-            return Some(0.0);
+            return Some((0.0, None));
         }
         let lmw = (extent[0] / 16 + 1) as usize;
         let lmh = (extent[1] / 16 + 1) as usize;
         let block = match lmw.checked_mul(lmh) {
             Some(b) => b,
-            None => return Some(0.0),
+            None => return Some((0.0, None)),
         };
         let start: usize = match face.lightofs.try_into() {
             Ok(s) => s,
-            Err(_) => return Some(0.0),
+            Err(_) => return Some((0.0, None)),
         };
         // Luxel coordinate within the block (C `ds>>4`, `dt>>4`; ds,dt >= 0 here).
         let lx = ((ds >> 4) as i64).clamp(0, lmw as i64 - 1) as usize;
@@ -794,7 +840,7 @@ fn light_point_check_node(
             let scale = light_styles.get(style as usize).copied().unwrap_or(1.0);
             r += sample * scale;
         }
-        return Some(r);
+        return Some((r, Some((face_index, luxel))));
     }
     None
 }

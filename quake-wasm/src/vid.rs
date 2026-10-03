@@ -22,7 +22,7 @@
 
 use quake_rs::client::Vid;
 use quake_rs::cvar::Cvars;
-use quake_rs::render::{self, FovMode, MipCvars, SkyScroll, VideoCvars};
+use quake_rs::render::{self, FovMode, MipCvars, SkyScroll, TorchFlicker, VideoCvars};
 use quake_rs::server::LerpLightStyles;
 
 use crate::app::{ensure_app, App, APP};
@@ -183,6 +183,7 @@ pub(crate) fn set_video(name: &str) -> i32 {
         (c.native, c.fov_adapt) = (modern, modern);
         c.sky = if modern { SkyScroll::Fluid } else { SkyScroll::Classic };
         c.lightstyles = if modern { LerpLightStyles::Smooth } else { LerpLightStyles::Classic };
+        c.torches = if modern { TorchFlicker::MODERN } else { TorchFlicker::OFF };
         if modern {
             c.pixel_size = 1;
         }
@@ -246,7 +247,7 @@ pub(crate) fn vid(a: &App) -> Vid {
         height: h,
         display_aspect,
         exact_perspective: c.exact_persp,
-        video: VideoCvars { fov_mode, hires: native, sky: c.sky, lightstyles: c.lightstyles },
+        video: VideoCvars { fov_mode, hires: native, sky: c.sky, lightstyles: c.lightstyles, torches: c.torches },
         mip: MipCvars { mipscale: c.d_mipscale, mipcap: c.d_mipcap },
     }
 }
