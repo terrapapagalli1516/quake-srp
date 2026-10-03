@@ -479,7 +479,7 @@ const threads = {
     }
   },
   // The threads the program may count on: this machine's, at most the pool
-  // plus the program's own (the player's `threads` cvar goes lower, never
+  // plus the program's own (the player's `r_threads` goes lower, never
   // higher).
   offer() {
     return Math.max(1, Math.min(navigator.hardwareConcurrency || 1, this.pool.length + 1));

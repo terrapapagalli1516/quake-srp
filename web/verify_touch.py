@@ -12,9 +12,9 @@ QUAKE_BROWSER=firefox runs the part Playwright's Firefox can drive: taps
 only `hasTouch`), at devicePixelRatio 1 (its device_scale_factor does not
 reach a cross-origin isolated page, so the "@3" and "@2.6" checks run at 1,
 and say so). Each check that needs a drag or a held finger is SKIPped with
-the reason: 3's stick, look, two thumbs, FIRE and JUMP, and 2b's held arrow
-(a quick tap of it runs). The rest, 101 of Chromium's 108 checks, runs on
-Gecko's touch events and pointer events.
+the reason: 3's stick, look, two thumbs, FIRE and JUMP, 2b's held arrow
+(a quick tap of it runs) and 5b's held finger. The rest, 137 of Chromium's
+146 checks, runs on Gecko's touch events and pointer events.
 
   1. The page: touch.js loads on the coarse pointer, the touch layout fills
      the screen, "tap to start"; held upright (390x844) the rotate prompt

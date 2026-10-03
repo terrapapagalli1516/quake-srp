@@ -1763,8 +1763,7 @@ refresh the box turns, and there is nothing to dismiss it and no upright
 mode left. The game waits behind it:
 
 - **No ticks, no frames.** index.html's frame loop reads the same media
-  query (`portraitNow()`, live, so it cannot disagree with a resize
-  handler by a refresh) and on the change does what a hidden tab already
+  query (`portraitNow()`, once a refresh) and on the change does what a hidden tab already
   does to it: sends no tick, presents nothing. The game's time stands still
   (a tick carries the time since the last; none comes), so the attract loop,
   a menu, the console and a game in progress stop alike with no state of the
@@ -1788,7 +1787,10 @@ mode left. The game waits behind it:
 - **The window's box is not reported** (`sendWindow` returns): the program
   keeps its landscape frame instead of resizing to a tall one nobody sees
   and back; `releaseGame` sends the box if it changed. A page that loads
-  upright reports none until its first turn.
+  upright reports none until its first turn. The report goes out from the
+  frame loop, a refresh after the resize event (`windowDirty`), not from
+  the event: Firefox evaluates a media query at layout, after the event, so
+  a handler there still read the old orientation and sent the tall box.
 - **A tap on the prompt asks for fullscreen and the landscape lock** (the
   gesture the covered "tap to start" would have given). A phone whose
   rotation is locked never reports landscape by itself; Android Chrome's lock,

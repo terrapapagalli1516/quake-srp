@@ -399,11 +399,11 @@
 
   // Held upright: the page's own box is taller than wide (CSS's `portrait`:
   // the height at least the width), not the device's orientation — a split
-  // screen or a foldable's half is judged by the room the page has. A live
-  // read, so a resize handler and the media query cannot disagree. The
-  // prompt itself is CSS (the media query below: it covers the page the
-  // moment the box turns, before any script runs); this is what the game
-  // asks (index.html's frame loop) to wait for it.
+  // screen or a foldable's half is judged by the room the page has. The same
+  // query as the prompt's CSS below, so the two cannot disagree; the prompt
+  // is up the moment the box turns, before any script runs, and this is
+  // what the game asks (index.html's frame loop, once a refresh — not in a
+  // resize event: Firefox evaluates a query at layout, after it) to wait.
   const portraitQuery = matchMedia('(orientation: portrait)');
   const portrait = () => portraitQuery.matches;
   // The game starts waiting (index.html holdGame) or goes on (releaseGame):

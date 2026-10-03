@@ -481,8 +481,9 @@ let touch = null;
 // the frame loop below sends no ticks and shows no frame, which is all a
 // hidden tab ever did to it, so the game's time stands still and it goes on
 // where it was when the screen is turned back. `held` is the frame loop's
-// own copy of the answer (it acts on a change, once); everything else asks
-// the screen itself, which cannot be a refresh behind a resize.
+// own copy of the answer (it acts on a change, once); `portraitNow` is the
+// answer itself — read at a refresh, where a media query is current in
+// every browser (not in a resize handler: see `windowDirty`).
 let held = false;
 const portraitNow = () => !!touch && touch.portrait();
 // The page is not being looked at: its tab hidden, or the prompt up. The
@@ -2521,8 +2522,15 @@ function commandLine(tracks) {
   const mod = GAME_PARAM === 'hipnotic' ? ['-hipnotic'] : GAME_PARAM === 'rogue' ? ['-rogue'] : [];
   return [...cdtracks, ...mod, ...(q.has('classic') ? ['+profile', 'classic'] : q.has('2026') ? ['+profile', '2026'] : [])];
 }
-addEventListener('resize', () => { sendWindow(); fitCanvas(); });
-document.addEventListener('fullscreenchange', () => { sendWindow(); fitCanvas(); });
+// The box is reported from the frame loop, a refresh after the resize, not
+// from the event: Firefox evaluates a media query at layout, after the
+// resize event, so a handler there can still read the old orientation —
+// and send the tall box of a phone just turned upright (a window report
+// is not to be taken back). At a refresh the page's media queries are
+// current in every browser.
+let windowDirty = false;
+addEventListener('resize', () => { windowDirty = true; fitCanvas(); });
+document.addEventListener('fullscreenchange', () => { windowDirty = true; fitCanvas(); });
 
 // The newest complete frame into the canvas, if there is one the page has
 // not shown. The slot is claimed first (READING), so the program writes its
@@ -2865,6 +2873,7 @@ function frame(now) {
     if (held) holdGame(); else releaseGame(now);
   }
   if (held) { audioT = now; return; }
+  if (windowDirty) { windowDirty = false; sendWindow(); }
   updateSndUI();
   advanceAudioClock(audioT === null ? 0 : now - audioT);
   audioT = now;
