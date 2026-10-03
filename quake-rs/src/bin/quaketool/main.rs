@@ -168,7 +168,7 @@ const COMMANDS: &[Command] = &[
     Command {
         name: "view",
         usage: "<pak> <map.bsp> <out.ppm> [--res WxH] [--origin x,y,z] [--angles p,y,r] [--time T] [--fov F] \
-                [--aspect A] [--exactpersp 0|1] [--vrect x,y,w,h] [--ents FILE] [--particles FILE] \
+                [--aspect A] [--vrect x,y,w,h] [--ents FILE] [--particles FILE] \
                 [--dlight x,y,z,radius[,minlight]]... [--viewmodel M:F] [--viewent x,y,z,p,y,r] [--bench N] \
                 [--d-mipscale X] [--d-mipcap N] [video options]",
         about: "render one exact view (Quake camera convention), for the C oracle diff",

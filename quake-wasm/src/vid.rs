@@ -168,7 +168,8 @@ pub(crate) fn apply_settings(a: &mut App) {
 
 /// The checks' and the benchmark's shorthand for the picture (the
 /// `set_video` call): `modern` is the 2026 profile's — native resolution at
-/// one device pixel a pixel, Hor+, the fluid sky, the gliding light styles:
+/// one device pixel a pixel, Hor+, the fluid sky, the gliding light styles,
+/// the flickering torches, exact perspective:
 /// `quaketool --video modern` — whose size then follows the window
 /// (`set_window`); `classic` a video mode in the 4:3 box with id's field of
 /// view, sky and light styles. Returns 1 for a known name.
@@ -180,7 +181,7 @@ pub(crate) fn set_video(name: &str) -> i32 {
     };
     ensure_app(|a| {
         let c = &mut a.settings.cvars;
-        (c.native, c.fov_adapt) = (modern, modern);
+        (c.native, c.fov_adapt, c.exact_persp) = (modern, modern, modern);
         c.sky = if modern { SkyScroll::Fluid } else { SkyScroll::Classic };
         c.lightstyles = if modern { LerpLightStyles::Smooth } else { LerpLightStyles::Classic };
         c.torches = if modern { TorchFlicker::MODERN } else { TorchFlicker::OFF };
@@ -339,6 +340,26 @@ mod tests {
         assert_eq!(sky(), SkyScroll::Fluid);
         assert_eq!(set_video("classic"), 1);
         assert_eq!(sky(), SkyScroll::Classic);
+    }
+
+    /// The renderer's perspective follows `wasm_exactpersp`: id's 16-pixel
+    /// spans in Classic, exact at every pixel in 2026 (the user's call: at
+    /// 1080p and above the spans' affine steps show), and `set_video`'s
+    /// `modern` is `quaketool --video modern`'s, exact perspective with the
+    /// rest.
+    #[test]
+    fn the_perspective_follows_wasm_exactpersp() {
+        let exact = || APP.with(|c| vid(c.borrow().as_ref().unwrap()).exact_perspective);
+        assert_eq!(boot(), 1);
+        assert!(!exact(), "the tests start in Classic: id's spans");
+        use_2026();
+        assert!(exact(), "2026: exact at every pixel");
+        crate::host_cmd::execute_console_command("wasm_exactpersp 0");
+        assert!(!exact());
+        assert_eq!(set_video("modern"), 1);
+        assert!(exact());
+        assert_eq!(set_video("classic"), 1);
+        assert!(!exact());
     }
 
     /// The light styles the client animates follow `r_lerplightstyles` the

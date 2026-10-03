@@ -216,7 +216,7 @@ pub const SETTING_ROWS: [SettingRow; 19] = [
     SettingRow {
         cvar: "wasm_exactpersp",
         label: "     Exact perspective",
-        help: ["Perspective exact at each pixel,", "not id's 16-pixel spans"],
+        help: ["Exact at every pixel; id's spans", "wobble on walls at 1080p and up"],
         kind: RowKind::Toggle,
     },
     SettingRow {

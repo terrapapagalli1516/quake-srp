@@ -12,7 +12,8 @@
      the screenshot, never smoothed; vid_pixelsize 3 gives 830x477 at 3x3.
   3. The 2026 frame: the 2026 cross centred on the view (crosshair 1 and 0
      differ only there), id's + crossing the same centre at the 2-D scale
-     (crosshair 2), no 72 fps cap (a second of 1/144 s steps runs 144
+     (crosshair 2), exact perspective on (switching it off redraws the walls
+     with id's 16-pixel spans, and on again restores the frame), no 72 fps cap (a second of 1/144 s steps runs 144
      frames), and W walks.
   4. `?classic` is Classic: the profile, config.cfg with nothing changed from
      it, every engine departure off (the 72 fps cap: 72 frames in a second at
@@ -28,7 +29,7 @@
   6. The settings survive a reload: a 2026 session's pixel size, a binding
      and Screen size; a `?classic` visit sticks for a plain reload after it;
      a returning visitor's old localStorage settings keep their choice (Show
-     FPS) and get the 2026 defaults (uncapped, scaled 2-D).
+     FPS) and get the 2026 defaults (uncapped, exact perspective, scaled 2-D).
   7. Video Options is honest about native resolution (review: it used to show
      960x600 as current and a pick silently turned Native off): opened while
      actually native, the cursor lands on the live native row (not a stale
@@ -180,6 +181,18 @@ with sync_playwright() as p:
     d = pg.evaluate(DIFF, ["_x2", "_x0"])
     ok = d is not None and (d["x0"], d["y0"]) == (614, 279) and 632 <= d["x1"] <= 634 and 293 <= d["y1"] <= 296
     check("crosshair 2: id's + at the 2-D scale, crossing the view's centre", ok, str(d))
+    # Exact perspective is on in 2026 (at 1080p and above id's 16-pixel spans
+    # wobble along a wall seen at a grazing angle); off is id's spans, which
+    # redraw the walls, and on again is the same frame.
+    check("wasm_exactpersp is on in 2026", cvar(pg, "wasm_exactpersp") == "1")
+    pg.evaluate(GRAB, "_p1")
+    pg.evaluate("quake.callLine('exec wasm_exactpersp 0')")
+    pg.evaluate(GRAB, "_p0")
+    pg.evaluate("quake.callLine('exec wasm_exactpersp 1')")
+    pg.evaluate(GRAB, "_p1b")
+    d = pg.evaluate(DIFF, ["_p1", "_p0"])
+    check("...off (id's spans) redraws the walls, on again is the same frame, byte for byte",
+          d is not None and d["n"] > 1000 and pg.evaluate(DIFF, ["_p1", "_p1b"]) is None, str(d))
     pg.evaluate("quake.resume()")
     check("no 72 fps cap: 144 frames in a second at 144 Hz", pg.evaluate(second_at_144) == 144)
     x0 = pg.evaluate("exp.listener_x()"), pg.evaluate("exp.listener_y()")
@@ -340,8 +353,8 @@ with sync_playwright() as p:
     pg = page(ctx)
     boot(pg)
     ext = pg.evaluate("exp.extras()")
-    check("old settings: the choice kept (Show FPS), the 2026 defaults on (uncapped, scaled 2-D)",
-          text(pg, "profile") == "2026" and ext == 11, f"extras {ext}; {text(pg, 'config_text')!r}")
+    check("old settings: the choice kept (Show FPS), the 2026 defaults on (uncapped, exact perspective, scaled 2-D)",
+          text(pg, "profile") == "2026" and ext == 15, f"extras {ext}; {text(pg, 'config_text')!r}")
     ctx.close()
 
     # 7. Video Options is honest about native resolution, and reversible.
