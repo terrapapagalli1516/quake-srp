@@ -16,11 +16,15 @@
 //! [--dump DIR [--strengths LIST]]` — the same for the steady torches'
 //! flicker (`r_torchflicker` at strength S), standing by torches; with
 //! `--dump`, every frame of each view at the first rate as raw RGB instead.
-//! `quaketool framerate <pak> --exactpersp [--rates LIST] [--res WxH]
-//! [--threads N] [--reps N] [--secs S] [--view NAME=MAP:X,Y,Z:YAW[:PITCH]]...`
-//! — what exact perspective (`wasm_exactpersp`) costs: the 3-D view's time
-//! per frame with id's 16-pixel spans and exact at every pixel, the rest the
-//! 2026 profile's.
+//! `quaketool framerate <pak> --perspspan [--spans 16,8,4,1] [--rates LIST]
+//! [--res WxH] [--threads N] [--reps N] [--secs S]
+//! [--view NAME=MAP:X,Y,Z:YAW[:PITCH]]...` — what each perspective span
+//! (`r_perspspan`) costs: the 3-D view's time per frame with the walls and
+//! liquids exact every 16 pixels (id's), 8, 4 or at every pixel, the rest the
+//! 2026 profile's (`--exactpersp`: the same with `--spans 16,1`); with
+//! `--dump DIR [--turn DEG_S] [--strafe UNITS_S] [--crop X,Y,W,H]`, every
+//! frame of each view at each span at the first rate as raw RGB instead, the
+//! camera turning or strafing (a clip of the four side by side).
 //!
 //! Each scenario is a scripted piece of play on the shareware maps — a jump,
 //! a fall, a grenade, a lift, a damage flash, a demo — run through the same
@@ -55,7 +59,7 @@ use quake_rs::vm::Vm;
 use quake_rs::world;
 
 /// The screen the scenarios draw (small: they measure the game, not pixels).
-const VID: Vid = Vid { width: 320, height: 200, display_aspect: 4.0 / 3.0, exact_perspective: false, video: render::VideoCvars::CLASSIC, mip: render::MipCvars::DEFAULT };
+const VID: Vid = Vid { width: 320, height: 200, display_aspect: 4.0 / 3.0, persp_span: render::PerspSpan::Spans16, video: render::VideoCvars::CLASSIC, mip: render::MipCvars::DEFAULT };
 
 // QuakeC constants (defs.qc).
 const FL_GODMODE: i32 = 64;
@@ -1817,10 +1821,10 @@ fn torches_dump(pak: &Pak, views: &[StyleView], rate: Rate, res: (usize, usize),
 }
 
 // ---------------------------------------------------------------------------
-// Exact perspective: what `wasm_exactpersp` costs
+// The perspective span: what `r_perspspan` costs
 // ---------------------------------------------------------------------------
 
-/// The views `--exactpersp` measures without `--view`: e1m1's start (a lit
+/// The views `--perspspan` measures without `--view`: e1m1's start (a lit
 /// corridor, the first thing a player sees), e1m1's flickering corridor, a
 /// wall-heavy view in e1m6 (the walls of the Door to Chthon's courtyard, where
 /// the two perspectives differ most of the legal views searched: 3% of the
@@ -1861,14 +1865,17 @@ fn persp_run(pak: &Pak, view: &StyleView, rate: Rate, vid: Vid, threads: usize, 
     view_s
 }
 
-/// `--exactpersp`: per view and rate, the 3-D view's time per frame (median,
-/// mean, p95 over `reps` runs of each, interleaved) with id's 16-pixel
-/// spans → exact perspective at every pixel, every other video setting the
-/// 2026 profile's (the torches flicker, so the numbers are today's).
-fn persp_report(pak: &Pak, rates: &[Rate], views: &[StyleView], res: (usize, usize), threads: usize, reps: usize, secs: f64) -> String {
+/// `--perspspan`: per view and rate, the 3-D view's time per frame (median,
+/// mean, p95 over `reps` runs of each, interleaved) at each of `spans`, the
+/// first the reference the others are put against (id's 16 by default),
+/// every other video setting the 2026 profile's (the torches flicker, so the
+/// numbers are today's).
+#[allow(clippy::too_many_arguments)]
+fn persp_report(pak: &Pak, rates: &[Rate], views: &[StyleView], res: (usize, usize), spans: &[render::PerspSpan], threads: usize, reps: usize, secs: f64) -> String {
     let mut o = String::new();
-    let vid_for = |exact_perspective| Vid { width: res.0, height: res.1, display_aspect: res.0 as f64 / res.1 as f64, exact_perspective, video: render::VideoCvars::MODERN, ..VID };
-    let _ = writeln!(o, "wasm_exactpersp at {}x{}, {threads} thread(s), {secs} s a run; id's spans → exact", res.0, res.1);
+    let vid_for = |persp_span| Vid { width: res.0, height: res.1, display_aspect: res.0 as f64 / res.1 as f64, persp_span, video: render::VideoCvars::MODERN, ..VID };
+    let names: Vec<String> = spans.iter().map(|p| p.pixels().to_string()).collect();
+    let _ = writeln!(o, "r_perspspan at {}x{}, {threads} thread(s), {secs} s a run; spans {}", res.0, res.1, names.join(" → "));
     quake_rs::client::set_lap_hook(Some(lap));
     for view in views {
         if pak.read_file(&format!("maps/{}.bsp", view.map)).ok().flatten().is_none() {
@@ -1877,10 +1884,10 @@ fn persp_report(pak: &Pak, rates: &[Rate], views: &[StyleView], res: (usize, usi
         }
         let _ = writeln!(o, "{} — maps/{}.bsp at {:?} looking {} pitch {}", view.name, view.map, view.origin, view.yaw, view.pitch);
         for &rate in rates {
-            let mut times: [Vec<f64>; 2] = Default::default();
+            let mut times: Vec<Vec<f64>> = vec![Vec::new(); spans.len()];
             for _ in 0..reps {
-                for (k, exact) in [false, true].into_iter().enumerate() {
-                    times[k].extend(persp_run(pak, view, rate, vid_for(exact), threads, secs));
+                for (k, &span) in spans.iter().enumerate() {
+                    times[k].extend(persp_run(pak, view, rate, vid_for(span), threads, secs));
                 }
             }
             // (median, mean, p95) in ms.
@@ -1889,16 +1896,101 @@ fn persp_report(pak: &Pak, rates: &[Rate], views: &[StyleView], res: (usize, usi
                 let (med, p95) = median_p95(xs);
                 (med, m, p95)
             };
-            let (a, b) = (stat(&mut times[0]), stat(&mut times[1]));
-            let _ = writeln!(
-                o,
-                "  {:>6} Hz: 3-D view ms/frame median {:.3} → {:.3} ({:+.1}%), mean {:.3} → {:.3} ({:+.1}%), p95 {:.3} → {:.3}  ({} frames each)",
-                rate.label(), a.0, b.0, (b.0 / a.0 - 1.0) * 100.0, a.1, b.1, (b.1 / a.1 - 1.0) * 100.0, a.2, b.2, times[0].len()
-            );
+            let st: Vec<(f64, f64, f64)> = times.iter_mut().map(stat).collect();
+            let pct = |b: f64, a: f64| (b / a - 1.0) * 100.0;
+            let cells = |f: &dyn Fn(&(f64, f64, f64)) -> f64| {
+                st.iter().zip(&names).enumerate().map(|(k, (x, n))| {
+                    if k == 0 { format!("{n}: {:.3}", f(x)) } else { format!("{n}: {:.3} ({:+.1}%)", f(x), pct(f(x), f(&st[0]))) }
+                }).collect::<Vec<_>>().join(", ")
+            };
+            let _ = writeln!(o, "  {:>6} Hz: 3-D view ms/frame median {}  ({} frames each)", rate.label(), cells(&|x| x.0), times[0].len());
+            let _ = writeln!(o, "  {:>6}     mean {}", "", cells(&|x| x.1));
+            let _ = writeln!(o, "  {:>6}     p95 {}", "", cells(&|x| x.2));
         }
     }
     quake_rs::client::set_lap_hook(None);
     o
+}
+
+/// How `--perspspan --dump` moves the camera: `turn` degrees a second to the
+/// left (the yaw grows), and `strafe` units a second to the right (noclip:
+/// the player floats at that speed, the view bobbing as a player's does).
+#[derive(Clone, Copy, Debug, Default)]
+struct PerspMotion {
+    turn: f32,
+    strafe: f32,
+}
+
+/// `--perspspan --dump DIR`: `secs` of each view at each span, the camera
+/// moving as `motion` says, every frame (after a second to settle, the
+/// camera already moving) as raw RGB in `DIR/<view>-<span>.rgb` — the
+/// `crop` rectangle of each, or the whole frame — and `DIR/<view>.txt`, the
+/// size, rate and frame count. Every span's run is the same game frame for
+/// frame (a fresh session's random streams, the same clock), so the four
+/// files are one clip at four settings.
+#[allow(clippy::too_many_arguments)]
+fn persp_dump(
+    pak: &Pak,
+    views: &[StyleView],
+    rate: Rate,
+    res: (usize, usize),
+    secs: f64,
+    spans: &[render::PerspSpan],
+    motion: PerspMotion,
+    crop: Option<(usize, usize, usize, usize)>,
+    dir: &str,
+) -> Result<String, String> {
+    use std::io::Write as _;
+    let palette = pak
+        .read_file("gfx/palette.lmp")
+        .ok()
+        .flatten()
+        .and_then(|b| render::parse_palette(&b))
+        .ok_or("gfx/palette.lmp is missing or short")?;
+    let (cx, cy, cw, ch) = crop.unwrap_or((0, 0, res.0, res.1));
+    if cx + cw > res.0 || cy + ch > res.1 || cw == 0 || ch == 0 {
+        return Err(format!("--crop {cx},{cy},{cw},{ch} is not inside {}x{}", res.0, res.1));
+    }
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let stepping = if rate == Rate::Hz(72) { Stepping::Classic } else { Stepping::Uncapped };
+    let mut o = String::new();
+    for view in views {
+        let mut frames = 0;
+        for &span in spans {
+            let vid = Vid { width: res.0, height: res.1, display_aspect: res.0 as f64 / res.1 as f64, persp_span: span, video: render::VideoCvars::MODERN, ..VID };
+            let mut s = Sim::new(pak, &view.map, rate, stepping);
+            s.teleport(view.origin, view.yaw);
+            let player = s.player();
+            s.vm().ent_set_float(player, "movetype", MOVETYPE_NOCLIP);
+            s.w.pitch = view.pitch;
+            s.w.viewsize = 120.0;
+            s.w.in_side = motion.strafe / 320.0;
+            let path = format!("{dir}/{}-{}.rgb", view.name, span.pixels());
+            let mut out = std::io::BufWriter::new(std::fs::File::create(&path).map_err(|e| format!("{path}: {e}"))?);
+            let (start, warm, end) = (s.t, s.t + 1.0, s.t + 1.0 + secs);
+            frames = 0;
+            while s.t < end - 1e-9 {
+                let dt = s.clock.next();
+                s.w.yaw = view.yaw + motion.turn * (s.t - start) as f32;
+                let frame = cl_main::walk_frame(&mut s.w, dt, false, &vid);
+                s.t += dt;
+                if s.t > warm {
+                    let rgb = frame.image.to_rgb(&palette);
+                    let mut bytes = Vec::with_capacity(cw * ch * 3);
+                    for row in rgb.pixels.chunks(res.0).skip(cy).take(ch) {
+                        bytes.extend(row[cx..cx + cw].iter().flatten());
+                    }
+                    out.write_all(&bytes).map_err(|e| format!("{path}: {e}"))?;
+                    frames += 1;
+                }
+                render::recycle_image(frame.image);
+            }
+            let _ = writeln!(o, "{path}: {frames} frames");
+        }
+        let meta = format!("{dir}/{}.txt", view.name);
+        std::fs::write(&meta, format!("{cw} {ch} {} {frames}\n", rate.label())).map_err(|e| format!("{meta}: {e}"))?;
+    }
+    Ok(o)
 }
 
 // ---------------------------------------------------------------------------
@@ -1938,8 +2030,10 @@ pub fn cmd_framerate(pak_path: &str, rest: &[String]) -> Result<String, String> 
     let (mut bake, mut thread_list) = (false, vec![1usize, 2, 4, 8, 16]);
     // `--torchflicker`'s: the strength, and `--dump`'s directory and strengths.
     let (mut torchflicker, mut dump, mut strengths) = (None::<f32>, None::<String>, vec![0.0, 0.5, 1.0]);
-    // `--exactpersp`'s: spans against exact perspective.
-    let mut exactpersp = false;
+    // `--perspspan`'s: the spans compared, and `--dump`'s camera motion and
+    // crop (`--exactpersp` is `--perspspan --spans 16,1`).
+    let (mut perspspan, mut spans) = (false, render::PerspSpan::ALL.to_vec());
+    let (mut motion, mut crop) = (PerspMotion::default(), None);
     let (mut threads, mut reps, mut secs) = (1usize, 3usize, 4.6f64);
     let mut i = 0;
     while i < rest.len() {
@@ -1968,7 +2062,26 @@ pub fn cmd_framerate(pak_path: &str, rest: &[String]) -> Result<String, String> 
                 i += 1;
             }
             "--lightstyles" => lightstyles = true,
-            "--exactpersp" => exactpersp = true,
+            "--perspspan" => perspspan = true,
+            "--exactpersp" => (perspspan, spans) = (true, vec![render::PerspSpan::Spans16, render::PerspSpan::Exact]),
+            "--spans" => {
+                let v = rest.get(i + 1).ok_or("--spans needs a list")?;
+                spans = v.split(',').map(crate::video::parse_span).collect::<Result<_, _>>()?;
+                i += 1;
+            }
+            "--turn" | "--strafe" => {
+                let v = rest.get(i + 1).ok_or_else(|| format!("{} needs a speed", rest[i]))?;
+                let speed: f32 = v.parse().map_err(|_| format!("{}: bad speed {v:?}", rest[i]))?;
+                if rest[i] == "--turn" { motion.turn = speed } else { motion.strafe = speed }
+                i += 1;
+            }
+            "--crop" => {
+                let v = rest.get(i + 1).ok_or("--crop needs X,Y,W,H")?;
+                let n: Vec<usize> = v.split(',').map(|x| x.trim().parse()).collect::<Result<_, _>>().map_err(|_| format!("--crop: bad X,Y,W,H {v:?}"))?;
+                let [x, y, w, h] = n[..] else { return Err(format!("--crop: expected X,Y,W,H, got {v:?}")) };
+                crop = Some((x, y, w, h));
+                i += 1;
+            }
             "--bake" => bake = true,
             "--torchflicker" => {
                 let v = rest.get(i + 1).ok_or("--torchflicker needs a strength")?;
@@ -2018,13 +2131,20 @@ pub fn cmd_framerate(pak_path: &str, rest: &[String]) -> Result<String, String> 
         });
     }
     let pak = pak.ok_or("no pak")?;
-    if exactpersp {
+    if perspspan {
         style_rates.retain(|r| matches!(r, Rate::Hz(_)));
         if views.is_empty() {
             views = PERSP_VIEWS.iter().map(|v| StyleView::parse(v)).collect::<Result<_, _>>()?;
         }
+        if spans.is_empty() {
+            return Err("--spans: no span".into());
+        }
         let size = super::parse_res(res.split(',').next().unwrap_or("1920x1080"), render::VideoCvars::MODERN)?;
-        return Ok(persp_report(&pak, &style_rates, &views, size, threads, reps, secs));
+        if let Some(dir) = dump {
+            let rate = style_rates.first().copied().unwrap_or(Rate::Hz(60));
+            return persp_dump(&pak, &views, rate, size, secs, &spans, motion, crop, &dir);
+        }
+        return Ok(persp_report(&pak, &style_rates, &views, size, &spans, threads, reps, secs));
     }
     if bake {
         style_rates.retain(|r| matches!(r, Rate::Hz(_)));

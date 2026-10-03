@@ -302,7 +302,7 @@ impl TurbTable {
 mod tests {
     use super::*;
     use crate::render::fixtures::synthetic_liquid_pixels;
-    use crate::render::raster::{span_at, span_turb, AttrVert, Persp, PolyGrads};
+    use crate::render::raster::{span_at, span_turb, AttrVert, PerspSpan, PolyGrads};
 
     /// `D_WarpScreen` at `scale` into an `out_w x out_h` image of its own,
     /// on fresh tables, on `threads` threads.
@@ -529,7 +529,7 @@ mod tests {
             let mut img = Image::new(w, h, 0);
             for y in 0..h {
                 let row = &mut img.pixels[y * w..(y + 1) * w];
-                span_turb(row, &span_at(&g, 0, y), &g, &pixels, 64, 64, &turb, time, Persp::Exact);
+                span_turb(row, &span_at(&g, 0, y), &g, &pixels, 64, 64, &turb, time, PerspSpan::Exact);
             }
             img
         };

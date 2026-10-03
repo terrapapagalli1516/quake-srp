@@ -181,7 +181,8 @@ pub(crate) fn set_video(name: &str) -> i32 {
     };
     ensure_app(|a| {
         let c = &mut a.settings.cvars;
-        (c.native, c.fov_adapt, c.exact_persp) = (modern, modern, modern);
+        (c.native, c.fov_adapt) = (modern, modern);
+        c.persp_span = if modern { render::PerspSpan::Exact } else { render::PerspSpan::Spans16 };
         c.sky = if modern { SkyScroll::Fluid } else { SkyScroll::Classic };
         c.lightstyles = if modern { LerpLightStyles::Smooth } else { LerpLightStyles::Classic };
         c.torches = if modern { TorchFlicker::MODERN } else { TorchFlicker::OFF };
@@ -236,7 +237,7 @@ pub(crate) const DISPLAY_ASPECT: f64 = 4.0 / 3.0;
 
 /// The screen the client frames draw ([`Vid`]): the picture's size, the
 /// aspect it is shown at (a mode's 4:3 box, or square pixels native; with the
-/// size it gives `vid.aspect`), and the exact-perspective setting.
+/// size it gives `vid.aspect`), and the perspective span.
 pub(crate) fn vid(a: &App) -> Vid {
     let (w, h) = (a.render_w, a.render_h);
     let c = &a.settings.cvars;
@@ -247,7 +248,7 @@ pub(crate) fn vid(a: &App) -> Vid {
         width: w,
         height: h,
         display_aspect,
-        exact_perspective: c.exact_persp,
+        persp_span: c.persp_span,
         video: VideoCvars { fov_mode, hires: native, sky: c.sky, lightstyles: c.lightstyles, torches: c.torches },
         mip: MipCvars { mipscale: c.d_mipscale, mipcap: c.d_mipcap },
     }
@@ -261,7 +262,7 @@ pub(crate) fn mode_vid(w: usize, h: usize) -> Vid {
         width: w,
         height: h,
         display_aspect: DISPLAY_ASPECT,
-        exact_perspective: false,
+        persp_span: render::PerspSpan::Spans16,
         video: VideoCvars::CLASSIC,
         mip: MipCvars::DEFAULT,
     }
@@ -302,6 +303,7 @@ mod tests {
     use crate::host::step;
     use crate::menu::{menu_cancel, menu_down, menu_left, menu_right, menu_select, menu_visible};
     use crate::test_util::*;
+    use quake_rs::render::PerspSpan;
 
     /// Auto picks the smallest whole pixel that keeps the frame within a
     /// 1080p frame's pixels per whole square root of the renderer's threads;
@@ -342,24 +344,28 @@ mod tests {
         assert_eq!(sky(), SkyScroll::Classic);
     }
 
-    /// The renderer's perspective follows `wasm_exactpersp`: id's 16-pixel
-    /// spans in Classic, exact at every pixel in 2026 (the user's call: at
-    /// 1080p and above the spans' affine steps show), and `set_video`'s
-    /// `modern` is `quaketool --video modern`'s, exact perspective with the
-    /// rest.
+    /// The renderer's perspective follows `r_perspspan`: id's 16-pixel spans
+    /// in Classic, exact at every pixel in 2026 (the user's call: at 1080p
+    /// and above the spans' affine steps show), 8 or 4 when set; the old
+    /// `wasm_exactpersp` sets its two ends; and `set_video`'s `modern` is
+    /// `quaketool --video modern`'s, exact perspective with the rest.
     #[test]
-    fn the_perspective_follows_wasm_exactpersp() {
-        let exact = || APP.with(|c| vid(c.borrow().as_ref().unwrap()).exact_perspective);
+    fn the_perspective_follows_r_perspspan() {
+        let span = || APP.with(|c| vid(c.borrow().as_ref().unwrap()).persp_span);
         assert_eq!(boot(), 1);
-        assert!(!exact(), "the tests start in Classic: id's spans");
+        assert_eq!(span(), PerspSpan::Spans16, "the tests start in Classic: id's spans");
         use_2026();
-        assert!(exact(), "2026: exact at every pixel");
-        crate::host_cmd::execute_console_command("wasm_exactpersp 0");
-        assert!(!exact());
+        assert_eq!(span(), PerspSpan::Exact, "2026: exact at every pixel");
+        for (line, want) in [("r_perspspan 8", PerspSpan::Spans8), ("r_perspspan 4", PerspSpan::Spans4),
+                             ("wasm_exactpersp 0", PerspSpan::Spans16), ("wasm_exactpersp 1", PerspSpan::Exact),
+                             ("r_perspspan 16", PerspSpan::Spans16)] {
+            crate::host_cmd::execute_console_command(line);
+            assert_eq!(span(), want, "{line}");
+        }
         assert_eq!(set_video("modern"), 1);
-        assert!(exact());
+        assert_eq!(span(), PerspSpan::Exact);
         assert_eq!(set_video("classic"), 1);
-        assert!(!exact());
+        assert_eq!(span(), PerspSpan::Spans16);
     }
 
     /// The light styles the client animates follow `r_lerplightstyles` the

@@ -87,6 +87,7 @@ pub use crate::screen::{
 pub use alias::{ModelInstance, Viewmodel};
 pub use light::{LIGHTSTYLES, NEUTRAL_LIGHTSTYLE_SCALES};
 pub use part::draw_particles;
+pub use raster::PerspSpan;
 pub use sprite::SpriteInstance;
 pub use surf::MipCvars;
 pub use stats::RenderStats;
@@ -393,14 +394,15 @@ pub struct RenderOptions {
     /// ([`ViewWindow`]) — the 2026 status bar overlay's world under the view
     /// ([`Renderer::render_below`]).
     pub window: Option<ViewWindow>,
-    /// EXTRA, not id (default off): exact perspective at every pixel of the
-    /// surface-cached walls and the liquids. id's x86 renderer, what 1996
-    /// players saw, is exact only every 16 pixels and affine in between
-    /// (`D_DrawSpans16`, `Turbulent8`); that is this struct's default, and
-    /// Classic's. The 2026 profile sets it (`wasm_exactpersp`, on there):
-    /// from 1080p up the spans' affine steps show as a wobble along a wall
-    /// seen at a grazing angle.
-    pub exact_perspective: bool,
+    /// How often the surface-cached walls and the liquids find their texel
+    /// exactly ([`PerspSpan`]). id's x86 renderer, what 1996 players saw, is
+    /// exact only every 16 pixels and affine in between (`D_DrawSpans16`,
+    /// `Turbulent8`); that is this struct's default, and Classic's. EXTRA,
+    /// not id: every 8 (id's portable C, `D_DrawSpans8`), every 4, or at
+    /// every pixel, the 2026 profile's (`r_perspspan`): from 1080p up the
+    /// spans' affine steps show as a wobble along a wall seen at a grazing
+    /// angle.
+    pub persp_span: PerspSpan,
     /// The port's video cvars: Hor+ and views past id's largest
     /// ([`VideoCvars`]; Classic by default).
     pub video: VideoCvars,
@@ -479,7 +481,7 @@ impl Default for RenderOptions {
             pixel_aspect: 1.0,
             screen: None,
             window: None,
-            exact_perspective: false,
+            persp_span: PerspSpan::Spans16,
             video: VideoCvars::CLASSIC,
             mip: MipCvars::DEFAULT,
         }
@@ -495,15 +497,6 @@ impl RenderOptions {
         match self.screen {
             Some(p) => ((p.vid_w as i32 >> 1) - p.x as i32, (p.vid_h as i32 >> 1) - p.y as i32),
             None => ((geom.proj_w as i32 >> 1) - geom.ox as i32, (geom.proj_h as i32 >> 1) - geom.oy as i32),
-        }
-    }
-
-    /// The span routine for textured brush surfaces.
-    fn persp(&self) -> raster::Persp {
-        if self.exact_perspective {
-            raster::Persp::Exact
-        } else {
-            raster::Persp::Spans16
         }
     }
 
@@ -1965,6 +1958,54 @@ mod tests {
         let other = demo_room();
         r.render(&Scene::new(&other, cam, 160, 120, &pal));
         assert_eq!(r.render(&scene).pixels, cold.pixels, "after another map");
+    }
+
+    /// `RenderOptions::persp_span` reaches the walls: the lit, textured room
+    /// seen along a wall at a grazing angle is id's frame at 16 (the
+    /// options' default), and at 8 and 4 nearer exact perspective's, by
+    /// fewer pixels at each step. (A frame's differing pixels are not the
+    /// error's size — `raster`'s tests measure that — but how many pixels it
+    /// carries over a texel's edge.)
+    #[test]
+    fn the_perspective_span_draws_the_walls_from_ids_to_exact() {
+        let mut bsp = fixtures::lightmapped_demo_room(100, 200);
+        // Each face's texture on its own plane's axes (demo_room's s and t
+        // are world x and y, which leave a wall's texture one line smeared),
+        // a texel a unit, a texture of 16 x 16 distinct texels.
+        for f in &bsp.faces {
+            let n = bsp.planes[f.planenum as usize].normal;
+            let (sa, ta) = if n[2] != 0.0 { ([1.0, 0.0, 0.0], [0.0, 1.0, 0.0]) } else if n[0] != 0.0 { ([0.0, 1.0, 0.0], [0.0, 0.0, 1.0]) } else { ([1.0, 0.0, 0.0], [0.0, 0.0, 1.0]) };
+            let ti = &mut bsp.texinfo[f.texinfo as usize];
+            ti.vecs = [[sa[0], sa[1], sa[2], 0.37], [ta[0], ta[1], ta[2], 0.61]];
+        }
+        bsp.textures = (0..bsp.texinfo.len())
+            .map(|i| {
+                Some(crate::bsp::MipTex {
+                    name: format!("wall{i}"),
+                    width: 16,
+                    height: 16,
+                    offsets: [0, 0, 0, 0],
+                    pixels: (0..256).map(|k| (k + 17 * i) as u8).collect(),
+                    mips: Default::default(),
+                    anim: None,
+                })
+            })
+            .collect();
+        let cam = Camera::looking_at([-201.3, -219.7, 41.1], [200.0, -233.3, 27.9], 90.0);
+        let pal = fixtures::ramp_palette();
+        let cm: Vec<u8> = (0..light::COLORMAP_LEN).map(|i| (i % 256) as u8).collect();
+        let scene = || Scene { colormap: Some(&cm), ..Scene::new(&bsp, cam, 480, 300, &pal) };
+        let draw = |persp_span| {
+            let mut s = scene();
+            s.options.persp_span = persp_span;
+            fixtures::render_once(&s).pixels
+        };
+        let exact = draw(PerspSpan::Exact);
+        let off = |img: &[u8]| img.iter().zip(&exact).filter(|(a, b)| a != b).count();
+        assert_eq!(draw(PerspSpan::Spans16), fixtures::render_once(&scene()).pixels, "16 is the default, id's");
+        let (d16, d8, d4) = (off(&draw(PerspSpan::Spans16)), off(&draw(PerspSpan::Spans8)), off(&draw(PerspSpan::Spans4)));
+        // (2026-10-03: 24826, 12487 and 5136 of the 144000 pixels.)
+        assert!(d16 > d8 && d8 > d4 && d4 > 0, "pixels off exact: 16 {d16}, 8 {d8}, 4 {d4}");
     }
 
     #[test]

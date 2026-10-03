@@ -90,7 +90,7 @@ pub fn cmd_sound(pak_path: &str, demo: &str, out_path: &str, rest: &[String]) ->
     mixer.run(&pak, &calls);
     let mut starts = count_starts(&calls);
 
-    let vid = Vid { width: 320, height: 200, display_aspect: 4.0 / 3.0, exact_perspective: false, video: render::VideoCvars::CLASSIC, mip: render::MipCvars::DEFAULT };
+    let vid = Vid { width: 320, height: 200, display_aspect: 4.0 / 3.0, persp_span: render::PerspSpan::Spans16, video: render::VideoCvars::CLASSIC, mip: render::MipCvars::DEFAULT };
     let (mut realtime, mut oldrealtime) = (0.0f64, 0.0f64);
     let mut pcm: Vec<i16> = Vec::new();
     let mut trace = String::new();
@@ -360,7 +360,7 @@ pub fn cmd_sndwalk(pak_path: &str, map: &str, script_path: &str, log_path: &str,
     let mut w = host_cmd::build_walk_map(pak.clone(), &map_file, &rand, &mut calls, settings.cvars.max_edicts as usize)
         .ok_or_else(|| format!("{map_file} would not load"))?;
     w.viewsize = settings.cvars.viewsize;
-    let vid = Vid { width: 320, height: 200, display_aspect: 4.0 / 3.0, exact_perspective: false, video: render::VideoCvars::CLASSIC, mip: render::MipCvars::DEFAULT };
+    let vid = Vid { width: 320, height: 200, display_aspect: 4.0 / 3.0, persp_span: render::PerspSpan::Spans16, video: render::VideoCvars::CLASSIC, mip: render::MipCvars::DEFAULT };
     // id's mixer at id's rate, for --wav.
     let mut mixer = Mixer::new(&pak, 11025, Fixes::NONE);
     let rate = mixer.rate();

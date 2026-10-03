@@ -14,7 +14,7 @@ use crate::keys::{
     keynum_to_string, Wheel, K_BACKSPACE, K_DEL, K_DOWNARROW, K_ENTER, K_ESCAPE, K_LEFTARROW,
     K_RIGHTARROW, K_UPARROW,
 };
-use crate::render::Image;
+use crate::render::{Image, PerspSpan};
 use crate::screen::{center_string_top, Crosshair, VIEWSIZE_MAX, VIEWSIZE_MIN, VIEWSIZE_STEP};
 use crate::settings::Settings;
 
@@ -146,6 +146,9 @@ pub enum RowKind {
     /// `crosshair`: `off`, `cross` (the 2026 one), `id's +`; left and right
     /// step it.
     Crosshair,
+    /// `r_perspspan`: `id's 16`, `8`, `4`, `exact` ([`PerspSpan::ALL`]);
+    /// left and right step it.
+    PerspSpan,
     /// A strength drawn as `M_DrawSlider` draws id's: left and right step
     /// the cvar by `step` within `min..=max`, as `M_AdjustSliders` steps
     /// Sound Volume.
@@ -246,10 +249,10 @@ pub const PICTURE_ROWS: [SettingRow; 10] = [
         kind: RowKind::Toggle,
     },
     SettingRow {
-        cvar: "wasm_exactpersp",
-        label: "     Exact perspective",
-        help: ["Exact at every pixel; id's spans", "wobble on walls at 1080p and up"],
-        kind: RowKind::Toggle,
+        cvar: "r_perspspan",
+        label: "      Perspective span",
+        help: ["Walls exact every 16 pixels (id's),", "8, 4, or 1: less wobble, more work"],
+        kind: RowKind::PerspSpan,
     },
     SettingRow {
         cvar: "crosshair",
@@ -376,6 +379,11 @@ impl SettingRow {
                 Crosshair::Glyph => "id's +",
             }
             .to_string(),
+            RowKind::PerspSpan => match s.cvars.persp_span {
+                PerspSpan::Spans16 => "id's 16".to_string(),
+                PerspSpan::Exact => "exact".to_string(),
+                p => p.pixels().to_string(),
+            },
             RowKind::Toggle => {
                 let on = cvar::find(self.cvar).is_some_and(|c| c.get(&s.cvars) != "0");
                 checkbox_text(on).to_string()
@@ -401,8 +409,9 @@ impl SettingRow {
     /// Left (`step` -1) or right (+1) on it, as `M_AdjustSliders` does a
     /// checkbox or a slider: a profile, a toggle or the wheel flips whatever
     /// the direction, the pixel size steps (auto, 1, 2, 3, 4, wrapping), and
-    /// so does the crosshair (off, cross, id's +); a slider steps, clamped
-    /// at its ends as id's are; a page row changes nothing.
+    /// so do the crosshair (off, cross, id's +) and the perspective span
+    /// (id's 16, 8, 4, exact); a slider steps, clamped at its ends as id's
+    /// are; a page row changes nothing.
     pub fn adjust(&self, s: &mut Settings, step: i32) {
         match self.kind {
             RowKind::Profile => s.set_profile(s.profile.toggled()),
@@ -413,6 +422,11 @@ impl SettingRow {
             RowKind::Crosshair => {
                 let n = i32::from(s.cvars.crosshair.cvar()) + step;
                 s.cvars.crosshair = Crosshair::from_cvar(n.rem_euclid(3) as f32);
+            }
+            RowKind::PerspSpan => {
+                let all = PerspSpan::ALL;
+                let at = all.iter().position(|&p| p == s.cvars.persp_span).unwrap_or(0) as i32;
+                s.cvars.persp_span = all[(at + step).rem_euclid(all.len() as i32) as usize];
             }
             RowKind::Toggle => {
                 if let Some(c) = cvar::find(self.cvar) {
@@ -440,6 +454,7 @@ impl SettingRow {
             RowKind::Profile => "console: profile classic|2026".to_string(),
             RowKind::PixelSize => format!("console: {} 0-{PIXEL_SIZE_MAX}", self.cvar),
             RowKind::Crosshair => format!("console: {} 0/1/2", self.cvar),
+            RowKind::PerspSpan => format!("console: {} 16/8/4/1", self.cvar),
             RowKind::Toggle => format!("console: {} 0/1", self.cvar),
             RowKind::Slider { min, max, .. } => {
                 format!("console: {} {}-{}", self.cvar, cvar::number_string(min), cvar::number_string(max))
@@ -4448,6 +4463,19 @@ mod tests {
         let console = cvar::find("crosshair").unwrap().get(&s.cvars);
         assert_eq!((s.cvars.crosshair, console.as_str()), (Crosshair::Glyph, "2"), "left wraps to id's +");
         assert_eq!(crosshair.console_hint(), "console: crosshair 0/1/2");
+        // And the perspective span: id's 16 (Classic's), 8, 4, exact (2026's),
+        // wrapping; the console reads the span's pixels.
+        let span = on_row(&mut m, "r_perspspan");
+        assert_eq!((span.value(&s).as_str(), span.label.trim_start()), ("id's 16", "Perspective span"));
+        let steps: Vec<String> = (0..5).map(|_| { m.adjust(1, &mut s); span.value(&s) }).collect();
+        assert_eq!(steps, ["8", "4", "exact", "id's 16", "8"]);
+        m.adjust(-1, &mut s);
+        m.adjust(-1, &mut s);
+        let console = cvar::find("r_perspspan").unwrap().get(&s.cvars);
+        assert_eq!((s.cvars.persp_span, console.as_str(), span.value(&s).as_str()), (PerspSpan::Exact, "1", "exact"), "left wraps to exact");
+        m.adjust(1, &mut s);
+        assert_eq!(s.cvars.persp_span, PerspSpan::Spans16, "and right from exact to id's 16");
+        assert_eq!(span.console_hint(), "console: r_perspspan 16/8/4/1");
 
         // The torch flicker: a slider (M_DrawSlider's knob), 0 to 2 by a
         // tenth of its range, clamped at its ends as id's sliders are;

@@ -1,6 +1,6 @@
 //! The video options `shot`, `view`, `play` and `timedemo` share: the port's video
 //! cvars ([`VideoCvars`]: Hor+, hires, the fluid sky and the gliding light
-//! styles), exact perspective (`wasm_exactpersp`; a renderer option, not one of
+//! styles), the perspective span (`r_perspspan`; a renderer option, not one of
 //! [`VideoCvars`]), the display the frame is shown on (which with the mode's
 //! size gives `vid.aspect`), and the scaled 2-D layer.
 //!
@@ -15,8 +15,10 @@
 //!                          gliding between them (`r_lerplightstyles`)
 //! --torchflicker S         the steady torches flicker at strength S, 0 (id's) to 2
 //!                          (`r_torchflicker`; 1 the flicker style's own swing)
-//! --exactpersp 0|1         walls and liquids exact at every pixel, or id's 16-pixel
-//!                          spans (`wasm_exactpersp`)
+//! --perspspan 16|8|4|1     walls and liquids exact every 16 pixels (id's
+//!                          `D_DrawSpans16`), 8 (id's C `D_DrawSpans8`), 4, or at
+//!                          every pixel (`r_perspspan`)
+//! --exactpersp 0|1         the same as --perspspan 16 or 1 (the option before the span)
 //! --display W:H|square     the display's width:height (square: the mode's own,
 //!                          square pixels); the default is the command's
 //! --scaled2d 0|1           the status bar, menus and console blown up from 320x200
@@ -24,16 +26,16 @@
 //!                          the pixels are the same for any N)
 //! ```
 
-use quake_rs::render::{FovMode, SkyScroll, TorchFlicker, VideoCvars};
+use quake_rs::render::{FovMode, PerspSpan, SkyScroll, TorchFlicker, VideoCvars};
 use quake_rs::server::LerpLightStyles;
 
 /// The parsed video options (see the module docs).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct VideoArgs {
     pub cvars: VideoCvars,
-    /// `--exactpersp`: [`RenderOptions::exact_perspective`](quake_rs::render::RenderOptions::exact_perspective),
+    /// `--perspspan`: [`RenderOptions::persp_span`](quake_rs::render::RenderOptions::persp_span),
     /// which sits beside [`VideoCvars`] in the frame's [`Vid`](quake_rs::client::Vid).
-    pub exact_persp: bool,
+    pub persp_span: PerspSpan,
     /// `--display`: `Some(None)` for `square`, `Some(Some(a))` for `W:H`.
     display: Option<Option<f64>>,
     scaled_2d: Option<bool>,
@@ -51,13 +53,14 @@ impl VideoArgs {
         };
         match flag {
             "--video" => {
-                (self.cvars, self.exact_persp) = match val {
-                    "classic" => (VideoCvars::CLASSIC, false),
-                    "modern" => (VideoCvars::MODERN, true),
+                (self.cvars, self.persp_span) = match val {
+                    "classic" => (VideoCvars::CLASSIC, PerspSpan::Spans16),
+                    "modern" => (VideoCvars::MODERN, PerspSpan::Exact),
                     _ => return Err(format!("--video: expected classic or modern, got {val:?}")),
                 }
             }
-            "--exactpersp" => self.exact_persp = bit(val)?,
+            "--perspspan" => self.persp_span = parse_span(val)?,
+            "--exactpersp" => self.persp_span = if bit(val)? { PerspSpan::Exact } else { PerspSpan::Spans16 },
             "--fov-mode" => {
                 self.cvars.fov_mode = match val {
                     "classic" => FovMode::Classic,
@@ -132,14 +135,22 @@ impl VideoArgs {
     }
 
     /// A short tag for file names and reports: `classic`, `modern`, or the mix
-    /// (a preset with the other perspective says so: `modern-spans`,
-    /// `classic-exactpersp`).
+    /// (a preset with another perspective says so: `modern-spans` for id's
+    /// 16, `modern-span8`, `classic-span4`, `classic-exactpersp`).
     pub fn tag(&self) -> String {
-        let exact = if self.exact_persp { "-exactpersp" } else { "" };
+        let exact = match self.persp_span {
+            PerspSpan::Spans16 => "",
+            PerspSpan::Spans8 => "-span8",
+            PerspSpan::Spans4 => "-span4",
+            PerspSpan::Exact => "-exactpersp",
+        };
         match self.cvars {
             VideoCvars::CLASSIC => format!("classic{exact}"),
-            VideoCvars::MODERN if self.exact_persp => "modern".into(),
-            VideoCvars::MODERN => "modern-spans".into(),
+            VideoCvars::MODERN => match self.persp_span {
+                PerspSpan::Exact => "modern".into(),
+                PerspSpan::Spans16 => "modern-spans".into(),
+                _ => format!("modern{exact}"),
+            },
             v => format!(
                 "{}{}{}{exact}",
                 if v.fov_mode == FovMode::HorPlus { "horplus" } else { "classicfov" },
@@ -148,6 +159,14 @@ impl VideoArgs {
             ),
         }
     }
+}
+
+/// `--perspspan`'s value: exactly 16, 8, 4 or 1.
+pub fn parse_span(val: &str) -> Result<PerspSpan, String> {
+    PerspSpan::ALL
+        .into_iter()
+        .find(|p| val == p.pixels().to_string())
+        .ok_or_else(|| format!("--perspspan: expected 16, 8, 4 or 1, got {val:?}"))
 }
 
 /// The options as `quaketool --help` lists them (the module docs say more).
@@ -159,7 +178,8 @@ pub const HELP: &[(&str, &str)] = &[
     ("--lightstyles classic|smooth", "the animated lights in id's ten steps a second, or gliding (`r_lerplightstyles`)"),
     ("--torchflicker S", "the steady torches flicker at strength S, 0 (id's) to 2 (`r_torchflicker`)"),
     ("--display W:H|square", "the display's width:height (square: the mode's own); the default is the command's"),
-    ("--exactpersp 0|1", "walls and liquids exact at every pixel, or id's 16-pixel spans (`wasm_exactpersp`)"),
+    ("--perspspan 16|8|4|1", "walls and liquids exact every 16 pixels (id's), 8 (id's C), 4, or every pixel (`r_perspspan`)"),
+    ("--exactpersp 0|1", "the same as --perspspan 16 or 1"),
     ("--scaled2d 0|1", "the status bar, menus and console blown up from 320x200"),
     ("--threads N", "draw each frame's 3-D view on N threads (default 1; the pixels are the same for any N)"),
 ];
@@ -170,20 +190,26 @@ mod tests {
 
     /// `--video modern` is the whole 2026 set, exact perspective with the
     /// rest (it was id's spans until the user turned it on in 2026);
-    /// `--video classic` is id's; `--exactpersp` moves it alone, and a later
-    /// `--video` sets it again with the rest, as it does every video option.
+    /// `--video classic` is id's; `--perspspan` (or the older `--exactpersp`,
+    /// its two ends) moves it alone, and a later `--video` sets it again with
+    /// the rest, as it does every video option.
     #[test]
     fn video_modern_carries_exact_perspective() {
         let mut v = VideoArgs::default();
-        assert!(!v.exact_persp, "id's spans by default");
+        assert_eq!(v.persp_span, PerspSpan::Spans16, "id's spans by default");
         assert_eq!(v.parse("--video", "modern"), Ok(true));
-        assert_eq!((v.cvars, v.exact_persp, v.tag().as_str()), (VideoCvars::MODERN, true, "modern"));
+        assert_eq!((v.cvars, v.persp_span, v.tag().as_str()), (VideoCvars::MODERN, PerspSpan::Exact, "modern"));
         assert_eq!(v.parse("--exactpersp", "0"), Ok(true));
-        assert_eq!((v.cvars, v.exact_persp, v.tag().as_str()), (VideoCvars::MODERN, false, "modern-spans"));
+        assert_eq!((v.cvars, v.persp_span, v.tag().as_str()), (VideoCvars::MODERN, PerspSpan::Spans16, "modern-spans"));
+        assert_eq!(v.parse("--perspspan", "8"), Ok(true));
+        assert_eq!((v.persp_span, v.tag().as_str()), (PerspSpan::Spans8, "modern-span8"));
         assert_eq!(v.parse("--video", "classic"), Ok(true));
-        assert_eq!((v.cvars, v.exact_persp, v.tag().as_str()), (VideoCvars::CLASSIC, false, "classic"));
+        assert_eq!((v.cvars, v.persp_span, v.tag().as_str()), (VideoCvars::CLASSIC, PerspSpan::Spans16, "classic"));
         assert_eq!(v.parse("--exactpersp", "1"), Ok(true));
         assert_eq!(v.tag(), "classic-exactpersp");
+        assert_eq!(v.parse("--perspspan", "4"), Ok(true));
+        assert_eq!(v.tag(), "classic-span4");
         assert!(v.parse("--exactpersp", "2").is_err());
+        assert!(v.parse("--perspspan", "2").is_err() && v.parse("--perspspan", "0").is_err());
     }
 }

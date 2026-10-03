@@ -304,12 +304,15 @@ pub(crate) fn menu_cursor() -> i32 {
 
 /// The four settings that were the port's first "Web extras", as the bits
 /// the browser checks and the benchmark read and set them by: 1
-/// `wasm_uncapped`, 2 `wasm_showfps`, 4 `wasm_exactpersp`, 8 `wasm_scaled2d`.
+/// `wasm_uncapped`, 2 `wasm_showfps`, 4 `wasm_exactpersp` (set while
+/// `r_perspspan` is 1, exact; setting it is `r_perspspan 1`, clearing it id's
+/// 16), 8 `wasm_scaled2d`.
 pub(crate) fn extras() -> i32 {
     APP.with(|c| {
         c.borrow().as_ref().map_or(0, |a| {
             let s = &a.settings.cvars;
-            i32::from(s.uncapped) | i32::from(s.show_fps) << 1 | i32::from(s.exact_persp) << 2 | i32::from(s.scaled_2d) << 3
+            let exact = s.persp_span == quake_rs::render::PerspSpan::Exact;
+            i32::from(s.uncapped) | i32::from(s.show_fps) << 1 | i32::from(exact) << 2 | i32::from(s.scaled_2d) << 3
         })
     })
 }
@@ -318,7 +321,9 @@ pub(crate) fn extras() -> i32 {
 pub(crate) fn set_extras(bits: i32) {
     ensure_app(|a| {
         let s = &mut a.settings.cvars;
-        (s.uncapped, s.show_fps, s.exact_persp, s.scaled_2d) = (bits & 1 != 0, bits & 2 != 0, bits & 4 != 0, bits & 8 != 0);
+        use quake_rs::render::PerspSpan;
+        let span = if bits & 4 != 0 { PerspSpan::Exact } else { PerspSpan::Spans16 };
+        (s.uncapped, s.show_fps, s.persp_span, s.scaled_2d) = (bits & 1 != 0, bits & 2 != 0, span, bits & 8 != 0);
     });
 }
 

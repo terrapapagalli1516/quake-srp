@@ -110,7 +110,7 @@ pub fn cmd_shot(args: &[String]) -> Result<String, String> {
         width: w,
         height: h,
         display_aspect: video.display_aspect(w, h, None),
-        exact_perspective: video.exact_persp,
+        persp_span: video.persp_span,
         video: video.cvars,
         mip: render::MipCvars::DEFAULT,
     };

@@ -839,14 +839,26 @@ mod tests {
         run_console_line("wasm_uncapped 0");
         run_console_line("wasm_showfps junk"); // atof("junk") = 0: off
         assert_eq!(extras(), 0);
-        run_console_line("wasm_exactpersp 1");
+        run_console_line("wasm_exactpersp 1"); // the retired name: r_perspspan 1
         assert_eq!(extras(), 4);
+        run_console_line("wasm_exactpersp");
+        assert_eq!(last_line().as_deref(), Some("\"wasm_exactpersp\" is \"1\""));
+        run_console_line("r_perspspan 8");
+        assert_eq!(extras(), 0, "8 is not exact");
+        run_console_line("r_perspspan");
+        assert_eq!(last_line().as_deref(), Some("\"r_perspspan\" is \"8\""));
+        run_console_line("wasm_help r_perspspan");
+        let said: String = APP.with(|c| c.borrow().as_ref().unwrap().console.lines().map(str::to_string).collect::<Vec<_>>().concat());
+        assert!(said.ends_with("r_perspspan \"8\": exact every 16 (id), 8, 4 or 1 px"), "{said:?}");
+        run_console_line("r_perspspan 1");
         run_console_line("wasm_help");
         let help: Vec<String> = APP.with(|c| {
             c.borrow().as_ref().unwrap().console.lines().map(str::to_string).collect()
         });
         assert!(help.iter().any(|l| l == "  wasm_uncapped 0"), "{help:?}");
-        assert!(help.iter().any(|l| l == "  wasm_exactpersp 1"), "{help:?}");
+        assert!(help.iter().any(|l| l == "  r_perspspan 1"), "{help:?}");
+        let listed = help.iter().skip_while(|l| !l.starts_with("settings, profile"));
+        assert!(!listed.into_iter().any(|l| l.contains("wasm_exactpersp")), "the retired name is not listed: {help:?}");
         assert!(help.iter().all(|l| l.len() <= LIST_WIDTH), "fits a 320-wide console: {help:?}");
     }
 

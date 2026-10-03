@@ -57,7 +57,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         width: 640,
         height: 400,
         display_aspect: 4.0 / 3.0,
-        exact_perspective: false,
+        persp_span: render::PerspSpan::Spans16,
         video: VideoCvars::CLASSIC,
         mip: MipCvars::DEFAULT,
     };

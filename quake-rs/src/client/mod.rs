@@ -691,10 +691,11 @@ pub struct Vid {
     /// browser page: 4:3, as DOS and Windows Quake's modes filled a 4:3
     /// monitor); with the mode's size it gives `vid.aspect`.
     pub display_aspect: f64,
-    /// Exact perspective at every pixel of walls and liquids instead of id's
-    /// 16-pixel spans (`D_DrawSpans16`): the web port's `wasm_exactpersp`
-    /// extra, off in id's Quake and in Classic, on in the 2026 profile.
-    pub exact_perspective: bool,
+    /// How often walls and liquids find their texel exactly
+    /// ([`render::PerspSpan`]): id's 16-pixel spans (`D_DrawSpans16`) in id's
+    /// Quake and in Classic, 8, 4, or every pixel — `r_perspspan`, exact in
+    /// the 2026 profile.
+    pub persp_span: render::PerspSpan,
     /// The port's video cvars (Hor+, views past id's largest mode): Classic
     /// in id's Quake.
     pub video: render::VideoCvars,
@@ -714,7 +715,7 @@ pub fn render_options(vrect: &render::ViewRect, vid: &Vid) -> render::RenderOpti
         pixel_aspect: render::vid_aspect(vid.width, vid.height, vid.display_aspect),
         screen: Some(render::ScreenPlace { x: vrect.x, y: vrect.y, vid_w: vid.width, vid_h: vid.height }),
         window: None,
-        exact_perspective: vid.exact_perspective,
+        persp_span: vid.persp_span,
         video: vid.video,
         mip: vid.mip,
     }
