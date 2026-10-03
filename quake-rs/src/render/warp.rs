@@ -89,9 +89,13 @@ fn warp_scaled(tables: &mut WarpTables, view: &Image, out: WarpTarget, clock: f3
         for (k, row) in run.chunks_mut(stride).enumerate() {
             let v = v0 + k;
             let tv = sin[phase + v] as usize; // 0..2*amp
-            for (u, px) in row[x0..x0 + out_w].iter_mut().enumerate() {
-                let tu = sin[phase + u] as usize; // 0..2*amp
-                *px = view.pixels[rowptr[v + tu] + column[tv + u]];
+            // The row's pixels in step with the runs of the tables they
+            // read: each column's sine `sin[phase + u]` (0..2*amp) and its
+            // source column `column[tv + u]` — two of the four reads a pixel
+            // with no index to check.
+            let (rowptr, pixels) = (&rowptr[v..], &mut row[x0..x0 + out_w]);
+            for ((px, &tu), &col) in pixels.iter_mut().zip(&sin[phase..phase + out_w]).zip(&column[tv..tv + out_w]) {
+                *px = view.pixels[rowptr[tu as usize] + col];
             }
         }
     });
