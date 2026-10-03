@@ -45,7 +45,7 @@ use super::sky::{draw_sky_span, sky_dome_scale, sky_texture, SkyView};
 use super::stats::Profiler;
 use super::torch::FaceTorches;
 use super::surf::{
-    bake_all, classify_surface, face_world_poly, texture_animation, BakeJob, MipView, SurfBlock, SurfKind, Surface,
+    classify_surface, face_world_poly, texture_animation, BakeJob, Bakes, MipView, SurfBlock, SurfKind, Surface,
     SurfaceCaches, SurfaceRequest,
 };
 use super::vis::point_in_leaf;
@@ -503,7 +503,8 @@ impl EdgeState {
     /// The world and the brush entities of `frame` as id sorts them
     /// (`R_EdgeDrawing`: `R_RenderWorld`, `R_DrawBEntitiesOnList`,
     /// `R_ScanEdges`), and `D_DrawSurfaces`' choice for each surface that
-    /// owns a span — the surface cache consulted, any block baked — so that
+    /// owns a span — the surface cache consulted, the bake of any block it
+    /// does not have added to the frame's `jobs` — so that
     /// [`WorldDraw::draw_band`] can draw any rows of the view from them. The
     /// world is the one [`EdgeState::begin_map`] was last called for. `None`
     /// for a view larger than any setting allows (the caller clamps to the
@@ -512,8 +513,8 @@ impl EdgeState {
         &mut self,
         frame: &Frame<'_, 'a>,
         caches: &mut SurfaceCaches,
+        jobs: &mut Vec<BakeJob<'a>>,
         prof: &mut Profiler,
-        threads: usize,
     ) -> Option<WorldDraw<'a>> {
         let (w, h) = (frame.w, frame.h);
         if w == 0 || h == 0 || w > super::HIRES_MAXWIDTH || h > super::HIRES_MAXHEIGHT {
@@ -582,7 +583,7 @@ impl EdgeState {
         let t2 = lap();
         self.scan_edges();
         let t3 = lap();
-        let world = self.prepare_surfaces(frame, caches, prof, &ents, &bits, threads);
+        let world = self.prepare_surfaces(frame, caches, jobs, prof, &ents, &bits);
         self.dlight_bits = bits;
         if prof.on() {
             let t4 = lap();
@@ -596,7 +597,7 @@ impl EdgeState {
                 // which goes to `submodel` (their spans are drawn with the
                 // world's); `sort` = the world walk to edges, `setup` = the scan,
                 // `surf` = D_DrawSurfaces (here its per-surface setup; the
-                // bands add their spans).
+                // bands add their bakes and spans).
                 s.world_ns += t1 + (t4 - t2);
                 s.submodel_ns += t2 - t1;
                 s.world_sort_ns += t1;
@@ -1901,17 +1902,17 @@ impl EdgeState {
 
     /// `D_DrawSurfaces`' per-surface setup: for each surface that owns a
     /// span, how its spans are painted and its `1/z` plane, the surface cache
-    /// consulted and any block baked (`D_CacheSurface`) — everything the
-    /// bands need, decided once.
+    /// consulted (`D_CacheSurface`) and a block it does not have added to the
+    /// frame's bakes, `jobs` — everything the bands need, decided once.
     #[allow(clippy::too_many_arguments)]
     fn prepare_surfaces<'a>(
         &mut self,
         frame: &Frame<'_, 'a>,
         caches: &mut SurfaceCaches,
+        jobs: &mut Vec<BakeJob<'a>>,
         prof: &mut Profiler,
         ents: &[Ent<'a>],
         bits: &[u32],
-        threads: usize,
     ) -> WorldDraw<'a> {
         let (cam, opts) = (&frame.cam, &frame.scene.options);
         let Projection { cx, cy, xscale, yscale } = Projection::new(cam, &frame.geom, opts.aspect());
@@ -1937,9 +1938,6 @@ impl EdgeState {
         let mut faces = 0u64;
         let mut surfs = Vec::with_capacity(self.surfs.len());
         let t_lookup = prof.now();
-        // The blocks to bake, and the surfaces waiting for one.
-        caches.begin_frame();
-        let (mut jobs, mut waiting) = (Vec::new(), Vec::new());
         for si in 0..self.surfs.len() {
             let s = self.surfs[si];
             if si == 0 || !s.has_spans {
@@ -1955,11 +1953,7 @@ impl EdgeState {
                 let paint = if s.flags & SURF_DRAWSKY != 0 {
                     sky_tex.map_or(Paint::Fill(clear), Paint::Sky)
                 } else {
-                    let (paint, job) = self.prepare_face(&s, &pass, caches, &mut jobs, prof);
-                    if let Some(job) = job {
-                        waiting.push((surfs.len(), job));
-                    }
-                    paint
+                    self.prepare_face(&s, &pass, caches, jobs, prof)
                 };
                 (paint, [s.d_ziorigin, s.d_zistepu, s.d_zistepv])
             };
@@ -1968,21 +1962,8 @@ impl EdgeState {
             surfs.push(Some(SurfDraw { paint, zi, izistep, background }));
         }
         prof.add(|st| st.faces_drawn += faces);
-        // The frame's bakes, on the render threads; then each waiting
-        // surface and cache entry takes its block.
-        let t = prof.now();
-        if let (Some(t0), Some(t)) = (t_lookup, t) {
-            prof.add(|st| st.surf_lookup_ns += (t - t0).as_nanos() as u64);
-        }
-        let blocks = bake_all(&jobs, threads);
-        if let Some(t) = t {
-            prof.add(|st| st.surf_bake_ns += t.elapsed().as_nanos() as u64);
-        }
-        caches.baked(&blocks);
-        for (si, job) in waiting {
-            if let Some(Some(SurfDraw { paint: Paint::Cached { block, .. }, .. })) = surfs.get_mut(si) {
-                block.block = blocks[job].clone();
-            }
+        if let Some(t) = t_lookup {
+            prof.add(|st| st.surf_lookup_ns += t.elapsed().as_nanos() as u64);
         }
         WorldDraw {
             surfs,
@@ -1997,8 +1978,8 @@ impl EdgeState {
     /// How one wall or liquid surface is painted (`D_DrawSurfaces`' turbulent
     /// and cached branches, and the port's fallbacks for textureless or unlit
     /// faces), its lightmap built and its block found in the cache — or its
-    /// bake added to `jobs`, the index given with the paint, whose block is
-    /// put in once the frame's bakes are done.
+    /// bake added to `jobs`, the paint naming the job, whose block the
+    /// frame's [`Bakes`] has when the spans are drawn.
     fn prepare_face<'a>(
         &mut self,
         s: &Surf,
@@ -2006,7 +1987,7 @@ impl EdgeState {
         caches: &mut SurfaceCaches,
         jobs: &mut Vec<BakeJob<'a>>,
         prof: &mut Profiler,
-    ) -> (Paint<'a>, Option<usize>) {
+    ) -> Paint<'a> {
         let FacePass { frame, sview, mipview, ents, bits, light_dir, clear } = *pass;
         let scene = frame.scene;
         let (light_styles, colormap, time) = (scene.light_styles, scene.colormap, scene.time);
@@ -2035,7 +2016,7 @@ impl EdgeState {
             ..*sview
         };
         let Some(grads) = face_grads(bsp, face, &local_sview, eye, ti) else {
-            return (Paint::Fill(clear), None);
+            return Paint::Fill(clear);
         };
         let face_bits = if e.world_bsp { bits.get(fi).copied().unwrap_or(0) } else { 0 };
         // The steady torches lighting it (`r_torchflicker`): the world's
@@ -2067,7 +2048,7 @@ impl EdgeState {
         match tex {
             Some((tex_index, mt)) if !mt.pixels.is_empty() && mt.width > 0 && mt.height > 0 => {
                 if turbulent {
-                    return (Paint::Turb { grads, mt }, None);
+                    return Paint::Turb { grads, mt };
                 }
                 let found = match (lightmap, colormap) {
                     (Some(lightmap), Some(colormap)) => caches.surface(
@@ -2094,11 +2075,11 @@ impl EdgeState {
                         prof.add(|st| st.surf_hits += 1);
                         let grads = grads.mip_scaled(block.mip);
                         let fixed = BlockFixed::new(&grads, block.texmins, block.bw, block.bh);
-                        (Paint::Cached { grads, fixed, block }, job)
+                        Paint::Cached { grads, fixed, block, job }
                     }
                     Surface::PerPixel(lightmap) => {
                         prof.add(|st| st.surf_misses += 1);
-                        (Paint::Texels { grads, texture: Some(mt), shade, lightmap }, None)
+                        Paint::Texels { grads, texture: Some(mt), shade, lightmap }
                     }
                 }
             }
@@ -2108,11 +2089,10 @@ impl EdgeState {
                 // texture lit by the lightmap when there is one.
                 let key = ti.map(|t| t.miptex as i64).unwrap_or(face.texinfo as i64);
                 let colour = hash_index(key);
-                let paint = match lightmap {
+                match lightmap {
                     Some(lm) => Paint::Flat { grads, colour, shade, lightmap: lm },
                     None => Paint::Fill(shade_index(scene.palette, colour, shade)),
-                };
-                (paint, None)
+                }
             }
         }
     }
@@ -2121,9 +2101,9 @@ impl EdgeState {
 impl WorldDraw<'_> {
     /// `D_DrawSurfaces` and `D_DrawZSpans` for the rows of `band`: the spans
     /// of those rows, each painted as [`EdgeState::build`] decided for its
-    /// surface, and their `1/z`. Returns the pixels drawn (the background's
-    /// not counted).
-    pub(super) fn draw_band(&self, band: &mut Band, frame: &Frame) -> u64 {
+    /// surface — a block the frame bakes from `bakes` — and their `1/z`.
+    /// Returns the pixels drawn (the background's not counted).
+    pub(super) fn draw_band(&self, band: &mut Band, frame: &Frame, bakes: &Bakes) -> u64 {
         let w = self.w as i32;
         let scene = frame.scene;
         let (palette, colormap, persp) = (scene.palette, scene.colormap, self.persp);
@@ -2149,8 +2129,9 @@ impl WorldDraw<'_> {
                         let (tw, th) = (mt.width as usize, mt.height as usize);
                         span_turb(row, &span_at(grads, u, v), grads, &mt.pixels, tw, th, &frame.turb, scene.time, persp);
                     }
-                    Paint::Cached { grads, fixed, block } => {
-                        span_cached(row, &span_at(grads, u, v), fixed, &block.block, block.bw, block.bh, persp);
+                    Paint::Cached { grads, fixed, block, job } => {
+                        let texels = job.map_or(&block.block[..], |job| bakes.block(job));
+                        span_cached(row, &span_at(grads, u, v), fixed, texels, block.bw, block.bh, persp);
                     }
                     Paint::Texels { grads, texture, shade, lightmap } => {
                         let (pixels, tw, th) = texture.map_or((&[][..], 0, 0), |mt| (&mt.pixels[..], mt.width as usize, mt.height as usize));
@@ -2188,8 +2169,9 @@ enum Paint<'a> {
     /// A liquid (`Turbulent8`), the raw texel.
     Turb { grads: PolyGrads, mt: &'a MipTex },
     /// A wall from its lit surface-cache block (`D_DrawSpans16`); the
-    /// gradients are the block's mip level's.
-    Cached { grads: PolyGrads, fixed: BlockFixed, block: SurfBlock },
+    /// gradients are the block's mip level's. With `job`, the block is one
+    /// the frame bakes ([`Bakes::block`]), and `block` has only its shape.
+    Cached { grads: PolyGrads, fixed: BlockFixed, block: SurfBlock, job: Option<usize> },
     /// A wall with no block, lit per pixel (no colormap, or a block past the
     /// size cap — never in id's maps).
     Texels { grads: PolyGrads, texture: Option<&'a MipTex>, shade: f32, lightmap: Option<LightMap<'a>> },
@@ -2330,7 +2312,7 @@ mod tests {
         let mut edge = EdgeState::new();
         edge.begin_map(&world);
         let (mut caches, mut prof) = (SurfaceCaches::default(), Profiler::default());
-        assert!(edge.build(&Frame::new(&scene, w, h), &mut caches, &mut prof, 1).is_none());
+        assert!(edge.build(&Frame::new(&scene, w, h), &mut caches, &mut Vec::new(), &mut prof).is_none());
     }
 
     #[test]

@@ -79,8 +79,9 @@ pub struct RenderStats {
     /// Surfaces asked of the surface cache that a steady torch flickers on
     /// (the 2026 `r_torchflicker`): the blocks a torch's change rebakes.
     pub surf_torchlit: u64,
-    /// The wall time of the frame's lit-surface bakes (`SurfaceCaches`'
-    /// jobs, on the render threads), before the bands.
+    /// The time of the frame's lit-surface bakes (`SurfaceCaches`' jobs),
+    /// every thread's added: each thread of the bands' round bakes before
+    /// its first band, so `bands_ns` has their wall time.
     pub surf_bake_ns: u64,
     /// Alias models handed to the renderer (`cl_visedicts` entries that reach
     /// `R_DrawEntitiesOnList`), those `R_AliasCheckBBox` accepted, and the

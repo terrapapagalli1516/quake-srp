@@ -220,7 +220,7 @@ pub fn cmd_timedemo(pak_path: &str, demo: &str, rest: &[String]) -> Result<Strin
             );
             let _ = writeln!(
                 o,
-                "  on the calling thread alone: {:.3} ms of the views' {:.3} ({:.1} views a frame): setup {:.3}  walk {:.3}  brush ents {:.3}  scan {:.3}  surface lookups {:.3}  bakes (wall) {:.3}  entity setup {:.3}",
+                "  on the calling thread alone: {:.3} ms of the views' {:.3} ({:.1} views a frame): setup {:.3}  walk {:.3}  brush ents {:.3}  scan {:.3}  surface lookups {:.3}  entity setup {:.3}; the bands' round has the bakes ({:.3} ms, every thread's)",
                 ns(st.view_ns.saturating_sub(st.bands_ns)),
                 ns(st.view_ns),
                 st.views as f64 / frames as f64,
@@ -229,8 +229,8 @@ pub fn cmd_timedemo(pak_path: &str, demo: &str, rest: &[String]) -> Result<Strin
                 ns(st.submodel_ns),
                 ns(st.world_setup_ns),
                 ns(st.surf_lookup_ns),
-                ns(st.surf_bake_ns),
                 ns(st.entity_setup_ns),
+                ns(st.surf_bake_ns),
             );
             let per = |n: u64| n / frames as u64;
             let _ = writeln!(

@@ -1170,8 +1170,9 @@ impl Renderer {
     /// The frame of `scene`, `w x h` (already clamped), into `rows`: `stride`
     /// pixels a row, the view at column `x0` of each. What the whole frame
     /// decides is done first — the world's edges, spans and surfaces (the
-    /// surface cache filled), the entities up to their rasterisers — and then
-    /// every band of the view draws from it, on the renderer's threads.
+    /// surface cache looked up), the entities up to their rasterisers — and
+    /// then, on the renderer's threads in one round, the blocks the cache
+    /// lacked are baked and every band of the view draws from it all.
     fn draw(&mut self, scene: &Scene, w: usize, h: usize, rows: &mut [u8], stride: usize, x0: usize) {
         if w == 0 || h == 0 {
             return;
@@ -1205,9 +1206,14 @@ impl Renderer {
             let ns = t.elapsed().as_nanos() as u64;
             self.prof.add(|s| s.view_setup_ns += ns);
         }
-        let Some(world) = self.edge.build(&frame, &mut self.surfaces, &mut self.prof, self.workers.threads()) else {
+        // The blocks the surface cache does not have are the frame's bakes,
+        // done by the threads that draw it before their bands.
+        self.surfaces.begin_frame();
+        let mut jobs = Vec::new();
+        let Some(world) = self.edge.build(&frame, &mut self.surfaces, &mut jobs, &mut self.prof) else {
             return;
         };
+        let bakes = surf::Bakes::new(jobs);
         let t_entities = self.prof.now();
         let entities = Entities::prepare(&frame, &mut self.prof);
         if let Some(t) = t_entities {
@@ -1217,9 +1223,18 @@ impl Renderer {
         let t = self.prof.now();
         let (prof, workers) = (&self.prof, self.workers);
         let whole = band::Band::placed(w, rows, stride, x0, &mut self.zbuf[..pixels]);
-        let bands = workers.run(whole, h, || prof.for_band(), |band, prof| {
+        let start = || {
+            let (t, mut prof) = (prof.now(), prof.for_band());
+            bakes.work();
+            if let Some(t) = t {
+                let ns = t.elapsed().as_nanos() as u64;
+                prof.add(|s| s.surf_bake_ns += ns);
+            }
+            prof
+        };
+        let bands = workers.run(whole, h, start, |band, prof| {
             let tw = prof.now();
-            let drawn = world.draw_band(band, &frame);
+            let drawn = world.draw_band(band, &frame, &bakes);
             if let Some(tw) = tw {
                 let ns = tw.elapsed().as_nanos() as u64;
                 prof.add(|s| {
@@ -1234,6 +1249,7 @@ impl Renderer {
         for b in &bands {
             self.prof.absorb(b);
         }
+        self.surfaces.baked(&bakes.finish());
         self.edge.recycle(world);
         if let Some(t) = t {
             let ns = t.elapsed().as_nanos() as u64;
