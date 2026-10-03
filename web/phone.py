@@ -28,6 +28,9 @@ paced by the page's own loop, and prints a row:
   MHz, cap    each kind of core's clock in play, and the lowest cap it was held to
   load        how busy each kind was, %
   skin        the phone's skin temperature, start -> end of the row
+  panel       the display's own refresh through the row (SurfaceFlinger's active
+              mode: an adaptive panel idles at 60 Hz and runs at 120 only while a
+              finger moves), and with --touch whether a finger was kept moving
 
 The phone: USB debugging on, plugged in, Chrome in front (the tab only runs
 there; if another app comes to the front the script waits and redoes the
@@ -38,7 +41,10 @@ is a new tab on `http://localhost:PORT` (a secure context, so the threads
 build runs), closed at the end with its storage cleared and the port
 forwarding removed. --top prints the busiest threads mid-row (which core
 runs what). --cool SECONDS rests the phone before each timedemo (the page's
-ticks paused) until no core is capped, or that long.
+ticks paused) until no core is capped, or that long. --touch keeps a finger
+moving on the screen through every row (`adb shell input swipe`, slow, in
+the middle of the picture, where a demo ignores it): play always has one,
+and it is what takes an adaptive panel to 120 Hz.
 
 The frame is the page's box, so every row says what the page had: a folding
 phone must be open flat (its posture is read with each row, and a row taken
@@ -55,7 +61,7 @@ never leaves fullscreen.
 
 adb is $ADB, else `adb` on the PATH. Chrome only (its DevTools socket).
 """
-import argparse, json, os, re, shutil, subprocess, sys, time
+import argparse, json, os, re, shutil, signal, subprocess, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -80,7 +86,8 @@ SAMPLE = ("cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_cur_freq; echo ---;"
           "cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_max_freq; echo ---;"
           "cat /sys/devices/system/cpu/cpu*/cpufreq/cpuinfo_max_freq; echo ---;"
           "grep '^cpu[0-9]' /proc/stat; echo ---;"
-          "dumpsys thermalservice 2>/dev/null | grep -E 'Thermal Status|mName=' | head -24")
+          "dumpsys thermalservice 2>/dev/null | grep -E 'Thermal Status|mName=' | head -24; echo ---;"
+          "dumpsys SurfaceFlinger 2>/dev/null | grep -m1 'activeMode='")
 
 
 def parse_sample(text):
@@ -102,11 +109,20 @@ def parse_sample(text):
         m = re.search(r"Thermal Status: (\d+)", line)
         if m:
             status = int(m[1])
-    return {"cur": mhz(part[0]), "cap": mhz(part[1]), "top": mhz(part[2]), "stat": stat, "temps": temps, "status": status}
+    # The first display's active mode: the panel's refresh right now.
+    hz = re.search(r"vsyncRate=([\d.]+)", part[5]) if len(part) > 5 else None
+    return {"cur": mhz(part[0]), "cap": mhz(part[1]), "top": mhz(part[2]), "stat": stat, "temps": temps, "status": status,
+            "hz": round(float(hz[1])) if hz else None}
 
 
 def phone_sample():
     return parse_sample(adb("shell", SAMPLE))
+
+
+def awake():
+    """The phone is on and unlocked (a tab only runs then)."""
+    power = adb("shell", "dumpsys power | grep mWakefulness=; dumpsys window | grep -m1 isKeyguardShowing=")
+    return "mWakefulness=Awake" in power and "isKeyguardShowing=true" not in power
 
 
 def posture():
@@ -124,7 +140,7 @@ def local_sample():
     cap = read("/sys/devices/system/cpu/cpu[0-9]*/cpufreq/scaling_max_freq")
     top = read("/sys/devices/system/cpu/cpu[0-9]*/cpufreq/cpuinfo_max_freq")
     stat = "".join(l for l in open("/proc/stat") if re.match(r"cpu\d", l))
-    return parse_sample("---".join([cur, cap, top, stat, ""]))
+    return parse_sample("---".join([cur, cap, top, stat, "", ""]))
 
 
 def kinds(sample):
@@ -153,6 +169,7 @@ def summarize(samples):
     for name in ("SKIN", "AP", "BAT"):
         if name in s[0]["temps"]:
             out[name] = [s[0]["temps"][name], s[-1]["temps"].get(name)]
+    out["panel"] = sorted({x["hz"] for x in s if x.get("hz")})   # every refresh the panel was seen at
     return out
 
 
@@ -207,6 +224,33 @@ PAGE = """() => new Promise(done => {
 VIEW = "({ inner: [innerWidth, innerHeight], fullscreen: !!document.fullscreenElement && innerWidth === screen.width })"
 
 
+class Finger:
+    """A finger kept moving on the phone's screen: `adb shell input swipe`, back and
+    forth across a few hundred pixels around (x, y), ten seconds a stroke, until
+    stopped. Real touch events to Android (what takes an adaptive panel to 120 Hz);
+    a demo ignores a touch that moves."""
+
+    def __init__(self, x, y, reach=150):
+        import threading
+        self.stop = threading.Event()
+        self.thread = threading.Thread(target=self.run, args=(x, y, reach), daemon=True)
+        self.thread.start()
+
+    def run(self, x, y, reach):
+        a, b = x - reach, x + reach
+        while not self.stop.is_set():
+            # Only ever on the game's page: Chrome in front.
+            if CHROME in adb("shell", "dumpsys activity activities | grep topResumedActivity"):
+                adb("shell", "input", "swipe", str(a), str(y), str(b), str(y), "10000", timeout=30)
+            else:
+                time.sleep(1.0)
+            a, b = b, a
+
+    def lift(self):
+        self.stop.set()
+        self.thread.join(timeout=15)
+
+
 class Interrupted(Exception):
     """The tab left the front mid-row."""
 
@@ -235,7 +279,9 @@ class Target:
         back; from any other app (the phone is in use) it waits."""
         while not self.front():
             top = adb("shell", "dumpsys activity activities | grep topResumedActivity").strip()
-            if posture() not in (None, "OPENED"):
+            if not awake():
+                print("  (the phone is asleep or locked; waiting)", flush=True)
+            elif posture() not in (None, "OPENED"):
                 print(f"  (the phone is {posture()}, not open flat: no row is taken like this; waiting)", flush=True)
             elif "launcher" in top.lower():
                 print("  (the launcher is in front: starting Chrome again)", flush=True)
@@ -375,6 +421,8 @@ def show(r):
         print(f"      {name:8} MHz {'/'.join(str(x['mhz']) for x in k)}  cap {'/'.join(str(x['cap']) for x in k)}"
               f"  load {'/'.join(str(x['load']) for x in k)}%"
               + (f"  skin {skin[0]} -> {skin[1]} C" if skin else "")
+              + (f"  panel {'/'.join(map(str, s['panel']))} Hz" if s.get("panel") else "")
+              + ("  finger moving" if r.get("touch") else "")
               + (f"  THERMAL STATUS {s['status']}" if s["status"] else ""), flush=True)
     if pl and pl.get("top"):
         print(pl["top"], flush=True)
@@ -402,6 +450,7 @@ def main():
     ap.add_argument("--secs", type=float, default=60, help="seconds of play a row (0: the timedemo only)")
     ap.add_argument("--cool", type=float, default=0, help="rest before each timedemo until no core is capped, at most this many seconds")
     ap.add_argument("--top", action="store_true", help="print the busiest threads mid-row")
+    ap.add_argument("--touch", action="store_true", help="keep a finger moving on the screen through every row (the phone)")
     ap.add_argument("--fullscreen", action="store_true", help="put the page in fullscreen first (the phone: a key chord from Android)")
     ap.add_argument("--query", default="?2026", help="the deploy page's query")
     ap.add_argument("--port", type=int, default=isolated.port(9100))
@@ -410,6 +459,8 @@ def main():
     if a.local and not a.deploy:
         ap.error("--local needs a deploy dir")
 
+    # A stopped run (a time limit's SIGTERM) still puts the tab back as it was.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit("stopped"))
     from playwright.sync_api import sync_playwright
     httpd = isolated.serve(a.deploy, a.port) if a.deploy else None
     url = f"http://localhost:{a.port}/index.html{a.query}"
@@ -449,7 +500,12 @@ def main():
         extras = [(name, v) for v in values.split(",") if v] if name else [None]
         saved = {n: t.cvar(n) for n in ["vid_pixelsize", "r_threads"] + ([name] if name else [])}
         out = open(a.json, "a") if a.json else None
+        finger = None
         try:
+            if a.touch and t.phone:
+                w, h, dpr = pg.evaluate("[screen.width, screen.height, devicePixelRatio]")
+                finger = Finger(round(w * dpr / 2), round(h * dpr / 2))
+                time.sleep(1.5)
             page = pg.evaluate(PAGE)
             s = t.sample()
             page["kinds"] = [f"{len(c)} x {top} MHz" for top, c in kinds(s)] if s else []
@@ -461,11 +517,14 @@ def main():
                 for threads in [int(x) for x in a.threads.split(",")]:
                     for extra in extras:
                         r = row(t, px, threads, extra, a.secs, a.cool, a.top)
+                        r["touch"] = bool(finger)
                         show(r)
                         if out:
                             out.write(json.dumps(r) + "\n")
                             out.flush()
         finally:
+            if finger:
+                finger.lift()
             # The tab as it was found: its own cvars back (a kept config.cfg with them).
             for n, v in saved.items():
                 t.exec(f"{n} {v}")
