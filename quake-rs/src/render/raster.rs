@@ -529,39 +529,39 @@ fn span16_cached(
     let (s0, t0) = sp.st_at(0, fx.sadjust, fx.tadjust);
     let (mut s, mut t) = (s0.clamp(0, fx.bbextents), t0.clamp(0, fx.bbextentt));
     let mut k0 = 0;
-    while k0 < end {
-        let left = end - k0;
-        // The positions this segment steps through: `16*s + i*ds` with 20
-        // fractional bits (a full segment), or `s + i*ds` with 16.
-        let (n, shift, mut sa, mut ta, ds, dt, next);
-        if left > 16 {
-            // A full segment: exact again at pixel k0 + 16.
-            let (sn, tn) = sp.st_at(k0 + 16, fx.sadjust, fx.tadjust);
-            let (sn, tn) = (sn.max(4096).min(fx.bbextents), tn.max(4096).min(fx.bbextentt));
-            (n, shift, sa, ta, ds, dt, next) = (16, 20, s * 16, t * 16, sn - s, tn - t, (sn, tn));
-        } else {
-            // The last segment: `left - 1` steps land on the span's last pixel.
-            let steps = left - 1;
-            let (mut ss, mut ts) = (0i64, 0i64);
-            if steps > 0 {
-                let (sn, tn) = sp.st_at(k0 + steps, fx.sadjust, fx.tadjust);
-                let (dss, dts) = (sn.max(4096).min(fx.bbextents) - s, tn.max(4096).min(fx.bbextentt) - t);
-                (ss, ts) = if steps == 1 {
-                    (dss, dts)
-                } else {
-                    ((dss * RECIPROCAL_16[steps]) >> 31, (dts * RECIPROCAL_16[steps]) >> 31)
-                };
-            }
-            (n, shift, sa, ta, ds, dt, next) = (left, 16, s, t, ss, ts, (s, t));
-        }
-        for c in &mut crow[k0..k0 + n] {
-            let texel = block.get((ta >> shift) as usize * bw + (sa >> shift) as usize);
-            *c = texel.copied().unwrap_or(0);
+    // The full segments: exact again at pixel k0 + 16, the positions `16*s +
+    // i*ds` with 20 fractional bits. (A loop of a constant 16, which the
+    // compiler unrolls.)
+    while k0 + 16 < end {
+        let (sn, tn) = sp.st_at(k0 + 16, fx.sadjust, fx.tadjust);
+        let (sn, tn) = (sn.max(4096).min(fx.bbextents), tn.max(4096).min(fx.bbextentt));
+        let (mut sa, mut ta, ds, dt) = (s * 16, t * 16, sn - s, tn - t);
+        let seg: &mut [u8; 16] = (&mut crow[k0..k0 + 16]).try_into().expect("16 pixels");
+        for c in seg {
+            *c = block.get((ta >> 20) as usize * bw + (sa >> 20) as usize).copied().unwrap_or(0);
             sa += ds;
             ta += dt;
         }
-        (s, t) = next;
-        k0 += n;
+        (s, t) = (sn, tn);
+        k0 += 16;
+    }
+    // The last segment: `left - 1` steps land on the span's last pixel, the
+    // positions `s + i*ds` with 16.
+    let steps = end.saturating_sub(k0 + 1);
+    let (mut ss, mut ts) = (0i64, 0i64);
+    if steps > 0 {
+        let (sn, tn) = sp.st_at(k0 + steps, fx.sadjust, fx.tadjust);
+        let (dss, dts) = (sn.max(4096).min(fx.bbextents) - s, tn.max(4096).min(fx.bbextentt) - t);
+        (ss, ts) = if steps == 1 {
+            (dss, dts)
+        } else {
+            ((dss * RECIPROCAL_16[steps]) >> 31, (dts * RECIPROCAL_16[steps]) >> 31)
+        };
+    }
+    for c in crow.iter_mut().skip(k0) {
+        *c = block.get((t >> 16) as usize * bw + (s >> 16) as usize).copied().unwrap_or(0);
+        s += ss;
+        t += ts;
     }
 }
 
@@ -587,31 +587,65 @@ fn span16_cached(
 /// pixel `i` of a segment from `s >= 0` to `snext >= N` is at least `i/N`
 /// in 16.16. Every position is inside the block, as in [`span16_cached`].
 fn span_c_cached<const N: usize>(crow: &mut [u8], sp: &Span, fx: &BlockFixed, block: &[u8], bw: usize) {
-    let shift = N.trailing_zeros();
-    let low = N as i64;
+    let (shift, low) = (N.trailing_zeros(), N as i64);
     let end = crow.len();
     let (s0, t0) = sp.st_at(0, fx.sadjust, fx.tadjust);
     let (mut s, mut t) = (s0.clamp(0, fx.bbextents), t0.clamp(0, fx.bbextentt));
+    // The full segments, `N` pixels each: a loop of a constant length, which
+    // the compiler unrolls (one of a variable length cost 8 nearly what
+    // exact perspective costs). Then the last, `n` pixels.
     let mut k0 = 0;
-    while k0 < end {
-        let n = (end - k0).min(N);
-        let (snext, tnext, sstep, tstep);
-        if k0 + n < end {
-            let (a, b) = sp.st_at(k0 + N, fx.sadjust, fx.tadjust);
-            (snext, tnext) = (a.max(low).min(fx.bbextents), b.max(low).min(fx.bbextentt));
-            (sstep, tstep) = ((snext - s) >> shift, (tnext - t) >> shift);
-        } else {
-            let (a, b) = sp.st_at(k0 + n - 1, fx.sadjust, fx.tadjust);
-            (snext, tnext) = (a.max(low).min(fx.bbextents), b.max(low).min(fx.bbextentt));
-            (sstep, tstep) = if n > 1 { ((snext - s) / (n as i64 - 1), (tnext - t) / (n as i64 - 1)) } else { (0, 0) };
-        }
-        for c in &mut crow[k0..k0 + n] {
+    while k0 + N < end {
+        let (a, b) = sp.st_at(k0 + N, fx.sadjust, fx.tadjust);
+        let (snext, tnext) = (a.max(low).min(fx.bbextents), b.max(low).min(fx.bbextentt));
+        let (sstep, tstep) = ((snext - s) >> shift, (tnext - t) >> shift);
+        let seg: &mut [u8; N] = (&mut crow[k0..k0 + N]).try_into().expect("N pixels");
+        for c in seg {
             *c = block.get((t >> 16) as usize * bw + (s >> 16) as usize).copied().unwrap_or(0);
             s += sstep;
             t += tstep;
         }
         (s, t) = (snext, tnext);
-        k0 += n;
+        k0 += N;
+    }
+    if k0 < end {
+        let n = end - k0;
+        let (a, b) = sp.st_at(end - 1, fx.sadjust, fx.tadjust);
+        let (snext, tnext) = (a.max(low).min(fx.bbextents), b.max(low).min(fx.bbextentt));
+        let (sstep, tstep) = (c_div_small(snext - s, n - 1), c_div_small(tnext - t, n - 1));
+        for c in &mut crow[k0..] {
+            *c = block.get((t >> 16) as usize * bw + (s >> 16) as usize).copied().unwrap_or(0);
+            s += sstep;
+            t += tstep;
+        }
+    }
+}
+
+/// The C's `x / d` (`int`, toward zero) for the `d` steps of a last segment
+/// (`spancount` less one: `0..16`, 0 for one pixel and no step), each `d` a
+/// constant so the compiler makes it a multiply and shifts: the same
+/// quotient, where a division by a variable is the slowest integer
+/// instruction there is.
+#[inline]
+fn c_div_small(x: i64, d: usize) -> i64 {
+    match d {
+        0 => 0,
+        1 => x,
+        2 => x / 2,
+        3 => x / 3,
+        4 => x / 4,
+        5 => x / 5,
+        6 => x / 6,
+        7 => x / 7,
+        8 => x / 8,
+        9 => x / 9,
+        10 => x / 10,
+        11 => x / 11,
+        12 => x / 12,
+        13 => x / 13,
+        14 => x / 14,
+        15 => x / 15,
+        d => x / d as i64,
     }
 }
 
@@ -694,23 +728,19 @@ fn turb_span<const N: usize>(
     let end = crow.len();
     let (s0, t0) = sp.st_at(0, sadjust, tadjust);
     let (mut s, mut t) = (s0.clamp(0, BBEXTENTS), t0.clamp(0, BBEXTENTS));
+    // The full segments, a loop of a constant `N` each ([`span_c_cached`]),
+    // then the last; each segment in the C's `int`s from its masked start.
+    // (Not one closure for the two loops: its captured slices lose the
+    // no-alias promise a function's arguments carry, and the loop then runs
+    // a third slower.)
     let mut k0 = 0;
-    while k0 < end {
-        let n = (end - k0).min(N);
-        let (sn, tn, ss, ts);
-        if k0 + n < end {
-            let (a, b) = sp.st_at(k0 + N, sadjust, tadjust);
-            (sn, tn) = (a.clamp(low, BBEXTENTS), b.clamp(low, BBEXTENTS));
-            (ss, ts) = ((sn - s) >> shift, (tn - t) >> shift);
-        } else {
-            let (a, b) = sp.st_at(k0 + n - 1, sadjust, tadjust);
-            (sn, tn) = (a.clamp(low, BBEXTENTS), b.clamp(low, BBEXTENTS));
-            (ss, ts) = if n > 1 { ((sn - s) / (n as i64 - 1), (tn - t) / (n as i64 - 1)) } else { (0, 0) };
-        }
-        // In the C's `int`s from here: the masked start and the steps.
+    while k0 + N < end {
+        let (a, b) = sp.st_at(k0 + N, sadjust, tadjust);
+        let (sn, tn) = (a.clamp(low, BBEXTENTS), b.clamp(low, BBEXTENTS));
+        let (ss, ts) = (((sn - s) >> shift) as i32, ((tn - t) >> shift) as i32);
         let (mut a, mut b) = ((s as i32) & TURB_COORD_MASK, (t as i32) & TURB_COORD_MASK);
-        let (ss, ts) = (ss as i32, ts as i32);
-        for c in &mut crow[k0..k0 + n] {
+        let seg: &mut [u8; N] = (&mut crow[k0..k0 + N]).try_into().expect("N pixels");
+        for c in seg {
             let (sturb, tturb) = turb.texel(phase, a, b);
             let texel = pixels.get(wrap_texel(tturb, th) * tw + wrap_texel(sturb, tw));
             *c = texel.copied().unwrap_or(0);
@@ -718,7 +748,21 @@ fn turb_span<const N: usize>(
             b = b.wrapping_add(ts);
         }
         (s, t) = (sn, tn);
-        k0 += n;
+        k0 += N;
+    }
+    if k0 < end {
+        let n = end - k0;
+        let (a, b) = sp.st_at(end - 1, sadjust, tadjust);
+        let (sn, tn) = (a.clamp(low, BBEXTENTS), b.clamp(low, BBEXTENTS));
+        let (ss, ts) = (c_div_small(sn - s, n - 1) as i32, c_div_small(tn - t, n - 1) as i32);
+        let (mut a, mut b) = ((s as i32) & TURB_COORD_MASK, (t as i32) & TURB_COORD_MASK);
+        for c in &mut crow[k0..] {
+            let (sturb, tturb) = turb.texel(phase, a, b);
+            let texel = pixels.get(wrap_texel(tturb, th) * tw + wrap_texel(sturb, tw));
+            *c = texel.copied().unwrap_or(0);
+            a = a.wrapping_add(ss);
+            b = b.wrapping_add(ts);
+        }
     }
 }
 
@@ -1218,3 +1262,4 @@ mod tests {
         }
     }
 }
+
