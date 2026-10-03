@@ -588,13 +588,21 @@ left the rest steady, style 0: all 143 torches and flames of e1m2–e1m7, 109
 on e2m6, 48 on e4m5. LIGHT.EXE baked a steady torch into each face's style-0
 lightmap with the room's other lights, so at run time it is just light. The
 2026 extra (`render::torch`; off in Classic) finds each one again: from the
-entity lump its origin and `light` (LIGHT.EXE's 300 without one), and for
-each face in front of it and within reach its share of each luxel as the
-tool computed it — `SingleLightFace`'s `(light - dist) * (0.5 + 0.5 cos)`,
-halved by `rangescale`, at `CalcPoints`' sample points — without the tool's
-shadows, and never more than the luxel holds (where a luxel holds less than
-the shares, the tool found the torch shadowed or clamped; on e1m2–e1m4 that
-is a third to a half of the luxels a torch could reach). Each frame adds
+entity lump its origin and `light` (any key starting `light`, or `_light`;
+LIGHT.EXE's 300 without one), and for each face in front of it and within
+reach its share of each luxel as the tool computed it. That is the tool's
+code ported: `SingleLightFace`'s `(light - dist) * (0.5 + 0.5 cos)`, halved
+by `rangescale`, at `CalcPoints`' sample points (pulled toward the face's
+middle where the middle cannot see them), four samples a luxel averaged, as
+`-extra` lights — and nothing where `TestLine`, the tool's trace through the
+world's nodes, finds a wall between the torch and the sample. id lit the
+shareware maps with `-extra`: re-derived so, every style-0 light traced,
+`start`'s style-0 lightmaps come out to the byte and e1m2–e1m6's on 85–97%
+of their luxels (one sample a luxel: a quarter). The registered maps in the
+pak tested here are not this tool's bake (3% of their luxels; held over
+re-derived spreads 0.4–1.4): their shares are the tool's light, not theirs.
+A luxel's shares are still never more than it holds, which only bites where
+the tool clamped a luxel at 255. Each frame adds
 
 ```text
 strength · depth · Σ_k (s_k(t)/s̄_k - 1)/√2 · share · d_lightstylevalue[0]/256
@@ -602,9 +610,15 @@ strength · depth · Σ_k (s_k(t)/s̄_k - 1)/√2 · share · d_lightstylevalue[
 
 to the luxel: `s_k` world.qc's two flicker strings through the light-style
 glide (stepped as id's with `r_lerplightstyles 0`), `s̄_k` their means, so the
-change is zero-mean and every luxel averages to id's over the strings'
-common period (`render::torch::tests`: to a hundredth of a luxel unit); the
-level is exactly as dark as id made it. Two strings, not one: either alone
+change is zero-mean and every luxel's light averages to id's over the
+strings' common period (`render::torch::tests`: to a hundredth of a luxel
+unit). The picture's mean brightness follows within about 2%, not exactly:
+the colormap's rows are not even steps (toward its dark end a rise
+brightens a texel more than a dip darkens it: +2.1% of luma on e1m3's
+flames close up), and a rise past the brightest row is clamped there while
+the dip is not (−1.1% on e1m2's torch wall), both in proportion to the
+strength. Two
+strings, not one: either alone
 comes round every 1.7 or 2.3 s, its one bright `q` a beat the eye finds; two
 at rates whose periods do not divide wander. The kinds differ, as fire does:
 the wall torch quick and shallow (style 6 at its own rate, style 1 at 0.75,

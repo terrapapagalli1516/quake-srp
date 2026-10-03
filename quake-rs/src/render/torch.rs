@@ -25,9 +25,9 @@
 //! so a row of torches never pulses as one; `s̄_k` is each pattern's mean, so
 //! the change is zero-mean: over the patterns' periods every luxel's light
 //! averages to id's. The picture's mean brightness follows to within about
-//! 2%, not exactly: the colormap's rows are not even steps of light (a dip
-//! darkens a dark texel more than a rise brightens it), and a rise past the
-//! brightest row is clamped there while the dip is not. It is
+//! 2%, not exactly: the colormap's rows are not even steps of light (toward
+//! its dark end a rise brightens a texel more than a dip darkens it), and a
+//! rise past the brightest row is clamped there while the dip is not. It is
 //! the light the torch would have given had the mapper set its style to a
 //! flicker (what `start`'s torches do), brought back to the steady torch's
 //! average — two flickers rather than one so that it wanders like a flame
