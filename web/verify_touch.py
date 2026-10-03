@@ -7,12 +7,14 @@ touchscreen; drags are CDP touch events (Input.dispatchTouchEvent), so the
 whole check is Chromium's.
 
 QUAKE_BROWSER=firefox runs the part Playwright's Firefox can drive: taps
-(its touchscreen has nothing else: no drag, no second finger, no hold),
+(its touchscreen has nothing else: no drag, no second finger, no hold).
 `hasTouch` without `isMobile` (Firefox has none; its coarse pointer needs
-only `hasTouch`). Each check that needs a drag or a held finger is SKIPped
-with the reason: 3's stick, look, two thumbs, FIRE and JUMP, and 2b's held
-arrow (a quick tap of it runs). The rest, 95 of Chromium's 102 checks, runs
-on Gecko's touch events and pointer events.
+only `hasTouch`), at devicePixelRatio 1 (its device_scale_factor does not
+reach a cross-origin isolated page, so the "@3" and "@2.6" checks run at 1,
+and say so). Each check that needs a drag or a held finger is SKIPped with
+the reason: 3's stick, look, two thumbs, FIRE and JUMP, and 2b's held arrow
+(a quick tap of it runs). The rest, 95 of Chromium's 102 checks, runs on
+Gecko's touch events and pointer events.
 
   1. The page: touch.js loads on the coarse pointer, the touch layout fills
      the screen, "tap to start"; the rotate prompt shows upright and a tap
@@ -251,6 +253,10 @@ def main():
         # --- 1. The page -------------------------------------------------------
         pg.goto(f"http://127.0.0.1:{PORT}/index.html?2026", wait_until="load")
         pg.wait_for_function("window.quake && quake.ready && window.QuakeTouch", timeout=120000)
+        if FIREFOX:
+            print(f"NOTE Firefox: devicePixelRatio is {pg.evaluate('devicePixelRatio')}, not the context's "
+                  f"{PHONE['device_scale_factor']}: its emulation is lost on a cross-origin isolated page "
+                  "(verify_settings.py skips its dpr 2 checks for it), so the @3 and @2.6 checks below run at it")
         check("touch.js on a coarse pointer, the touch layout",
               pg.evaluate("document.documentElement.classList.contains('touch') && !!document.getElementById('touch')"))
         check("no keyboard-and-mouse note", pg.evaluate("!document.getElementById('touchNote')"))
