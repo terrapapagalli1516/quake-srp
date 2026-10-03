@@ -8,16 +8,18 @@ host's workers the way the renderer does every frame, then eight threads
 allocate while the heap fills (as the torch set's build and the frame's
 bakes do), and the main thread checks the lot (PLATFORM.md, "Threads").
 
-The last stage is the regression check for Chromium's trap: a worker thread
-that touches memory another thread has just grown can trap ("memory access
-out of bounds"), about one run in four on a growable memory. The threads
-build's memory is fixed (quake-wasm/build.rs), so the program runs RUNS times
-(default 8) and none may trap or fail. `--growable` also builds it the old
-way (QUAKE_WASM_GROWABLE=1, its own target dir) and runs that RUNS times, to
-show the trap is there to catch: it reports how many trapped (expected some,
-in Chromium; Firefox does not trap), and does not fail on them.
+The last stage is the regression check for V8's trap (before Chrome 157): a
+worker thread that touches memory another thread has just grown can trap
+("memory access out of bounds"), about one run in four on a growable memory.
+The threads build's memory is fixed (quake-wasm/build.rs), so the program runs
+RUNS times (default 8) and none may trap or fail. In a Chromium before 157
+the check also builds it the old way (QUAKE_WASM_GROWABLE=1, its own target
+dir) and runs that GROWABLE_RUNS times (default 80), and fails unless one
+traps: the trap it guards against is still there to catch. Firefox reads the
+live size and does not trap; a Chromium from 157 has the fix; there the
+growable runs are skipped (`--growable` runs and reports them anyway).
 
-Usage: verify_threads.py [threadcheck.wasm] [--runs N] [--growable]
+Usage: verify_threads.py [threadcheck.wasm] [--runs N] [--growable-runs N] [--growable]
        (default: builds it with cargo)
 """
 import os, shutil, subprocess, sys, time
@@ -29,7 +31,8 @@ CRATE = os.path.join(os.path.dirname(HERE), "quake-wasm")
 args = sys.argv[1:]
 GROWABLE = "--growable" in args
 RUNS = int(args[args.index("--runs") + 1]) if "--runs" in args else 8
-paths = [a for i, a in enumerate(args) if not a.startswith("--") and (i == 0 or args[i - 1] != "--runs")]
+GROWABLE_RUNS = int(args[args.index("--growable-runs") + 1]) if "--growable-runs" in args else 80
+paths = [a for i, a in enumerate(args) if not a.startswith("--") and (i == 0 or args[i - 1] not in ("--runs", "--growable-runs"))]
 
 
 def build(growable):
@@ -107,13 +110,20 @@ with sync_playwright() as p:
             trapped += any("out of bounds" in e for e in errs)
             fails.append(f"run {run}: page errors: {errs[-2:]}")
     print(f"the threads build: {RUNS} runs, {trapped} trapped, {time.time() - t0:.1f} s")
-    if GROWABLE:
+    name, version = br.browser_type.name, br.version
+    major = int(version.split(".")[0]) if version.split(".")[0].isdigit() else 0
+    stale = name == "chromium" and major < 157
+    if stale or GROWABLE:
         old = build(True)
         bad = 0
-        for run in range(RUNS):
+        for run in range(GROWABLE_RUNS):
             logs, done, errs, _ = run_program(br, old)
             bad += any("out of bounds" in e for e in errs + logs)
-        print(f"the growable build (the old link): {RUNS} runs, {bad} trapped")
+        print(f"the growable build (the old link), {name} {version}: {GROWABLE_RUNS} runs, {bad} trapped")
+        if stale and bad == 0:
+            fails.append(f"the growable build never trapped in {GROWABLE_RUNS} runs of {name} {version}: the check cannot see the bug")
+    else:
+        print(f"{name} {version}: the growable build is not run (no stale size to catch here)")
     br.close()
 httpd.shutdown()
 if fails:
