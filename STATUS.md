@@ -1,6 +1,6 @@
 # Quake-RS — status and hand-off
 
-Last updated 2026-10-02, after the polish round (`main` @ 966b8fd). The first section is
+Last updated 2026-10-02, after the polish round's third wave (`main` @ 05d347a). The first section is
 where things stand. Then the rounds, newest first, branch by branch; how to work here; and
 the older history, kept as evidence, with superseded items marked.
 
@@ -51,8 +51,8 @@ the older history, kept as evidence, with superseded items marked.
     timedemo counts, the census and id's edicts on nine maps, the eight 3-D oracle rows
     at 100.00%, 146 2-D shots at their recorded match, demo playback against id's client
     over 17,500 frames, and the mixer against id's C in 28 of 28 cases.
-  - **Tests:** `cargo test --release` gives 752 in quake-rs (1 ignored: the r2m6 spawn,
-    which needs Rogue's data in `QUAKE_R2M6_DIR`) and 192 in quake-wasm (1
+  - **Tests:** `cargo test --release` gives 781 in quake-rs (plus a few ignored ones that
+    need the mission packs' data, `QUAKE_*_DIR`/`QUAKE_HIP1M1_PAK`) and 198 in quake-wasm (1
     ignored: the 2-D oracle's harness).
   - **Clippy:** 0 warnings in both crates.
   - **Browser checks:** the 18 `web/verify_*.py` checks pass in headless Chromium
@@ -98,6 +98,59 @@ the older history, kept as evidence, with superseded items marked.
 
   The structural work is `CODE_PLAN.md`'s menu:
   W0a/W0b, R1, R6, R8, R9, R11, and the engine-owned `Host` session (§7).
+
+---
+
+## 2026-10-02, later: what the user found playing, and the packs' own paths
+
+Played on a phone and a desktop the same day, with Opus and Sonnet agents on `fleet/*`
+branches, the renderer changes reviewed, every merge full-checked and deployed:
+
+- **The packs on a phone** (`fleet/picker`). The start overlay's own click took a tap on a
+  pack as "tap to start"; the choices were grey 12-px text with no state and gone after the
+  first tap. Now one `gameList()` draws them as buttons with the running game marked, on
+  the start overlay, in a "game" menu in the desktop bar, as a GAME pill beside BACK in a
+  phone's menu, and under the quit screen; `?game=` stays the only state.
+- **The Scourge start-room door** (it did not move, yet the player walked through it): two bugs.
+  `fleet/rotate` ported `R_RotateBmodel` and the clipped submodel path (`edge.rs`,
+  `world.rs`): rotating brush models draw rotated, byte-identical in Classic (id1 has none),
+  matched against id's C on that door through its swing. `fleet/startdoor` (round 2) found
+  the collision half: `sv_move` took a `SOLID_BSP` hull from the entity's live `model`
+  string, which Hipnotic's QC blanks after `setmodel` — id's `SV_HullForEntity` goes by
+  `modelindex`; now `Host::model_name` does, and id's C and the port block the walk at the
+  same wall. (Round 1 had proven hip1m1's five-piece door right; the user meant Scourge's
+  own `start.bsp`.)
+- **No sound at the episode gates** (`fleet/telesound`): proven with a scripted walk through
+  id's C (`oracle/sound_walk.py`, `walk_oracle.c`, `quaketool sndwalk`; in `classic_check`'s
+  sound row): the skill halls' teleporters sound, the `trigger_changelevel` gates don't.
+  Fixed on the way: sound positions as the wire rounds them (`server::wire_coord`).
+- **The Level Complete screen** (`fleet/intermission`): id's `Sbar_IntermissionOverlay`
+  draws at coordinates laid out for 320 columns while the bar, the menus and the finale
+  centre; in 2026's wide 2-D screen it sat left. `Screen2d::centred_320_x` serves all of
+  them; Classic keeps id's placement; the crosshair stays off the stats.
+- **Fullscreen** (`fleet/fullscreen`): in a headed Chromium, F was honoured only while the
+  game had the keyboard, and holding Esc hands the game one Esc first (the menu), so F died
+  after every exit. Alt+Enter toggles from `document.fullscreenElement` in the capture
+  phase whatever has the keyboard; F is unbound as in id's `default.cfg`; Classic has no key
+  (its strafe-jump); `vid_fkey` is `vid_altenter`, old names accepted; refusals reported.
+- **The packs' paths** (`fleet/packclass`, `AUDIT.md` "The mission packs' paths", P1–P19):
+  what id's engine does that the port skipped because id1 never reaches it, against id's C
+  on all 35 pack levels (`census/packs.py`, `screen2d.py --game`, `oracle_move`). Fixed:
+  `items2` (the packs' wetsuit, empathy shields, armour type, shield and belt never reached
+  the status bar; HUDs 100% now), slanted clip-plane sums in f64 (three items spawn as
+  id's), the re-release's `svc_achievement` skipped by name. Its follow-ups:
+  `fleet/makestatic` (`makestatic` frees its edict as `PF_makestatic` does; edict numbers
+  near id's — the `edicts` check's differences fell from 1,185 rows to 606; `r2m6` loads
+  in Classic under 600, so the edicts round's "632" was the port's own count, and
+  `sv_max_edicts` is just room for maps past 600; old saves migrated on load),
+  `fleet/sprites` (id's `r_sprite.c`/`d_sprite.c`, every type, in id's list order: bullet
+  holes lie on the wall, explosions' z-ties as id's; `play.demo1` re-recorded),
+  `fleet/packend` (builtin #79 `finaleFinished` and `menu_credits`: a pack's ending reaches
+  the end screen), and `fleet/strings` (the re-release's `$qc_` keys as English — see the
+  ledger for its state).
+- **Found, left open** (`AUDIT.md` Open): `angle_vectors` in f64 where id's is float (a
+  perpendicular facing test can flip), movement angles unrounded, particle origins
+  unrounded, `cvar()` of client cvars (Hipnotic's footsteps), `sprint` to a non-client.
 
 ---
 
