@@ -205,7 +205,8 @@ def mouse_paths(pg):
           f"mousemove {moved}, coalesced {sampled}, the game {read}; turned {t:.3f}°")
     # ?plainlock: the lock never asks for unadjusted movement (the check's
     # other half, the system's accelerated pointer).
-    other = pg.context.new_page()
+    other = pg.context.browser.new_page()
+    other.route("**/*", lambda r: r.continue_() if r.request.resource_type == "document" else r.abort())
     asked = {}
     for q in ("", "?plainlock"):
         other.goto(f"http://127.0.0.1:{PORT}/index.html{q}", wait_until="load")
@@ -415,6 +416,32 @@ with sync_playwright() as p:
         time.sleep(0.02)
     w3 = wait_weapon(4)
     check("a trackpad-style burst of small deltas fires once", w3 == 4, f"{w3:.0f}")
+    # macOS-shaped wheels: there a notch is NSEvent's accelerated deltaY x 40
+    # px, a few pixels, so the time decides (a lone event is a notch, a
+    # stream accumulates 100 px a notch). The page's own count of notches
+    # fired (`wheelFired`), events dispatched as the browser would, the gaps
+    # real: 150 ms timers, or none within a stream.
+    def wheel_notches(steps):
+        return pg.evaluate("""async steps => {
+            const c = document.getElementById('c'), n0 = { ...wheelFired };
+            for (const [deltaY, gap] of steps) {
+              if (gap) await new Promise(r => setTimeout(r, gap));
+              c.dispatchEvent(new WheelEvent('wheel', { deltaY, deltaMode: 0, cancelable: true, bubbles: true }));
+            }
+            return [wheelFired.down - n0.down, wheelFired.up - n0.up];
+        }""", steps)
+    for name, steps, want in [
+        ("three slow macOS notches (4, 8, 12 px, 150 ms apart) are three notches",
+         [(4, 200), (8, 150), (12, 150)], [3, 0]),
+        ("a stream of 40 x 6 px: the first at once, then a notch a 100 px",
+         [(6, 200)] + [(6, 0)] * 39, [2, 0]),
+        ("a stream that turns back drops what it carried (10 x 6 down, 20 x 6 up)",
+         [(6, 200)] + [(6, 0)] * 9 + [(-6, 0)] * 20, [1, 1]),
+        ("a flick of 1000 px in a stream is capped at three notches",
+         [(-2, 200), (-1000, 0)], [0, 4]),
+    ]:
+        got = wheel_notches(steps)
+        check(f"wheel: {name}", got == want, f"down {got[0]}, up {got[1]}; want {want}")
     # Classic leaves the wheel unbound, as id's default.cfg.
     pg.evaluate("quake.callLine('exec profile classic')")
     time.sleep(0.3)

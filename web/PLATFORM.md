@@ -737,17 +737,33 @@ it means, as id's `Key_Event`, `IN_MouseMove` and the joystick code do.
 - **The wheel** (2026's weapon cycle, `Bindings::with_wheel`). id's
   `WM_MOUSEWHEEL` (`vid_win.c`) turns every message into one press+release of
   `K_MWHEELUP`/`K_MWHEELDOWN`, whatever the message's own delta — Windows
-  already chunks a wheel's spin into one message per notch — so the page
-  turns a browser `wheel` event's continuous `deltaY` back into notches:
-  accumulated and normalized to Chrome's 100-per-notch (a line mouse's own
-  notch in Firefox, `deltaMode` 1, is 3 lines), one press+release per notch
-  consumed, capped so a fast flick or a trackpad's fling can't cycle through
-  every weapon. It needs no pointer lock — id's own never did — and fires
+  already chunks a wheel's spin into one message per notch. A browser's
+  `wheel` event has no notches, and its `deltaY` says little: Chrome's notch
+  is 100 px on Windows, but on macOS a notchy mouse's is NSEvent's
+  accelerated `deltaY` (0.1 for a slow notch, by the comment there) times 40
+  (`kScrollbarPixelsPerCocoaTick`, `web_input_event_builders_mac.mm`;
+  WebKit's `pixelsPerLineStep` the same): about 4 px, which never filled a
+  100 px notch. (Chromium's legacy `wheelDeltaY` there is the raw notch
+  count × 120, but a trackpad's is its pixels × 3, so it cannot tell the two
+  apart.) So the time decides: an event more
+  than 100 ms after the last is a notch of its own, whatever its size — a
+  mouse's notch comes alone — fired at once and counted as a whole notch's
+  worth; closer events are a stream (a trackpad, a fast spin), accumulated
+  at 100 px a notch (a line mouse's own notch in Firefox, `deltaMode` 1, is
+  3 lines), the direction's flip dropping what was carried, capped so a fast
+  flick or a trackpad's fling can't cycle through every weapon. A fast spin
+  of a macOS mouse is such a stream: its first notch fires, the rest as their
+  pixels add up. It needs no pointer lock — id's own never did — and fires
   whatever has the keyboard: `Key_Event` routes it itself (the console
   already scrolls on it, `consolekey()`; Customize controls' bind grab takes
   it like any key). `default.cfg` predates the wheel, so Classic leaves it
   unbound, as id's players who bound it themselves; 2026 binds a notch up to
   `impulse 10` (next weapon) and down to `impulse 12` (previous).
+  `verify_input.py` (5b) feeds Chrome's 100 px notches, a trackpad's burst,
+  and macOS-shaped ones (4, 8 and 12 px 150 ms apart: three notches; a
+  stream of 6 px; a turn back; a 1000 px flick); `?mousecheck` logs each
+  wheel event (`deltaY`, its mode, `wheelDeltaY`, the time since the last,
+  the notches made of it), the last three in its box. Not verified on a Mac.
 - **The gamepad.** The Gamepad API has no events for a pad's state, so the
   page polls `navigator.getGamepads()` once per refresh, just before the tick
   (as late as the frame allows), and sends a `GAMEPAD` record when the state

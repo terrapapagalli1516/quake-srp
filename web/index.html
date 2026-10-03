@@ -1193,13 +1193,21 @@ function mouseLook(dx, dy, at) {
 // vid_win.c's WM_MOUSEWHEEL turns every message into one press+release of
 // K_MWHEELUP (239) or K_MWHEELDOWN (240), whatever the message's own delta —
 // Windows already chunks a wheel's spin into one message per notch. A
-// browser's `wheel` event instead reports a running deltaY (a trackpad's
-// keeps coming in small steps), so this turns it back into notches:
-// accumulated and normalized to Chrome's 100-per-notch (deltaMode 0 PIXEL as
-// is; 1 LINE — a wheel mouse's own notch in Firefox, 3 lines — times
-// WHEEL_NOTCH_PX/3; 2 PAGE, rare off a real wheel, as a full flick), one
-// press+release per notch consumed, and capped so one fast flick or a
-// trackpad's fling can't cycle through every weapon. Unlike the buttons
+// browser's `wheel` event has no notches, only a deltaY, and its size says
+// little: Chrome's notch is 100 px on Windows, but on macOS it is NSEvent's
+// accelerated deltaY times 40 (`kScrollbarPixelsPerCocoaTick`; Safari the
+// same, `pixelsPerLineStep`) — a few pixels for a slow notch — and a
+// trackpad's swipe is a stream of small steps. So the time decides: an event
+// WHEEL_ALONE_MS after the last is a notch of its own, whatever its size (a
+// mouse's notch comes alone), fired at once and counted as a whole notch's
+// worth; events closer than that are a stream (a trackpad, a fast spin),
+// accumulated toward the next notch at 100 px each (deltaMode 0 PIXEL as is;
+// 1 LINE — a wheel mouse's own notch in Firefox, 3 lines — times
+// WHEEL_NOTCH_PX/3; 2 PAGE, rare off a real wheel, as a full flick), the
+// direction's flip dropping what was carried, and capped so one fast flick or
+// a trackpad's fling can't cycle through every weapon. (A fast spin of a
+// macOS mouse is such a stream of small steps: its first notch fires, the
+// rest only as their accelerated pixels add up.) Unlike the buttons
 // (MOUSE_KEYNUMS, gated on locked()/bindGrabbing() below) the wheel needs no
 // capture — id's own never did — so this fires with the pointer locked or
 // free, and whatever has the keyboard: Key_Event routes it itself (the
@@ -1209,23 +1217,38 @@ function mouseLook(dx, dy, at) {
 // consoleVisible() first. Bound only in 2026 (Bindings::with_wheel) — id's
 // default.cfg predates the wheel, so Classic leaves it unbound and this KEY
 // record just finds nothing to run.
-const WHEEL_NOTCH_PX = 100, WHEEL_LINE_PX = WHEEL_NOTCH_PX / 3, WHEEL_MAX_NOTCHES = 3;
-let wheelAccum = 0;   // pixel-equivalent carried to the next event; + down, - up
+const WHEEL_NOTCH_PX = 100, WHEEL_LINE_PX = WHEEL_NOTCH_PX / 3, WHEEL_MAX_NOTCHES = 3, WHEEL_ALONE_MS = 100;
+let wheelAt = -Infinity;   // the last wheel event's timeStamp
+let wheelDir = 0;          // the stream's direction: + down, - up
+let wheelAccum = 0;        // pixels toward its next notch (below 0: what a lone notch still owes)
+const wheelFired = { up: 0, down: 0 };   // notches so far (the checks')
+let wheelWatch = null;     // the mouse check's, with ?mousecheck: (event, ms since the last, notches)
 canvas.addEventListener('wheel', e => {
   if (!readyToPlay) return;
   e.preventDefault();
+  const since = e.timeStamp - wheelAt;
+  wheelAt = e.timeStamp;
   const px = e.deltaMode === 1 ? e.deltaY * WHEEL_LINE_PX
            : e.deltaMode === 2 ? Math.sign(e.deltaY) * WHEEL_NOTCH_PX * WHEEL_MAX_NOTCHES
            : e.deltaY;
-  if (!px) return;
-  if ((px < 0) !== (wheelAccum < 0)) wheelAccum = 0;   // direction flipped: drop stale momentum
-  const cap = WHEEL_NOTCH_PX * WHEEL_MAX_NOTCHES;
-  wheelAccum = Math.max(-cap, Math.min(cap, wheelAccum + px));
-  const notches = Math.trunc(wheelAccum / WHEEL_NOTCH_PX);
-  if (!notches) return;
-  wheelAccum -= notches * WHEEL_NOTCH_PX;
-  const key = notches < 0 ? 239 : 240;   // K_MWHEELUP (up) : K_MWHEELDOWN (down)
-  for (let i = 0; i < Math.abs(notches); i++) {
+  const dir = Math.sign(px);
+  let n = 0;
+  if (!dir) {
+    // no vertical movement (a horizontal swipe): it only keeps a stream going
+  } else if (since > WHEEL_ALONE_MS) {
+    [wheelDir, n] = [dir, 1];
+    wheelAccum = Math.min(0, Math.abs(px) - WHEEL_NOTCH_PX);
+  } else {
+    if (dir !== wheelDir) [wheelDir, wheelAccum] = [dir, 0];   // direction flipped: drop stale momentum
+    wheelAccum = Math.min(WHEEL_NOTCH_PX * WHEEL_MAX_NOTCHES, wheelAccum + Math.abs(px));
+    n = Math.max(0, Math.trunc(wheelAccum / WHEEL_NOTCH_PX));
+    wheelAccum -= n * WHEEL_NOTCH_PX;
+  }
+  if (wheelWatch) wheelWatch(e, since, n * dir);
+  if (!n) return;
+  wheelFired[dir < 0 ? 'up' : 'down'] += n;
+  const key = dir < 0 ? 239 : 240;   // K_MWHEELUP (up) : K_MWHEELDOWN (down)
+  for (let i = 0; i < n; i++) {
     keyEvent(key, true, 0, e.timeStamp);
     keyEvent(key, false, 0, e.timeStamp);
   }
@@ -2901,7 +2924,7 @@ const mouseCheck = (() => {
   // event per sample).
   const rawListen = 'onpointerrawupdate' in window;
   let armed = false, run = null, box = null;
-  const kept = [], latest = [];   // the last runs' summaries; the newest line (or the hint)
+  const kept = [], latest = [], wheels = [];   // the last runs' summaries; the newest line (or the hint); the last wheel events
   const tally = () => ({ refreshes: 0, dts: [], moves: 0, counts: 0, pointers: 0, samples: 0, sampled: 0,
                          fractional: 0, smallest: Infinity, raws: 0, rawCounts: 0 });
   // The page's records as they stand, and the program's count of what it
@@ -2915,9 +2938,10 @@ const mouseCheck = (() => {
   }).catch(() => null);
   const median = xs => { const v = [...xs].sort((a, b) => a - b); return v.length ? v[v.length >> 1] : NaN; };
 
-  function show(text, summary = false) {
+  function show(text, summary = false, wheel = false) {
     console.log(text);
-    if (summary) { kept.push(text); if (kept.length > 4) kept.shift(); latest.length = 0; }
+    if (wheel) { wheels.push(text); if (wheels.length > 3) wheels.shift(); }
+    else if (summary) { kept.push(text); if (kept.length > 4) kept.shift(); latest.length = 0; }
     else latest.splice(0, latest.length, text);
     if (!box) {
       box = document.createElement('pre');
@@ -2927,7 +2951,7 @@ const mouseCheck = (() => {
         + 'font:11px/1.4 monospace;white-space:pre-wrap;user-select:text;z-index:5';
       wrap.appendChild(box);
     }
-    box.textContent = [...kept, ...latest].join('\n');
+    box.textContent = [...kept, ...latest, ...wheels].join('\n');
   }
   // The browser, its system, the pixel ratio and the lock asked for.
   function browser() {
@@ -3029,6 +3053,12 @@ const mouseCheck = (() => {
   }
   if (wanted) show('mousecheck: start a game, click the view to capture the mouse and move it: '
                    + `${RUN_S} seconds from the first move (Esc ends a run early); the summary stays here`);
+  // With `?mousecheck`, every wheel event too (the last three stay): what
+  // the browser sends (deltaY, its mode, the legacy wheelDeltaY), how long
+  // after the last, and the notches the page made of it.
+  if (wanted) wheelWatch = (e, since, n) => show(`wheel deltaY ${+e.deltaY.toFixed(3)} (mode ${e.deltaMode}), `
+    + `wheelDeltaY ${e.wheelDeltaY ?? '-'}, ` + (since === Infinity ? 'the first' : `${Math.round(since)} ms after the last`)
+    + `: ${n ? `${Math.abs(n)} ${n < 0 ? 'up' : 'down'}` : 'no notch'}`, false, true);
   return { start };
 })();
 quake.mousecheck = (seconds) => mouseCheck.start(seconds);
