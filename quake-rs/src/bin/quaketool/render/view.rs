@@ -34,10 +34,11 @@
 //!                    passes id's `cl_dlights`, in slot order)
 //! --d-mipscale X     the `d_mipscale` cvar (default 1; 0 = every surface at mip 0)
 //! --d-mipcap N       the `d_mipcap` cvar (default 0; the finest mip level allowed)
-//! --video, --fov-mode, --hires, --sky, --lightstyles, --exactpersp  the port's video cvars
-//!                    (`video.rs`; default classic). --exactpersp 1: exact perspective at every
-//!                    pixel, the port's extra (default 0: id's 16-pixel segments,
-//!                    D_DrawSpans16 / Turbulent8)
+//! --video, --fov-mode, --hires, --sky, --lightstyles, --perspspan  the port's video cvars
+//!                    (`video.rs`; default classic). --perspspan 8|4|1: exact perspective every
+//!                    8 pixels (id's C D_DrawSpans8), 4, or at every pixel, the port's extra
+//!                    (default 16: id's 16-pixel segments, D_DrawSpans16 / Turbulent8);
+//!                    --exactpersp 0|1 is --perspspan 16|1
 //! ```
 //!
 //! The map's entities are still spawned (worldspawn's QuakeC sets the light-style
@@ -147,7 +148,7 @@ pub fn cmd_view(args: &[String]) -> CmdResult {
     // used here: `--aspect` gives vid.aspect itself.)
     video.apply();
     opts.video = video.cvars;
-    opts.exact_perspective = video.exact_persp;
+    opts.persp_span = video.persp_span;
     if let Some(r) = res {
         (w, h) = parse_res(r, video.cvars)?;
     }
@@ -371,7 +372,11 @@ pub fn cmd_view(args: &[String]) -> CmdResult {
         "view {map_name} {w}x{h} origin [{} {} {}] angles [{} {} {}] fov {fov} time {time}{}{}{}{}",
         origin[0], origin[1], origin[2], angles[0], angles[1], angles[2],
         if opts.pixel_aspect != 1.0 { format!(" aspect {}", opts.pixel_aspect) } else { String::new() },
-        if opts.exact_perspective { " exactpersp" } else { "" },
+        match opts.persp_span {
+            render::PerspSpan::Spans16 => String::new(),
+            render::PerspSpan::Exact => " exactpersp".into(),
+            p => format!(" perspspan {}", p.pixels()),
+        },
         vrect.map(|(x, y, vw, vh)| format!(" vrect {x},{y},{vw},{vh}")).unwrap_or_default(),
         if dowarp && vrect.is_none() { " (underwater: D_WarpScreen)" } else { "" }
     );

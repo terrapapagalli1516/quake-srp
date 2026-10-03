@@ -1175,7 +1175,7 @@ mod tests {
         DemoPlay::new(pak, bsp, palette, demo)
     }
 
-    const VID: Vid = Vid { width: 64, height: 40, display_aspect: 4.0 / 3.0, exact_perspective: false, video: render::VideoCvars::CLASSIC, mip: render::MipCvars::DEFAULT };
+    const VID: Vid = Vid { width: 64, height: 40, display_aspect: 4.0 / 3.0, persp_span: render::PerspSpan::Spans16, video: render::VideoCvars::CLASSIC, mip: render::MipCvars::DEFAULT };
 
     /// Entity `num` moved from `from` to `to` (x) this message.
     fn moved(num: i32, from: f32, to: f32) -> EntSnapshot {
@@ -1508,7 +1508,7 @@ mod tests {
         })
         .unwrap();
         let mut d = DemoPlay::new(pak, render::demo_room(), [[0u8; 3]; 256], demo);
-        let vid = Vid { width: 64, height: 40, display_aspect: 4.0 / 3.0, exact_perspective: false, video: render::VideoCvars::CLASSIC, mip: render::MipCvars::DEFAULT };
+        let vid = Vid { width: 64, height: 40, display_aspect: 4.0 / 3.0, persp_span: render::PerspSpan::Spans16, video: render::VideoCvars::CLASSIC, mip: render::MipCvars::DEFAULT };
         // The first frame (CL_TimeDemo_f's) reads through the second message;
         // the time between messages is not what moves playback on.
         let mut shown = Vec::new();

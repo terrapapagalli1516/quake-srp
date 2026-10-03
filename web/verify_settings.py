@@ -12,8 +12,8 @@
      the screenshot, never smoothed; vid_pixelsize 3 gives 830x477 at 3x3.
   3. The 2026 frame: the 2026 cross centred on the view (crosshair 1 and 0
      differ only there), id's + crossing the same centre at the 2-D scale
-     (crosshair 2), exact perspective on (switching it off redraws the walls
-     with id's 16-pixel spans, and on again restores the frame), no 72 fps cap (a second of 1/144 s steps runs 144
+     (crosshair 2), exact perspective on (r_perspspan 1; id's 16-pixel spans
+     redraw the walls, and exact again restores the frame), no 72 fps cap (a second of 1/144 s steps runs 144
      frames), and W walks.
   4. `?classic` is Classic: the profile, config.cfg with nothing changed from
      it, every engine departure off (the 72 fps cap: 72 frames in a second at
@@ -184,11 +184,11 @@ with sync_playwright() as p:
     # Exact perspective is on in 2026 (at 1080p and above id's 16-pixel spans
     # wobble along a wall seen at a grazing angle); off is id's spans, which
     # redraw the walls, and on again is the same frame.
-    check("wasm_exactpersp is on in 2026", cvar(pg, "wasm_exactpersp") == "1")
+    check("exact perspective is on in 2026 (r_perspspan 1)", cvar(pg, "r_perspspan") == "1")
     pg.evaluate(GRAB, "_p1")
-    pg.evaluate("quake.callLine('exec wasm_exactpersp 0')")
+    pg.evaluate("quake.callLine('exec r_perspspan 16')")
     pg.evaluate(GRAB, "_p0")
-    pg.evaluate("quake.callLine('exec wasm_exactpersp 1')")
+    pg.evaluate("quake.callLine('exec r_perspspan 1')")
     pg.evaluate(GRAB, "_p1b")
     d = pg.evaluate(DIFF, ["_p1", "_p0"])
     check("...off (id's spans) redraws the walls, on again is the same frame, byte for byte",
@@ -278,7 +278,7 @@ with sync_playwright() as p:
                   "wasm_showfps", "wasm_exactpersp"]
     controls = ["freelook", "cl_jumpswim", "vid_altenter", "joystick"]
     vals = {n: cvar(pg, n) for n in departures + controls + ["cl_forwardspeed"]}
-    check("every engine departure off", all(vals[n] == "0" for n in departures), str(vals))
+    check("every engine departure off", all(vals[n] == "0" for n in departures) and cvar(pg, "r_perspspan") == "16", str(vals))
     check("the controls are 2026's: mouse look, Space swims up, Alt+Enter, the gamepad, Always Run (400)",
           all(vals[n] == "1" for n in controls) and vals["cl_forwardspeed"] == "400", str(vals))
     pg.evaluate("quake.callLine('exec bind w; bind a; bind MWHEELUP')")

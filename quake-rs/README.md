@@ -156,7 +156,7 @@ of spare frame buffers, the 2-D layer's scale flag, a hull cache and a trace cou
 | `render` | `r_main.c` | `Renderer` (all its state), `Scene` (id's `refdef_t`), `Image` of palette indices |
 | `render::edge` | `r_bsp.c`, `r_edge.c`, `r_draw.c`, `d_edge.c` | the BSP walk, edge clipping, `R_ScanEdges`, the z-buffer |
 | `render::band` | the port's | the view in row bands on several threads, each through id's passes in id's order |
-| `render::raster`, `surf`, `light` | `d_scan.c`, `d_draw16.s`, `r_surf.c`, `d_surf.c`, `r_light.c` | 16-pixel perspective spans, mip levels, the surface cache, lightmaps and dynamic lights |
+| `render::raster`, `surf`, `light` | `d_scan.c`, `d_draw16.s`, `r_surf.c`, `d_surf.c`, `r_light.c` | perspective spans (id's 16 pixels, its C's 8, 4, or exact), mip levels, the surface cache, lightmaps and dynamic lights |
 | `render::sky`, `warp` | `r_sky.c`, `d_sky.c`, `d_scan.c` | the two-layer sky, liquids, the underwater wobble |
 | `render::alias`, `polyse`, `sprite`, `part` | `r_alias.c`, `d_polyse.c`, `r_sprite.c`, `d_part.c` | models and the gun, the affine triangle filler, sprites, particles |
 | `render::view` | `view.c` | view bob, the gun's placement, the frame's palette (`V_UpdatePalette` into `FramePalette`), packing to RGBA |

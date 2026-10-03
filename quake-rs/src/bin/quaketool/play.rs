@@ -253,7 +253,7 @@ pub fn cmd_play(pak_path: &str, workloads: &str, rest: &[String]) -> Result<Stri
         .flatten()
         .and_then(|b| render::parse_palette(&b))
         .ok_or("gfx/palette.lmp is missing or short")?;
-    let vid = Vid { width: 0, height: 0, display_aspect: DISPLAY_ASPECT, exact_perspective: video.exact_persp, video: video.cvars, mip: render::MipCvars::DEFAULT };
+    let vid = Vid { width: 0, height: 0, display_aspect: DISPLAY_ASPECT, persp_span: video.persp_span, video: video.cvars, mip: render::MipCvars::DEFAULT };
     let mut host = Host {
         pak,
         settings: Settings::id(Profile::Classic), // id's controls by name: the oracle pins against them explicitly

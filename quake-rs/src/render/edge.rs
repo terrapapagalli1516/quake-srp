@@ -1954,7 +1954,7 @@ impl EdgeState {
                 block.block = blocks[job].clone();
             }
         }
-        WorldDraw { surfs, sky, persp: opts.persp() }
+        WorldDraw { surfs, sky, persp: opts.persp_span }
     }
 
     /// How one wall or liquid surface is painted (`D_DrawSurfaces`' turbulent
@@ -2179,7 +2179,7 @@ struct SurfDraw<'a> {
 pub(super) struct WorldDraw<'a> {
     surfs: Vec<Option<SurfDraw<'a>>>,
     sky: SkyView,
-    persp: super::raster::Persp,
+    persp: super::raster::PerspSpan,
 }
 
 #[cfg(test)]

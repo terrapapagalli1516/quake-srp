@@ -212,6 +212,8 @@ def run_port(args, qt: Path, case: str, mapname: str, meta: dict, ents: bool, ou
         cmd += ["--vrect", f"{vx},{vy},{vw},{vh}"]
     if args.exactpersp:
         cmd += ["--exactpersp", "1"]
+    elif args.perspspan is not None:
+        cmd += ["--perspspan", str(args.perspspan)]
     if ents:
         cmd += ["--ents", str(out / f"{case}.c.ents")]
     # id's particles in the frame (R_DrawParticles draws them whatever
@@ -326,7 +328,10 @@ def main() -> None:
                          "16-pixel segments (d_subdiv16), 1 = exact per-pixel perspective (experiment)")
     ap.add_argument("--exactpersp", action="store_true",
                     help="the port's exact per-pixel perspective extra (default: id's 16-pixel spans, "
-                         "which --spans 16 gives id's side too)")
+                         "which --spans 16 gives id's side too); the same as --perspspan 1")
+    ap.add_argument("--perspspan", type=int, choices=(16, 8, 4, 1),
+                    help="the port's perspective span (quaketool view --perspspan): 16 id's asm (default), "
+                         "8 id's C D_DrawSpans8 (pair it with --spans 8), 4, 1 exact")
     ap.add_argument("--c-cmd", action="append", default=[],
                     help="extra C console command before the map loads (repeatable), e.g. 'd_mipscale 0' "
                          "(d_mipscale and d_mipcap are handed to the port as well)")

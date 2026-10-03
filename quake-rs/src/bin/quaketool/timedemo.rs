@@ -169,7 +169,7 @@ pub fn cmd_timedemo(pak_path: &str, demo: &str, rest: &[String]) -> Result<Strin
         // CL_PlayDemo_f, then CL_TimeDemo_f in host frame 0.
         let _ = writeln!(o, "Playing demo from {name}.");
         let display_aspect = video.display_aspect(width, height, Some(DISPLAY_ASPECT));
-        let vid = Vid { width, height, display_aspect, exact_perspective: video.exact_persp, video: video.cvars, mip: render::MipCvars::DEFAULT };
+        let vid = Vid { width, height, display_aspect, persp_span: video.persp_span, video: video.cvars, mip: render::MipCvars::DEFAULT };
         let Some(timed) = run(&pak, &name, &vid, video.threads(), &mut clock, &mut rgba, false, lerpmodels) else {
             let _ = writeln!(o, "ERROR: couldn't open.");
             return Ok(o);

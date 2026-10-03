@@ -35,7 +35,7 @@
 use crate::client::in_win::JoyCvars;
 use crate::client::lerpmodels::LerpModels;
 use crate::client::lerpmove::LerpMove;
-use crate::render::{Crosshair, SkyScroll, Threads, TorchFlicker};
+use crate::render::{Crosshair, PerspSpan, SkyScroll, Threads, TorchFlicker};
 use crate::snd::SoundMode;
 use crate::screen::{SbarLayout, VIEWSIZE_DEFAULT, VIEWSIZE_MAX, VIEWSIZE_MIN, VIEWSIZE_STEP};
 use crate::server::LerpLightStyles;
@@ -103,10 +103,12 @@ pub struct Cvars {
     pub uncapped: bool,
     /// `wasm_showfps`: QuakeWorld's frame-rate readout.
     pub show_fps: bool,
-    /// `wasm_exactpersp`: exact perspective at every pixel of the walls and
-    /// liquids, not id's 16-pixel spans (`D_DrawSpans16`: exact every 16
-    /// pixels, affine between). Off in Classic, on in 2026.
-    pub exact_persp: bool,
+    /// `r_perspspan`: how often the walls and liquids find their texel
+    /// exactly ([`PerspSpan`]): every 16 pixels and affine between, id's
+    /// `D_DrawSpans16` (Classic); 8, id's portable C; 4; or 1, exact at every
+    /// pixel (2026). The retired `wasm_exactpersp` still sets and reads it
+    /// ([`RETIRED`]).
+    pub persp_span: PerspSpan,
     /// `wasm_scaled2d`: the 2-D layer (status bar, menus, console) at the
     /// largest whole multiple of id's 320x200 that fits, where id draws it
     /// 1:1 ([`crate::draw::screen_2d`]).
@@ -229,7 +231,7 @@ impl Cvars {
             vid_resolution: (960, 600),
             uncapped: false,
             show_fps: false,
-            exact_persp: false,
+            persp_span: PerspSpan::Spans16,
             scaled_2d: false,
             sbar_layout: SbarLayout::Classic,
             native: false,
@@ -272,7 +274,7 @@ impl Cvars {
         Cvars {
             crosshair: Crosshair::Cross,
             uncapped: true,
-            exact_persp: true,
+            persp_span: PerspSpan::Exact,
             scaled_2d: true,
             sbar_layout: SbarLayout::Overlay,
             native: true,
@@ -512,8 +514,8 @@ pub const CVARS: &[Cvar] = &[
         get: |c| flag(c.uncapped), set: |c, v| c.uncapped = on(v) },
     Cvar { name: "wasm_showfps", archive: true, departure: true, help: "frame rate readout",
         get: |c| flag(c.show_fps), set: |c, v| c.show_fps = on(v) },
-    Cvar { name: "wasm_exactpersp", archive: true, departure: true, help: "exact perspective per pixel",
-        get: |c| flag(c.exact_persp), set: |c, v| c.exact_persp = on(v) },
+    Cvar { name: "r_perspspan", archive: true, departure: true, help: "exact every 16 (id), 8, 4 or 1 px",
+        get: |c| c.persp_span.pixels().to_string(), set: |c, v| c.persp_span = PerspSpan::from_pixels(atof(v)) },
     Cvar { name: "wasm_scaled2d", archive: true, departure: true, help: "2-D layer at id's proportions",
         get: |c| flag(c.scaled_2d), set: |c, v| c.scaled_2d = on(v) },
     Cvar { name: "scr_sbaroverlay", archive: true, departure: true, help: "the world beside the status bar",
@@ -579,11 +581,29 @@ const OLD_NAMES: &[(&str, &str)] = &[
     ("vid_fkey", "vid_altenter"),
 ];
 
+/// A cvar replaced by one that does more, kept as a view onto it: a
+/// `config.cfg` saved before the change still sets the setting, and the
+/// console still reads and sets it by the old name; but [`write_changes`],
+/// completion, the lists and the profiles know only [`CVARS`], so the next
+/// save writes the new cvar alone. (A cvar merely renamed, its values as
+/// they were, is [`OLD_NAMES`]'.)
+const RETIRED: &[Cvar] = &[
+    // The on/off of exact perspective until 2026-10-03, now the span's two
+    // ends: on is `r_perspspan 1`, off id's 16, and it reads 1 only while
+    // the span is 1. A saved `wasm_exactpersp "1"` (written by a Classic
+    // player who switched it on) draws exact perspective, as it did; a saved
+    // "0" (a 2026 player who switched it off) draws id's 16-pixel spans.
+    Cvar { name: "wasm_exactpersp", archive: false, departure: true, help: "old: 1 is r_perspspan 1, 0 is 16",
+        get: |c| flag(c.persp_span == PerspSpan::Exact),
+        set: |c, v| c.persp_span = if on(v) { PerspSpan::Exact } else { PerspSpan::Spans16 } },
+];
+
 /// `Cvar_FindVar`: the cvar called `name` (any case, as the port's console
-/// matches names), or called that before it was renamed ([`OLD_NAMES`]).
+/// matches names), or called that before it was renamed ([`OLD_NAMES`]), or
+/// a retired one ([`RETIRED`]).
 pub fn find(name: &str) -> Option<&'static Cvar> {
     let name = OLD_NAMES.iter().find(|(old, _)| old.eq_ignore_ascii_case(name)).map_or(name, |&(_, new)| new);
-    CVARS.iter().find(|c| c.name.eq_ignore_ascii_case(name))
+    CVARS.iter().chain(RETIRED).find(|c| c.name.eq_ignore_ascii_case(name))
 }
 
 /// `Cvar_CompleteVariable`: the first cvar whose name starts with `partial`
@@ -693,22 +713,54 @@ mod tests {
         assert_eq!(out, "cl_forwardspeed \"200\"\ncl_backspeed \"200\"\nm_pitch \"-0.022\"\n");
     }
 
-    /// Exact perspective is 2026's, and Classic's is id's 16-pixel spans: the
-    /// departure a player switches off in 2026 is the one `config.cfg` then
-    /// writes. (Show FPS, the other old "extra", is the one 2026 leaves off.)
+    /// The perspective span is 2026's exact (1), Classic's id's 16: the
+    /// departure a player changes in 2026 is the one `config.cfg` then
+    /// writes. Its values are the four spans; any other number is the
+    /// longest span not longer than it, and below 1 (0, a word) id's 16.
+    /// (Show FPS, the other old "extra", is the one 2026 leaves off.)
     #[test]
-    fn exact_perspective_is_on_in_2026_and_off_in_classic() {
+    fn the_perspective_span_is_exact_in_2026_and_ids_16_in_classic() {
         let (id, modern) = (Cvars::classic(), Cvars::modern());
-        let c = find("wasm_exactpersp").expect("the cvar");
+        let c = find("r_perspspan").expect("the cvar");
         assert!(c.departure && c.archive);
-        assert_eq!((c.get(&id), c.get(&modern)), ("0".into(), "1".into()));
+        assert_eq!((c.get(&id), c.get(&modern)), ("16".into(), "1".into()));
         let fps = find("wasm_showfps").expect("the cvar");
         assert_eq!((fps.get(&id), fps.get(&modern)), ("0".into(), "0".into()));
         let mut spans = Cvars::modern();
-        c.set(&mut spans, "0");
+        for (set, now) in [("8", "8"), ("4", "4"), ("16", "16"), ("1", "1"), ("12", "8"), ("100", "16"), ("5", "4"),
+                           ("2", "1"), ("0", "16"), ("junk", "16"), ("-4", "16")] {
+            c.set(&mut spans, set);
+            assert_eq!(c.get(&spans), now, "r_perspspan {set}");
+        }
+        c.set(&mut spans, "4");
         let mut out = String::new();
         write_changes(&spans, &Cvars::modern(), &mut out);
-        assert_eq!(out, "wasm_exactpersp \"0\"\n");
+        assert_eq!(out, "r_perspspan \"4\"\n");
+        assert_eq!(complete("r_persp"), Some("r_perspspan"));
+    }
+
+    /// `wasm_exactpersp`, the on/off before the span: a saved config's line
+    /// still sets it (1 exact, 0 id's 16), it reads 1 only while the span is
+    /// 1, and nothing writes, completes or lists it any more.
+    #[test]
+    fn wasm_exactpersp_is_the_spans_two_ends() {
+        let old = find("WASM_EXACTPERSP").expect("an old config still finds it");
+        assert_eq!(old.name, "wasm_exactpersp");
+        let mut c = Cvars::classic();
+        old.set(&mut c, "1");
+        assert_eq!((c.persp_span, old.get(&c).as_str()), (PerspSpan::Exact, "1"), "a Classic player's saved 1: exact, as before");
+        let mut out = String::new();
+        write_changes(&c, &Cvars::classic(), &mut out);
+        assert_eq!(out, "r_perspspan \"1\"\n", "the next save writes the span");
+        let mut c = Cvars::modern();
+        old.set(&mut c, "0");
+        assert_eq!((c.persp_span, old.get(&c).as_str()), (PerspSpan::Spans16, "0"), "a 2026 player's saved 0: id's spans, as before");
+        for (span, reads) in [(PerspSpan::Spans8, "0"), (PerspSpan::Spans4, "0"), (PerspSpan::Exact, "1")] {
+            c.persp_span = span;
+            assert_eq!(old.get(&c), reads, "{span:?}");
+        }
+        assert_eq!(complete("wasm_ex"), None, "completion offers only the names in use");
+        assert!(CVARS.iter().all(|v| v.name != "wasm_exactpersp"), "not listed, not written, not a profile's");
     }
 
     #[test]

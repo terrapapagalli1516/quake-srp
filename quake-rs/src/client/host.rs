@@ -147,7 +147,7 @@ mod tests {
             width: 64,
             height: 40,
             display_aspect: 4.0 / 3.0,
-            exact_perspective: false,
+            persp_span: crate::render::PerspSpan::Spans16,
             video: crate::render::VideoCvars::CLASSIC,
             mip: crate::render::MipCvars::DEFAULT,
         };
