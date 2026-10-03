@@ -16,6 +16,9 @@
 //!
 //! - **Gravity** ([`Stepping::gravity_lead`], used by `sv_phys`): the closed
 //!   form of id's 72 Hz steps, exact at any frame length.
+//! - **Ground contact** ([`Stepping::ground_probe`], used by `sv_phys`): a
+//!   72 Hz frame's fall always reaches the floor a walker stands on; a short
+//!   frame's does not, so the uncapped walker feels for it.
 //! - **Integer fades** ([`Tick72`], used by `client::view::fade_cshifts`):
 //!   id's palette-shift percents are `int`s that lose a truncation every
 //!   frame, so they step in whole 1/72 s ticks.
@@ -29,6 +32,8 @@
 //!
 //! [`Stepping::Classic`], the default, is id's per-frame code unchanged: with
 //! the 72 fps gate on it is WinQuake.
+
+use crate::world::DIST_EPSILON;
 
 /// id's frame time: `Host_FilterTime`'s cap of 72 host frames a second. The
 /// uncapped host steps the game as a run of these.
@@ -58,6 +63,34 @@ impl Stepping {
         match self {
             Stepping::Classic => 0.0,
             Stepping::Uncapped => gravity * (dt - ID_FRAMETIME) * 0.5,
+        }
+    }
+
+    /// How far below where its move ended a walker that stood on the ground,
+    /// and whose move touched no floor, feels for the floor it stands on.
+    ///
+    /// A trace stops a box [`DIST_EPSILON`] (1/32 unit) short of the plane it
+    /// hits, and `SV_FlyMove` latches `FL_ONGROUND` only when the frame's
+    /// move touches a floor. id's 72 Hz frame pulls a standing walker
+    /// `gravity / 72²` down (0.15 units), well past that standoff, so every
+    /// frame touches the floor again. An uncapped frame pulls it
+    /// `gravity · dt · (dt + 1/72) / 2` (with [`Self::gravity_lead`]), which
+    /// is shorter than the standoff above about 233 Hz: the frame after a
+    /// walker is set down at it — a step up, a landing, the foot of a ramp —
+    /// touches nothing, and `FL_ONGROUND` drops for that frame. Everything
+    /// that reads the flag sees a hop: the client's stair smoothing
+    /// (`V_CalcRefdef`) lets go and the view jumps the rest of the step at
+    /// once. The probe reaches the standoff measured straight down on the
+    /// steepest floor a walker stands on (`SV_FlyMove`'s `normal.z > 0.7`):
+    /// a floor a walker was set down on is within it at any frame length,
+    /// and a floor the move left further behind than the standoff is not
+    /// (on a gentle down slope a short frame keeps its touch about as long
+    /// as id's frame does; `FRAMERATE.md`). Classic: 0, id's (the move's own
+    /// contact).
+    pub fn ground_probe(self) -> f32 {
+        match self {
+            Stepping::Classic => 0.0,
+            Stepping::Uncapped => DIST_EPSILON / 0.7,
         }
     }
 }
