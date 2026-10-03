@@ -90,6 +90,23 @@ pub(crate) fn finish_host_error(a: &mut App) {
     a.cls.demonum = -1;
 }
 
+/// The mission packs' re-release-only end-of-game credits roll
+/// ([`quake_rs::client::Walk::pending_menu_credits`], set once builtin #79
+/// `finaleFinished` is finally true and `finale_transition`/`finale_6` ran
+/// `localcmd("menu_credits\n")`): end the session exactly as the Quit menu's
+/// "Y" does ([`App::request_quit`]), which shows the same end screen
+/// (`web/PLATFORM.md`'s "Quit" — id's `end2.bin`/`end1.bin`, or the plain
+/// message without one) and disconnects — the `disconnect` QuakeC queues
+/// right after `menu_credits` needs no separate handling, since
+/// `request_quit` already disconnects. No confirmation prompt: the game
+/// itself decided this is over, not the player asking to leave. `id1` never
+/// sets the flag, so this never fires for it.
+pub(crate) fn finish_menu_credits(a: &mut App) {
+    let Some(w) = a.walk.as_mut().filter(|w| w.pending_menu_credits) else { return };
+    w.pending_menu_credits = false;
+    a.request_quit();
+}
+
 /// `CL_PlayDemo_f` after its argument check: disconnect, print
 /// `"Playing demo from <name>."`, and start the demo — or print "ERROR:
 /// couldn't open." and stop the demo loop (`cls.demonum = -1`), staying

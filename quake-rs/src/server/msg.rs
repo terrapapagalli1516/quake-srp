@@ -64,6 +64,15 @@ pub struct Outbox {
     /// `svc_lightstyle`s, `(style, pattern)`, not yet applied to the server's
     /// table (`Server::apply_lightstyles`).
     pub(super) lightstyles: Vec<(usize, String)>,
+    /// A `menu_credits` the QuakeC queued for the host's command buffer
+    /// (`localcmd("menu_credits\n")`; [`Server::take_pending_menu_credits`]).
+    /// The mission packs' re-release-only end-of-game credits roll
+    /// (`finale_transition`/`finale_6`, client.qc/ending.qc/oldone.qc), always
+    /// immediately followed by `localcmd("disconnect\n")` in the same QuakeC
+    /// frame — a front-end that ends the session on `menu_credits` (as the
+    /// Quit menu does) need not separately recognise the `disconnect` that
+    /// follows it; `id1` never calls either.
+    pub(super) menu_credits: bool,
 }
 
 impl Server {

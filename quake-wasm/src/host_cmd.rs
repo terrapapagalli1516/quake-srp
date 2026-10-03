@@ -23,7 +23,10 @@ use quake_rs::keys::{self, Binding};
 use quake_rs::settings::Profile;
 
 use crate::app::{build_walk_map, ensure_app, App, KeyDest};
-use crate::cl_demo::{cl_disconnect, cl_next_demo, cl_play_demo, cl_stop_playback, cl_timedemo, finish_host_error};
+use crate::cl_demo::{
+    cl_disconnect, cl_next_demo, cl_play_demo, cl_stop_playback, cl_timedemo, finish_host_error,
+    finish_menu_credits,
+};
 use crate::savegame::{do_load_command, do_save_command};
 use crate::snd_dma;
 
@@ -474,6 +477,7 @@ fn cmd_game(args: &Args) {
         }
         // `kill`'s QuakeC can fail too: Host_Error's disconnect.
         finish_host_error(a);
+        finish_menu_credits(a);
     });
 }
 

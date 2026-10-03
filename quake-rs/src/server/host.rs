@@ -57,13 +57,26 @@ pub struct ServerCvars {
     /// episode gates) and `ExitIntermission` (episode 1's end: the next
     /// episode, or the order screen).
     pub registered: bool,
+    /// NOT a QuakeC-visible cvar — `cvar()`/`cvar_set()` never reach this
+    /// one, unlike the three above. It is engine state for the mission
+    /// packs' re-release-only builtin `finaleFinished` (#79,
+    /// `server::pr_cmds::bi_finale_finished`), kept here only because this is
+    /// what a builtin can already reach ([`crate::vm::Host::cvars`]). A
+    /// front-end sets it once the end-of-pack finale/credits text is fully
+    /// shown (`screen::finale_text_fully_revealed`) and the player has
+    /// pressed a button since (`client/cl_main.rs`'s `walk_frame`, via
+    /// [`Server::set_finale_finished`]); it only ever latches true — see
+    /// that method — so a stray poll before the press keeps seeing false.
+    /// `id1`'s progs never declares the builtin, so this never matters there.
+    pub finale_finished: bool,
 }
 
 impl Default for ServerCvars {
     /// The cvars' defaults: `skill` "1" (single-player medium), `sv_gravity`
-    /// "800", `registered` "0".
+    /// "800", `registered` "0", `finale_finished` false (a fresh level has
+    /// not shown, let alone finished, any finale text).
     fn default() -> Self {
-        ServerCvars { skill: 1, sv_gravity: SV_GRAVITY, registered: false }
+        ServerCvars { skill: 1, sv_gravity: SV_GRAVITY, registered: false, finale_finished: false }
     }
 }
 
@@ -122,6 +135,9 @@ pub(super) fn bi_changelevel(vm: &mut Vm) -> Result<()> {
 /// but single-player gameplay issues a few level-control commands we MUST honour:
 ///   * `restart` — reload the current level (the death-respawn path, `client.qc`).
 ///   * `changelevel <map>` / `map <map>` — defer a level swap (same as PF_changelevel).
+///   * `menu_credits` — the mission packs' re-release-only end-of-game credits
+///     roll ([`Outbox::menu_credits`]); the `disconnect` that always follows
+///     it in the same QuakeC frame needs no handler of its own (see there).
 ///
 /// Everything else is a benign no-op (matching the old behaviour). The token parse
 /// is whitespace-split and case-insensitive on the command word.
@@ -135,7 +151,8 @@ pub(super) fn bi_localcmd(vm: &mut Vm) -> Result<()> {
         match (word.as_deref(), map) {
             (Some("restart"), _) => outbox.restart = true,
             (Some("changelevel" | "map"), Some(map)) => outbox.request_changelevel(map),
-            _ => {} // other console text: benign no-op, as before.
+            (Some("menu_credits"), _) => outbox.menu_credits = true,
+            _ => {} // other console text (e.g. the paired "disconnect"): benign no-op.
         }
     });
     Ok(())
@@ -281,6 +298,27 @@ impl Server {
         }
     }
 
+    /// What the mission packs' re-release `finaleFinished` builtin (#79)
+    /// returns — see [`ServerCvars::finale_finished`].
+    pub fn finale_finished(&self) -> bool {
+        self.cvars().finale_finished
+    }
+
+    /// Latch [`Self::finale_finished`] true. A front-end calls this every
+    /// frame with its own freshly-computed condition (the finale text fully
+    /// revealed AND a button pressed since); passing `false` is a no-op —
+    /// once latched, only a changelevel/restart's fresh server (a new
+    /// [`ServerCvars::default`]) clears it, matching `finale_check`'s think
+    /// (client.qc) needing to see `true` only once, however its 0.1s polls
+    /// happen to land against the player's one dismiss press.
+    pub fn set_finale_finished(&mut self, finished: bool) {
+        if finished {
+            if let Some(c) = self.cvars_mut() {
+                c.finale_finished = true;
+            }
+        }
+    }
+
     /// The live `ED_Alloc` ceiling ([`crate::vm::Vm::max_edicts`]): id's
     /// `MAX_EDICTS` (600) unless [`Self::set_max_edicts`] raised it.
     pub fn max_edicts(&self) -> usize {
@@ -341,6 +379,14 @@ impl Server {
     /// `restart` console command after the frame.
     pub fn take_pending_restart(&mut self) -> bool {
         self.take_outbox(|o| &mut o.restart)
+    }
+
+    /// Take and clear a pending `menu_credits` (the mission packs'
+    /// re-release-only end-of-game credits roll, `localcmd("menu_credits\n")`
+    /// — [`Outbox::menu_credits`]). A front-end that sees `true` ends the
+    /// session the same way the Quit menu does (`id1` never calls this).
+    pub fn take_pending_menu_credits(&mut self) -> bool {
+        self.take_outbox(|o| &mut o.menu_credits)
     }
 
     /// `Host_Kill_f` (host_cmd.c): the `kill` console command — suicide via the

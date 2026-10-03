@@ -230,6 +230,22 @@ fn bi_cvar(vm: &mut Vm) -> Result<()> {
     Ok(())
 }
 
+/// `finaleFinished` (#79, the mission packs' 2021 re-release only): whether
+/// the end-of-pack finale/credits text has been fully shown and the player
+/// has pressed a button since ([`ServerCvars::finale_finished`], latched by
+/// [`super::Server::set_finale_finished`] — a front-end sets it from
+/// client-side state, `client::screen::finale_text_fully_revealed`, since
+/// single-player keeps server and client in one process). `client.qc`'s
+/// `finale_check` polls this every 0.1s and, once true, runs `menu_credits`
+/// then `disconnect` five seconds later. `id1`'s progs never declares this
+/// builtin, so it is never called for it (AUDIT.md "The mission packs'
+/// paths", P7/B4).
+fn bi_finale_finished(vm: &mut Vm) -> Result<()> {
+    let finished = vm.host().map(|h| h.cvars().finale_finished).unwrap_or(false);
+    vm.ret_float(if finished { 1.0 } else { 0.0 });
+    Ok(())
+}
+
 /// The handful of cvar defaults the spawn/think code reads. Values match the
 /// stock `*.c` declarations (`deathmatch` "0"). `skill` and `sv_gravity` are
 /// the server's *live* values ([`ServerCvars`]): `cvar_set("skill", N)` from a
@@ -571,6 +587,10 @@ pub fn install_engine_builtins(vm: &mut Vm) {
     put(76, bi_precache_sound); // precache_sound (alias)
     put(77, bi_precache_file); // precache_file (alias)
     put(78, bi_noop); // setspawnparms
+    put(79, bi_finale_finished); // finaleFinished (mission packs' re-release only)
+    // #80 localsound stays pf_fixme: declared by both packs, called by
+    // neither (AUDIT.md "The mission packs' paths", P7/B4) — left failing at
+    // the call, like id's own PR_RunError would.
 }
 
 #[cfg(test)]

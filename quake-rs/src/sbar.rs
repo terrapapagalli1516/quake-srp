@@ -1063,9 +1063,11 @@ pub fn draw_finale_overlay(
         let vx = ((sc.w - pic.width.max(0)) / 2) as f32;
         blit_qpic_at(image, pic, vx, 16.0, sc.scale, 0.0, 0.0);
     }
-    // scr_printspeed defaults to "8" (screen.c): 8 characters per second.
+    // scr_printspeed defaults to "8" (screen.c): 8 characters per second —
+    // crate::screen::scr_printspeed_remaining, shared with the mission packs'
+    // `finaleFinished` builtin so both agree on when the reveal completes.
     if let Some(cc) = conchars {
-        let remaining = (8.0 * elapsed.max(0.0)).min(9999.0) as i32;
+        let remaining = crate::screen::scr_printspeed_remaining(elapsed);
         draw_center_string_revealed(image, cc, text, remaining);
     }
 }

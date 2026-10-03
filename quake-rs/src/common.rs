@@ -37,9 +37,12 @@
 //! *declared* function at startup and refused the whole game if any used
 //! such a number, whether ever called or not — stricter than id's engine,
 //! and wrong for the mission packs' re-release `progs.dat`, which declare
-//! `finaleFinished` (#79) and `localsound` (#80) but never call either
-//! (`quaketool dis`, grepped for both names outside their own declaration).
-//! [`check_progs`] no longer does that scan; it keeps id's own two eager
+//! `finaleFinished` (#79) and `localsound` (#80), the first of which both
+//! packs *do* call, at each pack's very end (AUDIT.md "The mission packs'
+//! paths", P7/B4 — `server::pr_cmds::bi_finale_finished` implements it;
+//! `quaketool dis`, grepped for both names outside their own declaration,
+//! found no call to `localsound` in either pack, so it stays unimplemented).
+//! [`check_progs`] no longer does that eager scan; it keeps id's own two
 //! checks (`PR_LoadProgs`'s version and `PROGHEADER_CRC`), and leaves
 //! anything builtin-shaped to the call that may never come.
 

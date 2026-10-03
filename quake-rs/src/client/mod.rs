@@ -35,8 +35,10 @@
 //! change, and `S_Update`'s listener pose and ambient leaf. The level loads
 //! record the same calls into a caller's `Vec`. What else the host needs it
 //! reads off the state, as id's host reads `cl`: the printed text for its
-//! console ([`Walk::notify`]), `pending_sellscreen`, `intermission`, and
-//! whether a QuakeC error ended the game ([`Walk::host_error`]). A
+//! console ([`Walk::notify`]), `pending_sellscreen`, `intermission`, whether
+//! the mission packs' re-release end-of-game credits roll should show
+//! (`pending_menu_credits`), and whether a QuakeC error ended the game
+//! ([`Walk::host_error`]). A
 //! platform may install frame timers ([`set_lap_hook`]) and a hook on the
 //! finished 3-D view ([`set_view_hook`]); none is installed by default.
 
@@ -283,6 +285,16 @@ pub struct Walk {
     /// i.e. popped the Help/Ordering menu — the `step` dispatcher (which owns the
     /// menu) takes this flag and opens it.
     pub pending_sellscreen: bool,
+    /// `localcmd("menu_credits\n")` arrived this frame
+    /// ([`crate::server::Server::take_pending_menu_credits`]) — the mission
+    /// packs' re-release-only end-of-game credits roll
+    /// (`finale_transition`/`finale_6`, builtin #79's `finaleFinished`
+    /// finally true). Like `pending_sellscreen`, a platform-level flag for
+    /// whatever owns the session to take and act on — ending it the same way
+    /// the Quit menu does (the `disconnect` immediately queued after it in
+    /// the same QuakeC frame needs no handling of its own). `id1` never
+    /// calls this, so it never sets true for it.
+    pub pending_menu_credits: bool,
     /// `Host_Error`'s message once this game has ended in one — a QuakeC
     /// runtime error: "Program error" ([`host::host_error`]). What id printed
     /// on the way is already in [`Walk::notify`]'s printed text. The host does
@@ -646,6 +658,7 @@ pub fn assemble_walk(
         finale_text: String::new(),
         finale_start: 0.0,
         pending_sellscreen: false,
+        pending_menu_credits: false,
         host_error: None,
         pic_complete,
         pic_inter,
