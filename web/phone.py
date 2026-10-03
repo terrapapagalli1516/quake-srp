@@ -44,10 +44,14 @@ The frame is the page's box, so every row says what the page had: a folding
 phone must be open flat (its posture is read with each row, and a row taken
 in any other is refused and waited out: half folded, the page has half the
 screen), and the row is marked `windowed` unless the page is fullscreen.
-Fullscreen takes a real finger: asked for through DevTools, Chrome
-sets `document.fullscreenElement` but keeps its bars, and the page lays out
-wrong. So the script never asks for it (in its own tab it turns the page's
-request off), and never leaves it.
+Chrome on Android hides its bars for a page's fullscreen only if no DevTools
+client is attached at that moment: asked for while this script is connected
+(by its own tap, or by a finger), `document.fullscreenElement` is set but
+the bars stay and the page keeps its windowed box. So the script's own first
+tap has the page's request turned off, and --fullscreen lets go of the
+browser, presses the page's fullscreen chord as a key event from Android
+(`input keycombination`: Alt+Enter, `vid_altenter`), and connects again. It
+never leaves fullscreen.
 
 adb is $ADB, else `adb` on the PATH. Chrome only (its DevTools socket).
 """
@@ -260,10 +264,11 @@ class Target:
         sound starts). The page's request for fullscreen is turned off first: made
         through DevTools it leaves Chrome's bars up and the page laid out wrong."""
         if self.pg.evaluate("getComputedStyle(document.getElementById('overlay')).display") != "none":
-            self.pg.evaluate("() => { wrap.requestFullscreen = () => Promise.reject(new Error('the phone kit runs windowed')); }")
+            self.pg.evaluate("() => { wrap.requestFullscreen = () => Promise.reject(new Error('not with DevTools attached')); }")
             w, h = self.pg.evaluate("[innerWidth, innerHeight]")
             self.tap(w / 2, h / 2)
             time.sleep(1.5)
+            self.pg.evaluate("() => { delete wrap.requestFullscreen; }")
 
     def cool(self, secs):
         """Rest the phone, the page's ticks paused, until no core is capped and the
@@ -375,6 +380,18 @@ def show(r):
         print(pl["top"], flush=True)
 
 
+def find_page(p, port, deploy):
+    """Connect to the phone's Chrome and find the page: the kit's own tab on
+    `port`, or the tab that runs the game."""
+    br = p.chromium.connect_over_cdp(f"http://127.0.0.1:{DEVTOOLS_PORT}")
+    pages = [pg for ctx in br.contexts for pg in ctx.pages]
+    mine = [pg for pg in pages if pg.url.startswith(f"http://localhost:{port}/")] if deploy else \
+           [pg for pg in pages if pg.evaluate("!!(window.quake && quake.call)")]
+    if not mine:
+        sys.exit("no quake page among the phone's tabs: " + ", ".join(pg.url for pg in pages))
+    return br, mine[0]
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("deploy", nargs="?", help="a deploy dir to serve to the phone (default: the page already open in its Chrome)")
@@ -385,6 +402,7 @@ def main():
     ap.add_argument("--secs", type=float, default=60, help="seconds of play a row (0: the timedemo only)")
     ap.add_argument("--cool", type=float, default=0, help="rest before each timedemo until no core is capped, at most this many seconds")
     ap.add_argument("--top", action="store_true", help="print the busiest threads mid-row")
+    ap.add_argument("--fullscreen", action="store_true", help="put the page in fullscreen first (the phone: a key chord from Android)")
     ap.add_argument("--query", default="?2026", help="the deploy page's query")
     ap.add_argument("--port", type=int, default=isolated.port(9100))
     ap.add_argument("--json", help="append each row here, a JSON line each")
@@ -410,23 +428,28 @@ def main():
                 adb("reverse", f"tcp:{a.port}", f"tcp:{a.port}")
                 adb("shell", "am", "start", "-n", CHROME_MAIN, "-a", "android.intent.action.VIEW", "-d", url)
                 time.sleep(3.0)
-            br = p.chromium.connect_over_cdp(f"http://127.0.0.1:{DEVTOOLS_PORT}")
-            pages = [pg for ctx in br.contexts for pg in ctx.pages]
-            mine = [pg for pg in pages if pg.url.startswith(f"http://localhost:{a.port}/")] if a.deploy else \
-                   [pg for pg in pages if pg.evaluate("!!(window.quake && quake.call)")]
-            if not mine:
-                sys.exit("no quake page among the phone's tabs: " + ", ".join(pg.url for pg in pages))
-            pg = mine[0]
+            br, pg = find_page(p, a.port, a.deploy)
         pg.wait_for_function("window.quake && quake.ready && quake.firstFrameAt > 0", timeout=180000)
         t = Target(pg, not a.local)
         t.wait_front()
+        if a.deploy:
+            t.start()
+        if a.fullscreen and t.phone and not pg.evaluate(VIEW)["fullscreen"]:
+            # No DevTools client may be attached while the page asks (the doc
+            # above): let go, press the page's chord from Android, come back.
+            br.close()
+            if CHROME in adb("shell", "dumpsys activity activities | grep topResumedActivity"):
+                adb("shell", "input", "keycombination", "57", "66")   # ALT_LEFT + ENTER
+            time.sleep(3.0)
+            br, pg = find_page(p, a.port, a.deploy)
+            t = Target(pg, True)
+            if not pg.evaluate(VIEW)["fullscreen"]:
+                print("  (the page did not go fullscreen: its rows are windowed)", flush=True)
         name, _, values = a.cvar.partition("=")
         extras = [(name, v) for v in values.split(",") if v] if name else [None]
         saved = {n: t.cvar(n) for n in ["vid_pixelsize", "r_threads"] + ([name] if name else [])}
         out = open(a.json, "a") if a.json else None
         try:
-            if a.deploy:
-                t.start()
             page = pg.evaluate(PAGE)
             s = t.sample()
             page["kinds"] = [f"{len(c)} x {top} MHz" for top, c in kinds(s)] if s else []

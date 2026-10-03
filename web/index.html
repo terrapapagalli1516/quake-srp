@@ -2711,10 +2711,21 @@ class GlPresenter {
   draw(frame, done) {
     if (this.lost || !frame.indexed) { done(); return { copy: 0, put: 0 }; }
     const gl = this.gl, t0 = performance.now();
-    gl.activeTexture(gl.TEXTURE1);
-    let copy = viaStaging(this, frame.palette, (v) => gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 256, 1, gl.RGBA, gl.UNSIGNED_BYTE, v));
+    // The frame first, then the palette: the order is worth 2 ms a frame on
+    // a phone. Chromium sends a context's uploads through one transfer
+    // buffer and resizes it by what is in use when an upload asks: a 1 KB
+    // palette asked for first, with last frame's megabytes already
+    // consumed, looks like a buffer far too large, so it is freed for a
+    // small one, and the frame behind it frees that for a large one again —
+    // fresh shared memory, faulted in page by page, twice a frame. Asked for
+    // right after the frame, the palette finds the buffer in use and nothing
+    // is resized (web/PLATFORM.md, "Presentation": 2.3 ms -> 0.3 for a
+    // 2640x1080 frame).
     gl.activeTexture(gl.TEXTURE0);
-    copy += viaStaging(this, frame.pixels, (v) => gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, frame.w, frame.h, gl.RED_INTEGER, gl.UNSIGNED_BYTE, v));
+    let copy = viaStaging(this, frame.pixels, (v) => gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, frame.w, frame.h, gl.RED_INTEGER, gl.UNSIGNED_BYTE, v));
+    gl.activeTexture(gl.TEXTURE1);
+    copy += viaStaging(this, frame.palette, (v) => gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 256, 1, gl.RGBA, gl.UNSIGNED_BYTE, v));
+    gl.activeTexture(gl.TEXTURE0);
     done();
     this.last = { w: frame.w, h: frame.h };
     gl.drawArrays(gl.TRIANGLES, 0, 3);
