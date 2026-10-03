@@ -65,13 +65,29 @@ AudioWorklet (audio thread): plays the sound ring, moves its clock
   runs a host frame. The worker's own event loop never runs again after
   `_start`, so nothing reaches the program by `postMessage`: every event goes
   through the ring.
-- **The page presents in the same refresh.** The refresh that posts a tick
-  spins (the main thread may not `Atomics.wait`) until the program answers,
-  then presents. That keeps the old page's timing, which computed the frame
-  inside the refresh; only the hand-off below is added. One tick is in flight at a time; a refresh that
+- **The page presents in the same refresh, when a frame is quick.** The
+  refresh that posts a tick spins (the main thread may not `Atomics.wait`)
+  until the program answers, then presents. That keeps the old page's
+  timing, which computed the frame inside the refresh; only the hand-off
+  below is added. One tick is in flight at a time; a refresh that
   finds the last one unanswered posts none (its time goes into the next
   tick's `dt`) and presents whatever has come. The spin is bounded by 30 ms,
   so a level load or a long automation call does not freeze the page.
+- **A slow frame is not waited for.** When the program's frames take most
+  of a refresh or more (a moving average of its time to answer a tick with
+  a frame, above 0.8 of the display's period; back below 0.6 the wait
+  returns), the refresh only shows what has come and asks for the next
+  frame, and a frame that comes back after a refresh has gone by without it
+  is followed by the next tick at that moment (`Atomics.waitAsync` on the
+  Syncs), so the program draws back to back while it is behind
+  (`index.html`'s `pacing`). Waiting could not show such a frame in its own
+  refresh anyway, and the wait is a spin: on a phone it sat on a fast core
+  for the whole frame while the game's threads had the others ("On an
+  Android phone", below: 46 frames a second shown at 2640x1080 with the wait, 57-58
+  without). The display's period is the refreshes' shortest spacing lately.
+  A browser without `Atomics.waitAsync` waits always. `verify_pacing.py`
+  checks both ways and the switch, with frames made slow on purpose
+  (`stall_ms`, a bench build).
 - **The 72 fps gate stays in the program.** A tick is the display's refresh
   and `dt` is the raw time since the last one, exactly the old `step(dt)`
   export's argument; `Host_FilterTime` decides whether a host frame runs.
@@ -210,7 +226,20 @@ shown through each frame (the cshifts, then gamma: the renderer's
   `texelFetch(palette, texelFetch(frame, p).r)` — exact integers, no
   filtering, blending, dithering or colour conversion, so the canvas holds
   exactly the RGBA the program's own pack would. No RGBA pack runs in the
-  program, and a palette shift costs 1 KB.
+  program, and a palette shift costs 1 KB. The frame goes up before its
+  palette, and the order matters: Chromium sends a context's uploads
+  through one transfer buffer, which it resizes by what is in use when an
+  upload asks. A 1 KB palette asked for first, with the last frame's bytes
+  already consumed, made it shrink the megabytes it had grown to, and the
+  frame behind it made it grow again: fresh shared memory, faulted in page
+  by page, twice a frame (a trace on the phone: `TransferBuffer::Free` 340
+  times in 3 s). Asked for right after the frame, the palette finds the
+  buffer in use and nothing is resized: on the phone the uploads
+  and the draw call went from 2.27 to 0.29 ms at 2640x1080 and from 1.16
+  to 0.13 at 1320x540, every frame under 1 ms (one page, 15 s each way;
+  64 `Free`s in 3 s). The old order was sometimes quick too — the state is
+  sticky either way — which is how the same frame measured 2.6 ms in one
+  minute and 0.3 in the next.
 - **2-D canvas** (no WebGL2 — a headless Firefox with no display to ask —, a WebGL2 drawn by the CPU,
   or `?canvas2d`): the page asks for `RGBA8`; the program packs its frame
   through the palette on the renderer's threads (`render::pack_rgba`, one
@@ -1771,8 +1800,9 @@ Auto's budget grows with them (4 and up: twice the pixels), so a 6-core
 phone would get the 1×1 picture, 3.4× the pixels, drawn in equal row
 bands on unequal cores (a phone's efficiency cores take ~3× as long, and
 every band waits for the slowest): hotter and not smoother. For a phone,
-deploy the single-threaded build, or set `vid_pixelsize 2`. (Open: a
-phone-aware thread offer in wasi.js — the `present`/`platform` side.)
+deploy the single-threaded build, or set `vid_pixelsize 2`. (Since then
+Auto starts a phone's screen at 2×2 whatever its threads, `vid.rs`'s
+`phone_sized`, and a phone has been measured: "On an Android phone", below.)
 iOS Safari: `SharedArrayBuffer` needs iOS 15.2 and https (the page says so
 when it is missing); rAF runs at 60 Hz (Safari's default even on 120 Hz
 screens), 30 Hz in Low Power Mode; Web Audio follows the silent switch;
@@ -1782,6 +1812,66 @@ stays outside it, "Files"); the threads build declares a shared memory of
 up to 1 GiB (16384 pages), which a browser reserves up front for a
 shared memory — the kind of reservation iOS has refused in other wasm
 games, one more reason to give a phone the single-threaded build.
+
+**On an Android phone (2026-10-03).** The phone (an SoC with
+three slow cores, four middle, one fast; Chrome 154),
+measured over USB with `web/phone.py` (below). Played fullscreen, the
+page has a phone-sized landscape viewport: a 2640×1080 frame at a pixel
+size of 1, 1320×540 at Auto's 2; its `requestAnimationFrame` runs at 60 Hz;
+`hardwareConcurrency` is 8, so Auto draws on 8 threads. The threads build,
+the 2026 profile, demo1:
+
+| | 1320×540 (Auto) | 2640×1080, exact perspective | 2640×1080, `r_perspspan 16` |
+|---|---|---|---|
+| back to back (`timedemo`), cool, 8 / 6 / 4 threads | 323 / 375 / 367 fps | 148 / 162 / 155 | 182 / – / 194 |
+| back to back, warm (the caps below), 8 threads | – | 69 | 85 |
+| in play at 60 Hz, cool (the larger frame: caps already at 1920 MHz): the frame, ms | 8.4 | 12.8 | 10.1 |
+| in play, warm, before this round's page: frame ms; frames shown a second | 11 ; 59 | 18.3 ; 50 | 15.0 ; 57 |
+| in play, warm, this round's page | 11 ; 59 | 14.6 ; 57 | 13.5 ; 58 |
+
+- **Heat decides.** A minute of 2640×1080 play and the phone caps its
+  cores at 1171 MHz (the four) and 1478 MHz (the fast one), 42–44% of their
+  top clocks, at a skin temperature of only 40 °C, and holds them there; a
+  frame then costs 2.2× what it does cool. Even the 1320×540 frame pulls
+  the caps down slowly (2803 → 1785 MHz in three minutes). The numbers that
+  matter are the warm ones.
+- **A frame in play costs far more than back to back**: 8.4 ms against 3
+  at 1320×540, cool. Between frames the cores idle, the scheduler keeps the
+  game's threads (each busy a fraction of the time) on the slower cores at
+  low clocks, and the fast core is left to whoever is busiest — which was
+  the page's main thread, spinning for the frame ("A frame", above). So the
+  thread count hardly matters in play: 4, 6 and 8 threads are within noise
+  of one another at both sizes (one thread: 11.8 ms against 10.5 at
+  1320×540), with a slightly better tail on 4.
+- **What this round's page changed**, on the warm phone at 2640×1080: the
+  wait gone when frames are slow, 18.3 → 14.6 ms a frame and 50 → 57 frames
+  shown a second (main's page and this one in turn, twice each, 45 s a
+  row); and the upload's order, 2.3 → 0.3 ms of the main thread whenever
+  Chromium's buffer was in its bad state ("Presentation"). Native is then
+  close to a steady 60 with `r_perspspan 16`, and short of it (57, with a
+  late frame two or three times a second) with exact perspective.
+- **Not measured:** the display at 120 Hz (the phone's adaptive mode idles
+  at 60 and boosts only while a finger moves; its settings were not
+  touched), the delay from a touch to the glass, a long session's battery.
+
+**`web/phone.py`** is the kit: one command, a table — for each pixel size
+and thread count (and one more cvar's values: `--cvar r_perspspan=16,1`),
+`timedemo demo1`, then a stretch of `playdemo demo1` at the page's own
+pace, with each kind of core's clock, cap and load and the skin temperature
+read through adb beside the page's numbers (the frame's time, the frames
+shown, the gaps, the upload; the program's phases on a bench build). It
+measures the tab already open in the phone's Chrome and puts its cvars
+back, or serves a deploy dir to the phone over `adb reverse`
+(`http://localhost` is a secure context, so the threads build runs) in a
+tab it closes after, or runs against the local Chromium (`--local`).
+`--cool` rests the phone before each timedemo until no core is capped. Two
+things it learned the hard way: a page given part of the screen measures a
+smaller frame, so the device's state is read with every row and anything but
+the whole screen is refused; and Chrome hides its bars for a page's fullscreen
+only while no DevTools client is attached, so `--fullscreen` disconnects,
+sends the page's own Alt+Enter as a key event from Android, and connects
+again. A baseline of both pixel sizes at three thread counts with a minute
+of play each takes about 15 minutes of the phone.
 
 ## Offline and install
 
