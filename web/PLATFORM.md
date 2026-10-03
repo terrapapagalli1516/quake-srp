@@ -1403,6 +1403,19 @@ the same pixels for any count). `wasi.js`:
 - passes the program `-hwthreads N`, the threads it may count on
   (`hardwareConcurrency`, at most the pool plus its own).
 
+**What the browser must give.** When it will not, the page says so once,
+plainly, and the game does not start — never a degraded mode: the memory and
+the thread workers (above), and WebAssembly SIMD, which `wasi.js` probes
+(`SIMD_PROBE`, the usual `i8x16.popcnt` module) before it compiles the
+program: "the game did not start: this browser has no WebAssembly SIMD, which
+the game needs to run (Chrome 91, Firefox 89 and Safari 16.4 have it)". A
+build that uses SIMD (`-C target-feature=+simd128`) cannot be compiled
+without it, and asking first keeps the line from depending on how a browser
+words its compile error; for a build without SIMD the probe is harmless,
+since every current browser passes it. `verify_crash.py` checks all three
+lines (stubbing `Worker`, `WebAssembly.Memory`, and `WebAssembly.validate`
+with `compile`).
+
 A thread has the clocks, randomness, sleep and stderr (to its worker's
 console: the parent never reads messages again). The files, stdin and
 stdout stay the main program's, and a thread cannot spawn threads yet.

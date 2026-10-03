@@ -18,7 +18,10 @@ worker and shows what stopped it, with a reload (web/PLATFORM.md, "Threads").
   3. a fresh page whose thread workers the browser will not make (`Worker`
      made to throw): the same, in the same words — the threads build does not
      fall back to one thread (the player's own `threads 1` is another thing)
-     — within a second of the load, and the game never ran.
+     — within a second of the load, and the game never ran;
+  4. a fresh page in a browser without WebAssembly SIMD (`WebAssembly.validate`
+     made to say no, `compile` to fail with an unrelated message): the same,
+     in the same words, from wasi.js's probe before it compiles.
 
 Usage: verify_crash.py [deploydir]   (PLATFORM.md: a threads build's deploy)
 """
@@ -122,6 +125,25 @@ with sync_playwright() as p:
           and pg.evaluate("Atomics.load(ctl, C.FRAMES)") == 0,
           f"ready={pg.evaluate('quake.ready')} run={pg.evaluate('Atomics.load(ctl, C.RUN)')} frames={pg.evaluate('Atomics.load(ctl, C.FRAMES)')}")
     pg.screenshot(path=os.path.join(WEB, "verify_crash_noworkers.png"))
+    pg.close()
+
+    # 4. A browser without WebAssembly SIMD (no current Chromium flag turns it
+    # off, so `validate` says no and `compile` fails with a message that
+    # names nothing: the line is the probe's, asked before compiling, not a
+    # browser's wording of a compile error). A build without SIMD is
+    # unaffected — the probe passes in every current browser (every other
+    # case here boots the page with the probe in place).
+    url = refusing("verify-crash-nosimd", "WebAssembly.validate = () => false;"
+                   " WebAssembly.compile = () => Promise.reject(new WebAssembly.CompileError('an unrelated compile failure'));")
+    status, took, pg = says(url, "did not start")
+    check("no wasm SIMD: the game did not start, and says why",
+          "did not start" in status and "no WebAssembly SIMD" in status and "Chrome 91, Firefox 89 and Safari 16.4 have it" in status
+          and "unrelated" not in status, status[:240])
+    check("it says so within a second of the page's load", took < 1.0, f"{took:.2f} s")
+    check("and it never ran: not ready, run state crashed, not a frame",
+          not pg.evaluate("quake.ready") and pg.evaluate("Atomics.load(ctl, C.RUN)") == 3
+          and pg.evaluate("Atomics.load(ctl, C.FRAMES)") == 0)
+    pg.screenshot(path=os.path.join(WEB, "verify_crash_nosimd.png"))
     pg.close()
     br.close()
 httpd.shutdown()
