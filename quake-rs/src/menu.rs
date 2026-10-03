@@ -15,7 +15,7 @@ use crate::keys::{
     K_RIGHTARROW, K_UPARROW,
 };
 use crate::render::Image;
-use crate::screen::{center_string_top, VIEWSIZE_MAX, VIEWSIZE_MIN, VIEWSIZE_STEP};
+use crate::screen::{center_string_top, Crosshair, VIEWSIZE_MAX, VIEWSIZE_MIN, VIEWSIZE_STEP};
 use crate::settings::Settings;
 
 // The binding commands were the menu's before they were keys.c's; their
@@ -96,6 +96,9 @@ pub enum RowKind {
     Toggle,
     /// `vid_pixelsize`: `auto`, then 1..=4; left and right step it.
     PixelSize,
+    /// `crosshair`: `off`, `cross` (the 2026 one), `id's +`; left and right
+    /// step it.
+    Crosshair,
 }
 
 /// One row of the settings page (Options > Classic / 2026, Enter).
@@ -167,8 +170,8 @@ pub const SETTING_ROWS: [SettingRow; 18] = [
     SettingRow {
         cvar: "crosshair",
         label: "             Crosshair",
-        help: ["id's own crosshair, a + at", "the centre of the view"],
-        kind: RowKind::Toggle,
+        help: ["A thin cross on your aim, or", "id's own + at the menus' scale"],
+        kind: RowKind::Crosshair,
     },
     SettingRow {
         cvar: "freelook",
@@ -235,6 +238,12 @@ impl SettingRow {
                 0 => "auto".to_string(),
                 n => n.to_string(),
             },
+            RowKind::Crosshair => match s.cvars.crosshair {
+                Crosshair::Off => checkbox_text(false),
+                Crosshair::Cross => "cross",
+                Crosshair::Glyph => "id's +",
+            }
+            .to_string(),
             RowKind::Toggle => {
                 let on = cvar::find(self.cvar).is_some_and(|c| c.get(&s.cvars) != "0");
                 checkbox_text(on).to_string()
@@ -244,13 +253,18 @@ impl SettingRow {
 
     /// Left (`step` -1) or right (+1) on it, as `M_AdjustSliders` does a
     /// checkbox: a profile or a toggle flips whatever the direction, the pixel
-    /// size steps (auto, 1, 2, 3, 4, wrapping).
+    /// size steps (auto, 1, 2, 3, 4, wrapping), and so does the crosshair
+    /// (off, cross, id's +).
     pub fn adjust(&self, s: &mut Settings, step: i32) {
         match self.kind {
             RowKind::Profile => s.set_profile(s.profile.toggled()),
             RowKind::PixelSize => {
                 let n = i32::from(PIXEL_SIZE_MAX) + 1;
                 s.cvars.pixel_size = (i32::from(s.cvars.pixel_size) + step).rem_euclid(n) as u8;
+            }
+            RowKind::Crosshair => {
+                let n = i32::from(s.cvars.crosshair.cvar()) + step;
+                s.cvars.crosshair = Crosshair::from_cvar(n.rem_euclid(3) as f32);
             }
             RowKind::Toggle => {
                 if let Some(c) = cvar::find(self.cvar) {
@@ -266,6 +280,7 @@ impl SettingRow {
         match self.kind {
             RowKind::Profile => "console: profile classic|2026".to_string(),
             RowKind::PixelSize => format!("console: {} 0-{PIXEL_SIZE_MAX}", self.cvar),
+            RowKind::Crosshair => format!("console: {} 0/1/2", self.cvar),
             RowKind::Toggle => format!("console: {} 0/1", self.cvar),
         }
     }
@@ -4116,6 +4131,17 @@ mod tests {
         m.adjust(-1, &mut s);
         m.adjust(-1, &mut s);
         assert_eq!((s.cvars.pixel_size, SETTING_ROWS[pixel].value(&s).as_str()), (4, "4"));
+        // The crosshair steps the same way: off, the cross, id's +, wrapping.
+        let crosshair = SETTING_ROWS.iter().position(|r| r.kind == RowKind::Crosshair).unwrap();
+        m.set_cursor(crosshair);
+        assert_eq!(SETTING_ROWS[crosshair].value(&s), "off");
+        let steps: Vec<String> = (0..4).map(|_| { m.adjust(1, &mut s); SETTING_ROWS[crosshair].value(&s) }).collect();
+        assert_eq!(steps, ["cross", "id's +", "off", "cross"]);
+        m.adjust(-1, &mut s);
+        m.adjust(-1, &mut s);
+        let console = cvar::find("crosshair").unwrap().get(&s.cvars);
+        assert_eq!((s.cvars.crosshair, console.as_str()), (Crosshair::Glyph, "2"), "left wraps to id's +");
+        assert_eq!(SETTING_ROWS[crosshair].console_hint(), "console: crosshair 0/1/2");
         // The profile row is the Options row's switch.
         m.set_cursor(0);
         m.select(&mut s);

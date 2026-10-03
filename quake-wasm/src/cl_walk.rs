@@ -635,9 +635,9 @@ mod tests {
         let crosshair_changes = |intermission: u8| {
             walk_mut(|w| {
                 w.intermission = intermission;
-                w.crosshair = true;
+                w.crosshair = quake_rs::render::Crosshair::Cross;
                 let on = step_walk(w, 0.0, false, &crate::vid::mode_vid(320, 200)).0;
-                w.crosshair = false;
+                w.crosshair = quake_rs::render::Crosshair::Off;
                 let off = step_walk(w, 0.0, false, &crate::vid::mode_vid(320, 200)).0;
                 w.intermission = 1;
                 on.pixels != off.pixels
