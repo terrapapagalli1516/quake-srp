@@ -14,7 +14,14 @@ worker and shows what stopped it, with a reload (web/PLATFORM.md, "Threads").
   2. a fresh page with a memory the browser will not make (wasi.js's
      `WebAssembly.Memory` made to throw, as a browser refusing the threads
      build's fixed size would): the page says the game did not start, and
-     why, in plain words.
+     why, in plain words;
+  3. a fresh page whose thread workers the browser will not make (`Worker`
+     made to throw): the same, in the same words — the threads build does not
+     fall back to one thread (the player's own `threads 1` is another thing)
+     — within a second of the load, and the game never ran;
+  4. a fresh page in a browser without WebAssembly SIMD (`WebAssembly.validate`
+     made to say no, `compile` to fail with an unrelated message): the same,
+     in the same words, from wasi.js's probe before it compiles.
 
 Usage: verify_crash.py [deploydir]   (PLATFORM.md: a threads build's deploy)
 """
@@ -61,38 +68,86 @@ with sync_playwright() as p:
     pg.screenshot(path=os.path.join(WEB, "verify_crash.png"))
     pg.close()
 
-    # 2. A memory the browser will not make: the deploy's page again, from a
-    # subdirectory of its own whose wasi.js makes WebAssembly.Memory throw
-    # (rewritten each run; the engine and the pak linked, not copied).
-    sub = os.path.join(WEB, "verify-crash-refused")
-    os.makedirs(os.path.join(sub, "id1"), exist_ok=True)
-    for name in os.listdir(WEB):
-        src = os.path.join(WEB, name)
-        if os.path.isfile(src) and name != "wasi.js" and not name.endswith(".png"):
-            dst = os.path.join(sub, name)
+    # The deploy's page again, from a subdirectory of its own whose wasi.js
+    # starts with a line that makes the browser refuse something (rewritten
+    # each run; the engine and the pak linked, not copied).
+    def refusing(name, prefix):
+        sub = os.path.join(WEB, name)
+        os.makedirs(os.path.join(sub, "id1"), exist_ok=True)
+        for f in os.listdir(WEB):
+            src = os.path.join(WEB, f)
+            if os.path.isfile(src) and f != "wasi.js" and not f.endswith(".png"):
+                dst = os.path.join(sub, f)
+                if not os.path.lexists(dst):
+                    os.symlink(src, dst)
+        if os.path.isdir(os.path.join(WEB, "icons")) and not os.path.lexists(os.path.join(sub, "icons")):
+            os.symlink(os.path.join(WEB, "icons"), os.path.join(sub, "icons"))
+        for f in os.listdir(os.path.join(WEB, "id1")):
+            dst = os.path.join(sub, "id1", f)
             if not os.path.lexists(dst):
-                os.symlink(src, dst)
-    if os.path.isdir(os.path.join(WEB, "icons")) and not os.path.lexists(os.path.join(sub, "icons")):
-        os.symlink(os.path.join(WEB, "icons"), os.path.join(sub, "icons"))
-    for name in os.listdir(os.path.join(WEB, "id1")):
-        dst = os.path.join(sub, "id1", name)
-        if not os.path.lexists(dst):
-            os.symlink(os.path.join(WEB, "id1", name), dst)
-    with open(os.path.join(sub, "wasi.js"), "w") as f:
-        f.write("WebAssembly.Memory = class { constructor() { throw new RangeError("
-                "'WebAssembly.Memory(): could not allocate memory'); } };\n")
-        f.write(open(os.path.join(WEB, "wasi.js")).read())
-    pg = br.new_page(viewport={"width": 960, "height": 600})
-    pg.goto(f"http://127.0.0.1:{PORT}/verify-crash-refused/index.html", wait_until="load")
-    try:
-        pg.wait_for_function("document.getElementById('status').textContent.includes('did not start')", timeout=60000)
-    except Exception:
-        pass
-    status = pg.evaluate("document.getElementById('status').textContent")
+                os.symlink(os.path.join(WEB, "id1", f), dst)
+        with open(os.path.join(sub, "wasi.js"), "w") as f:
+            f.write(prefix + "\n")
+            f.write(open(os.path.join(WEB, "wasi.js")).read())
+        return f"http://127.0.0.1:{PORT}/{name}/index.html"
+
+    def says(url, what):
+        """Open `url`; wait for the status line to say the game did not start
+        and `what`; (the status, seconds from the page's load to it, the page)."""
+        pg = br.new_page(viewport={"width": 960, "height": 600})
+        pg.goto(url, wait_until="load")
+        t0 = time.time()
+        try:
+            pg.wait_for_function(f"document.getElementById('status').textContent.includes({what!r})", timeout=60000)
+        except Exception:
+            pass
+        return pg.evaluate("document.getElementById('status').textContent"), time.time() - t0, pg
+
+    # 2. A memory the browser will not make.
+    url = refusing("verify-crash-refused", "WebAssembly.Memory = class { constructor() { throw new RangeError("
+                   "'WebAssembly.Memory(): could not allocate memory'); } };")
+    status, took, pg = says(url, "did not start")
     check("a refused memory: the game did not start, and says why", "did not start" in status and "memory it needs" in status, status[:200])
+    pg.close()
+
+    # 3. Thread workers the browser will not make (a `Worker` that throws, as
+    # a browser out of workers does): the threads build does not run on one
+    # thread instead; the page says the game did not start, and why, as it
+    # does for a refused memory, and the game never ran.
+    url = refusing("verify-crash-noworkers", "self.Worker = class { constructor() { throw new Error("
+                   "'Worker(): too many workers'); } };")
+    status, took, pg = says(url, "did not start")
+    check("no thread workers: the game did not start, and says why",
+          "did not start" in status and "worker threads the game needs" in status and "too many workers" in status, status[:240])
+    check("it says so within a second of the page's load", took < 1.0, f"{took:.2f} s")
+    check("and it never ran: not ready, run state crashed, not a frame — no one-thread mode",
+          not pg.evaluate("quake.ready") and pg.evaluate("Atomics.load(ctl, C.RUN)") == 3
+          and pg.evaluate("Atomics.load(ctl, C.FRAMES)") == 0,
+          f"ready={pg.evaluate('quake.ready')} run={pg.evaluate('Atomics.load(ctl, C.RUN)')} frames={pg.evaluate('Atomics.load(ctl, C.FRAMES)')}")
+    pg.screenshot(path=os.path.join(WEB, "verify_crash_noworkers.png"))
+    pg.close()
+
+    # 4. A browser without WebAssembly SIMD (no current Chromium flag turns it
+    # off, so `validate` says no and `compile` fails with a message that
+    # names nothing: the line is the probe's, asked before compiling, not a
+    # browser's wording of a compile error). A build without SIMD is
+    # unaffected — the probe passes in every current browser (every other
+    # case here boots the page with the probe in place).
+    url = refusing("verify-crash-nosimd", "WebAssembly.validate = () => false;"
+                   " WebAssembly.compile = () => Promise.reject(new WebAssembly.CompileError('an unrelated compile failure'));")
+    status, took, pg = says(url, "did not start")
+    check("no wasm SIMD: the game did not start, and says why",
+          "did not start" in status and "no WebAssembly SIMD" in status and "Chrome 91, Firefox 89 and Safari 16.4 have it" in status
+          and "unrelated" not in status, status[:240])
+    check("it says so within a second of the page's load", took < 1.0, f"{took:.2f} s")
+    check("and it never ran: not ready, run state crashed, not a frame",
+          not pg.evaluate("quake.ready") and pg.evaluate("Atomics.load(ctl, C.RUN)") == 3
+          and pg.evaluate("Atomics.load(ctl, C.FRAMES)") == 0)
+    pg.screenshot(path=os.path.join(WEB, "verify_crash_nosimd.png"))
+    pg.close()
     br.close()
 httpd.shutdown()
 if fails:
     print("FAIL:", "; ".join(fails))
     sys.exit(1)
-print("done: a crashed thread ends the game with a message, and a refused memory is said plainly")
+print("done: a crashed thread ends the game with a message, and a refused memory, refused workers or no wasm SIMD are said plainly")
