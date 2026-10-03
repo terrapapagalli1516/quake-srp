@@ -41,7 +41,7 @@
      48°; a pointermove and its mousemove count once; `?mousecheck`'s
      summary adds up; a real drag counts the same through pointermove's
      coalesced samples (what the page takes) as through mousemove's own
-     movement (what it took before).
+     movement (what it took before); `?plainlock` asks for the plain lock.
 
 Headless fullscreen is approximate: the Alt+Enter/fullscreen checks are best-effort
 here (skipped with a note when the headless browser refuses) — see the manual
@@ -175,7 +175,7 @@ def mouse_paths(pg):
         return done; }""")
     print("INFO", summary)
     sent = re.search(r"records (\d+) sent, 0 dropped, (\d+) read", summary)
-    want = ("× 100.0 counts |", "read × 100.0 |", f"turned {100 * per:.2f}°, {per:.4f}°/count")
+    want = ("× 100.00 counts |", "read × 100.00 |", f"turned {100 * per:.2f}°, {per:.4f}°/count")
     check("mousecheck: its summary adds up",
           all(w in summary for w in want) and sent and sent.group(1) == sent.group(2), summary)
     # A real drag, the lock refused: the browser's own pointermove (its
@@ -203,6 +203,16 @@ def mouse_paths(pg):
     check("mouse: a real drag counts the same through pointermove's samples as mousemove's",
           moved == 200 and sampled == moved and read == moved and abs(t - 200 * per) < 0.05,
           f"mousemove {moved}, coalesced {sampled}, the game {read}; turned {t:.3f}°")
+    # ?plainlock: the lock never asks for unadjusted movement (the check's
+    # other half, the system's accelerated pointer).
+    other = pg.context.new_page()
+    asked = {}
+    for q in ("", "?plainlock"):
+        other.goto(f"http://127.0.0.1:{PORT}/index.html{q}", wait_until="load")
+        asked[q] = other.evaluate("rawMouse")
+    other.close()
+    check("?plainlock: the lock does not ask for unadjusted movement",
+          asked == {"": True, "?plainlock": False}, str(asked))
 
 with sync_playwright() as p:
     br = isolated.launch(p, [

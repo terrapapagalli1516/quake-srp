@@ -495,6 +495,7 @@ function altEnterFullscreen() { return !!(gameState.flags & ST.ALT_ENTER); }
 // holds whole records: the write index moves once the bytes are in.
 let inputDropped = 0;
 let mouseSent = 0;   // MOUSE records into the ring (the mouse check's)
+let tickWatch = null;   // the mouse check's, while it runs: each tick's dt
 function sendRecord(kind, payload) {
   if (!ctl) return false;
   const n = 4 + payload.length;
@@ -523,6 +524,7 @@ function mouseMove(dx, dy, at) {
   if (sendRecord(IN.MOUSE, fields(8, d => { d.setFloat32(0, dx, true); d.setFloat32(4, dy, true); }))) mouseSent++;
 }
 function sendTick(seq, dt) {
+  if (tickWatch) tickWatch(dt);
   sendRecord(IN.TICK, fields(12, d => { d.setUint32(0, seq, true); d.setFloat64(4, dt, true); }));
 }
 
@@ -1055,12 +1057,15 @@ addEventListener('mouseup', (e) => {
 // off while the game ran (newmouseparms {0, 0, 1}, unless -noforcemaccel), so
 // a count of mouse movement was always the same turn; `unadjustedMovement`
 // asks the browser for the same unaccelerated counts (Chromium: the OS's raw
-// input, on Windows, macOS and ChromeOS). Where it is refused
-// (NotSupportedError: Linux, Firefox, an older Chromium) the plain lock, at
-// once and from then on: Chromium refuses a burst of lock requests ("too many
-// in a short window"), so a refused option must not cost a second request
-// every time.
-let rawMouse = true;   // until the browser says it has no unadjusted movement
+// input, on Windows, macOS and ChromeOS; Firefox since 152, on Windows and
+// macOS; Safari on macOS). Where it is refused (NotSupportedError: Linux, an
+// older browser) the plain lock, at once and from then on: Chromium refuses a
+// burst of lock requests ("too many in a short window"), so a refused option
+// must not cost a second request every time. `?plainlock` in the address
+// never asks (the system's accelerated pointer, as the desktop moves it): the
+// mouse check's other half, to compare the two on one machine (PLATFORM.md,
+// "The mouse check").
+let rawMouse = !new URLSearchParams(location.search).has('plainlock');   // until the browser says it has none
 function lockPointer() {
   let p = null;
   try { p = rawMouse ? canvas.requestPointerLock({ unadjustedMovement: true }) : canvas.requestPointerLock(); }
@@ -1146,15 +1151,18 @@ function syncLockChip() {
 // unadjusted lock, which replaces only the event's own movement,
 // `UnadjustedMovementPlatformMouseEvent`: there the turn follows macOS's
 // acceleration, but all of it arrives.) No list (a script's event), or one
-// whose samples all read 0 where the event moved (Firefox before 150): the
-// event's own movement. A `mousemove` with no `pointermove` before it (a
-// browser without pointer events, or a script's event) carries its own.
+// whose samples all read 0 (Firefox before 150 left them so): the event's own
+// movement. A `mousemove` with no `pointermove` before it (a browser without
+// pointer events, or a script's event) carries its own.
 function pointerMovement(e) {
   const samples = typeof e.getCoalescedEvents === 'function' ? e.getCoalescedEvents() : [];
-  let dx = 0, dy = 0;
-  for (const s of samples) { dx += s.movementX; dy += s.movementY; }
-  if (!(dx || dy)) { dx = e.movementX; dy = e.movementY; }
-  return { dx, dy, samples: samples.length };
+  let dx = 0, dy = 0, moved = false;
+  for (const s of samples) {
+    dx += s.movementX; dy += s.movementY;
+    moved = moved || s.movementX !== 0 || s.movementY !== 0;
+  }
+  if (!moved) { dx = e.movementX; dy = e.movementY; }
+  return { dx, dy, samples, own: !moved };
 }
 let pointerMoved = false;
 canvas.addEventListener('pointermove', e => {
@@ -2878,32 +2886,39 @@ startTouch();
 // second at a time, for a display and a browser the checks here cannot run
 // (PLATFORM.md, "The mouse at any frame rate"). With `?mousecheck` each
 // pointer lock arms a run of ten seconds from the first move, and the lock
-// ending ends it early; the lines go to the console and stay in a box over
-// the view, to be copied. Counts are |movementX| (the turn's), an event's.
+// ending ends it early. A line a second goes to the console, and the run's
+// summary after them; a box over the view shows the newest line and keeps
+// the last four summaries, to be copied once the lock is let go. Counts are
+// |movementX| (the turn's), an event at a time: the event's own (mousemove),
+// its coalesced samples' (pointermove: what the look takes), each raw update
+// (pointerrawupdate, where the browser has it), and what the program read.
 // ===========================================================================
 const mouseCheck = (() => {
   const RUN_S = 10;
   const wanted = new URLSearchParams(location.search).has('mousecheck');
-  // pointerrawupdate (Chromium, on a secure page): every sample as it
-  // comes, listened to only during a run (a listener costs the page an
+  // pointerrawupdate (Chromium, on a secure page, and Firefox): every sample
+  // as it comes, listened to only during a run (a listener costs the page an
   // event per sample).
   const rawListen = 'onpointerrawupdate' in window;
   let armed = false, run = null, box = null;
-  const shown = [];
-  const tally = () => ({ refreshes: 0, moves: 0, counts: 0, fractional: 0, smallest: Infinity,
-                         pointers: 0, samples: 0, sampled: 0, raws: 0, rawCounts: 0 });
+  const kept = [], latest = [];   // the last runs' summaries; the newest line (or the hint)
+  const tally = () => ({ refreshes: 0, dts: [], moves: 0, counts: 0, pointers: 0, samples: 0, sampled: 0,
+                         fractional: 0, smallest: Infinity, raws: 0, rawCounts: 0 });
   // The page's records as they stand, and the program's count of what it
-  // read (records, their counts, the turn, host frames: `mouse_count`). A
-  // call is queued behind every record sent before it, so the two taken
-  // together cover the same events.
+  // read (records, their counts, the turn, host frames, the game's clock:
+  // `mouse_count`). A call is queued behind every record sent before it, so
+  // the two taken together cover the same events.
   const sent = () => ({ sent: mouseSent, dropped: inputDropped });
   const read = () => callLine('mouse_count').then(r => {
-    const [records, counts, turned, frames] = r.text.split(' ').map(Number);
-    return { records, counts, turned, frames };
+    const [records, counts, turned, frames, time] = r.text.split(' ').map(Number);
+    return { records, counts, turned, frames, time };
   }).catch(() => null);
+  const median = xs => { const v = [...xs].sort((a, b) => a - b); return v.length ? v[v.length >> 1] : NaN; };
 
-  function show(text) {
+  function show(text, summary = false) {
     console.log(text);
+    if (summary) { kept.push(text); if (kept.length > 4) kept.shift(); latest.length = 0; }
+    else latest.splice(0, latest.length, text);
     if (!box) {
       box = document.createElement('pre');
       box.id = 'mouseCheck';
@@ -2912,9 +2927,7 @@ const mouseCheck = (() => {
         + 'font:11px/1.4 monospace;white-space:pre-wrap;user-select:text;z-index:5';
       wrap.appendChild(box);
     }
-    shown.push(text);
-    if (shown.length > 13) shown.shift();
-    box.textContent = shown.join('\n');
+    box.textContent = [...kept, ...latest].join('\n');
   }
   // The browser, its system, the pixel ratio and the lock asked for.
   function browser() {
@@ -2927,44 +2940,50 @@ const mouseCheck = (() => {
     return `${name} ${os}, dpr ${devicePixelRatio}, ${rawMouse ? 'unadjusted' : 'plain'} lock`;
   }
   // A line: the page's tallies `t` over `s` seconds, the records sent from
-  // `p0` to `p1`, what the program read from `g0` to `g1`.
+  // `p0` to `p1`, what the program read from `g0` to `g1`. The clock: the
+  // ticks' dt (the refreshes' time, the game's only clock) and the game's
+  // time a second (`host_time`: 1.000 unless frames are clamped at 0.1 s).
   function line(head, t, s, p0, p1, g0, g1, summary) {
-    const f = (x, d = 1) => x.toFixed(d), rate = x => Math.round(x / s);
-    const game = g0 && g1;
-    const parts = [`${head}: ${rate(t.refreshes)} Hz refresh` + (game ? `, ${rate(g1.frames - g0.frames)} fps` : ''),
+    const f = (x, d = 2) => x.toFixed(d), rate = x => Math.round(x / s), per = (a, b) => b ? f(a / b) : '-';
+    const game = g0 && g1, frames = game ? g1.frames - g0.frames : 0;
+    const parts = [`${head}: ${rate(t.refreshes)} Hz refresh` + (game ? `, ${rate(frames)} fps, ${f(frames / t.refreshes)} a refresh` : ''),
+      `clock: tick ${f(median(t.dts) * 1000)} ms median` + (game ? `, game ${f((g1.time - g0.time) / s, 3)} s a second` : ''),
       `mousemove ${t.moves} × ${f(t.counts)} counts`,
-      `pointermove ${t.pointers} × ${f(t.sampled)} counts in ${t.samples} samples`,
+      `pointermove ${t.pointers} × ${f(t.sampled)} counts, ${per(t.sampled, t.pointers)} an event, `
+        + `in ${t.samples} samples (${per(t.samples, t.pointers)} an event), ${t.fractional} fractional`,
       rawListen ? `rawupdate ${t.raws} × ${f(t.rawCounts)}` : 'rawupdate n/a'];
     const records = `records ${p1.sent - p0.sent} sent, ${p1.dropped - p0.dropped} dropped`;
     if (game) {
       const counts = g1.counts - g0.counts, turned = g1.turned - g0.turned;
       parts.push(`${records}, ${g1.records - g0.records} read × ${f(counts)}`,
-                 `turned ${f(turned, 2)}°` + (counts ? `, ${f(turned / counts, 4)}°/count` : ''));
+                 `turned ${f(turned)}°` + (counts ? `, ${f(turned / counts, 4)}°/count` : ''));
     } else parts.push(`${records}, the game did not answer`);
-    if (summary) {
-      parts.push(`${t.fractional} fractional, smallest ${t.smallest === Infinity ? '-' : f(t.smallest, 3)}`, browser());
-    }
+    if (summary) parts.push(`smallest ${t.smallest === Infinity ? '-' : f(t.smallest, 3)}`, browser());
     return parts.join(' | ');
   }
 
   // Each tally of the run, `f(tally, event)`.
   const each = f => e => { if (run) { f(run.win, e); f(run.all, e); } };
-  canvas.addEventListener('mousemove', e => {
-    if (armed && locked()) { armed = false; start(); }
-    each((t, e) => {
-      const x = Math.abs(e.movementX);
-      t.moves++;
-      t.counts += x;
-      if (x % 1) t.fractional++;
-      if (x && x < t.smallest) t.smallest = x;
-    })(e);
-  });
+  // Armed in the capture phase, before the look's own listeners, so that the
+  // first move's record is the run's like its events; with `?mousecheck` by
+  // the first raw update too, which comes before the refresh's pointermove
+  // (or the raw updates of the first refresh's samples would be missed).
+  const arm = () => { if (armed && locked()) { armed = false; start(); } };
+  addEventListener('pointermove', arm, true);
+  addEventListener('mousemove', arm, true);
+  if (wanted && rawListen) addEventListener('pointerrawupdate', arm, true);
+  canvas.addEventListener('mousemove', each((t, e) => { t.moves++; t.counts += Math.abs(e.movementX); }));
   canvas.addEventListener('pointermove', each((t, e) => {
     if (e.pointerType !== 'mouse') return;
-    const m = pointerMovement(e);
+    const m = pointerMovement(e), took = m.own ? [e] : m.samples;
     t.pointers++;
-    t.samples += Math.max(1, m.samples);
+    t.samples += took.length;
     t.sampled += Math.abs(m.dx);
+    for (const s of took) {
+      const x = Math.abs(s.movementX);
+      if (x % 1) t.fractional++;
+      if (x && x < t.smallest) t.smallest = x;
+    }
   }));
   const onRaw = each((t, e) => { if (e.pointerType === 'mouse') { t.raws++; t.rawCounts += Math.abs(e.movementX); } });
   document.addEventListener('pointerlockchange', () => {
@@ -2981,29 +3000,35 @@ const mouseCheck = (() => {
     const refresh = () => { if (run === r) { r.win.refreshes++; r.all.refreshes++; requestAnimationFrame(refresh); } };
     requestAnimationFrame(refresh);
     if (rawListen) canvas.addEventListener('pointerrawupdate', onRaw);
+    tickWatch = each((t, dt) => t.dts.push(dt));
     r.timer = setInterval(() => second(r, false), 1000);
     return r.done;
   }
   // The second's line, and at the end of the run (its time up, or the lock
   // gone) its summary.
   async function second(r, end) {
+    if (r.over) return;
     const now = performance.now(), p = sent(), g = read(), t = r.win;
     const [wt, wp, wg] = [r.wt, r.wp, r.wg];
     [r.wt, r.wp, r.wg, r.win] = [now, p, g, tally()];
     const elapsed = (now - r.t0) / 1000, last = end || elapsed > r.seconds - 0.05;
     if (last) {
+      r.over = true;
       clearInterval(r.timer);
       if (rawListen) canvas.removeEventListener('pointerrawupdate', onRaw);
+      tickWatch = null;
       run = null;
     }
     const [g0, g1, gw] = await Promise.all([r.g0, g, wg]);
     show(line(`mousecheck ${Math.round(elapsed)}/${r.seconds} s`, t, (now - wt) / 1000, wp, p, gw, g1, false));
     if (last) {
       const summary = line(`mousecheck ${elapsed.toFixed(1)} s`, r.all, elapsed, r.p0, p, g0, g1, true);
-      show(summary);
+      show(summary, true);
       r.resolve(summary);
     }
   }
+  if (wanted) show('mousecheck: start a game, click the view to capture the mouse and move it: '
+                   + `${RUN_S} seconds from the first move (Esc ends a run early); the summary stays here`);
   return { start };
 })();
 quake.mousecheck = (seconds) => mouseCheck.start(seconds);
