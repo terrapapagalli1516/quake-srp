@@ -49,9 +49,10 @@ use crate::screen::VIEWSIZE_DEFAULT;
 /// The two profiles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Profile {
-    /// id's WinQuake: every departure off, `default.cfg`'s bindings.
+    /// id's WinQuake engine: every departure off. (The controls are the
+    /// player's, the same as 2026's: [`Settings::id`] is id's own.)
     Classic,
-    /// The 2026 profile: the port's departures on, WASD.
+    /// The 2026 profile: the port's departures on, the mouse wheel cycling weapons.
     #[default]
     Modern,
 }

@@ -242,12 +242,12 @@
       <div class="col">
         <h2>Move</h2>
         <div class="keys">
-          <span class="k"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd></span><span>move / strafe (Classic: id's arrows and <kbd>,</kbd><kbd>.</kbd>)</span>
+          <span class="k"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd></span><span>move / strafe (id's own: the arrows and <kbd>,</kbd><kbd>.</kbd> — <code>idcontrols</code> on the console)</span>
           <span class="k">mouse</span><span>look (click to lock; or click-drag)</span>
           <span class="k"><kbd>←</kbd><kbd>→</kbd></span><span>turn</span>
           <span class="k"><kbd>Space</kbd></span><span>jump / swim up</span>
           <span class="k"><kbd>C</kbd></span><span>swim down</span>
-          <span class="k">gamepad</span><span>2026: left stick moves, right stick looks, RT fires, A or LT jumps, bumpers change weapon, Start the menu (D-pad, A and B work it), Back the scores. Classic: id's joystick after <code>joystick 1</code> on the console. A browser sees a pad once a button is pressed</span>
+          <span class="k">gamepad</span><span>Left stick moves, right stick looks, RT fires, A or LT jumps, bumpers change weapon, Start the menu (D-pad, A and B work it), Back the scores. <code>idcontrols</code> on the console gives id's own joystick (after <code>joystick 1</code>). A browser sees a pad once a button is pressed</span>
         </div>
       </div>
       <div class="col">
@@ -266,9 +266,9 @@
           <span class="k"><kbd>Esc</kbd></span><span>menu / back — with the mouse captured, <kbd>Esc</kbd> releases it and opens the menu. In fullscreen on Chrome/Edge <kbd>Esc</kbd> just toggles the menu (hold it to leave fullscreen); elsewhere a <em>second</em> <kbd>Esc</kbd> leaves fullscreen (browser rule)</span>
           <span class="k"><kbd>Tab</kbd></span><span>hold for the scoreboard (monsters, secrets, time)</span>
           <span class="k"><kbd>↑</kbd><kbd>↓</kbd></span><span>menu: navigate · <kbd>←</kbd><kbd>→</kbd> adjust · <kbd>Enter</kbd> select</span>
-          <span class="k">Options</span><span>screen size, brightness, mouse, always run — Customize controls to rebind keys, Video Options for id's 4:3 modes, and <em>Classic / 2026</em>: ←/→ switches between id's WinQuake exactly and this port's 2026 settings, Enter lists each one (or open the page as <code>?classic</code> / <code>?2026</code>)</span>
+          <span class="k">Options</span><span>screen size, brightness, mouse, always run — Customize controls to rebind keys, Video Options for id's 4:3 modes, and <em>Classic / 2026</em>: ←/→ switches between id's WinQuake exactly and this port's 2026 settings (the engine: the controls stay), Enter lists each one (or open the page as <code>?classic</code> / <code>?2026</code>)</span>
           <span class="k"><kbd>-</kbd><kbd>=</kbd></span><span>screen size down / up</span>
-          <span class="k"><kbd>Alt</kbd>+<kbd>Enter</kbd></span><span>fullscreen on and off, whatever has the keyboard: the game, the menu, the console (2026; Option+Return on a Mac). Classic leaves the chord to id's strafe and jump: use the <em>fullscreen</em> button. <kbd>F11</kbd> is the browser's own, the whole window</span>
+          <span class="k"><kbd>Alt</kbd>+<kbd>Enter</kbd></span><span>fullscreen on and off, whatever has the keyboard: the game, the menu, the console (Option+Return on a Mac). With id's own controls (<code>idcontrols</code>) the chord is id's strafe and jump: use the <em>fullscreen</em> button. <kbd>F11</kbd> is the browser's own, the whole window</span>
           <span class="k"><kbd>F6</kbd> / <kbd>F9</kbd></span><span>quicksave / quickload (id's own binds — also <kbd>F1</kbd> help, <kbd>F2</kbd>/<kbd>F3</kbd> the Save/Load screen, <kbd>F4</kbd> Options, <kbd>F10</kbd> quit, <kbd>F12</kbd> a screenshot — a <code>.pcx</code> file in this page's storage, not a download yet; F12 only reaches the game in fullscreen, where the browser keeps it for devtools otherwise)</span>
           <span class="k"><kbd>~</kbd></span><span>console (see below)</span>
           <span class="k">game</span><span>with a mission pack on this page (the server's or your own): Quake, Scourge of Armagon or Dissolution of Eternity — on the start screen, under the view, or GAME in a phone's menu. A choice reloads the page as <code>?game=hipnotic</code> / <code>?game=rogue</code> (none for Quake): bookmark one to start there. Saves stay; an unsaved game ends</span>
@@ -286,7 +286,8 @@
         <code>impulse 9</code><span>all weapons + ammo</span>
         <code>map e1m2</code><span>jump to a level (<code>start</code>, <code>e1m1</code>…<code>e1m8</code>)</span>
         <code>kill</code><span>respawn</span>
-        <code>profile classic</code><span>id's WinQuake exactly (every departure off, id's keys); <code>profile 2026</code> the port's settings, each also a variable (<code>wasm_showfps 1</code>, <code>vid_pixelsize 2</code>, …; Options &gt; Classic / 2026)</span>
+        <code>profile classic</code><span>id's WinQuake engine exactly (every departure off); <code>profile 2026</code> the port's settings, each also a variable (<code>wasm_showfps 1</code>, <code>vid_pixelsize 2</code>, …; Options &gt; Classic / 2026). The controls (WASD, mouse look, gamepad, Always Run) are the same in both</span>
+        <code>idcontrols</code><span>id's own 1996 controls: the arrows, no mouse look, no gamepad, Always Run off</span>
         <code>help</code><span>id's Help/Ordering screen</span>
         <code>wasm_help</code><span>this port's list of console commands (<code>echo</code>, <code>clear</code>, the demo commands, …)</span>
       </div>
@@ -485,8 +486,9 @@ function bindGrabbing() { return !!(gameState.flags & ST.BIND_GRAB); }
 // Native resolution (vid_native): device pixels per picture pixel, 0 when the
 // picture is a video mode shown in the 4:3 box.
 function nativePixel() { return (gameState.flags & ST.NATIVE) ? gameState.pixelSize : 0; }
-// Is Alt+Enter the page's fullscreen key (vid_altenter: 2026; in Classic the
-// chord is the game's, id's ALT +strafe and ENTER +jump)? See "Fullscreen",
+// Is Alt+Enter the page's fullscreen key (vid_altenter, on in both profiles; off
+// with id's own controls, `idcontrols`, the chord is the game's, id's ALT +strafe
+// and ENTER +jump)? See "Fullscreen",
 // below.
 function altEnterFullscreen() { return !!(gameState.flags & ST.ALT_ENTER); }
 
@@ -858,7 +860,7 @@ function pageWillDropLock() {
 // the capture phase, before any other listener: the game never sees the
 // Enter (the Alt reaches it, +strafe for a moment), and what it toggles is
 // the browser's own state, document.fullscreenElement, never a copy.
-// vid_altenter switches it (2026). In Classic the chord stays the game's:
+// vid_altenter switches it (on in both profiles). Off, the chord stays the game's:
 // default.cfg binds ALT +strafe and ENTER +jump, a strafe-jump, as in
 // WinQuake. The browser's own F11 fills the screen with the whole window.
 addEventListener('keydown', e => {

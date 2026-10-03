@@ -2498,8 +2498,8 @@ const EXTRAS_HEADER_Y: f32 = if EXTRAS_LIST_END + OPTIONS_ROW_STEP + EXTRAS_NOTE
 /// the list grows, after the gap and the console line ([`EXTRAS_HELP_LINES`]),
 /// once the header and a row's two help lines no longer fit under the list.
 /// What it says the page says anyway: it opens from Options' "Classic / 2026"
-/// row, and its own first row's help is "Classic: id's Quake, every row
-/// off". (This round's `scr_sbaroverlay` makes 19 rows, and drops it.)
+/// row, and its own first row's help is "Classic: id's WinQuake engine,
+/// 2026: the port's. Controls: both". (This round's `scr_sbaroverlay` makes 19 rows, and drops it.)
 const EXTRAS_HEADER_SHOWN: bool = EXTRAS_LIST_END + 3.0 * OPTIONS_ROW_STEP <= 200.0;
 const EXTRAS_HELP_Y: f32 = if EXTRAS_HEADER_SHOWN { EXTRAS_HEADER_Y + OPTIONS_ROW_STEP } else { EXTRAS_LIST_END };
 /// How many of a row's three help lines ([`extras_help_lines`]: its own

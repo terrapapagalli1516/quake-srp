@@ -14,16 +14,27 @@ Since 2026-09-26 every departure from id's game is a setting. `quake_rs::cvar::C
 marks each one `departure`, and two profiles switch them all at once
 (`quake_rs::settings`):
 
-- **Classic** has every departure off and `default.cfg`'s bindings. It is WinQuake:
-  frames, game state and timing, proven by `uv run oracle/classic_check.py`
-  (`oracle/README.md`, "Classic").
+- **Classic** has every departure off. It is WinQuake: frames, game state and timing,
+  proven by `uv run oracle/classic_check.py` (`oracle/README.md`, "Classic").
 - **2026** is the default: an idealized software-rendered Quake on a 2026 machine.
+
+**The profile is the engine; the controls are the player's.** Since 2026-10-03 WASD, mouse
+look, the gamepad, Space swimming up, Alt+Enter and Always Run are the same in both
+profiles by default (the rows below marked *both*). They are not `departure` cvars, so
+switching profile leaves them alone, as it leaves id's own settings. The oracle never
+sees them (id's C has no WASD or gamepad to compare); the harnesses that run Classic
+against it name id's controls explicitly (`Settings::id`: `quaketool play` and `sound`;
+`idcontrols` in `oracle_screen`, whose Keys screen the C draws with `default.cfg`'s keys).
+The one step to id's 1996 controls — arrows, `a` `+lookup`, no mouse look, no gamepad,
+Always Run off — is the console's `idcontrols`; it is never a profile switch. The mouse
+wheel's weapon cycle is the exception, still a 2026 departure: switching to Classic
+unbinds it.
 
 To switch, use Options > "Classic / 2026" (←/→; Enter lists every row), the console's
 `profile classic|2026`, or the page's `?classic` / `?2026`. Each row can also be set
 alone, on that settings page or as its console variable. Switching profile resets the
-departures and the bindings, and keeps id's own settings (Screen size, Brightness,
-the volumes, the mouse).
+departures (and binds or unbinds the wheel), and keeps the controls and id's own settings
+(Screen size, Brightness, the volumes, the mouse).
 
 | departure | setting (settings page row) | 2026 | why |
 |---|---|---|---|
@@ -35,16 +46,16 @@ the volumes, the mouse).
 | Monsters glide between their 0.1 s steps (QuakeSpasm's `r_lerpmove`) | `r_lerpmove` (Smooth monsters) | on | At high refresh rates a stepping monster visibly jumps ten times a second. ("Demo playback between messages") |
 | An alias model's animation blends between its frames (QuakeSpasm's `r_lerpmodels`) | `r_lerpmodels` (Smooth animations) | on | id steps `frame` ten times a second; at high refresh rates a monster's walk cycle (and the view weapon's) visibly holds a pose for several frames, then jumps. (`client::lerpmodels`, FRAMERATE.md "Animation frames blended") |
 | A crosshair at the view's centre (`V_RenderView`'s): `crosshair 1` the port's cross — thin arms of palette 253 round an open centre, outlined in black, in proportion to the frame's height (`screen::CrossSize`) — and `2` id's conchars `+` at the 2-D layer's scale, its crossing on the centre (id's puts the glyph's corner there, its crossing 4 pixels right of and 4.5 below the aim); left off the intermission and finale screens as id's GLQuake leaves it (`gl_screen.c`'s `SCR_UpdateScreen`; WinQuake draws it over the stats too) | `crosshair` (Crosshair: off, cross, id's +) | 1, the cross (id: 0) | Mouse aiming. id's `+` at the 2026 2-D scale is a blocky grey glyph 35 pixels across at 1080p, crossing 20 pixels right of the aim and 22.5 below. A level's stats have nothing to aim at. |
-| Mouse look without holding `+mlook` | `freelook` (Mouse look) | on | How mouse play works today; `+mlook` still works in both profiles. |
-| Always Run | `cl_forwardspeed`, `cl_backspeed` 400 (Options > Always Run) | on (id: 200) | |
-| WASD: `w`/`s` forward and back, `a`/`d` strafe, over `default.cfg`'s `a` `+lookup` and `d` `+moveup` | the profile's bindings (`Bindings::with_wasd`) | on | |
-| The wheel switches weapons: a notch up `impulse 10` (next), down `impulse 12` (previous) | the profile's bindings (`Bindings::with_wheel`) | on | `default.cfg` predates the wheel (`in_win.c`'s `WM_MOUSEWHEEL` already turns it into `MWHEELUP`/`MWHEELDOWN` key presses), so id's players bound it themselves. |
-| Jump also swims up (`upmove`), on top of QuakeC's own swim | `cl_jumpswim` (Space swims up) | on | With WASD, `d` no longer swims up. |
-| Alt+Enter toggles fullscreen, whatever has the keyboard (the page takes the chord before the game) | `vid_altenter` (Fullscreen key; `vid_fkey`, its name when the key was F, still sets it) | on | `default.cfg` binds ALT `+strafe` and ENTER `+jump`, so in WinQuake the chord is a strafe-jump. A letter could not work in the menu and the console (`web/PLATFORM.md`, "Fullscreen"). |
+| Mouse look without holding `+mlook` | `freelook` (Mouse look) | both | How mouse play works today; `+mlook` still works in both profiles. |
+| Always Run | `cl_forwardspeed`, `cl_backspeed` 400 (Options > Always Run) | both (id: 200) | |
+| WASD: `w`/`s` forward and back, `a`/`d` strafe, over `default.cfg`'s `a` `+lookup` and `d` `+moveup` | the profile's bindings (`Bindings::with_wasd`) | both | |
+| The wheel switches weapons: a notch up `impulse 10` (next), down `impulse 12` (previous) | the profile's bindings (`Bindings::with_wheel`) | on | `default.cfg` predates the wheel (`in_win.c`'s `WM_MOUSEWHEEL` already turns it into `MWHEELUP`/`MWHEELDOWN` key presses), so id's players bound it themselves. The one control that stays a departure: the user wanted it 2026's alone, so a switch to Classic unbinds it (`Bindings::without_wheel`). |
+| Jump also swims up (`upmove`), on top of QuakeC's own swim | `cl_jumpswim` (Space swims up) | both | With WASD, `d` no longer swims up. |
+| Alt+Enter toggles fullscreen, whatever has the keyboard (the page takes the chord before the game) | `vid_altenter` (Fullscreen key; `vid_fkey`, its name when the key was F, still sets it) | both | `default.cfg` binds ALT `+strafe` and ENTER `+jump`, so in WinQuake the chord is a strafe-jump. A letter could not work in the menu and the console (`web/PLATFORM.md`, "Fullscreen"). |
 | id's mixer at the device's rate with four of its faults fixed: the click at a loop's restart, 48 kHz pitch 1.4% flat, ambient fades stalling above 100 fps, `S_StopSound`'s channel range | `snd_modern` (Full-rate sound) | on | Classic is id's mixer as written, at 11025 Hz. ("The engine's own mixer") |
 | Touch controls on a touch screen (stick, look by dragging, fire, jump, weapon), and the live game pauses when the page is hidden | `in_touch` (Touch controls) | on | Phones. Classic on a touch screen keeps a MENU button and the tappable menu. ("Touch, install and offline") |
-| A gamepad as a twin-stick pad: in_win.c's advanced joystick layout (`joystick 1`, `joyadvanced 1`, the axis maps and sensitivities), a round dead zone, a look curve, the pad in the menus, and the 2026 pad bindings | `joystick` (Gamepad), `joyadv*`, `joy*sensitivity`, `joy*threshold`, `joy_deadzone`, `joy_exponent`, `joy_menukeys` | on | id's `joystick 0` reads no pad. ("Input") |
-| Rumble on damage and on the big guns (the pad, or a phone's vibration) | `joy_rumble` (Rumble) | on | |
+| A gamepad as a twin-stick pad: in_win.c's advanced joystick layout (`joystick 1`, `joyadvanced 1`, the axis maps and sensitivities), a round dead zone, a look curve, the pad in the menus, and the 2026 pad bindings | `joystick` (Gamepad), `joyadv*`, `joy*sensitivity`, `joy*threshold`, `joy_deadzone`, `joy_exponent`, `joy_menukeys` | both | id's `joystick 0` reads no pad. ("Input") |
+| Rumble on damage and on the big guns (the pad, or a phone's vibration) | `joy_rumble` (Rumble) | both | |
 | QuakeWorld's frame-rate readout, in the top-left corner (QuakeWorld's sat bottom right, just above the status bar); the notify lines start a text row lower while it shows | `wasm_showfps` (Show FPS) | off | Clutter. |
 | Exact perspective at every pixel | `wasm_exactpersp` (Exact perspective) | off | id's 16-pixel spans are part of the look. |
 | The sky's clouds glide: the cloud layer is offset by the exact `skytime*skyspeed`, not `R_MakeSky`'s whole texels (`SkyScroll::Fluid`); still the nearest texel, palette-true, and id's frame at every whole texel | `r_fluidsky` (console only, no settings row — the page has no room for a 19th) | on | id's back layer already glides (`D_Sky_uv_To_st` adds the float scroll), but the clouds' extra 8 texels a second come as `(int)(skytime*skyspeed)`: eight one-texel jumps a second, a pixel at 320x200, 6 at 1080p looking up, 11 at 4K. At 240 Hz, looking up at e1m3's sky, id's frames change 3% of the view each and 39% at every jump; the fluid ones a steady 5%. No cost: the port already reads both layers per pixel, so only where the offset is added moves (the sky-heavy view at 1080p, 1 and 8 threads: +0.3%, within noise). (`render::sky`) |
@@ -82,7 +93,8 @@ Classic; the scaled layer's own screen in 2026):
 - The CD plays the player's own tracks (`cd_win.c`; with none there is no drive, as
   `cd_null.c`).
 - A player's own `pak1.pak` goes through id's search path.
-- Classic's joystick has a few small departures of its own ("Input").
+- id's joystick (`idcontrols`; the 2026 pad is the default in both profiles) has a few small
+  departures of its own ("Input").
 
 The names still carry the old era: `wasm_*` for four of the cvars, `MenuScreen::Extras`
 and `EXTRAS_*` in the menu code. Renaming them needs `config.cfg` aliases (Open, "Code").
@@ -103,8 +115,8 @@ The 2026 push, in merge order. Each section names its branch; the merge message 
   `CL_LerpPoint` draws them (a Classic fix); `r_lerpmove`.
 - **QuakeC errors end the game** (`q26/server`): `PR_RunError`'s report, `Host_Error`,
   `error`/`objerror` (CENSUS L16).
-- **Settings and profiles** (`q26/settings`): Classic's controls are id's; `+mlook`; the
-  crosshair; `config.cfg` as id's; one command table; the profiles.
+- **Settings and profiles** (`q26/settings`): Classic's controls were id's (shared with 2026 since
+  2026-10-03: "The profiles", above); `+mlook`; the crosshair; `config.cfg` as id's; one command table; the profiles.
 - **Input** (`q26/input`): id's joystick; the 2026 pad; keys by place; raw mouse;
   latency.
 - **Touch, install and offline** (`q26/mobile`): `in_touch`; tappable menus; pause when
@@ -196,8 +208,9 @@ marked *(2026-06)* were not re-checked since. Struck items were closed on 2026-0
 
 **Closed since the 2026-09-25 list**
 - ~~Four control departures on by default (mouse look held while the pointer is locked,
-  WASD, `f` for fullscreen, Space adding swim-up speed)~~: Classic has `default.cfg`'s
-  bindings and none of them; 2026 has each as a named setting (settings).
+  WASD, `f` for fullscreen, Space adding swim-up speed)~~: each a named setting (settings).
+  Classic had `default.cfg`'s bindings and none of them until 2026-10-03, when the controls
+  became the player's, the same in both profiles ("The profiles", above).
 - ~~The main menu does not stop the attract loop~~: it does, as `M_Menu_Main_f`
   (polish4b; the 2026-09-25 list missed it).
 - ~~`setmodel` gives alias and sprite models a zero box~~: id's box (polish4a, CENSUS L10).
@@ -268,7 +281,7 @@ marked *(2026-06)* were not re-checked since. Struck items were closed on 2026-0
   (2026-06, deliberate).
 
 **Input**
-- Classic's joystick departs from in_win.c in small ways: `IN_Commands` keys the newest
+- id's joystick (`idcontrols`, `joystick 1`) departs from in_win.c in small ways: `IN_Commands` keys the newest
   reading (id's, the frame before); a pad that goes away lets its held keys go; the pad's
   turn is gated behind the menu and console; "joystick detected" prints when a pad first
   shows itself (input).
@@ -2716,8 +2729,9 @@ the console has `profile classic|2026`, the page `?classic` / `?2026`. The
 settings live in one typed value the host owns (`quake_rs::settings`), and
 `config.cfg` keeps them the id way. What that changed against id's WinQuake:
 
-- ✅ **Classic's controls are id's** (closes "Decisions, not work": the four
-  control departures, and Always Run). `default.cfg`'s bindings: `a`
+- ✅ **Classic's controls were id's** (since 2026-10-03 they are the same in both profiles
+  and `idcontrols` is the way to id's: "The profiles", at the top; this entry is as of
+  2026-09-26; closes "Decisions, not work": the four control departures, and Always Run). `default.cfg`'s bindings: `a`
   `+lookup`, `d` `+moveup`, `c` `+movedown`, `w`/`s` unbound; `cl_forwardspeed`
   / `cl_backspeed` 200; `f` unbound (the page's fullscreen key is
   `vid_fkey`); `+jump` sets only `button2` (`cl_jumpswim` adds `upmove`); no

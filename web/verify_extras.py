@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --with playwright --script
 """Verify Options > Classic / 2026 and its settings page, the settings the
 page keeps across reloads, and Esc in fullscreen, end-to-end in headless
-Chromium. The page opens as `?classic` (every departure off, id's keys):
+Chromium. The page opens as `?classic` (every engine departure off):
 
   1. Options' 14th row, "Classic / 2026" (the port's): left/right switch the
      whole profile (the 2026 one turns wasm_uncapped and wasm_scaled2d on),

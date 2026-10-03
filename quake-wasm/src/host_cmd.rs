@@ -1116,6 +1116,39 @@ mod tests {
         assert!(console_scrollback() >= 2, "god with no walk prints a guard message");
     }
 
+    /// The controls are the player's, the profile the engine: `profile`
+    /// leaves the controls alone (and the wheel, the one control that is a
+    /// departure, follows it), and `idcontrols` is the one step to id's own
+    /// 1996 ones — the engine untouched, whichever profile is live.
+    #[test]
+    fn idcontrols_is_ids_1996_controls_and_the_profile_leaves_the_controls_alone() {
+        use quake_rs::keys::{BIND_FORWARD, BIND_LOOKUP, K_MWHEELUP};
+        let live = || APP.with(|c| c.borrow().as_ref().unwrap().settings.clone());
+        assert_eq!(boot(), 1);
+        execute_console_command("profile 2026");
+        let s = live();
+        assert!(s.binds.get(K_MWHEELUP).is_some() && s.cvars.uncapped && s.cvars.freelook);
+
+        execute_console_command("profile classic"); // the engine: the wheel off, the controls kept
+        let s = live();
+        assert!(!s.cvars.uncapped && s.binds.get(K_MWHEELUP).is_none(), "the wheel is 2026's alone");
+        assert!(s.cvars.freelook && s.cvars.always_run() && s.cvars.joy.enabled, "the controls are kept");
+        assert_eq!(s.binds.command(b'w'), Some(BIND_FORWARD));
+
+        execute_console_command("profile 2026");
+        execute_console_command("idcontrols");
+        let s = live();
+        assert_eq!(s.binds, quake_rs::keys::Bindings::default_cfg(), "default.cfg's, the wheel unbound too");
+        assert_eq!(s.binds.command(b'a'), Some(BIND_LOOKUP));
+        assert!(!s.cvars.freelook && !s.cvars.jumpswim && !s.cvars.alt_enter && !s.cvars.always_run());
+        assert_eq!(s.cvars.joy, quake_rs::client::in_win::JoyCvars::classic(), "id's joystick: off");
+        assert!(s.cvars.uncapped && s.profile == Profile::Modern, "the engine untouched");
+
+        execute_console_command("profile classic"); // and a switch keeps id's controls as they are
+        let s = live();
+        assert!(!s.cvars.freelook && s.binds.command(b'w').is_none() && !s.cvars.uncapped);
+    }
+
     /// `Host_Quit_f`'s branch: `quit` with the console NOT the keyboard's
     /// destination (a bound key, say, run with the console down) raises the
     /// Quit confirmation prompt instead of quitting on the spot — same as

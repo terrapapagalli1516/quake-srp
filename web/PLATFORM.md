@@ -139,7 +139,7 @@ zeros, and an unknown kind is skipped, so either side can grow a record.
 | 15 | AUDIO | `rate u32`, `mode u32` (0 Classic, 1 2026), then counts: `starts`, `local`, `stops`, `clears`, `painted` (u32 each) |
 | 16 | CD | `serial u32` (a new value: play the track from its top), `track u8`, `looping u8`, `mode u8` (0 stopped, 1 playing, 2 paused), `0 u8`, `volume f32` (0..1): the CD player's state, written when it changes, and only with a disc ("CD music") |
 | 17 | FRAME_AT | `w u16`, `h u16`, `format u8`, `slot u8`, `0 u16`, `pixels u32`, `palette u32`: a frame left in the program's shared memory, ring slot `slot`, its pixels and palette at those addresses (`-sharedframes`) |
-| 20 | RUMBLE | `strong f32`, `weak f32`, `ms u32`, `pad u32` (1: the pad is read): the pad's two motors, or a phone's vibration (2026's `joy_rumble`) |
+| 20 | RUMBLE | `strong f32`, `weak f32`, `ms u32`, `pad u32` (1: the pad is read): the pad's two motors, or a phone's vibration (`joy_rumble`) |
 
 A turn's records end with its `SYNC`. A tick's `PCM` comes before its
 `FRAME`, so the samples reach the ring before the pixels are copied.
@@ -619,8 +619,9 @@ asked for; the element's time, loop and level; the output's RMS) and the
 
 Every setting is the program's (`quake_rs::settings`: id's cvars and key
 bindings, and the port's departures, which the profiles **Classic** and
-**2026** switch). The page needs three of them, and hears them in the
-`STATE` record:
+**2026** switch — the engine; the controls are the player's, the same in both,
+and `idcontrols` is the console's one step to id's own). The page needs three of them, and hears
+them in the `STATE` record:
 
 - **Native resolution** (`vid_native`, 2026). The page sends its box for the
   picture in device pixels and its `devicePixelRatio` (`WINDOW`); the
@@ -635,8 +636,8 @@ bindings, and the port's departures, which the profiles **Classic** and
   the box's own aspect (the view is Hor+: `fov_adapt`). Off (Classic), the
   picture is the video mode (`_vid_resolution`, Options > Video Options)
   in the largest 4:3 box the window fits, as before.
-- **Alt+Enter toggles fullscreen** (`vid_altenter`, 2026; in Classic the
-  chord is id's ALT `+strafe` and ENTER `+jump`): "Fullscreen", below.
+- **Alt+Enter toggles fullscreen** (`vid_altenter`, on in both profiles; with
+  `idcontrols` the chord is id's ALT `+strafe` and ENTER `+jump`): "Fullscreen", below.
 - **The profile from the address.** `?classic` and `?2026` add `+profile
   classic` / `+profile 2026` to the program's command line (`wasi.js` hands
   it `args`), which quake.rc's `stuffcmds` runs after `config.cfg`: the same
@@ -772,12 +773,13 @@ it means, as id's `Key_Event`, `IN_MouseMove` and the joystick code do.
   as id's joystick: `IN_Commands` (buttons as `JOY1`.., `AUX5`.., the D-pad as
   the hat's `AUX29`..`AUX32`) and `IN_JoyMove`; quake-rs
   `client/in_win.rs` has the mapping from a standard pad to winmm's axes and
-  buttons. Classic reads it only after `joystick 1` (id's default is 0); the
-  2026 profile's pad is a twin-stick layout of `bind` lines and `joy*`
-  settings, with its buttons as the menu's keys (`joy_menukeys`). A pad's
+  buttons. Both profiles read it (`joystick 1`, a control: the same in both): a
+  twin-stick layout of `bind` lines and `joy*` settings, with its buttons as the
+  menu's keys (`joy_menukeys`); id's own is `idcontrols` (`joystick 0`, then `joystick 1`
+  for the plain joystick). A pad's
   button also takes the click-to-play scrim away (a browser may not count it
   as the gesture audio needs: then the first click or key starts the sound).
-- **Rumble** (2026, `joy_rumble`): a `RUMBLE` record after a frame in which
+- **Rumble** (`joy_rumble`, both profiles): a `RUMBLE` record after a frame in which
   the player took damage (its strength from `V_ParseDamage`'s count) or fired
   a heavy weapon, saying whether the pad is read (`joystick`). The page plays
   it on the pad's `vibrationActuator` (`"dual-rumble"`, Chromium) or
@@ -791,7 +793,7 @@ it means, as id's `Key_Event`, `IN_MouseMove` and the joystick code do.
 
 `web/verify_gamepad.py` drives all of it with a synthetic pad (the scrim, the
 menus, a walk, a turn, the rocket's kick and its blast's rumble, an unplugged
-pad, Classic's `joystick 0` and `1`, and on a touch page the rumble going to
+pad, id's `joystick 0` and `1` (after `idcontrols`), Classic's default pad, and on a touch page the rumble going to
 the pad or the phone, whichever was used last).
 The synthetic pad stands in for the browsers' own Gamepad API; no real pad
 was tried.
@@ -994,7 +996,7 @@ more is the browser's (`?lowlatency`, below) or the frame's own time.
 ## Fullscreen
 
 **The ways in and out.** The bar's *fullscreen* button, in every profile;
-the fullscreen key, **Alt+Enter** (Option+Return on a Mac), in 2026
+the fullscreen key, **Alt+Enter** (Option+Return on a Mac), in both profiles
 (`vid_altenter`); the browser's own F11, which fills the screen with the
 whole window (Alt+Enter still works inside it); and on a phone the first tap
 (`touch.js`, "Touch").
@@ -1020,9 +1022,9 @@ Why Alt+Enter: web games mostly offer a button in their own chrome and leave
 the browser its F11; video players take F because they have no text to type
 and no binds; games with a native heritage use Alt+Enter — QuakeSpasm's
 `VID_Toggle`, DOSBox, Windows games at large — and browsers leave the
-chord to the page. In Classic it stays the game's: `default.cfg`
-binds ALT `+strafe` and ENTER `+jump`, a strafe-jump in WinQuake, so
-Classic has the button and F11. `vid_altenter` was `vid_fkey`; a
+chord to the page. With id's own controls (`idcontrols`, `vid_altenter 0`) it stays the
+game's: `default.cfg` binds ALT `+strafe` and ENTER `+jump`, a strafe-jump in WinQuake, so
+there is the button and F11. `vid_altenter` was `vid_fkey`; a
 `config.cfg` with the old name still sets it (`quake_rs::cvar`'s
 `OLD_NAMES`) and the next save writes the new one.
 
@@ -1485,7 +1487,7 @@ thumb, a 12% dead zone, at most once a display frame); FIRE and JUMP hold
 bindings on purpose: a touch button is its action, whatever the player
 bound. Look is the MOUSE record, IN_MouseMove's input, 2 counts per CSS
 pixel: 0.32° a pixel at the default Mouse Speed, so Options > Mouse Speed
-and Invert Mouse apply, and `freelook` (on in 2026) is what makes a
+and Invert Mouse apply, and `freelook` (on by default) is what makes a
 vertical drag pitch. `in_touchaccel` (console, 0..4, default 0) turns a
 fast drag up to 1 + that many times as far (full at 2 px/ms). Escape,
 Tab, y/n and the typed characters are KEY records through `Key_Event`.
