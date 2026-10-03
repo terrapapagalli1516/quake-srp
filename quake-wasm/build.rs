@@ -19,6 +19,16 @@ const FIXED_MEMORY: u64 = 512 << 20;
 
 fn main() {
     println!("cargo:rerun-if-env-changed=QUAKE_WASM_GROWABLE");
+    // The browser builds are compiled with wasm's 128-bit SIMD
+    // (.cargo/config.toml says why). The flag lives in a file Cargo reads
+    // only when run from this directory, and a RUSTFLAGS in the environment
+    // replaces it: a wasm build that lost it still runs, a little slower,
+    // so say so.
+    let wasm = std::env::var("CARGO_CFG_TARGET_ARCH").is_ok_and(|a| a == "wasm32");
+    let simd = std::env::var("CARGO_CFG_TARGET_FEATURE").is_ok_and(|f| f.split(',').any(|f| f == "simd128"));
+    if wasm && !simd {
+        println!("cargo:warning=this wasm build has no SIMD (simd128): run cargo from quake-wasm/ with no RUSTFLAGS, so that .cargo/config.toml applies");
+    }
     let threads = std::env::var("TARGET").is_ok_and(|t| t == "wasm32-wasip1-threads");
     let growable = std::env::var("QUAKE_WASM_GROWABLE").is_ok_and(|v| v == "1");
     if threads && !growable {

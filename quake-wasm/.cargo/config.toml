@@ -1,0 +1,21 @@
+# The browser builds use WebAssembly's 128-bit SIMD.
+#
+# Nothing in the source asks for it: the flag lets the compiler vectorize
+# what it can, and what it finds is `D_DrawZSpans`, the 16-bit 1/z written
+# for every world pixel (0.25 -> 0.06 ns a pixel in V8; a 2640x1080 frame of
+# demo1 3.5% faster on one thread at span 16, 4.9% at exact: PERF_PLAN.md,
+# §14). Integer lanes only, so every pixel is the same with it.
+#
+# The cost is the browsers that cannot compile the module at all: those
+# before Chrome 91, Firefox 89 and Safari 16.4 (March 2023). There
+# `WebAssembly.compile` rejects and the game does not start (web/wasi.js).
+#
+# Cargo reads this file when it is run from this directory, as the README,
+# web/publish.sh and ci/local.sh run it; build.rs warns when a wasm build
+# comes without the feature (run from elsewhere, or RUSTFLAGS set, which
+# replaces these).
+[target.wasm32-wasip1]
+rustflags = ["-C", "target-feature=+simd128"]
+
+[target.wasm32-wasip1-threads]
+rustflags = ["-C", "target-feature=+simd128"]
