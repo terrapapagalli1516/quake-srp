@@ -150,4 +150,4 @@ httpd.shutdown()
 if fails:
     print("FAIL:", "; ".join(fails))
     sys.exit(1)
-print("done: a crashed thread ends the game with a message, and a refused memory or refused workers are said plainly")
+print("done: a crashed thread ends the game with a message, and a refused memory, refused workers or no wasm SIMD are said plainly")
