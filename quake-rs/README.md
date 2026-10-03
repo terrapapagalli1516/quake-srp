@@ -161,6 +161,7 @@ of spare frame buffers, the 2-D layer's scale flag, a hull cache and a trace cou
 | `render::alias`, `polyse`, `sprite`, `part` | `r_alias.c`, `d_polyse.c`, `r_sprite.c`, `d_part.c` | models and the gun, the affine triangle filler, sprites, particles |
 | `render::view` | `view.c` | view bob, the gun's placement, the frame's palette (`V_UpdatePalette` into `FramePalette`), packing to RGBA |
 | `render::video` | the port's | past id's 1280x1024 limit, and wider views on wide screens (2026) |
+| `render::torch` | the port's, after LIGHT.EXE's `SingleLightFace` | the steady torches flicker about the light they baked (2026) |
 | `render::world`, `vis`, `stats` | `r_main.c`, `model.c` | brush entities, `Mod_PointInLeaf`, timers |
 
 **2-D, sound, settings**

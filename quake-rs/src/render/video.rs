@@ -1,14 +1,15 @@
 //! The video settings beyond id's modes: sizes past `MAXWIDTH` x `MAXHEIGHT`,
-//! a field of view that widens with the display (Hor+), and sky clouds and
-//! animated lights that glide at the display's rate.
+//! a field of view that widens with the display (Hor+), sky clouds and
+//! animated lights that glide at the display's rate, and steady torches that
+//! flicker.
 //!
 //! id's WinQuake never set a mode larger than 1280x1024 (`r_shared.h`), and
 //! `R_ViewChanged` (`r_main.c`) spreads `fov` over the view's width whatever
 //! its shape, so a wider view shows the same horizontal angle with less above
 //! and below. Both are right for 1996 and both are kept as **Classic**
 //! ([`VideoCvars::CLASSIC`], the default here, which every golden and oracle
-//! run uses), with id's sky and light styles. The port's four extras are for
-//! 2026 displays:
+//! run uses), with id's sky, light styles and torches. The port's five extras
+//! are for 2026 displays:
 //!
 //! - [`FovMode::HorPlus`]: `fov` is the horizontal field of view of a 4:3
 //!   screen; a wider screen keeps that screen's VERTICAL field of view and sees
@@ -30,14 +31,19 @@
 //!   snaps ten times a second: at 240 Hz a flickering torch holds each
 //!   brightness for 24 frames, then jumps. At every whole tenth of a second
 //!   it is id's value.
+//! - [`TorchFlicker`] (`r_torchflicker`, a strength): the torches and flames
+//!   LIGHT.EXE baked steady flicker about their light, as if the mapper had
+//!   given each a flicker style, zero-mean so the level is as dark as id made
+//!   it ([`super::torch`]).
 //!
 //! These are cvars in id's sense — settings the platform sets and the
 //! renderer reads each frame, like `d_mipscale` ([`super::MipCvars`]): the
 //! scene hands them in with every frame
 //! ([`RenderOptions::video`](super::RenderOptions::video)), and the client's
 //! [`Vid`](crate::client::Vid) carries them from the platform. (The light
-//! styles are the client's to read: it animates them into the scene's
-//! [`light_styles`](super::Scene::light_styles).)
+//! styles are the client's to animate into the scene's
+//! [`light_styles`](super::Scene::light_styles); the renderer reads the
+//! stepping too, for the torches.)
 
 use super::sky::SkyScroll;
 use super::torch::TorchFlicker;

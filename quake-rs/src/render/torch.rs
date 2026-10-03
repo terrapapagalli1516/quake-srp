@@ -13,27 +13,42 @@
 //! luxel holds). Each frame moves that share by the torch's flicker:
 //!
 //! ```text
-//! luxel(t) = id's luxel + strength · (s(t)/s̄ - 1) · share · d_lightstylevalue[0] / 256
+//! luxel(t) = id's luxel + strength · depth · Σ_k (s_k(t)/s̄_k - 1)/√2 · share · d_lightstylevalue[0] / 256
 //! ```
 //!
-//! `s(t)` is one of world.qc's flicker patterns through the light-style glide
-//! ([`crate::server::LerpLightStyles`], stepped as id's when it is off), each
-//! torch at its own phase from its origin so a row of torches never pulses as
-//! one, and `s̄` the pattern's mean, so the change is zero-mean: over the
-//! pattern's period every luxel averages to id's, and the level is exactly as
-//! dark as id made it, only alive. It is the light the torch would have given
-//! had the mapper set its style to the flicker (what `start`'s torches do),
-//! brought back to the steady torch's average.
+//! `s_k(t)` are world.qc's two flicker patterns (styles 1 and 6) through the
+//! light-style glide ([`crate::server::LerpLightStyles`], stepped as id's when
+//! it is off), each at a rate and a depth the kind of flame gives
+//! ([`TorchKind::flicker`]) and each torch at its own phases from its origin,
+//! so a row of torches never pulses as one; `s̄_k` is each pattern's mean, so
+//! the change is zero-mean: over the patterns' periods every luxel averages
+//! to id's, and the level is exactly as dark as id made it, only alive. It is
+//! the light the torch would have given had the mapper set its style to a
+//! flicker (what `start`'s torches do), brought back to the steady torch's
+//! average — two flickers rather than one so that it wanders like a flame
+//! instead of coming round every 1.7 or 2.3 s. `strength` is the cvar
+//! ([`TorchFlicker`], 0 to 2).
 //!
 //! The faces a torch reaches are rebaked when its value moves, as an animated
 //! style's are: the lightmap and lit-surface caches key a face on its torches'
 //! scales ([`FaceTorches::key_is`]), and the glide moves in whole steps
-//! (`server::GLIDE_STEP`), so a block rebakes at most once a step. A torch with
-//! an animated style of its own is left to it (no double flicker); one QuakeC
+//! (`server::GLIDE_STEP`), so a block rebakes at most once a step of either
+//! voice. A torch's light reaches 300 units, so in a torch-lit room most of
+//! the surfaces drawn are rebaked every frame at 72 Hz and about half of them
+//! at 480 Hz (`FRAMERATE.md`, "Steady torches that flicker"). A torch with an
+//! animated style of its own is left to it (no double flicker); one QuakeC
 //! switches (style 32 and up) is left alone.
 //!
 //! Alias models (the monsters, the gun) are lit by the luxel under them
 //! (`R_LightPoint`), and pick up that luxel's change ([`FaceTorches::at`]).
+//!
+//! The time is the scene's, `cl.time` as a `float`: a pure function of it and
+//! the torch, so a demo and the live game show the same light at the same
+//! time. After about 10 hours in one level a `float` clock holds a value for
+//! two 480 Hz frames (and steps 128 times a second after 28); the light-style
+//! glide reads the client's `double` instead, but a flame's flicker, whose
+//! fastest moves take tens of milliseconds, cannot show it, so it is not
+//! worth a second clock in the [`Scene`](super::Scene).
 
 use crate::bsp::{Bsp, DFace, TEX_SPECIAL};
 use crate::math::{dot, Vec3};

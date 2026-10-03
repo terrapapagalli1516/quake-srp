@@ -138,6 +138,7 @@ default, turns most of them on.
 | picture | a fixed mode (960x600 by default) in a 4:3 frame, id's 90° field of view | the window's own size and shape in whole pixels (pixel size Auto or 1–4), a wider view on wide screens |
 | status bar, menus, console | 1:1, as id drew them | scaled up by a whole number |
 | monsters | move in id's 0.1 s steps, and change pose ten times a second | glide between the steps, and blend between poses (the gun too) |
+| lights | the flickering ones snap ten times a second; most torches and flames steady, as the map baked them | the flickering ones glide; the steady torches and flames flicker gently about their light (`r_torchflicker`, a strength) |
 | controls | id's `default.cfg` | WASD, mouse look, Always Run, a crosshair, a twin-stick gamepad with rumble, touch controls |
 | sound | id's mixer at 11025 Hz | id's mixer at the device's rate, with four of id's bugs fixed |
 
