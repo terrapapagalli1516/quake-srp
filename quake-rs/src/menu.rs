@@ -158,7 +158,7 @@ pub const SETTING_ROWS: [SettingRow; 19] = [
     SettingRow {
         cvar: "scr_sbaroverlay",
         label: "    Status bar overlay",
-        help: ["The view fills the screen and", "the status bar is drawn over it"],
+        help: ["The world goes on under the view", "either side of the status bar"],
         kind: RowKind::Toggle,
     },
     SettingRow {

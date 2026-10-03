@@ -100,10 +100,9 @@ pub struct Cvars {
     /// largest whole multiple of id's 320x200 that fits, where id draws it
     /// 1:1 ([`crate::draw::screen_2d`]).
     pub scaled_2d: bool,
-    /// `scr_sbaroverlay`: the 3-D view fills the frame and the status bar is
-    /// drawn over its bottom ([`SbarLayout::Overlay`], QuakeSpasm's
-    /// `scr_sbaralpha` layout with the bar opaque), so the game shows either
-    /// side of the bar, where id's view stops above it and tiles its sides.
+    /// `scr_sbaroverlay`: the world goes on under the 3-D view, beside the
+    /// status bar ([`SbarLayout::Overlay`]), where id tiles the bar's sides
+    /// with `backtile`; the view itself is id's, pixel for pixel.
     pub sbar_layout: SbarLayout,
     /// `vid_native`: the picture fills the window at the window's own aspect,
     /// rendered at its device pixels divided by [`Cvars::pixel_size`], with
@@ -228,7 +227,7 @@ impl Cvars {
     /// The 2026 profile's: an idealized software-rendered Quake on a 2026
     /// machine. A frame every display refresh, the window filled at native
     /// resolution in whole chunky pixels with a Hor+ field of view, the 2-D
-    /// layer at id's proportions with the status bar over a full-frame view,
+    /// layer at id's proportions with the world on beside the status bar,
     /// the crosshair, monsters that glide between their steps and whose
     /// animation blends between frames, clouds that glide across the sky,
     /// Always Run, mouse look, Space to swim up, Alt+Enter for fullscreen and
@@ -469,7 +468,7 @@ pub const CVARS: &[Cvar] = &[
         get: |c| flag(c.exact_persp), set: |c, v| c.exact_persp = on(v) },
     Cvar { name: "wasm_scaled2d", archive: true, departure: true, help: "2-D layer at id's proportions",
         get: |c| flag(c.scaled_2d), set: |c, v| c.scaled_2d = on(v) },
-    Cvar { name: "scr_sbaroverlay", archive: true, departure: true, help: "status bar over a full-frame view",
+    Cvar { name: "scr_sbaroverlay", archive: true, departure: true, help: "the world beside the status bar",
         get: |c| flag(c.sbar_layout == SbarLayout::Overlay),
         set: |c, v| c.sbar_layout = if on(v) { SbarLayout::Overlay } else { SbarLayout::Classic } },
     Cvar { name: "vid_native", archive: true, departure: true, help: "fill the window, native pixels",

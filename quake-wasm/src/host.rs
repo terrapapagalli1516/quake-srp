@@ -581,11 +581,11 @@ mod tests {
         crate::host_cmd::execute_console_command("crosshair 0");
         step(0.0);
         let without = APP.with(|c| c.borrow().as_ref().unwrap().present.rgba());
-        // The view fills the frame under the scaled status bar (2026's
-        // scr_sbaroverlay; viewsize 100: the bar 48 rows x 5): the + at the
-        // frame's centre.
+        // The view above the scaled status bar (viewsize 100: 48 rows x 5),
+        // id's in either layout: the world drawn under it beside the bar
+        // (2026's scr_sbaroverlay) leaves its centre where it was.
         let vrect = render::calc_refdef(w, h, 100.0, false, render::SbarLayout::Overlay).vrect;
-        assert_eq!((vrect.w, vrect.h), (w, h));
+        assert_eq!(vrect, render::calc_refdef(w, h, 100.0, false, render::SbarLayout::Classic).vrect);
         let (cx, cy) = (vrect.x + vrect.w / 2, vrect.y + vrect.h / 2);
         let differing: Vec<(usize, usize)> = (0..w * h)
             .filter(|&i| with[i * 4..i * 4 + 3] != without[i * 4..i * 4 + 3])
@@ -642,47 +642,95 @@ mod tests {
         assert!(run(100.0, 3, 2)[60..].iter().all(|&f| f == 50), "the cap's 50 at 100 Hz");
     }
 
-    /// 2026's status bar over the view, end to end on a 16:9 window (the 2-D
-    /// layer at 5x: a 384x216 screen, the bar's 320 columns centred with 32
-    /// either side): the bar itself is byte for byte the same in both
-    /// layouts (its pics are opaque), its sides show the game instead of the
-    /// backtile, and the view above it is the whole frame's, not the rows
-    /// above the bar.
+    /// 2026's status bar overlay end to end, at 1920x1080 (pixel
+    /// size 1, the 2-D layer at 5x, the bar 240 rows) and a wide frame
+    /// (1315x535, 2x, 96 rows), on frozen frames of e1m1 in turn — id's, the
+    /// overlay's twice, id's again: every pixel above the world under the
+    /// view (the whole view, id's projection) is byte for byte id's; the bar
+    /// is the same bar; each part beside it shows the world where id has the
+    /// backtile; and an overlay frame leaves nothing behind (id's frame after
+    /// it is id's frame). Then the same under water (the view in a water
+    /// leaf, wobbled), where the wobble runs on into the corners.
     #[test]
-    fn the_2026_status_bar_sits_over_a_full_frame_view() {
+    fn the_2026_overlay_draws_the_world_beside_the_bar_and_leaves_every_view_pixel_as_it_was() {
         assert_eq!(boot(), 1);
         close_menu();
         use_2026();
-        crate::vid::set_window(1920, 1080, 1.0);
-        step(0.0);
-        let (w, h) = APP.with(|c| {
-            let b = c.borrow();
-            (b.as_ref().unwrap().render_w, b.as_ref().unwrap().render_h)
-        });
-        assert_eq!((w, h), (1920, 1080));
-        assert_eq!(quake_rs::screen::status_bar_rows(w, h, 100.0, false), 240, "48 rows x 5");
         let grab = || APP.with(|c| c.borrow().as_ref().unwrap().present.rgba());
-        step(0.0);
-        let over = grab();
-        crate::host_cmd::execute_console_command("scr_sbaroverlay 0");
-        step(0.0);
-        let id = grab();
-        let px = |img: &[u8], x: usize, y: usize| img[(y * w + x) * 4..(y * w + x) * 4 + 3].to_vec();
-        let region_differs = |xs: std::ops::Range<usize>, ys: std::ops::Range<usize>| {
-            ys.clone().any(|y| xs.clone().any(|x| px(&over, x, y) != px(&id, x, y)))
+        let frame = |on: bool| {
+            crate::host_cmd::execute_console_command(if on { "scr_sbaroverlay 1" } else { "scr_sbaroverlay 0" });
+            step(0.0);
+            grab()
         };
-        let (bar_top, bar_x0, bar_x1) = (h - 240, 32 * 5, w - 32 * 5);
-        for y in bar_top..h {
-            for x in bar_x0..bar_x1 {
-                assert_eq!(px(&over, x, y), px(&id, x, y), "({x},{y}): the bar is the same bar");
+        // The eye in water: the first point of a 7x7x7 grid over e1m1's water
+        // leaves with water 24 units every way round it (quaketool shot's
+        // `--liquid` search, shorter).
+        let in_water = || {
+            APP.with(|c| {
+                let mut b = c.borrow_mut();
+                let wk = b.as_mut().unwrap().walk.as_mut().unwrap();
+                let (bsp, water) = (&wk.bsp, quake_rs::bsp::CONTENTS_WATER);
+                let wet = |p: [f32; 3]| quake_rs::world::point_contents(bsp, p) == water;
+                let deep = |p: [f32; 3]| {
+                    wet(p) && (0..3).all(|k| [-24.0, 24.0].iter().all(|d| wet({ let mut q = p; q[k] += d; q })))
+                };
+                let eye = (bsp.leafs.iter().filter(|l| l.contents == water))
+                    .flat_map(|l| {
+                        let at = |k: usize, i: usize| l.mins[k] as f32 + (l.maxs[k] - l.mins[k]) as f32 * (i as f32 + 0.5) / 7.0;
+                        (0..343).map(move |c| [at(0, c % 7), at(1, c / 7 % 7), at(2, c / 49)])
+                    })
+                    .find(|&p| deep(p))
+                    .expect("e1m1 has water");
+                wk.server.vm.ent_set_vector(wk.player, "origin", [eye[0], eye[1], eye[2] - 22.0]);
+                let view = wk.server.player_view().0;
+                assert_eq!(quake_rs::world::point_contents(&wk.bsp, view), water, "the view in water: warped");
+            })
+        };
+        for underwater in [false, true] {
+            if underwater {
+                in_water();
+            }
+            for (ww, wh) in [(1920, 1080), (1315, 535)] {
+                crate::vid::set_window(ww, wh, 1.0);
+                step(0.0);
+                let (w, h) = APP.with(|c| {
+                    let b = c.borrow();
+                    (b.as_ref().unwrap().render_w, b.as_ref().unwrap().render_h)
+                });
+                assert_eq!((w, h), (ww as usize, wh as usize), "Auto: one device pixel a pixel");
+                let refdef = render::calc_refdef(w, h, 100.0, false, render::SbarLayout::Overlay);
+                let below = refdef.below.expect("the view stands on the bar");
+                let bar = render::status_bar_rect(w, h, refdef.sb_lines).expect("a bar");
+                let (id, over, over2, id2) = (frame(false), frame(true), frame(true), frame(false));
+                let what = format!("{w}x{h}{}", if underwater { " under water" } else { "" });
+                assert_eq!(id2, id, "{what}: id's frame after the overlay's is id's");
+                assert_eq!(over2, over, "{what}: the overlay's frame again is the same");
+                let px = |img: &[u8], x: usize, y: usize| img[(y * w + x) * 4..(y * w + x) * 4 + 3].to_vec();
+                assert!(over[..below.y * w * 4] == id[..below.y * w * 4], "{what}: every row of the view is id's");
+                for y in bar.y..h {
+                    for x in bar.x..bar.x + bar.w {
+                        assert_eq!(px(&over, x, y), px(&id, x, y), "{what} ({x},{y}): the bar is the same bar");
+                    }
+                }
+                let parts: Vec<_> = refdef.below_parts(Some(bar)).collect();
+                assert!(parts.len() >= 2, "{what}: a corner either side of the bar: {parts:?}");
+                for part in parts {
+                    let differs = (part.y..part.y + part.h)
+                        .flat_map(|y| (part.x..part.x + part.w).map(move |x| (x, y)))
+                        .filter(|&(x, y)| px(&over, x, y) != px(&id, x, y))
+                        .count();
+                    assert!(differs * 2 > part.w * part.h, "{what}: {part:?} shows the world, not the backtile ({differs} differ)");
+                }
+                // Left of the view and right of it (id's even widths leave a
+                // column or two in the wide frame): the backtile, as id's.
+                for y in below.y..h {
+                    for x in (0..below.x).chain(below.x + below.w..w) {
+                        assert_eq!(px(&over, x, y), px(&id, x, y), "{what} ({x},{y}): beside the view, id's");
+                    }
+                }
             }
         }
-        assert!(region_differs(0..bar_x0, bar_top..h), "the left side shows the game, not the backtile");
-        assert!(region_differs(bar_x1..w, bar_top..h), "the right side too");
-        assert!(region_differs(0..w, 0..bar_top), "the view above is the full frame's");
         crate::host_cmd::execute_console_command("scr_sbaroverlay 1");
-        step(0.0);
-        assert_eq!(grab(), over, "on again: the same frame");
     }
 
     #[test]

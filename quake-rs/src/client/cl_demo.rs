@@ -30,7 +30,7 @@ use super::view::{
     BONUS_PERCENT, FACE_ANIM_TIME, V_KICKTIME,
 };
 use super::{
-    backtile_for, color_for_name, lap, render_options, s_update, ClientFrame, DemoPlay, Listener,
+    backtile_for, color_for_name, draw_world_below, lap, render_options, s_update, warp_below, ClientFrame, DemoPlay, Listener,
     Phase, SoundCall, Vid,
 };
 
@@ -902,7 +902,7 @@ fn render_demo_frame(
     let eye_contents = crate::world::point_contents(&d.bsp, cam.pos);
     let dowarp = eye_contents <= crate::bsp::CONTENTS_WATER;
     let rvrect = if dowarp {
-        crate::screen::warp_vrect(render_w, render_h, d.viewsize, f.intermission != 0, d.sbar_layout, vid.video.hires)
+        crate::screen::warp_vrect(render_w, render_h, d.viewsize, f.intermission != 0, vid.video.hires)
     } else {
         vrect
     };
@@ -922,15 +922,18 @@ fn render_demo_frame(
     // straight into it — or, submerged, into the warp buffer and then
     // D_WarpScreen'd over the rectangle while it wobbles: the warp applies to
     // the 3-D view FIRST; the content tint joins the deferred whole-screen
-    // blend below (V_UpdatePalette order).
+    // blend below (V_UpdatePalette order). 2026's status bar overlay goes on
+    // drawing the world under the view, as live play does.
     let backtile = backtile_for(&vrect, render_w, render_h, d.gfx_wad.as_ref());
     let mut img = render::screen_with_backtile(vrect, render_w, render_h, backtile.as_ref());
     if dowarp {
-        let view = d.renderer.render(&scene);
+        let below = warp_below(&refdef, vid);
+        let view = d.renderer.render_extended(&scene, below);
         lap(Phase::Render3d);
-        d.renderer.warp_into(view, &mut img, vrect, v.time, vid.video.hires);
+        d.renderer.warp_into(view, &mut img, vrect, below, v.time, vid.video.hires);
     } else {
         d.renderer.render_into(&scene, &mut img);
+        draw_world_below(&mut d.renderer, &scene, &refdef, &mut img);
         lap(Phase::Render3d);
     }
     // V_RenderView: the crosshair over the view, before the 2-D layer — but

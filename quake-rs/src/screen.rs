@@ -55,8 +55,9 @@ pub fn vid_aspect(vid_w: usize, vid_h: usize, display_aspect: f64) -> f32 {
 
 /// How the 3-D view meets the status bar: the `scr_sbaroverlay` setting
 /// ([`Cvars::sbar_layout`](crate::cvar::Cvars::sbar_layout)), which
-/// [`calc_refdef`] and [`warp_vrect`] lay the view out by and
-/// [`draw_hud_into`](crate::sbar::draw_hud_into) draws the bar by.
+/// [`calc_refdef`] works out the world under the view by
+/// ([`Refdef::below`]) and [`draw_hud_into`](crate::sbar::draw_hud_into)
+/// draws the bar's sides by.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum SbarLayout {
     /// id's: `SCR_CalcRefdef` stops the view above the status bar's rows, and
@@ -64,29 +65,19 @@ pub enum SbarLayout {
     /// it with `backtile`.
     #[default]
     Classic,
-    /// A 2026 extra: the view takes the bar's rows too, as at viewsize 120,
-    /// and the bar is drawn over its bottom — QuakeSpasm's `scr_sbaralpha`
-    /// layout (its `SCR_CalcRefdef` counts no `sb_lines` once the bar is see-
-    /// through), with the bar opaque. The bar's pictures cover their 320
-    /// columns as before (`sbar`, `ibar` and `scorebar` have no transparent
-    /// texel), so only its sides change: they show the game, not the
-    /// backtile. `sb_lines` and the bar's rows ([`status_bar_rows`]) are the
-    /// same in both layouts; below viewsize 100 the view keeps its size and is
-    /// centred on the whole screen (QuakeSpasm's too), the bar over the
-    /// border, or over the view's own bottom rows when it reaches them (90).
+    /// A 2026 extra: everything id draws stays as it is — the view's
+    /// rectangle and projection (its centre, field of view and horizon; the
+    /// gun and the crosshair where they were), the bar, its rows — and the
+    /// world continues under the view, down to the screen's bottom, wherever
+    /// the bar does not cover it: the two corners either side of the bar, on
+    /// a 2-D screen wider than its 320 columns (384 at 16:9), and the row or
+    /// two id leaves between an even-height view and the bar. They are drawn
+    /// as windows onto the view, with its projection
+    /// ([`ViewWindow`](crate::render::ViewWindow)), so every pixel id drew is
+    /// the same and the corners are what a taller view would show there.
+    /// Only where the view stands on the bar (viewsize 100 and 110); below
+    /// 100 the view sits inside a backtile border and nothing changes.
     Overlay,
-}
-
-impl SbarLayout {
-    /// `R_SetVrect`'s `lineadj`: of a status bar `bar_rows` framebuffer rows
-    /// tall, the rows the 3-D view must stay above — all of them in id's
-    /// layout, none when the bar is drawn over the view.
-    fn lineadj(self, bar_rows: i64) -> i64 {
-        match self {
-            SbarLayout::Classic => bar_rows,
-            SbarLayout::Overlay => 0,
-        }
-    }
 }
 
 /// What `SCR_CalcRefdef` works out each time the view changes: where the 3-D
@@ -98,11 +89,45 @@ pub struct Refdef {
     /// centred on it and `fov_x` spanning its width — R_ViewChanged's
     /// `xcenter = vrect.width/2 + vrect.x`, `xscale = vrect.width / (2 tan(fov_x/2))`,
     /// `yscale = xscale * pixelAspect` ([`vid_aspect`]); the software renderer derives its
-    /// vertical extent from that, not from CalcFov's `fov_y`.
+    /// vertical extent from that, not from CalcFov's `fov_y`. The same in
+    /// either [`SbarLayout`], so its centre is the projection's — the
+    /// crosshair's — in both.
     pub vrect: ViewRect,
     /// `sb_lines` in 2-D screen rows ([`crate::draw::screen_2d`]): 48 (sbar +
     /// inventory), 24 (sbar only) or 0 (no status bar).
     pub sb_lines: i32,
+    /// [`SbarLayout::Overlay`]'s world under the view: the rows from the
+    /// view's bottom to the screen's, across the view's columns, drawn with
+    /// the view's projection where the bar leaves them uncovered
+    /// ([`Refdef::below_parts`]). `None` in id's layout, with no status bar
+    /// (viewsize 120, an intermission), and below viewsize 100.
+    pub below: Option<ViewRect>,
+}
+
+impl Refdef {
+    /// The parts of [`Refdef::below`] the status bar's rectangle `bar`
+    /// ([`crate::sbar::status_bar_rect`]) leaves uncovered, each to be drawn
+    /// as a window onto the view: the corner either side of the bar, the full
+    /// height, and the rows between the view and the bar's top across its
+    /// width (none when the view stands right on it). Empty ones are left
+    /// out; without a bar (no `gfx.wad`) the whole of `below`.
+    pub fn below_parts(&self, bar: Option<ViewRect>) -> impl Iterator<Item = ViewRect> {
+        let parts = match (self.below, bar) {
+            (None, _) => [None, None, None],
+            (Some(below), None) => [Some(below), None, None],
+            (Some(below), Some(bar)) => {
+                let (left, right) = (below.x, below.x + below.w);
+                let (bar_left, bar_right) = (bar.x.clamp(left, right), (bar.x + bar.w).clamp(left, right));
+                let bar_top = bar.y.clamp(below.y, below.y + below.h);
+                [
+                    Some(ViewRect { x: left, y: below.y, w: bar_left - left, h: below.h }),
+                    Some(ViewRect { x: bar_right, y: below.y, w: right - bar_right, h: below.h }),
+                    Some(ViewRect { x: bar_left, y: below.y, w: bar_right - bar_left, h: bar_top - below.y }),
+                ]
+            }
+        };
+        parts.into_iter().flatten().filter(|r| r.w > 0 && r.h > 0)
+    }
 }
 
 /// `SCR_CalcRefdef` + `R_SetVrect` (screen.c / r_main.c) for a `vid_w x vid_h`
@@ -116,37 +141,40 @@ pub struct Refdef {
 /// The status bar the view must clear (`lineadj`) is `sb_lines` 2-D rows,
 /// which the "scaled 2-D" extra ([`crate::draw::set_scaled_2d`]) makes
 /// `sb_lines * scale` framebuffer rows — exactly the rows
-/// [`draw_hud_into`](crate::sbar::draw_hud_into) paints. With
-/// [`SbarLayout::Overlay`] it is none: the view is laid out on the whole
-/// screen, as at viewsize 120 but for viewsize's own scaling below 100, and
-/// `sb_lines` is unchanged. With [`SbarLayout::Classic`] and without the
-/// "scaled 2-D" extra every number is the C's, in every mode.
+/// [`draw_hud_into`](crate::sbar::draw_hud_into) paints. Without the extra
+/// every number is the C's, in every mode. `sbar` only adds
+/// [`Refdef::below`]; the view is id's in either layout.
 ///
 /// The arithmetic keeps the C's types: `size` is a `float`, the products are
 /// truncated to `int` (so e.g. 70% of 320 is `(int)(320 * 0.7f) = 224`, as an
 /// IEEE-single build computes it).
 pub fn calc_refdef(vid_w: usize, vid_h: usize, viewsize: f32, intermission: bool, sbar: SbarLayout) -> Refdef {
-    let (viewsize, sb_lines, bar_rows) = status_lines(vid_w, vid_h, viewsize, intermission);
-    let lineadj = sbar.lineadj(bar_rows);
-    Refdef { vrect: set_vrect(vid_w as i64, vid_h as i64, viewsize, lineadj, intermission), sb_lines }
+    let (viewsize, sb_lines, lineadj) = status_lines(vid_w, vid_h, viewsize, intermission);
+    let vrect = set_vrect(vid_w as i64, vid_h as i64, viewsize, lineadj, intermission);
+    // The view stands on the bar from viewsize 100: as wide as the screen
+    // allows, at its top, the bar's rows (and an odd row) under it.
+    let stands_on_bar = sbar == SbarLayout::Overlay && sb_lines > 0 && viewsize >= 100.0;
+    let bottom = vrect.y + vrect.h;
+    let below = (stands_on_bar && bottom < vid_h).then_some(ViewRect { x: vrect.x, y: bottom, w: vrect.w, h: vid_h - bottom });
+    Refdef { vrect, sb_lines, below }
 }
 
 /// The framebuffer rows, bottom-anchored, the status bar covers this frame:
 /// what anything drawn outside the renderer must keep clear, so it never sits
 /// over the HUD's numbers and icons ([`crate::sbar::draw_hud_into`]) — the
 /// browser's touch layout (`web/touch.js`, the `sbar_height` automation call)
-/// is the one caller today. The same in either [`SbarLayout`]: in id's,
-/// [`calc_refdef`] keeps the 3-D view above these rows; with the bar over the
-/// view they are still the bar's. 0 with no status bar (viewsize 120, or any
-/// viewsize during an intermission, which is always full screen).
+/// is the one caller today. The same in either [`SbarLayout`]: [`calc_refdef`]
+/// keeps the 3-D view above these rows in both (the overlay's world under the
+/// view is beside the bar, not over it). 0 with no status bar (viewsize 120,
+/// or any viewsize during an intermission, which is always full screen).
 pub fn status_bar_rows(vid_w: usize, vid_h: usize, viewsize: f32, intermission: bool) -> i64 {
     status_lines(vid_w, vid_h, viewsize, intermission).2
 }
 
 /// SCR_CalcRefdef's first half: the bounded `viewsize` (a non-number reads as
 /// the default), `sb_lines`, and the framebuffer rows the status bar covers
-/// (`sb_lines` scaled like the 2-D layer, see [`calc_refdef`]: in id's layout
-/// the `lineadj` R_SetVrect keeps the view above).
+/// (the `lineadj` R_SetVrect keeps the view above: `sb_lines` scaled like the
+/// 2-D layer, see [`calc_refdef`]).
 fn status_lines(vid_w: usize, vid_h: usize, viewsize: f32, intermission: bool) -> (f32, i32, i64) {
     let viewsize = if viewsize.is_finite() {
         viewsize.clamp(VIEWSIZE_MIN, VIEWSIZE_MAX)
@@ -214,7 +242,7 @@ pub const WARP_HEIGHT: usize = 200;
 /// then capped at 200 high, and R_SetVrect runs on that with the status-bar
 /// lines scaled by the same factor: `(int)(sb_lines * (h / vid.height))`
 /// (the 2-D layer's `lineadj`: the C's own unless the "scaled 2-D" extra is
-/// on, and none with [`SbarLayout::Overlay`]). At every 16:10
+/// on). At every 16:10
 /// mode — all of [`RESOLUTION_PRESETS`](crate::menu::RESOLUTION_PRESETS) —
 /// that is the 320x200 screen's own view rectangle.
 ///
@@ -230,9 +258,8 @@ pub const WARP_HEIGHT: usize = 200;
 /// there is no warp buffer: the underwater view is rendered at the screen's
 /// view rectangle, as above water, and [`Renderer::warp_into`](crate::render::Renderer::warp_into)
 /// scales the wobble to it — at 4K id's buffer would be blown up twelve times.
-pub fn warp_vrect(vid_w: usize, vid_h: usize, viewsize: f32, intermission: bool, sbar: SbarLayout, hires: bool) -> ViewRect {
-    let (viewsize, _, bar_rows) = status_lines(vid_w, vid_h, viewsize, intermission);
-    let lineadj = sbar.lineadj(bar_rows);
+pub fn warp_vrect(vid_w: usize, vid_h: usize, viewsize: f32, intermission: bool, hires: bool) -> ViewRect {
+    let (viewsize, _, lineadj) = status_lines(vid_w, vid_h, viewsize, intermission);
     if (vid_w <= WARP_WIDTH && vid_h <= WARP_HEIGHT) || hires {
         return set_vrect(vid_w as i64, vid_h as i64, viewsize, lineadj, intermission);
     }
@@ -962,76 +989,69 @@ mod tests {
     }
 
     #[test]
-    fn the_bar_over_the_view_gives_the_view_the_whole_frame() {
-        // SbarLayout::Overlay: at viewsize 100 and 110 the view is the whole
-        // frame, as at 120; sb_lines is unchanged, so the bar is still drawn
-        // and the touch controls still keep clear of the same rows.
-        for (vs, sb_lines) in [(100.0, 48), (110.0, 24), (120.0, 0)] {
-            let r = calc_refdef(320, 200, vs, false, Overlay);
-            assert_eq!((r.vrect, r.sb_lines), (vr(0, 0, 320, 200), sb_lines), "viewsize {vs}");
-            assert_eq!(r.sb_lines, calc_refdef(320, 200, vs, false, Classic).sb_lines);
+    fn the_overlay_keeps_ids_view_and_adds_the_world_under_it() {
+        // The view, its sb_lines and the bar's rows are id's in both layouts;
+        // the overlay only adds `below`, where the view stands on the bar.
+        for vs in [30.0, 50.0, 90.0, 100.0, 110.0, 120.0] {
+            let (id, over) = (calc_refdef(320, 200, vs, false, Classic), calc_refdef(320, 200, vs, false, Overlay));
+            assert_eq!((over.vrect, over.sb_lines), (id.vrect, id.sb_lines), "viewsize {vs}");
+            assert_eq!(id.below, None, "id's layout draws nothing under the view");
         }
-        // Below 100 viewsize still scales the view, now centred on the whole
-        // screen (QuakeSpasm's scr_sbaralpha layout): 50 is 160x100 at
-        // ((320-160)/2, (200-100)/2); at 90 (288x180) the bar's 48 rows cover
-        // the view's bottom 38 and the border's 10.
-        assert_eq!(calc_refdef(320, 200, 50.0, false, Overlay).vrect, vr(80, 50, 160, 100));
-        assert_eq!(calc_refdef(320, 200, 90.0, false, Overlay).vrect, vr(16, 10, 288, 180));
-        assert_eq!(calc_refdef(320, 200, 30.0, false, Overlay).vrect, vr(112, 70, 96, 60));
-        // An intermission is full screen in either layout.
-        assert_eq!(calc_refdef(320, 200, 100.0, true, Overlay), calc_refdef(320, 200, 100.0, true, Classic));
-        // The 2026 frames: 1920x1080 at pixel size 1 (the 2-D layer at 5x,
-        // the bar 240 rows) and a wide frame (1315x535, 2x, 96 rows). id's
-        // layout keeps the view above the bar; over it the view is the frame
-        // (its width a multiple of 8 and its height even, R_SetVrect's: 1312
-        // at x 1 and 534 rows in the wide frame), and its centre — the
-        // crosshair's — moves down by half the bar's rows.
+        assert_eq!(calc_refdef(320, 200, 100.0, false, Overlay).below, Some(vr(0, 152, 320, 48)));
+        assert_eq!(calc_refdef(320, 200, 110.0, false, Overlay).below, Some(vr(0, 176, 320, 24)));
+        // No bar (120, an intermission), or a view inside a border (< 100).
+        for (vs, inter) in [(120.0, false), (100.0, true), (90.0, false), (50.0, false)] {
+            assert_eq!(calc_refdef(320, 200, vs, inter, Overlay).below, None, "viewsize {vs}, intermission {inter}");
+        }
+        // The 2026 frames: 1920x1080 at pixel size 1 (the 2-D layer at 5x, the
+        // bar 240 rows) and a wide frame (1315x535, 2x, 96 rows). The view is
+        // id's 1312 columns at x 1 in the wide frame, 438 rows (even): under it the
+        // odd row and the bar's 96.
         let _extra = crate::draw::Scaled2dGuard::set(true);
-        for (w, h, bar, x, view_w, id_h, over_h) in [(1920, 1080, 240, 0, 1920, 840, 1080), (1315, 535, 96, 1, 1312, 438, 534)] {
-            let id = calc_refdef(w, h, 100.0, false, Classic);
-            let over = calc_refdef(w, h, 100.0, false, Overlay);
-            assert_eq!(status_bar_rows(w, h, 100.0, false), bar as i64, "{w}x{h}: the bar's rows");
-            assert_eq!(id.vrect, vr(x, 0, view_w, id_h), "{w}x{h}: id's view above the bar");
-            assert_eq!(over.vrect, vr(x, 0, view_w, over_h), "{w}x{h}: the view is the whole frame");
-            assert_eq!(over.sb_lines, id.sb_lines);
-            let centre_y = |r: ViewRect| r.y + r.h / 2;
-            assert_eq!(centre_y(over.vrect) - centre_y(id.vrect), bar / 2, "{w}x{h}: the centre moves down half the bar");
-        }
-        // Every preset at every step stays inside the frame.
-        for &(w, h) in RESOLUTION_PRESETS.iter() {
-            for step in 3..=12 {
-                let r = calc_refdef(w as usize, h as usize, step as f32 * 10.0, false, Overlay);
-                assert!(r.vrect.x + r.vrect.w <= w as usize && r.vrect.y + r.vrect.h <= h as usize);
-                if step >= 10 {
-                    assert_eq!(r.vrect, vr(0, 0, w as usize, h as usize), "{w}x{h} @ {step}0: the whole frame");
-                }
-            }
+        for (w, h, view, below) in [
+            (1920, 1080, vr(0, 0, 1920, 840), vr(0, 840, 1920, 240)),
+            (1315, 535, vr(1, 0, 1312, 438), vr(1, 438, 1312, 97)),
+        ] {
+            let r = calc_refdef(w, h, 100.0, false, Overlay);
+            assert_eq!((r.vrect, r.below), (view, Some(below)), "{w}x{h}");
+            assert_eq!(r.vrect, calc_refdef(w, h, 100.0, false, Classic).vrect);
         }
     }
 
     #[test]
-    fn the_warp_buffer_follows_the_bar_layout() {
-        // Underwater, the warp buffer's view is the screen's own: with the
-        // bar over the view, the whole 320x200 buffer (id's at viewsize 120).
-        assert_eq!(warp_vrect(960, 600, 100.0, false, Overlay, false), vr(0, 0, 320, 200));
-        assert_eq!(warp_vrect(320, 200, 100.0, false, Overlay, false), calc_refdef(320, 200, 100.0, false, Overlay).vrect);
-        assert_eq!(warp_vrect(960, 600, 50.0, false, Overlay, false), vr(80, 50, 160, 100));
-        // hires: the view rectangle itself.
-        for vs in [50.0, 100.0, 110.0] {
-            assert_eq!(warp_vrect(1920, 1080, vs, false, Overlay, true), calc_refdef(1920, 1080, vs, false, Overlay).vrect);
-        }
+    fn the_world_under_the_view_is_drawn_beside_the_bar_not_under_it() {
+        let r = |below| Refdef { vrect: vr(0, 0, 0, 0), sb_lines: 48, below };
+        let parts = |rd: Refdef, bar| rd.below_parts(bar).collect::<Vec<_>>();
+        // 1920x1080: the bar's 1600 columns from 160, from row 840; the two
+        // corners, nothing between the view and the bar.
+        let below = vr(0, 840, 1920, 240);
+        assert_eq!(parts(r(Some(below)), Some(vr(160, 840, 1600, 240))), [vr(0, 840, 160, 240), vr(1760, 840, 160, 240)]);
+        // The wide frame: the view's columns 1..1313, the bar's 338..978 from row
+        // 440 (its 2-D screen is 268 rows, 536 pixels: the last is off the
+        // frame), the view's bottom at 438: the corners and two rows above
+        // the bar.
+        let below = vr(1, 438, 1312, 97);
+        assert_eq!(
+            parts(r(Some(below)), Some(vr(338, 440, 640, 95))),
+            [vr(1, 438, 337, 97), vr(978, 438, 335, 97), vr(338, 438, 640, 2)]
+        );
+        // A 16:10 frame's bar spans the view: nothing beside it.
+        assert_eq!(parts(r(Some(vr(0, 456, 960, 144))), Some(vr(0, 456, 960, 144))), []);
+        // No bar drawn (no gfx.wad): all of it; nothing below: nothing.
+        assert_eq!(parts(r(Some(below)), None), [below]);
+        assert_eq!(parts(r(None), Some(vr(338, 440, 640, 95))), []);
     }
 
     #[test]
     fn warp_vrect_is_r_setupframes_warp_buffer_view() {
         // No larger than 320x200: the screen's own view rectangle (1:1 warp).
         for vs in [30.0, 50.0, 100.0, 110.0, 120.0] {
-            assert_eq!(warp_vrect(320, 200, vs, false, Classic, false), calc_refdef(320, 200, vs, false, Classic).vrect);
+            assert_eq!(warp_vrect(320, 200, vs, false, false), calc_refdef(320, 200, vs, false, Classic).vrect);
         }
         // id's 48-row bar on a 960x600 screen is (int)(48 * 200/600) = 16 rows
         // of the warp buffer.
-        assert_eq!(warp_vrect(960, 600, 100.0, false, Classic, false), vr(0, 0, 320, 184));
-        assert_eq!(warp_vrect(640, 400, 100.0, false, Classic, false), vr(0, 0, 320, 176));
+        assert_eq!(warp_vrect(960, 600, 100.0, false, false), vr(0, 0, 320, 184));
+        assert_eq!(warp_vrect(640, 400, 100.0, false, false), vr(0, 0, 320, 176));
         // The "scaled 2-D" extra's bar is 48 rows of the 320x200 screen.
         let _extra = crate::draw::Scaled2dGuard::set(true);
         // Every 16:10 preset the extra draws at a whole multiple of 320x200
@@ -1042,16 +1062,16 @@ mod tests {
             for step in 3..=12 {
                 let vs = step as f32 * 10.0;
                 let want = calc_refdef(320, 200, vs, false, Classic).vrect;
-                assert_eq!(warp_vrect(w as usize, h as usize, vs, false, Classic, false), want, "{w}x{h} @ {vs}");
+                assert_eq!(warp_vrect(w as usize, h as usize, vs, false, false), want, "{w}x{h} @ {vs}");
             }
-            assert_eq!(warp_vrect(w as usize, h as usize, 50.0, true, Classic, false), vr(0, 0, 320, 200));
+            assert_eq!(warp_vrect(w as usize, h as usize, 50.0, true, false), vr(0, 0, 320, 200));
         }
-        assert_eq!(warp_vrect(960, 600, 50.0, false, Classic, false), vr(80, 26, 160, 100));
+        assert_eq!(warp_vrect(960, 600, 50.0, false, false), vr(80, 26, 160, 100));
         // Wider than 16:10: 320 wide, the height follows the mode (C's too).
-        assert_eq!(warp_vrect(1280, 600, 120.0, false, Classic, false), vr(0, 0, 320, 150));
+        assert_eq!(warp_vrect(1280, 600, 120.0, false, false), vr(0, 0, 320, 150));
         // Taller (4:3): id squeezes 320x200 with its pixel aspect; the square-
         // pixel port keeps the shape instead (266 wide, &~7 -> 264).
-        assert_eq!(warp_vrect(640, 480, 120.0, false, Classic, false), vr(1, 0, 264, 200));
+        assert_eq!(warp_vrect(640, 480, 120.0, false, false), vr(1, 0, 264, 200));
     }
 
     #[test]
@@ -1059,7 +1079,7 @@ mod tests {
         // The hires extra has no warp buffer: the view rectangle, at any size.
         for (w, h) in [(320, 200), (960, 600), (1920, 1080), (3840, 2160)] {
             for vs in [50.0, 100.0, 120.0] {
-                assert_eq!(warp_vrect(w, h, vs, false, Classic, true), calc_refdef(w, h, vs, false, Classic).vrect, "{w}x{h} @ {vs}");
+                assert_eq!(warp_vrect(w, h, vs, false, true), calc_refdef(w, h, vs, false, Classic).vrect, "{w}x{h} @ {vs}");
             }
         }
     }

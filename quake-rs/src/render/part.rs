@@ -6,7 +6,7 @@
 
 use crate::math::{dot, sub, Vec3};
 use super::band::Band;
-use super::{Camera, Image};
+use super::{Camera, Image, ViewGeom};
 
 /// Draw a set of engine particles into `image`, z-tested and depth-written
 /// against the shared `zbuf`: id's `D_DrawParticle` (`d_part.c`, the portable
@@ -191,6 +191,14 @@ impl ParticleProjection {
     /// 640 wide (`xscale` 160 and 320 at fov 90) and follows the world's own
     /// projection at any other width, field of view or Hor+ widening.
     pub(crate) fn new(cam: &Camera, w: usize, h: usize, pixel_aspect: f32, hires: bool) -> Self {
+        Self::in_view(cam, &ViewGeom::whole(w, h), pixel_aspect, hires)
+    }
+
+    /// [`ParticleProjection::new`] for an image wherever it lies on its view
+    /// ([`ViewGeom`]): sized and centred as that view (`proj_w x proj_h`),
+    /// bounded by the image's own `w x h`.
+    pub(crate) fn in_view(cam: &Camera, geom: &ViewGeom, pixel_aspect: f32, hires: bool) -> Self {
+        let (w, h) = (geom.proj_w, geom.proj_h);
         let (wf, hf) = (w as f32, h as f32);
         // horizontalFieldOfView = 2*tan(fov_x/2), a float; a degenerate fov
         // falls back to ~90 degrees as `Projection` does.
@@ -214,8 +222,9 @@ impl ParticleProjection {
         };
         let y_aspect_shift = u32::from(pixel_aspect > 1.4);
         ParticleProjection {
-            xcenter: wf * 0.5 - 0.5,
-            ycenter: hf * 0.5 - 0.5,
+            // (A whole view's offsets are 0: id's centre to the bit.)
+            xcenter: wf * 0.5 - 0.5 - geom.ox as f32,
+            ycenter: hf * 0.5 - 0.5 - geom.oy as f32,
             xscaleshrink,
             yscaleshrink: xscaleshrink * pixel_aspect,
             pix_min,
@@ -223,8 +232,8 @@ impl ParticleProjection {
             pix_mul,
             pix_shift,
             y_aspect_shift,
-            vrectright_particle: w as i64 - pix_max,
-            vrectbottom_particle: h as i64 - (pix_max << y_aspect_shift),
+            vrectright_particle: geom.w as i64 - pix_max,
+            vrectbottom_particle: geom.h as i64 - (pix_max << y_aspect_shift),
         }
     }
 }

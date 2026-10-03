@@ -32,7 +32,7 @@ use super::view::{
     BONUS_PERCENT, FACE_ANIM_TIME, V_KICKTIME,
 };
 use super::{
-    backtile_for, color_for_name, lap, render_options, s_update, view_hook, ClientFrame,
+    backtile_for, color_for_name, draw_world_below, lap, render_options, s_update, view_hook, warp_below, ClientFrame,
     Listener, Phase, SoundCall, Vid, Walk,
 };
 
@@ -1105,10 +1105,10 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
     // current server clock; the worldspawn populated the styles at spawn time.
     let light_styles = w.server.lightstyle_scales(w.clock);
     // SCR_CalcRefdef / R_SetVrect: the viewsize picks the 3-D view rectangle
-    // (in id's layout the view sits ABOVE the status bar; with the 2026 bar
-    // over the view it takes the bar's rows too; either way it is projected
-    // about its own centre) and how much status bar shows; an intermission
-    // is always full screen.
+    // (the view sits ABOVE the status bar, projected about its own centre)
+    // and how much status bar shows; an intermission is always full screen.
+    // With 2026's status bar overlay, also the rows under the view the world
+    // goes on into, beside the bar (`refdef.below`).
     lap(Phase::Sim);
     let refdef = render::calc_refdef(render_w, render_h, w.viewsize, intermission, w.sbar_layout);
     let vrect = refdef.vrect;
@@ -1118,7 +1118,7 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
     let eye_contents = crate::world::point_contents(&w.bsp, eye);
     let dowarp = eye_contents <= crate::bsp::CONTENTS_WATER;
     let rvrect = if dowarp {
-        crate::screen::warp_vrect(render_w, render_h, w.viewsize, intermission, w.sbar_layout, vid.video.hires)
+        crate::screen::warp_vrect(render_w, render_h, w.viewsize, intermission, vid.video.hires)
     } else {
         vrect
     };
@@ -1138,14 +1138,18 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
     };
     // The screen: backtile around the view rectangle (SCR_UpdateScreen's
     // Draw_TileClear) and the view drawn straight into it, or, underwater,
-    // into the warp buffer for D_WarpScreen below. The status bar is drawn
+    // into the warp buffer for D_WarpScreen below. With 2026's status bar
+    // overlay the world goes on under the view, beside the bar (underwater,
+    // in the view's buffer, to be wobbled with it). The status bar is drawn
     // over it later.
     let backtile = backtile_for(&vrect, render_w, render_h, w.gfx_wad.as_ref());
     let mut img = render::screen_with_backtile(vrect, render_w, render_h, backtile.as_ref());
+    let below = warp_below(&refdef, vid);
     let warp_view = if dowarp {
-        Some(w.renderer.render(&scene))
+        Some(w.renderer.render_extended(&scene, below))
     } else {
         w.renderer.render_into(&scene, &mut img);
+        draw_world_below(&mut w.renderer, &scene, &refdef, &mut img);
         None
     };
     lap(Phase::Render3d);
@@ -1167,7 +1171,7 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
     // over the screen's view rectangle while it wobbles, BEFORE the content
     // tint so the screen ripples, not just darkens.
     if let Some(view) = warp_view {
-        w.renderer.warp_into(view, &mut img, vrect, w.clock, vid.video.hires);
+        w.renderer.warp_into(view, &mut img, vrect, below, w.clock, vid.video.hires);
     }
     // The 2-D oracle harness paints the view one flat colour (the C oracle's
     // `oracle_blank`), so a shot measures the 2-D layer alone (`set_view_hook`).

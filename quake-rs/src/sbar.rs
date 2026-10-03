@@ -133,7 +133,9 @@ pub struct Hud<'a> {
     pub sb_lines: i32,
     /// How the view meets the bar ([`SbarLayout`], the frame's
     /// [`calc_refdef`](crate::screen::calc_refdef) layout): id's tile-clears
-    /// the bar's sides, the 2026 overlay leaves the game under them.
+    /// the bar's sides; the 2026 overlay leaves them to the world drawn
+    /// under the view (or the screen's own backtile, where none is: the same
+    /// tile).
     pub sbar_layout: SbarLayout,
     /// `standard_quake`/`hipnotic`/`rogue` (common.c): which game this is —
     /// id1 or one of the two mission packs, detected from the `progs.dat`
@@ -701,6 +703,26 @@ fn draw_sbar_inventory(
     }
 }
 
+/// The framebuffer rectangle [`draw_hud_into`]'s bar covers on a `vid_w x
+/// vid_h` frame for `sb_lines`: its 320 columns, centred as `Sbar_DrawPic`
+/// centres them, from `sb_lines` 2-D rows above the bottom (scaled with the
+/// 2-D layer) to the frame's bottom — what the 2026 overlay's world under the
+/// view stays out of ([`crate::screen::Refdef::below_parts`]). `sbar`, `ibar`
+/// and `scorebar` have no transparent texel, so the bar covers all of it.
+/// `None` with no bar (`sb_lines` 0).
+pub fn status_bar_rect(vid_w: usize, vid_h: usize, sb_lines: i32) -> Option<crate::screen::ViewRect> {
+    let xf = BarXf::new(vid_w, vid_h);
+    let sc = screen_2d(vid_w, vid_h);
+    if sb_lines <= 0 || !(xf.scale.is_finite() && xf.scale > 0.0) {
+        return None;
+    }
+    let (x0, _) = xf.at(0.0, 0.0);
+    let (x1, _) = xf.at(HUD_VIRT_W, 0.0);
+    let (x0, x1) = (x0.clamp(0, vid_w as i64) as usize, x1.clamp(0, vid_w as i64) as usize);
+    let y0 = sc.px(sc.h - sb_lines).clamp(0, vid_h as i64) as usize;
+    Some(crate::screen::ViewRect { x: x0, y: y0, w: x1 - x0, h: vid_h - y0 })
+}
+
 /// Draw the Quake status bar (HUD) across the bottom of `image`, on top of the
 /// finished 3-D frame — a faithful port of `sbar.c`'s `Sbar_Draw` (single-player /
 /// non-deathmatch path).
@@ -744,9 +766,9 @@ pub fn draw_hud_into(image: &mut Image, hud: &Hud) {
 
     // Sbar_Draw: `if (sb_lines && vid.width > 320) Draw_TileClear (0,
     // vid.height - sb_lines, vid.width, sb_lines);` — the backtile either side
-    // of the bar (and under it, where the bar pics draw over it). With the bar
-    // over the view the view is there instead, and the bar's opaque pics
-    // cover their own 320 columns (QuakeSpasm, whose sb_lines is 0 then).
+    // of the bar (and under it, where the bar pics draw over it). With the 2026
+    // overlay the world under the view is there instead, and the bar's opaque
+    // pics cover their own 320 columns.
     let sc = screen_2d(image.w, image.h);
     if hud.sb_lines > 0 && sc.w > HUD_VIRT_W as i32 && hud.sbar_layout == SbarLayout::Classic {
         let y0 = sc.px(sc.h - hud.sb_lines).max(0) as usize;

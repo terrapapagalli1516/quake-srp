@@ -158,10 +158,9 @@ pub struct Walk {
     /// The `crosshair` cvar this frame: `V_RenderView` draws it over the
     /// finished view ([`render::draw_crosshair`]). Set like `viewsize`.
     pub crosshair: render::Crosshair,
-    /// The `scr_sbaroverlay` setting this frame: whether the 3-D view stops
-    /// above the status bar (id's) or fills the frame under it
-    /// ([`render::SbarLayout`], with `viewsize` [`render::calc_refdef`]'s
-    /// input). Set like `viewsize`.
+    /// The `scr_sbaroverlay` setting this frame: whether the world goes on
+    /// under the view, beside the status bar ([`render::SbarLayout`], with
+    /// `viewsize` [`render::calc_refdef`]'s input). Set like `viewsize`.
     pub sbar_layout: render::SbarLayout,
     /// `wasm_showfps` this frame: the host draws its frame-rate readout in
     /// the top-left corner over this frame ([`render::draw_fps`]), so the
@@ -714,6 +713,7 @@ pub fn render_options(vrect: &render::ViewRect, vid: &Vid) -> render::RenderOpti
     render::RenderOptions {
         pixel_aspect: render::vid_aspect(vid.width, vid.height, vid.display_aspect),
         screen: Some(render::ScreenPlace { x: vrect.x, y: vrect.y, vid_w: vid.width, vid_h: vid.height }),
+        window: None,
         exact_perspective: vid.exact_perspective,
         video: vid.video,
         mip: vid.mip,
@@ -734,6 +734,30 @@ pub fn backtile_for(
         return None;
     }
     gfx_wad.and_then(|g| g.qpic("backtile").ok())
+}
+
+/// EXTRA (2026's status bar overlay, [`render::SbarLayout::Overlay`]), not
+/// id: the world under the view, beside the status bar, drawn into `img` once
+/// the view is — each part of [`render::Refdef::below_parts`] a window onto
+/// `scene`'s view ([`render::Renderer::render_window`]), so no pixel of the
+/// view changes. Nothing without [`render::Refdef::below`].
+pub fn draw_world_below(renderer: &mut render::Renderer, scene: &render::Scene, refdef: &render::Refdef, img: &mut render::Image) {
+    let bar = render::status_bar_rect(img.w, img.h, refdef.sb_lines);
+    for part in refdef.below_parts(bar) {
+        renderer.render_window(scene, part, img);
+    }
+}
+
+/// How many rows under the view an underwater frame renders and wobbles
+/// with it ([`render::Renderer::render_extended`], `warp_into`'s `below`):
+/// [`render::Refdef::below`]'s with the hires extra, whose underwater view is
+/// drawn at the screen's own size; none with id's warp buffer (a view at most
+/// 320x200, stretched), beside which the corners keep their backtile.
+pub fn warp_below(refdef: &render::Refdef, vid: &Vid) -> usize {
+    match refdef.below {
+        Some(below) if vid.video.hires => below.h,
+        _ => 0,
+    }
 }
 
 /// One client frame, as the platform presents it: the finished screen, the

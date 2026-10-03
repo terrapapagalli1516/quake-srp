@@ -234,8 +234,7 @@ pub fn cmd_timedemo(pak_path: &str, demo: &str, rest: &[String]) -> Result<Strin
             // The background (r_clearcolor) where no surface covers the view:
             // cracks and sparkles, or the eye outside the world. (demo1 has no
             // intermission and no underwater frame, so every frame's view is
-            // the viewsize-100 rectangle, in id's layout: this command does not
-            // put the status bar over the view.)
+            // the viewsize-100 rectangle; this command draws nothing under it.)
             let vrect = render::calc_refdef(width, height, render::VIEWSIZE_DEFAULT, false, render::SbarLayout::Classic).vrect;
             let background = (frames as u64 * (vrect.w * vrect.h) as u64).saturating_sub(st.world_pixels);
             let _ = writeln!(o, "  background pixels in all {frames} frames (if every frame is the viewsize-100 view): {background}");
