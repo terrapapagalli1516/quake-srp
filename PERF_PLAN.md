@@ -1,5 +1,9 @@
 # quake-rust — performance plan
 
+*Status (2026-10-02): a working log. "Where it stands" sums it up; the numbered sections
+below are the rounds of work, each measured as it landed (§11 and §12 are the latest). The
+current figures are in `README.md`, "Numbers".*
+
 ## Where it stands (2026-09-26, the 2026 push)
 
 The day's changes on top of 2026-09-25's (below):

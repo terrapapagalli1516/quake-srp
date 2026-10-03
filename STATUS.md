@@ -369,12 +369,11 @@ merge message summarises its branch. In merge order:
   run web/x.py` ignores the shebang's flags and fails. Parallel runs take
   `QUAKE_VERIFY_PORT` so they don't collide. The scripts write screenshots into the
   directory they serve, so point them at a scratch deploy dir.
-- **Commits:** only this project's files — the repo root has unrelated files; never
-  `git add` broadly. Never commit game data or a built `quake.wasm`.
+- **Commits:** never commit game data or a built `quake.wasm`.
 
 ## Quick commands
 
-From the repository root:
+From the repository's root:
 
 ```bash
 # tests and lints

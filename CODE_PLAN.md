@@ -1,5 +1,8 @@
 # CODE_PLAN: making quake-rust a showcase of idiomatic Rust
 
+*Status (2026-10-02): a working plan, kept as it was written; §0 lists the items done since,
+and `STATUS.md` ("What is left") the ones still open. Its line numbers are those of `3866e1b`.*
+
 Recon by the `rustcheck` agent, 2026-09-26, on `quake/2026` @ 3866e1b. No code changed.
 Every number below was measured on scratch copies of the tree; the last section says how.
 Items are sized for one agent in 2–4 hours. They are ranked, and each one says what it
