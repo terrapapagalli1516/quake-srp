@@ -354,7 +354,7 @@ pub fn cmd_view(args: &[String]) -> CmdResult {
             let view = renderer.render(&scene);
             let mut screen = render::Image::new(w, h, 0);
             let full = render::ViewRect { x: 0, y: 0, w, h };
-            renderer.warp_into(view, &mut screen, full, time, video.cvars.hires);
+            renderer.warp_into(view, &mut screen, full, 0, time, video.cvars.hires);
             return screen;
         }
         renderer.render(&scene)

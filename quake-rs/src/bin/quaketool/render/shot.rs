@@ -18,6 +18,7 @@
 //! --viewsize V       the `viewsize` cvar (default 100: the view above the full status bar)
 //! --fire N           hold +attack for the last N frames (muzzle flash, particles)
 //! --crosshair N      the `crosshair` cvar: 1 the 2026 cross, 2 id's + (default 0: none, the view alone)
+//! --sbaroverlay 0|1  `scr_sbaroverlay`: the world beside the status bar, as 2026 (default 0, id's)
 //! plus the video options (`video.rs`): --video, --fov-mode, --hires, --sky, --lightstyles, --display (default square), --scaled2d, --threads
 //! ```
 
@@ -41,6 +42,7 @@ pub fn cmd_shot(args: &[String]) -> Result<String, String> {
     let mut liquid: Option<i32> = None;
     let mut viewsize = render::VIEWSIZE_DEFAULT;
     let mut crosshair = render::Crosshair::Off;
+    let mut sbar_layout = render::SbarLayout::Classic;
     let mut i = 3;
     while i < args.len() {
         let flag = args[i].as_str();
@@ -56,6 +58,9 @@ pub fn cmd_shot(args: &[String]) -> Result<String, String> {
                 "--pitch" => pitch = num(flag)?,
                 "--viewsize" => viewsize = num(flag)?,
                 "--crosshair" => crosshair = render::Crosshair::from_cvar(num(flag)?),
+                "--sbaroverlay" => {
+                    sbar_layout = if num(flag)? != 0.0 { render::SbarLayout::Overlay } else { render::SbarLayout::Classic }
+                }
                 "--in-liquid" => {
                     liquid = Some(match val.as_str() {
                         "water" => quake_rs::bsp::CONTENTS_WATER,
@@ -85,6 +90,7 @@ pub fn cmd_shot(args: &[String]) -> Result<String, String> {
         .ok_or_else(|| format!("{map} would not load"))?;
     wk.viewsize = viewsize;
     wk.crosshair = crosshair;
+    wk.sbar_layout = sbar_layout;
     wk.renderer.set_threads(video.threads());
     if let Some(contents) = liquid {
         origin = Some(largest_leaf_centre(&wk.bsp, contents).ok_or_else(|| format!("{map} has no leaf of contents {contents}"))?);

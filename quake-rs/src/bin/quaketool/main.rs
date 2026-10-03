@@ -178,7 +178,7 @@ const COMMANDS: &[Command] = &[
         name: "shot",
         usage: "<pak> <map.bsp> <out.ppm> [--res WxH] [--zoom N] [--frames N] [--yaw Y] [--pitch P] \
                 [--origin x,y,z | --in-liquid water|slime|lava] [--viewsize V] [--fire N] [--crosshair N] \
-                [video options]",
+                [--sbaroverlay 0|1] [video options]",
         about: "the game screen as a player sees it (view, gun, status bar) at any size and video setting",
         run: |a| Ok(Out::Text(render::shot::cmd_shot(a)?)),
     },

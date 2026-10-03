@@ -36,13 +36,19 @@ pub(super) fn warp_screen(tables: &mut WarpTables, view: &Image, out: WarpTarget
 }
 
 /// Where [`warp_screen`] writes: `w x h` pixels at column `x0` of `rows`,
-/// `stride` pixels a row (the screen's view rectangle, or an image of its own).
+/// `stride` pixels a row (the screen's view rectangle, or an image of its own),
+/// and `below` more rows under them (EXTRA, not id: the 2026 status bar
+/// overlay's world under the view, whose `view` is as many rows taller; 0 for
+/// id's warp). The warp is laid out on the `w x h` alone — its scale, its
+/// tables' compression — and the rows under it read on as the tables
+/// continue, so the `h` rows are the same with or without them.
 pub(super) struct WarpTarget<'a> {
     pub(super) rows: &'a mut [u8],
     pub(super) stride: usize,
     pub(super) x0: usize,
     pub(super) w: usize,
     pub(super) h: usize,
+    pub(super) below: usize,
 }
 
 /// The hires warp's scale for an `out_w x out_h` view: its linear size in
@@ -60,13 +66,15 @@ pub(crate) fn warp_scale(out_w: usize, out_h: usize) -> f64 {
 /// target writes black.
 fn warp_scaled(tables: &mut WarpTables, view: &Image, out: WarpTarget, clock: f32, scale: f64, threads: usize) {
     const SPEED: f64 = 20.0;
-    let (w, h) = (view.w, view.h);
-    let WarpTarget { rows, stride, x0, w: out_w, h: out_h } = out;
-    if stride == 0 || x0 + out_w > stride || rows.len() < out_h * stride {
+    let WarpTarget { rows, stride, x0, w: out_w, h: out_h, below } = out;
+    // The view's own rows, and the `below` under them (id: none).
+    let (w, h) = (view.w, view.h.saturating_sub(below));
+    let out_rows = out_h + below;
+    if stride == 0 || x0 + out_w > stride || rows.len() < out_rows * stride {
         return;
     }
-    let rows = &mut rows[..out_h * stride];
-    if w == 0 || h == 0 || out_w == 0 || out_h == 0 || view.pixels.len() < w * h {
+    let rows = &mut rows[..out_rows * stride];
+    if w == 0 || h == 0 || out_w == 0 || out_h == 0 || view.pixels.len() < w * (h + below) {
         for row in rows.chunks_mut(stride) {
             row[x0..x0 + out_w].fill(0);
         }
@@ -75,9 +83,9 @@ fn warp_scaled(tables: &mut WarpTables, view: &Image, out: WarpTarget, clock: f3
     let scale = if scale.is_finite() && scale > 1.0 { scale } else { 1.0 };
     let cycle = (WARP_CYCLE as f64 * scale).round() as i64;
     let phase = ((clock as f64 * SPEED * scale) as i64).rem_euclid(cycle) as usize;
-    tables.prepare(w, h, out_w, out_h, scale, phase + out_w.max(out_h));
+    tables.prepare(w, h, out_w, out_h, below, scale, phase + out_w.max(out_rows));
     let WarpTables { rowptr, column, sin, .. } = &*tables;
-    super::band::for_rows(threads, out_h, rows, stride, |v0, run| {
+    super::band::for_rows(threads, out_rows, rows, stride, |v0, run| {
         for (k, row) in run.chunks_mut(stride).enumerate() {
             let v = v0 + k;
             let tv = sin[phase + v] as usize; // 0..2*amp
@@ -100,8 +108,9 @@ const WARP_CYCLE: usize = 128;
 /// view and screen sizes and scale, and `intsintable` (at that scale) as far
 /// as any frame has read it. The [`Renderer`](super::Renderer)'s.
 pub(super) struct WarpTables {
-    /// `(view w, view h, screen w, screen h)` the row/column tables are for.
-    sizes: (usize, usize, usize, usize),
+    /// `(view w, view h, screen w, screen h, rows below)` the row/column
+    /// tables are for.
+    sizes: (usize, usize, usize, usize, usize),
     /// The scale `sin` is for (1: id's `intsintable`).
     scale: f64,
     /// `D_WarpScreen`'s `rowptr`, pre-multiplied by the view's width `w`: the
@@ -114,7 +123,7 @@ pub(super) struct WarpTables {
 
 impl Default for WarpTables {
     fn default() -> WarpTables {
-        WarpTables { sizes: (0, 0, 0, 0), scale: 1.0, rowptr: Vec::new(), column: Vec::new(), sin: Vec::new() }
+        WarpTables { sizes: (0, 0, 0, 0, 0), scale: 1.0, rowptr: Vec::new(), column: Vec::new(), sin: Vec::new() }
     }
 }
 
@@ -122,27 +131,32 @@ impl WarpTables {
     /// The tables for a `w x h` view warped over an `out_w x out_h` screen at
     /// `scale`, with at least `n` entries of `intsintable`. The arithmetic is
     /// `D_WarpScreen`'s `float`s, as it was per frame; the rows and columns
-    /// past the edge are `2*AMP2` (times the scale, rounded up).
-    fn prepare(&mut self, w: usize, h: usize, out_w: usize, out_h: usize, scale: f64, n: usize) {
+    /// past the edge are `2*AMP2` (times the scale, rounded up). `below`
+    /// (the overlay's, [`WarpTarget`]) continues `rowptr` that many rows
+    /// further, into as many rows of the view under its `h`: the same
+    /// formula, so the wobble runs on unbroken, and every entry before them
+    /// is id's.
+    #[allow(clippy::too_many_arguments)]
+    fn prepare(&mut self, w: usize, h: usize, out_w: usize, out_h: usize, below: usize, scale: f64, n: usize) {
         if self.scale != scale {
             self.scale = scale;
             self.sin.clear();
-            self.sizes = (0, 0, 0, 0);
+            self.sizes = (0, 0, 0, 0, 0);
         }
         extend_intsintable(&mut self.sin, n, scale);
-        if self.sizes == (w, h, out_w, out_h) {
+        if self.sizes == (w, h, out_w, out_h, below) {
             return;
         }
-        self.sizes = (w, h, out_w, out_h);
+        self.sizes = (w, h, out_w, out_h, below);
         let margin = (2.0 * WARP_AMP2 * scale).ceil() as usize;
         let wratio = w as f32 / out_w as f32;
         let hratio = h as f32 / out_h as f32;
         // rowptr[v] = (int)((float)v * hratio * h / (h + AMP2*2)), v < scr height + 2*AMP2,
         // times `w`: the row's starting offset into `view.pixels` directly.
+        let row = |v: usize| (v as f32 * hratio * h as f32 / (h + margin) as f32) as usize;
         self.rowptr.clear();
-        self.rowptr.extend((0..out_h + margin).map(|v| {
-            ((v as f32 * hratio * h as f32 / (h + margin) as f32) as usize).min(h - 1) * w
-        }));
+        self.rowptr.extend((0..out_h + margin).map(|v| row(v).min(h - 1) * w));
+        self.rowptr.extend((out_h + margin..out_h + below + margin).map(|v| row(v).min(h + below - 1) * w));
         // column[u] = (int)((float)u * wratio * w / (w + AMP2*2)), u < scr width + 2*AMP2
         self.column.clear();
         self.column.extend((0..out_w + margin).map(|u| {
@@ -294,7 +308,7 @@ mod tests {
     /// on fresh tables, on `threads` threads.
     fn warp_at(view: Image, out_w: usize, out_h: usize, clock: f32, scale: f64, threads: usize) -> Image {
         let mut out = Image::new(out_w, out_h, 7);
-        let target = WarpTarget { rows: &mut out.pixels, stride: out_w, x0: 0, w: out_w, h: out_h };
+        let target = WarpTarget { rows: &mut out.pixels, stride: out_w, x0: 0, w: out_w, h: out_h, below: 0 };
         warp_scaled(&mut WarpTables::default(), &view, target, clock, scale, threads);
         out
     }
@@ -302,6 +316,40 @@ mod tests {
     /// `D_WarpScreen` with id's scale.
     fn apply_warp(view: Image, out_w: usize, out_h: usize, clock: f32) -> Image {
         warp_at(view, out_w, out_h, clock, 1.0, 1)
+    }
+
+    #[test]
+    fn the_rows_below_continue_the_wobble_and_leave_the_views_rows_as_they_were() {
+        // The 2026 overlay's underwater frame: a view 60 rows taller than the
+        // warped rectangle (hires: drawn at its size, scale 4). Its own rows
+        // are id's warp to the byte; the rows under it read on down the
+        // source as the tables continue, each source row at most a wobble
+        // from where the row above read.
+        let (w, h, below, scale) = (640, 400, 60, 4.0);
+        let src = coord_image(w, h + below, Y);
+        let mut alone = Image::new(w, h, 7);
+        let target = WarpTarget { rows: &mut alone.pixels, stride: w, x0: 0, w, h, below: 0 };
+        warp_scaled(&mut WarpTables::default(), &Image { w, h, pixels: src.pixels[..w * h].to_vec() }, target, 1.25, scale, 1);
+        let mut tables = WarpTables::default();
+        let mut on = Image::new(w, h + below, 7);
+        let target = WarpTarget { rows: &mut on.pixels, stride: w, x0: 0, w, h, below };
+        warp_scaled(&mut tables, &src, target, 1.25, scale, 3);
+        assert!(on.pixels[..w * h] == alone.pixels[..], "the view's rows are id's");
+        let reach = (2.0 * WARP_AMP2 * scale).ceil() as usize + 2;
+        for x in [0, 100, 333, 639] {
+            let col: Vec<usize> = (0..h + below).map(|y| on.pixels[y * w + x] as usize).collect();
+            for y in h - 1..h + below {
+                // Source rows mod 256: unwrap against the row above.
+                let (a, b) = (col[y - 1], col[y]);
+                let step = (b + 256 - a) % 256;
+                assert!(step <= reach || 256 - step <= reach, "column {x}, row {y}: {a} then {b}");
+            }
+        }
+        // The same tables again, and with nothing below: id's tables back.
+        let mut again = Image::new(w, h, 7);
+        let target = WarpTarget { rows: &mut again.pixels, stride: w, x0: 0, w, h, below: 0 };
+        warp_scaled(&mut tables, &Image { w, h, pixels: src.pixels[..w * h].to_vec() }, target, 1.25, scale, 2);
+        assert!(again.pixels == alone.pixels);
     }
 
     /// The axes of [`coord_image`].

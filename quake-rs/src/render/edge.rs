@@ -51,7 +51,7 @@ use super::vis::point_in_leaf;
 use super::world::{self, face_grads};
 use super::band::Band;
 use super::raster::PolyGrads;
-use super::{Frame, Projection};
+use super::{Frame, Projection, ViewGeom};
 use crate::bsp::MipTex;
 
 /// "No edge / no span / no surface" in the index links.
@@ -438,6 +438,31 @@ pub(super) fn screen_edges(w: usize, h: usize, xscale: f32, yscale: f32) -> [Vec
     ]
 }
 
+/// [`screen_edges`] for a frame's image wherever it lies on its view
+/// ([`ViewGeom`]): id's for a whole view; for a window the planes through the
+/// eye and the window's own four sides, which need not straddle the centre
+/// (the overlay's windows lie wholly below it, and to one side). A side `a`
+/// (the window's edge from the centre, over the scale, positive outwards)
+/// keeps `[-1, 0, a]` (left; `[1, 0, a]` right, `[0, -1, a]` top, `[0, 1,
+/// a]` bottom): id's `[-1/a, 0, 1]` times `a`, the same plane facing the
+/// same way while `a > 0`, and still the side's plane, facing in, when `a`
+/// is 0 or negative (a side on or past the centre), where id's has none.
+pub(super) fn view_edges(geom: &ViewGeom, p: &Projection) -> [Vec3; 4] {
+    if geom.is_whole() {
+        return screen_edges(geom.w, geom.h, p.xscale, p.yscale);
+    }
+    let left = p.cx / p.xscale;
+    let right = (geom.w as f32 - p.cx) / p.xscale;
+    let top = p.cy / p.yscale;
+    let bottom = (geom.h as f32 - p.cy) / p.yscale;
+    [
+        vector_normalize([-1.0, 0.0, left]),
+        vector_normalize([1.0, 0.0, right]),
+        vector_normalize([0.0, -1.0, top]),
+        vector_normalize([0.0, 1.0, bottom]),
+    ]
+}
+
 /// `R_TransformFrustum`: the view's four sides (`screenedge`) as planes
 /// `(normal, dist)` in the frame whose axes are `vpn`, `vright`, `vup` and
 /// whose eye is `modelorg` — `view_clipplanes`. A point is inside a side
@@ -612,7 +637,8 @@ impl EdgeState {
     fn setup_frame(&mut self, frame: &Frame) {
         let (cam, w, h) = (&frame.cam, frame.w, frame.h);
         self.framecount = self.framecount.wrapping_add(1);
-        let Projection { cx, cy, xscale, yscale } = Projection::new(cam, w, h, frame.scene.options.aspect());
+        let proj = Projection::new(cam, &frame.geom, frame.scene.options.aspect());
+        let Projection { cx, cy, xscale, yscale } = proj;
         let (vpn, vright, vup) = cam.basis();
         self.w = w;
         self.h = h;
@@ -635,7 +661,7 @@ impl EdgeState {
         self.vup = vup;
         self.r_origin = cam.pos;
         self.modelorg = cam.pos;
-        self.screenedge = screen_edges(w, h, xscale, yscale);
+        self.screenedge = view_edges(&frame.geom, &proj);
         for (i, c) in self.clip.iter_mut().enumerate() {
             c.leftedge = i == 0;
             c.rightedge = i == 1;
@@ -1860,18 +1886,20 @@ impl EdgeState {
         ents: &[Ent<'a>],
         bits: &[u32],
     ) -> WorldDraw<'a> {
-        let (w, h) = (self.w, self.h);
         let (cam, opts) = (&frame.cam, &frame.scene.options);
-        let Projection { cx, cy, xscale, yscale } = Projection::new(cam, w, h, opts.aspect());
+        let Projection { cx, cy, xscale, yscale } = Projection::new(cam, &frame.geom, opts.aspect());
         let (vpn, vright, vup) = (self.vpn, self.vright, self.vup);
         let sview = ScreenProj { forward: vpn, right: vright, up: vup, cx, cy, xscale, yscale };
         let mipview = MipView::new(xscale, yscale, opts.mip);
+        // The dome's scale is the projected view's (a window's is the view it
+        // opens onto, so its sky meets the view's).
+        let (proj_w, proj_h) = (frame.geom.proj_w, frame.geom.proj_h);
         let sky = SkyView::new(
             vpn,
             vright,
             vup,
-            sky_dome_scale(w, h, frame.scr_fov(), cam.fov_deg),
-            opts.sky_centre(w, h),
+            sky_dome_scale(proj_w, proj_h, frame.scr_fov(), cam.fov_deg),
+            opts.sky_centre(&frame.geom),
             frame.scene.time,
             opts.video.sky,
         );

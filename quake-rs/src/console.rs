@@ -14,18 +14,20 @@ use crate::render::Image;
 use std::collections::VecDeque;
 
 /// Draw the notify lines (`bprint`/`sprint`, Con_DrawNotify): stacked from
-/// the very top of the [`screen_2d`] screen (`v = 0`), each character at
-/// `(x+1)<<3`.
+/// row `top` of the [`screen_2d`] screen, each character at `(x+1)<<3`. id's
+/// `top` is 0, the very top (`v = 0`); the 2026 Show FPS readout takes that
+/// row while it shows ([`crate::screen::notify_top`]).
 pub fn draw_notify(
     image: &mut Image,
     conchars: &crate::wad::Qpic,
     lines: &[&str],
+    top: i32,
 ) {
     if image.w == 0 || image.h == 0 {
         return;
     }
     let scale = screen_2d(image.w, image.h).scale;
-    let mut vy = 0.0;
+    let mut vy = top as f32;
     for line in lines {
         draw_string_scaled(image, conchars, 8.0, vy, line, scale, 0.0, 0.0);
         vy += 8.0;

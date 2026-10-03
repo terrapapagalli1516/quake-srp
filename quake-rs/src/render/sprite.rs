@@ -36,7 +36,7 @@ use crate::math::{add, angle_vectors, dot, inverse, normalize, scale, sub, Vec3,
 use crate::spr::{Frame as SprFrame, Sprite, SpriteFrame, SPR_FACING_UPRIGHT, SPR_ORIENTED, SPR_VP_PARALLEL,
     SPR_VP_PARALLEL_ORIENTED, SPR_VP_PARALLEL_UPRIGHT};
 use super::band::Band;
-use super::edge::{frustum_planes, screen_edges};
+use super::edge::{frustum_planes, view_edges};
 use super::polyse::c_ftoi;
 use super::{Frame, Projection};
 
@@ -112,7 +112,8 @@ impl SpriteView {
     /// (`EdgeState::setup_frame`).
     pub(super) fn new(frame: &Frame) -> SpriteView {
         let (cam, w, h) = (&frame.cam, frame.w, frame.h);
-        let Projection { cx, cy, xscale, yscale } = Projection::new(cam, w, h, frame.scene.options.aspect());
+        let proj = Projection::new(cam, &frame.geom, frame.scene.options.aspect());
+        let Projection { cx, cy, xscale, yscale } = proj;
         let (vpn, vright, vup) = cam.basis();
         let (wf, hf) = (w as f32, h as f32);
         SpriteView {
@@ -128,7 +129,7 @@ impl SpriteView {
             fvrecty_adj: -0.5,
             fvrectright_adj: wf - 0.5,
             fvrectbottom_adj: hf - 0.5,
-            clip: frustum_planes(&screen_edges(w, h, xscale, yscale), vpn, vright, vup, cam.pos),
+            clip: frustum_planes(&view_edges(&frame.geom, &proj), vpn, vright, vup, cam.pos),
         }
     }
 

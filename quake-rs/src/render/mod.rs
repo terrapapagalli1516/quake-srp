@@ -74,11 +74,11 @@ pub use crate::menu::{
     NUM_HELP_PAGES, RESOLUTION_PRESETS, SETTING_ROWS,
 };
 pub use crate::sbar::{
-    draw_finale_overlay, draw_hud_into, draw_intermission_overlay, Hud, IntermissionStats,
+    draw_finale_overlay, draw_hud_into, draw_intermission_overlay, status_bar_rect, Hud, IntermissionStats,
 };
 pub use crate::screen::{
-    calc_refdef, compose_view, draw_centerprint, draw_crosshair, draw_fps, draw_pause, screen_with_backtile,
-    status_bar_rows, vid_aspect, CrossSize, Crosshair, ViewRect,
+    calc_refdef, compose_view, draw_centerprint, draw_crosshair, draw_fps, draw_pause, notify_top, screen_with_backtile,
+    status_bar_rows, vid_aspect, CrossSize, Crosshair, Refdef, SbarLayout, ViewRect,
     SB_LINES_FULL, VIEWSIZE_DEFAULT,
 };
 // The renderer's public API (its files are private).
@@ -385,6 +385,11 @@ pub struct RenderOptions {
     /// above the status bar or inside a border (viewsize below 120) sees the
     /// sky off its own centre — 24 rows at 320x200 and the default viewsize 100.
     pub screen: Option<ScreenPlace>,
+    /// EXTRA, not id (default `None`: the image is the whole view): the image
+    /// is a window onto a larger view, drawn with that view's projection
+    /// ([`ViewWindow`]) — the 2026 status bar overlay's world under the view
+    /// ([`Renderer::render_below`]).
+    pub window: Option<ViewWindow>,
     /// EXTRA, not id (default off): exact perspective at every pixel of the
     /// surface-cached walls and the liquids. id's x86 renderer, what 1996
     /// players saw, is exact only every 16 pixels and affine in between
@@ -397,6 +402,59 @@ pub struct RenderOptions {
     /// `d_mipscale` / `d_mipcap` (`D_SetupFrame` reads them every frame; id's
     /// by default).
     pub mip: MipCvars,
+}
+
+/// A window onto a larger view ([`RenderOptions::window`]): the image is the
+/// rectangle at `(x, y)` of a `view_w x view_h` view, which may run past that
+/// view's own edges (the overlay's windows lie below it), and it is projected
+/// as that view is — its centre, its `xscale`/`yscale`, its sky's scale, its
+/// particles' and models' sizes — so every pixel of it is the one the larger
+/// view would have at that place, extended as far as the window goes. id's
+/// `R_ViewChanged` can centre the projection off the view (`xOrigin`,
+/// `yOrigin`); this is that, for a window wherever it lies.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ViewWindow {
+    pub x: usize,
+    pub y: usize,
+    pub view_w: usize,
+    pub view_h: usize,
+}
+
+/// Where a frame's `w x h` image lies on the view it is projected as: at
+/// `(ox, oy)` of a `proj_w x proj_h` view ([`ViewWindow`]), or, the whole
+/// view (id's, and every view but a window), at `(0, 0)` of itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ViewGeom {
+    pub(crate) w: usize,
+    pub(crate) h: usize,
+    pub(crate) proj_w: usize,
+    pub(crate) proj_h: usize,
+    pub(crate) ox: usize,
+    pub(crate) oy: usize,
+}
+
+impl ViewGeom {
+    /// A `w x h` view that is its own projection.
+    pub(crate) fn whole(w: usize, h: usize) -> ViewGeom {
+        ViewGeom { w, h, proj_w: w, proj_h: h, ox: 0, oy: 0 }
+    }
+
+    /// A `w x h` image drawn as `window` (or the whole view without one).
+    fn of(w: usize, h: usize, window: Option<ViewWindow>) -> ViewGeom {
+        window.map_or(ViewGeom::whole(w, h), |win| ViewGeom {
+            w,
+            h,
+            proj_w: win.view_w,
+            proj_h: win.view_h,
+            ox: win.x,
+            oy: win.y,
+        })
+    }
+
+    /// Whether the image is the whole view (every number then id's).
+    pub(crate) fn is_whole(&self) -> bool {
+        *self == ViewGeom::whole(self.w, self.h)
+    }
 }
 
 /// A view's place on the screen ([`RenderOptions::screen`]): its top-left
@@ -415,6 +473,7 @@ impl Default for RenderOptions {
         RenderOptions {
             pixel_aspect: 1.0,
             screen: None,
+            window: None,
             exact_perspective: false,
             video: VideoCvars::CLASSIC,
             mip: MipCvars::DEFAULT,
@@ -423,12 +482,14 @@ impl Default for RenderOptions {
 }
 
 impl RenderOptions {
-    /// `D_Sky_uv_To_st`'s screen centre in a `w x h` view's own pixels:
-    /// `(vid.width>>1) - vrect.x`, `(vid.height>>1) - vrect.y`.
-    fn sky_centre(&self, w: usize, h: usize) -> (i32, i32) {
+    /// `D_Sky_uv_To_st`'s screen centre in a view's own pixels:
+    /// `(vid.width>>1) - vrect.x`, `(vid.height>>1) - vrect.y`. Without a
+    /// place on a screen the view is the screen (a window's is the view it
+    /// opens onto).
+    fn sky_centre(&self, geom: &ViewGeom) -> (i32, i32) {
         match self.screen {
             Some(p) => ((p.vid_w as i32 >> 1) - p.x as i32, (p.vid_h as i32 >> 1) - p.y as i32),
-            None => (w as i32 >> 1, h as i32 >> 1),
+            None => ((geom.proj_w as i32 >> 1) - geom.ox as i32, (geom.proj_h as i32 >> 1) - geom.oy as i32),
         }
     }
 
@@ -461,7 +522,9 @@ impl RenderOptions {
 /// `yscale = xscale * pixelAspect`; the vertical field of view follows from
 /// them (the software renderer never uses `fov_y`). The centre is `w/2, h/2`
 /// because pixel `(px, py)` has its centre at `(px + 0.5, py + 0.5)` here: id's
-/// `xcenter = w/2 - 0.5` with centres on the integers.
+/// `xcenter = w/2 - 0.5` with centres on the integers. A window
+/// ([`ViewGeom`]) is projected as the view it lies in: that view's scales,
+/// and its centre in the window's own pixels.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Projection {
     pub(crate) cx: f32,
@@ -471,13 +534,14 @@ pub(crate) struct Projection {
 }
 
 impl Projection {
-    pub(crate) fn new(cam: &Camera, w: usize, h: usize, pixel_aspect: f32) -> Projection {
-        let cx = w as f32 / 2.0;
-        let cy = h as f32 / 2.0;
+    pub(crate) fn new(cam: &Camera, geom: &ViewGeom, pixel_aspect: f32) -> Projection {
+        let cx = geom.proj_w as f32 / 2.0;
+        let cy = geom.proj_h as f32 / 2.0;
         let tan_half = (cam.fov_deg as f64 * 0.5).to_radians().tan();
         // A degenerate fov falls back to ~90 degrees (xscale = cx).
         let xscale = if tan_half.abs() < 1e-6 { cx } else { (cx as f64 / tan_half) as f32 };
-        Projection { cx, cy, xscale, yscale: xscale * pixel_aspect }
+        // (A whole view's offsets are 0: its centre is id's to the bit.)
+        Projection { cx: cx - geom.ox as f32, cy: cy - geom.oy as f32, xscale, yscale: xscale * pixel_aspect }
     }
 }
 
@@ -861,6 +925,9 @@ struct Frame<'s, 'a> {
     cam: Camera,
     w: usize,
     h: usize,
+    /// The image's place on the view it is projected as: the whole view, or
+    /// a window onto one ([`RenderOptions::window`]).
+    geom: ViewGeom,
     /// The liquids' `sintable` (`R_InitTurb`).
     turb: TurbTable,
 }
@@ -869,10 +936,11 @@ impl<'s, 'a> Frame<'s, 'a> {
     /// `scene` in a `w x h` view (already clamped to the cvars' largest).
     fn new(scene: &'s Scene<'a>, w: usize, h: usize) -> Frame<'s, 'a> {
         let opts = &scene.options;
-        let (screen_w, screen_h) = opts.screen.map_or((w, h), |s| (s.vid_w, s.vid_h));
+        let geom = ViewGeom::of(w, h, opts.window);
+        let (screen_w, screen_h) = opts.screen.map_or((geom.proj_w, geom.proj_h), |s| (s.vid_w, s.vid_h));
         let fov_x = opts.video.fov_mode.fov_x(scene.camera.fov_deg, screen_w, screen_h, opts.aspect());
         let cam = Camera { fov_deg: fov_x, ..scene.camera };
-        Frame { scene, cam, w, h, turb: TurbTable::new() }
+        Frame { scene, cam, w, h, geom, turb: TurbTable::new() }
     }
 
     /// `scr_fov`, the cvar: what id tests on the cvar itself (no gun over 90,
@@ -1037,6 +1105,54 @@ impl Renderer {
         }
     }
 
+    /// EXTRA, not id (2026's status bar overlay, [`crate::screen::SbarLayout`]):
+    /// the world under `scene`'s view, in the rectangle `part` of `screen`
+    /// (below the view and within its columns: a corner beside the status
+    /// bar, [`crate::screen::Refdef::below_parts`]), drawn as a window onto the
+    /// view ([`ViewWindow`]) — the view's projection, frustum moved to the
+    /// part's sides — so it is what a taller view would show there, and the
+    /// view itself, drawn before, is not touched. `scene.options.screen` is
+    /// the view's place (none: the top-left corner of a screen of `screen`'s
+    /// size). A part above or left of the view draws nothing.
+    pub fn render_window(&mut self, scene: &Scene, part: ViewRect, screen: &mut Image) {
+        let (w, h) = scene.options.video.clamp_to_max(scene.width, scene.height);
+        let place = scene.options.screen.unwrap_or(ScreenPlace { x: 0, y: 0, vid_w: screen.w, vid_h: screen.h });
+        if part.x < place.x || part.y < place.y {
+            return;
+        }
+        let window = ViewWindow { x: part.x - place.x, y: part.y - place.y, view_w: w, view_h: h };
+        let options = RenderOptions {
+            screen: Some(ScreenPlace { x: part.x, y: part.y, ..place }),
+            window: Some(window),
+            ..scene.options
+        };
+        self.render_into(&Scene { width: part.w, height: part.h, options, ..*scene }, screen);
+    }
+
+    /// [`Renderer::render`] with the world continued `below` rows under the
+    /// view, its full width (one window, [`Renderer::render_window`]'s): a
+    /// `w x (h + below)` image whose first `h` rows are exactly `render`'s
+    /// (`below` 0: `render` itself).
+    /// The underwater warp's source when the 2026 overlay draws under the
+    /// view ([`Renderer::warp_into`]'s `below`), so the wobble runs on into
+    /// the corners from the view's own rows.
+    pub fn render_extended(&mut self, scene: &Scene, below: usize) -> Image {
+        let (w, h) = scene.options.video.clamp_to_max(scene.width, scene.height);
+        let mut image = Image::reused_uncleared(w, h + below);
+        let (view_rows, below_rows) = image.pixels.split_at_mut(w * h);
+        self.draw(scene, w, h, view_rows, w, 0);
+        if below > 0 {
+            let place = scene.options.screen.unwrap_or(ScreenPlace { x: 0, y: 0, vid_w: w, vid_h: h + below });
+            let options = RenderOptions {
+                screen: Some(ScreenPlace { y: place.y + h, ..place }),
+                window: Some(ViewWindow { x: 0, y: h, view_w: w, view_h: h }),
+                ..scene.options
+            };
+            self.draw(&Scene { width: w, height: below, options, ..*scene }, w, below, below_rows, w, 0);
+        }
+        image
+    }
+
     /// The frame of `scene`, `w x h` (already clamped), into `rows`: `stride`
     /// pixels a row, the view at column `x0` of each. What the whole frame
     /// decides is done first — the world's edges, spans and surfaces (the
@@ -1109,12 +1225,18 @@ impl Renderer {
     /// stretched over the rectangle `at` of `screen` at `clock`, on the
     /// renderer's threads. With the hires extra (`hires`) the wobble is scaled
     /// to the view. The view's buffer goes back to the frame pool.
-    pub fn warp_into(&mut self, view: Image, screen: &mut Image, at: ViewRect, clock: f32, hires: bool) {
+    ///
+    /// `below` (2026's status bar overlay, with `hires`; 0 otherwise): `view`
+    /// is [`Renderer::render_extended`]'s, `below` rows taller than `at`, and
+    /// the wobble runs on over that many rows of `screen` under `at`, as the
+    /// view's own tables continue there; `at`'s rows are id's either way.
+    pub fn warp_into(&mut self, view: Image, screen: &mut Image, at: ViewRect, below: usize, clock: f32, hires: bool) {
         let (sw, threads) = (screen.w, self.threads());
         let (x0, y0) = (at.x.min(sw), at.y.min(screen.h));
         let (w, h) = (at.w.min(sw - x0), at.h.min(screen.h - y0));
-        if let Some(rows) = screen.pixels.get_mut(y0 * sw..(y0 + h) * sw) {
-            let target = warp::WarpTarget { rows, stride: sw, x0, w, h };
+        let below = below.min(screen.h - y0 - h);
+        if let Some(rows) = screen.pixels.get_mut(y0 * sw..(y0 + h + below) * sw) {
+            let target = warp::WarpTarget { rows, stride: sw, x0, w, h, below };
             warp::warp_screen(&mut self.warp, &view, target, clock, hires, threads);
         }
         recycle_image(view);
@@ -1151,7 +1273,7 @@ impl<'a> Entities<'a> {
         sprites.sort_by_key(|&(before, _)| before);
         if let Some(t) = ts { prof.add(|s| s.sprite_ns += t.elapsed().as_nanos() as u64); }
         let opts = &scene.options;
-        let proj = part::ParticleProjection::new(&frame.cam, frame.w, frame.h, opts.aspect(), opts.video.hires);
+        let proj = part::ParticleProjection::in_view(&frame.cam, &frame.geom, opts.aspect(), opts.video.hires);
         let particles = part::project_particles(&frame.cam, &proj, scene.particles);
         let gun = scene.viewmodel.as_ref().and_then(|vm| prepare_viewmodel(frame, vm));
         Entities { models, sprites, particles, gun }
@@ -1591,12 +1713,19 @@ mod tests {
         // 24 rows below its own; the viewsize-70 view (224x140 at 48,6) is off
         // both ways.
         let at = |screen| RenderOptions { screen, ..Default::default() };
-        assert_eq!(at(None).sky_centre(320, 200), (160, 100));
-        assert_eq!(at(None).sky_centre(320, 152), (160, 76));
+        let whole = ViewGeom::whole;
+        assert_eq!(at(None).sky_centre(&whole(320, 200)), (160, 100));
+        assert_eq!(at(None).sky_centre(&whole(320, 152)), (160, 76));
         let sbar = ScreenPlace { x: 0, y: 0, vid_w: 320, vid_h: 200 };
-        assert_eq!(at(Some(sbar)).sky_centre(320, 152), (160, 100));
+        assert_eq!(at(Some(sbar)).sky_centre(&whole(320, 152)), (160, 100));
         let border = ScreenPlace { x: 48, y: 6, vid_w: 320, vid_h: 200 };
-        assert_eq!(at(Some(border)).sky_centre(224, 140), (112, 94));
+        assert_eq!(at(Some(border)).sky_centre(&whole(224, 140)), (112, 94));
+        // A window below that view, beside the bar (its corner at (256, 152)
+        // on the screen): the same centre, in the window's own pixels.
+        let corner = ScreenPlace { x: 256, y: 152, vid_w: 320, vid_h: 200 };
+        assert_eq!(at(Some(corner)).sky_centre(&whole(64, 48)), (160 - 256, 100 - 152));
+        let window = ViewGeom { w: 64, h: 48, proj_w: 320, proj_h: 152, ox: 256, oy: 152 };
+        assert_eq!(at(None).sky_centre(&window), (160 - 256, 76 - 152));
     }
 
     #[test]
@@ -1701,7 +1830,7 @@ mod tests {
             r.set_threads(threads);
             let view = r.render(&scene);
             let mut screen = Image::new(w, h, 9);
-            r.warp_into(view, &mut screen, at, scene.time, true);
+            r.warp_into(view, &mut screen, at, 0, scene.time, true);
             screen
         };
         let one = frame_at(1);
@@ -1741,6 +1870,50 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_view_drawn_as_windows_onto_it_is_the_view() {
+        // render_window draws a part of the screen as a window onto a view:
+        // that view's projection, frustum cut to the part. Four windows that
+        // tile the view (and one past its bottom, the overlay's case) draw the
+        // view again — the world, a model, particles, sky and water — but for
+        // the odd pixel where a window's own sides round an edge or a span's
+        // 16-pixel steps differently.
+        let bsp = special_surface_room();
+        let pal = fixtures::ramp_palette();
+        let mdl = fixtures::tiny_mdl();
+        let cam = Camera::looking_at([-200.0, -150.0, 60.0], [0.0, 0.0, 0.0], 90.0);
+        let models = [ModelInstance::with_frame(&mdl, [-80.0, 0.0, 0.0], 30.0, 0, [200, 40, 40])];
+        let particles: Vec<(Vec3, u8)> = (0..100).map(|i| ([-120.0 + 2.0 * i as f32, 0.0, 20.0], 77)).collect();
+        let (vw, vh) = (160, 120);
+        let place = RenderOptions { screen: Some(ScreenPlace { x: 0, y: 0, vid_w: vw, vid_h: vh + 40 }), ..RenderOptions::default() };
+        let view = Scene { time: 0.7, models: &models, particles: &particles, options: place, ..Scene::new(&bsp, cam, vw, vh, &pal) };
+        let mut r = Renderer::new();
+        let mut whole = Image::new(vw, vh + 40, 1);
+        r.render_into(&view, &mut whole);
+        let mut tiled = Image::new(vw, vh + 40, 1);
+        for (x, y, w, h) in [(0, 0, 70, 50), (70, 0, 90, 50), (0, 50, 70, 70), (70, 50, 90, 70)] {
+            r.render_window(&view, crate::screen::ViewRect { x, y, w, h }, &mut tiled);
+        }
+        // On the ramp palette a span stepped differently is one index off;
+        // an edge or a texel boundary rounded differently, more.
+        let off = |by: u8| (0..vw * vh).filter(|&i| whole.pixels[i].abs_diff(tiled.pixels[i]) > by).count();
+        let (differ, far) = (off(0), off(2));
+        assert!(differ * 50 < vw * vh, "{differ} of {} pixels differ", vw * vh);
+        assert!(far * 400 < vw * vh, "{far} of {} pixels differ by more than a shade", vw * vh);
+        assert!(tiled.pixels[vw * vh..].iter().all(|&p| p == 1), "nothing past the windows");
+        // A window below the view: the world goes on there, and the view's
+        // own rows are not touched.
+        let before = whole.pixels.clone();
+        r.render_window(&view, crate::screen::ViewRect { x: 0, y: vh, w: vw, h: 40 }, &mut whole);
+        assert!(whole.pixels[..vw * vh] == before[..vw * vh], "the view's rows untouched");
+        assert!(whole.pixels[vw * vh..].iter().filter(|&&p| p != 1).count() > vw * 40 / 2, "the world below the view");
+        // Above or left of the view's place: nothing.
+        let mut none = Image::new(vw, vh + 40, 1);
+        let moved = Scene { options: RenderOptions { screen: Some(ScreenPlace { x: 10, y: 10, vid_w: vw, vid_h: vh + 40 }), ..place }, ..view };
+        r.render_window(&moved, crate::screen::ViewRect { x: 0, y: 0, w: 10, h: 10 }, &mut none);
+        assert!(none.pixels.iter().all(|&p| p == 1));
     }
 
     #[test]

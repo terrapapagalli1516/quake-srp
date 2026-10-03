@@ -7,7 +7,7 @@
 
 use crate::bsp::Bsp;
 use crate::math::{dot, Vec3};
-use super::{nearest_index, Camera, Frame};
+use super::{nearest_index, Camera, Frame, ViewGeom};
 use super::light::{r_light_point, COLORMAP_LEN, LIGHTSTYLES};
 use super::polyse::PolyFramebuffer;
 use super::stats::Profiler;
@@ -231,9 +231,12 @@ pub(super) struct AliasView {
 }
 
 impl AliasView {
-    /// The alias view of a `w x h` view drawn by `cam` (its field of view
-    /// the view's own) for the `fov` cvar `scr_fov`.
-    fn new(cam: &Camera, scr_fov: f32, w: usize, h: usize, pixel_aspect: f32) -> AliasView {
+    /// The alias view of an image drawn by `cam` (its field of view the
+    /// view's own) for the `fov` cvar `scr_fov`: projected as its view
+    /// (`proj_w x proj_h`, the image's own unless it is a window onto a larger
+    /// one, [`ViewGeom`]) and clipped to the image's `w x h`.
+    fn new(cam: &Camera, scr_fov: f32, geom: &ViewGeom, pixel_aspect: f32) -> AliasView {
+        let (w, h) = (geom.proj_w, geom.proj_h);
         let (vpn, vright, vup) = cam.basis();
         // R_ViewChanged: horizontalFieldOfView = 2*tan(fov_x/360*M_PI),
         // aliasxscale = vrect.width / it, aliasyscale = aliasxscale * pixelAspect.
@@ -257,12 +260,13 @@ impl AliasView {
             vright,
             vup,
             origin: cam.pos,
-            xcenter: w as f32 * 0.5 - 0.5,
-            ycenter: h as f32 * 0.5 - 0.5,
+            // (A whole view's offsets are 0: id's centre to the bit.)
+            xcenter: w as f32 * 0.5 - 0.5 - geom.ox as f32,
+            ycenter: h as f32 * 0.5 - 0.5 - geom.oy as f32,
             xscale,
             yscale: xscale * pixel_aspect,
-            right: w as i32,
-            bottom: h as i32,
+            right: geom.w as i32,
+            bottom: geom.h as i32,
             transition: (R_ALIASTRANSBASE as f64 * res_scale) as f32,
             resfudge: (R_ALIASTRANSADJ as f64 * res_scale) as f32,
         }
@@ -867,7 +871,7 @@ pub(super) fn prepare_alias_model<'a>(
         return None;
     }
     let scene = frame.scene;
-    let view = AliasView::new(&frame.cam, frame.scr_fov(), frame.w, frame.h, scene.options.aspect());
+    let view = AliasView::new(&frame.cam, frame.scr_fov(), &frame.geom, scene.options.aspect());
     let ent = AliasEntity {
         mdl: inst.mdl,
         origin: inst.origin,
@@ -997,7 +1001,7 @@ pub(super) fn prepare_viewmodel<'a>(frame: &Frame<'_, 'a>, vm: &Viewmodel<'a>) -
     if frame.w == 0 || frame.h == 0 || scr_fov > 90.0 {
         return None;
     }
-    let view = AliasView::new(cam, scr_fov, frame.w, frame.h, scene.options.aspect());
+    let view = AliasView::new(cam, scr_fov, &frame.geom, scene.options.aspect());
     let origin = [cam.pos[0] + vm.origin_ofs[0], cam.pos[1] + vm.origin_ofs[1], cam.pos[2] + vm.origin_ofs[2]];
     // CalcGunAngle's angles (pitch stored "backward", i.e. +up like the camera).
     let ent = AliasEntity {
@@ -1852,10 +1856,10 @@ mod tests {
         // height has, as it is drawn at that view's size.
         let cam = Camera { pos: [0.0; 3], yaw: 0.0, pitch: 0.0, roll: 0.0, fov_deg: 90.0 };
         let wide = Camera { fov_deg: crate::render::FovMode::HorPlus.fov_x(90.0, 1920, 1080, 1.0), ..cam };
-        let (a, b) = (AliasView::new(&wide, 90.0, 1920, 1080, 1.0), AliasView::new(&cam, 90.0, 1440, 1080, 1.0));
+        let (a, b) = (AliasView::new(&wide, 90.0, &ViewGeom::whole(1920, 1080), 1.0), AliasView::new(&cam, 90.0, &ViewGeom::whole(1440, 1080), 1.0));
         assert!((a.transition - b.transition).abs() < 1e-2 && (a.resfudge - b.resfudge).abs() < 1e-2);
         assert!((a.xscale - b.xscale).abs() < 1e-2);
         // id's own at 320x152: res_scale 1, transition 200.
-        assert_eq!(AliasView::new(&cam, 90.0, 320, 152, 1.0).transition, 200.0);
+        assert_eq!(AliasView::new(&cam, 90.0, &ViewGeom::whole(320, 152), 1.0).transition, 200.0);
     }
 }

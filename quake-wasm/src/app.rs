@@ -171,6 +171,9 @@ pub(crate) struct App {
     /// The gamepad: in_win.c's joystick state and the 2026 rumble's
     /// ([`crate::input::PadHost`]).
     pub(crate) pad: crate::input::PadHost,
+    /// The mouse's records, counts and turn so far, for the page's
+    /// `?mousecheck` ([`crate::input::MouseCount`]).
+    pub(crate) mouse: crate::input::MouseCount,
     /// Set once by [`App::request_quit`] (`Host_Quit_f`'s immediate branch,
     /// or `M_Quit_Key`'s 'y'): the session is over. [`crate::sys::run`]'s
     /// loop reads it back with [`take_quit`] and ends the turn — and the
@@ -613,6 +616,7 @@ pub(crate) fn ensure_app(f: impl FnOnce(&mut App)) {
                 m_save_demonum: 0,
                 hw_threads: 1,
                 pad: crate::input::PadHost::default(),
+                mouse: crate::input::MouseCount::default(),
                 quit: false,
                 pending_cmd: None,
                 screenshot_request: false,

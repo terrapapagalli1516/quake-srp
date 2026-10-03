@@ -717,38 +717,53 @@ it means, as id's `Key_Event`, `IN_MouseMove` and the joystick code do.
   for itself, as this section says it should, is NOT verified by this
   check.
 - **The raw mouse.** The pointer lock asks for `unadjustedMovement`
-  (Chromium's raw input, on Windows, macOS and ChromeOS): id's
-  `IN_StartupMouse` switched Windows' pointer acceleration off while the game
-  ran, so a count was always the same turn. Refused (Linux, Firefox), the
-  plain lock, at once and from then on (Chromium refuses a burst of lock
-  requests). Each `mousemove` is a `MOUSE` record with the event's
-  `movementX/Y` as they came (floats, never rounded); a browser that
-  coalesces samples into one event per refresh sums their movement into it,
-  so every count arrives, and the program adds each as it comes: the turn
-  per count is the same at any frame rate ("The mouse at any frame rate",
-  below). `pointerrawupdate` would deliver samples sooner within a refresh,
-  but the frame starts at the refresh either way, so it would not show them
-  sooner.
-  requests). Each `mousemove` is a `MOUSE` record; a browser that coalesces
-  samples into one event per refresh sums their movement into it, so every
-  count arrives, and the program adds each as it comes: the turn per count
-  is the same at any frame rate (`mouse_turns_the_same_at_60_and_480_hz`).
-  `pointerrawupdate` would deliver samples sooner within a refresh, but the
-  frame starts at the refresh either way, so it would not show them sooner.
+  (Chromium's raw input, on Windows, macOS and ChromeOS; Firefox's since
+  152, on Windows and macOS; Safari's on macOS): id's `IN_StartupMouse`
+  switched Windows' pointer acceleration off while the game ran, so a count
+  was always the same turn. Refused (Linux, an older browser), the plain
+  lock, at once and from then on (Chromium refuses a burst of lock
+  requests); `?plainlock` never asks (the mouse check's). Each mouse
+  `pointermove` is a `MOUSE` record: the sum of its coalesced samples'
+  `movementX/Y` (`getCoalescedEvents()`; floats, never rounded), and the
+  `mousemove` that follows it is skipped; a `mousemove` with no
+  `pointermove` before it carries its own. Chromium and Firefox sum a
+  refresh's samples into the one event they send, so there the sum is the
+  event's own movement, count for count; Safari keeps only the newest
+  sample's in it, and the list holds the rest ("The mouse at any frame
+  rate", below). The program adds each record as it comes: the turn per
+  count is the same at any frame rate. `pointerrawupdate` would deliver
+  samples sooner within a refresh, but the frame starts at the refresh
+  either way, so it would not show them sooner.
 - **The wheel** (2026's weapon cycle, `Bindings::with_wheel`). id's
   `WM_MOUSEWHEEL` (`vid_win.c`) turns every message into one press+release of
   `K_MWHEELUP`/`K_MWHEELDOWN`, whatever the message's own delta — Windows
-  already chunks a wheel's spin into one message per notch — so the page
-  turns a browser `wheel` event's continuous `deltaY` back into notches:
-  accumulated and normalized to Chrome's 100-per-notch (a line mouse's own
-  notch in Firefox, `deltaMode` 1, is 3 lines), one press+release per notch
-  consumed, capped so a fast flick or a trackpad's fling can't cycle through
-  every weapon. It needs no pointer lock — id's own never did — and fires
+  already chunks a wheel's spin into one message per notch. A browser's
+  `wheel` event has no notches, and its `deltaY` says little: Chrome's notch
+  is 100 px on Windows, but on macOS a notchy mouse's is NSEvent's
+  accelerated `deltaY` (0.1 for a slow notch, by the comment there) times 40
+  (`kScrollbarPixelsPerCocoaTick`, `web_input_event_builders_mac.mm`;
+  WebKit's `pixelsPerLineStep` the same): about 4 px, which never filled a
+  100 px notch. (Chromium's legacy `wheelDeltaY` there is the raw notch
+  count × 120, but a trackpad's is its pixels × 3, so it cannot tell the two
+  apart.) So the time decides: an event more
+  than 100 ms after the last is a notch of its own, whatever its size — a
+  mouse's notch comes alone — fired at once and counted as a whole notch's
+  worth; closer events are a stream (a trackpad, a fast spin), accumulated
+  at 100 px a notch (a line mouse's own notch in Firefox, `deltaMode` 1, is
+  3 lines), the direction's flip dropping what was carried, capped so a fast
+  flick or a trackpad's fling can't cycle through every weapon. A fast spin
+  of a macOS mouse is such a stream: its first notch fires, the rest as their
+  pixels add up. It needs no pointer lock — id's own never did — and fires
   whatever has the keyboard: `Key_Event` routes it itself (the console
   already scrolls on it, `consolekey()`; Customize controls' bind grab takes
   it like any key). `default.cfg` predates the wheel, so Classic leaves it
   unbound, as id's players who bound it themselves; 2026 binds a notch up to
   `impulse 10` (next weapon) and down to `impulse 12` (previous).
+  `verify_input.py` (5b) feeds Chrome's 100 px notches, a trackpad's burst,
+  and macOS-shaped ones (4, 8 and 12 px 150 ms apart: three notches; a
+  stream of 6 px; a turn back; a 1000 px flick); `?mousecheck` logs each
+  wheel event (`deltaY`, its mode, `wheelDeltaY`, the time since the last,
+  the notches made of it), the last three in its box. Not verified on a Mac.
 - **The gamepad.** The Gamepad API has no events for a pad's state, so the
   page polls `navigator.getGamepads()` once per refresh, just before the tick
   (as late as the frame allows), and sends a `GAMEPAD` record when the state
@@ -800,21 +815,148 @@ counts at 1000 Hz, the pointer locked). In the game, Chromium 146 and
 Firefox 155 delivered all 1000 counts and the view turned 160° at a 60 Hz
 and at a 455–710 Hz refresh; on a bare page with its main thread busy (up
 to 14 ms of a 60 Hz frame, 3 ms of a 480 Hz one) they and WebKitGTK 26.6
-delivered every count.
+delivered every count, in `mousemove` and in `pointermove`'s coalesced
+samples alike.
+
+Fractional and tiny counts arrive whole. The record is an f32, and
+`mouse_move` (`quake-wasm/src/input.rs`) multiplies it by `sensitivity` in
+f32 — no `(int)` mickeys, no `m_filter` — and adds it to the yaw, which
+rounds only to its own step:
+`sys::tests::fractional_mouse_counts_turn_the_view_in_full_at_any_refresh_rate`
+turns the view 48° with 1000 events of 0.3 counts from a 1000 Hz mouse (and
+1.6° with 0.01), at 60 and at 480 Hz, a record an event or a refresh's
+summed, in both profiles. The one loss was the yaw's range: the port's
+`CL_AdjustAngles` never brought it back within a turn (id's does, with
+`anglemod`), and an f32 far from 0 has coarse steps — after a hundred
+turns (36000°, a step of 2^-8°) a tenth of a count turned the view 2%
+short and a hundredth not at all. `math::angle_wrap` keeps it within
+[−180°, 180°) by whole turns, exactly (not `anglemod`'s truncation to
+1/65536 of a turn, which at 480 Hz would make the turn itself depend on the
+frame rate): `a_small_mouse_delta_turns_the_view_after_any_number_of_turns`.
+Nor is the drawn view a stepped or smoothed copy of the turn: the camera's
+yaw is the frame's `v_angle` (the move's yaw) plus the weapon's kick, and at
+480 Hz one count before every refresh turns every drawn frame by exactly
+0.16° (`every_frame_draws_the_mouse_turn_so_far`; Classic draws at most 72
+of the refreshes, each turned by the counts since the last).
+
+The look takes `pointermove`'s coalesced samples because of WebKit. From
+the browsers' sources (read 2026-10): Chromium's and Firefox's `movementX`
+is an integer, which their per-refresh coalescing sums (Chromium's raw input
+copies the OS's counts — Windows' `WM_INPUT`, macOS's unaccelerated field —
+and its plain lock differences truncated positions, which telescopes), and
+the coalesced samples add up to the event's own. WebKit's is a double, but
+`WebPageProxy::handleMouseEvent` replaces a queued move with the next
+(`removeOldRedundantEvent`) and, since 2023 (WebKit bug 259408), sends the
+page one a frame: the event's own movement is the newest sample's, the
+coalesced list has them all, and summed they are every count again. (Under
+Safari's unadjusted lock the samples are the accelerated movement and only
+the event's own is raw, so the turn follows macOS's acceleration there:
+accepted, against losing most of it. Safari also runs pages near 60 fps by
+default.) What no page can recover is a fractional delta truncated per OS
+event before the page sees it: Chromium on macOS with the plain lock (the
+page asks for the unadjusted one, which Chromium grants there; macOS 26
+also delivers one move per display frame, crbug 465798393) and Firefox's
+Wayland relative pointer. Between the page and the program nothing is per
+frame either: the input ring holds 64 KiB, some 5400 `MOUSE` records (a
+full ring drops a record and counts it, `inputDropped`), in order with the
+keys; `timeStamp` is only for the latency measurement; the program reads
+every record before its next frame. `verify_input.py` (10): 1000 records of
+0.3 counts turn 48°, a `pointermove` and its `mousemove` count once, and a
+real drag counts the same through the samples as through `mousemove`.
+
+The frame clock is not in the turn either. The game's only clock is the
+display's: a tick's dt is the difference of two `requestAnimationFrame`
+timestamps (in steps of 5 µs in Chromium and 20 µs in Firefox in this
+cross-origin-isolated page, measured; the differences telescope), which the
+program adds to `realtime` and `host_filter_time_display` makes a frame's
+`host_frametime`; the WASI clock only times a frame's own work. Nothing on
+the turn's path is scaled by time or by a count of ticks (no `m_filter`, no
+average, no remainder carried; `Tick72` steps only the palette's fades):
+`sys::tests::the_turn_does_not_depend_on_the_frame_clock` turns the view
+48° (320°) with 1000 records of 0.3 (2) counts at 60, 240, 480 and 1000 Hz,
+and with every tick's time reported at half and at twice the real one. A
+wrong clock would show instead as the whole game running fast or slow, and
+in the mouse check's `clock:` (below). What does depend on the frame rate is
+id's mouse *movement* (`+strafe`, `lookstrafe`, or mouse Y without mouse
+look): a count is a wish speed for the frame it lands in (`cmd.sidemove +=
+m_side * mouse_x`), so 1000 counts of `lookstrafe` moved the player 4.6
+units at 72 Hz, 1.2 at 144 Hz and 0.1 at 480 Hz (open). The turn and the
+pitch are per count.
+
 On Linux there is no raw input and `movementX` is in CSS pixels: at a
 device pixel ratio of 1.5 the same motion is 668 counts (Chromium) or 665
 (Firefox), at every rate — the pixel ratio scales the turn there, the frame
-rate does not. Not verified: Windows and macOS (where Chromium's raw input
-reports the mouse's own counts), and a real 480 Hz display. To check one,
-paste this into the console, capture the mouse, and move it the same
-distance (along a ruler) within five seconds, at 60 Hz and again at the
-display's top rate: fewer counts at the higher rate is the browser losing
-them; the same counts but less turn would be the game.
+rate does not. Not verified: Windows and macOS, Safari, and a real 480 Hz
+display.
 
-```js
-let n = 0, s = 0; canvas.addEventListener('mousemove', e => { n++; s += e.movementX; });
-setTimeout(() => console.log(n, 'events,', s, 'counts'), 5000);
+**The mouse against the trackpad (macOS).** The turn per count is
+`sensitivity` × 0.16°/3 (`M_YAW_PORT`, `quake-wasm/src/input.rs`; id's is
+0.022° a mickey, so at the default `sensitivity 3` the port turns 0.16° a
+count, 2.4 times id's 0.066°). Under the unadjusted lock a count is the
+mouse's own: 2250 counts a full turn, 5.7 cm at 1000 CPI, 14 cm at 400 — a
+fast turn, if every count arrives. Chromium on macOS reads each event's
+`kCGEventUnacceleratedPointerMovementX` as an integer
+(`web_input_event_builders_mac.mm`, `GetWebEventLocationForEventInView`),
+WebKit the same field as a double (`unadjustedMovementForEvent`; WebKit
+offers the unadjusted lock on every Mac, `HAVE_MOUSE_UNACCELERATED_MOVEMENT`
+— which Safari first shipped it, not checked), whatever the device; what
+macOS puts in it for a trackpad's motion is not documented. And since
+macOS 26 AppKit merges mouse moves into one event a display frame, before
+the browser sees them (crbug 465798393, open: a 1000 Hz mouse reads at
+120 Hz on a 120 Hz Mac; Chromium's fix, `mouseCoalescingEnabled` off, was
+reverted; by a comment of 2026-10-01 Safari 27 now does the same). By that
+report the moves it merges are lost —
+"sensitivity becomes extremely slow" in web FPS games with 500–1000 Hz mice,
+in Chromium only, back then — and `getCoalescedEvents()` cannot bring them
+back (its list holds one sample there). That fits a mouse that turns too
+little at 120 and at 480 Hz alike beside a trackpad, whose own rate is
+near the display's, that turns as it should. Not verified here (no Mac);
+the mouse check measures it (below).
+
+**The mouse check.** For a display, a device and a browser the local checks cannot
+run, the page measures itself. Open it with `?mousecheck` in the address,
+start a game, click the view and move: for ten seconds from the first move
+(Esc ends it sooner) the page logs a line a second to the console, then the
+run's summary, which also stays in a box at the top left of the view (the
+last four runs'; `quake.mousecheck(seconds)` runs one from the console and
+resolves to its summary). `?plainlock` added never asks for the unadjusted
+lock: the system's accelerated pointer, as the desktop moves it. A run with
+real input here (2026-10-03, XTEST on the desktop's Wayland compositor's virtual X11 layer, 8000 counts
+at 1000 Hz, Firefox's frame-rate limit off):
+
 ```
+mousecheck 10.0 s: 474 Hz refresh, 474 fps, 1.00 a refresh | clock: tick 2.06 ms median, game 1.000 s a second | mousemove 3798 × 8000.00 counts | pointermove 3798 × 8000.00 counts, 2.11 an event, in 5721 samples (1.51 an event), 0 fractional | rawupdate 5721 × 8000.00 | records 3798 sent, 0 dropped, 3798 read × 8000.00 | turned 1280.00°, 0.1600°/count | smallest 1.000 | Firefox 155 Linux, dpr 1, plain lock
+```
+
+In order: the display's refresh as the page sees it (`requestAnimationFrame`),
+the game's frames a second and a refresh; the clock: the ticks' median dt
+(1000 ÷ the refresh rate, in ms, while the frames keep up) and the game's
+time a second (`host_time`: 1.000 unless frames are clamped at 0.1 s or the
+clock is wrong); the browser's `mousemove`s and their own |movementX|
+summed; the `pointermove`s, their coalesced samples' sum (what the look
+takes) and a mean per event, the samples and a mean per event, and how many
+had a fractional part; the `pointerrawupdate`s (Chromium, on a secure page,
+and Firefox); the `MOUSE` records the page sent and dropped, and those the
+program read with their counts; the turn they gave the view, and per count
+(0.16° at `sensitivity 3`, at any rate); the smallest sample; the browser,
+its system, the pixel ratio and the lock asked for. Within a line:
+`mousemove` short of `pointermove` is a browser keeping only the newest
+sample in the event (the look sums them already); `pointermove` short of
+`rawupdate`, its per-refresh coalescing losing counts; `read` short of
+`sent`, or anything dropped, the ring; another °/count, the game. Samples
+an event near the mouse's rate ÷ the refresh rate (16 for a 1000 Hz mouse at
+60 Hz, 2 at 480) is every report reaching the browser; 1.00 with a mouse
+faster than the display is the system merging them first (macOS 26, above).
+Between runs of the same motion — 10 cm along a ruler — the counts are the
+measure: with the unadjusted lock a mouse's are its CPI ÷ 2.54 a
+centimetre (394 at 1000 CPI), at any speed and any rate. The mouse's run
+against the trackpad's gives their ratio in a minute; fewer counts than the
+mouse's CPI says, with one sample an event, is counts lost before the page;
+the same run with `?plainlock` says whether the system's accelerated pointer
+keeps them. Here, in Chromium 146 and Firefox 155, at 60 Hz and at
+406–474 Hz, every column read 8000 and the view turned 1280° (three Chromium
+runs at the higher rate read 8000, 7999 and 7998 in every column: counts
+lost before the page, to its plain lock on X).
 
 **Latency.** `web/latency.py` measures from each input event's `timeStamp`
 (when the browser got it, so the wait for the refresh counts; a pad's
@@ -1316,10 +1458,12 @@ control must never cover is the one piece of the page the program itself
 draws, not the page. The program reports it: `sbar_height` (an automation
 call, `quake_rs::screen::status_bar_rows`) answers the framebuffer rows,
 bottom-anchored, the status bar covers *this frame* — the same arithmetic
-`calc_refdef` uses to keep the 3-D view off the bar, so it is exactly right
-for every `viewsize` (0, 24 or 48 virtual rows), the "scaled 2-D" extra's
-whole-number blow-up, and an intermission (always full screen, so 0). The
-page turns that into a CSS custom property, `--bar` (`touch.js`'s
+`calc_refdef` uses to keep the 3-D view off the bar (in 2026 too: the
+"Status bar overlay", `scr_sbaroverlay`, only draws the world on under the
+view beside the bar), so it is exactly right for every `viewsize` (0, 24
+or 48 virtual rows), the "scaled 2-D" extra's whole-number blow-up, and an
+intermission (always full screen, so 0). The page turns that into a CSS
+custom property, `--bar` (`touch.js`'s
 `refreshBar`/`applyBar`): the frame rows at the canvas box's own CSS-pixel-
 per-frame-pixel ratio, re-read whenever that ratio or the bar might have
 changed — a resize, a rotation, fullscreen, and leaving the menu or console
