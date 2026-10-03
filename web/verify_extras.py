@@ -4,26 +4,29 @@ the page keeps across reloads, and Esc in fullscreen, end-to-end in headless
 Chromium. The page opens as `?classic` (every engine departure off):
 
   1. Options' 14th row, "Classic / 2026" (the port's): left/right switch the
-     whole profile (the 2026 one turns wasm_uncapped, wasm_exactpersp and
-     wasm_scaled2d on),
+     whole profile (the 2026 one turns wasm_uncapped and wasm_scaled2d on,
+     and r_perspspan to 1, exact),
      Enter opens the settings hub (menu_screen_id 10), whose rows open the
      pages (12 Picture and sound, 13 Motion and light, 14 Controls); their
-     rows switch each setting (Picture: Uncapped framerate row 0, Exact
-     perspective row 6, Show FPS row 8; Motion: Fluid sky row 2, Gliding
+     rows switch each setting (Picture: Uncapped framerate row 0, the
+     Perspective span row 6 stepping id's 16, 8, 4, exact, Show FPS row 8;
+     Motion: Fluid sky row 2, Gliding
      lights row 3, the Torch flicker slider row 4, five steps to 1;
      Controls: Wheel weapons row 1 binds and unbinds the wheel:
      left/right/Enter), Esc returns from a page to the hub on its row and
      from the hub to Options; the wasm_* console variables set the same
-     settings, with the console's history and Tab completion. Screenshots:
+     settings, with the console's history and Tab completion (and the retired
+     wasm_exactpersp still sets the span's two ends). Screenshots:
      verify_extras_options.png, verify_extras.png (the hub),
      verify_extras_motion.png (the torch slider at 1), verify_extras_fps.png
      (the readout).
   2. wasm_uncapped through the real program: a second of 1/144 s steps runs
      72 host frames with the cap (id's), 144 without.
   3. On frozen frames: wasm_showfps changes only the box in the top-left
-     corner, wasm_exactpersp redraws the walls, and switching either off
+     corner, exact perspective redraws the walls, and switching either off
      restores id's frame byte for byte (Classic). In 2026, where exact
-     perspective starts on, off redraws the walls and on is the frame again.
+     perspective starts on, id's 16 redraws the walls and exact is the frame
+     again; 8 and 4 redraw them too, each nearer exact than the one before.
   4. Persistence: config.cfg keeps the profile and what differs from it
      (`wasm_showfps "1"`, `viewsize "80"`, ...), and a plain reload (no
      `?classic`) comes back Classic with them.
@@ -172,10 +175,15 @@ with sync_playwright() as p:
     check("Left toggles it back", ext() == 1)
     key("ArrowUp", 8); key("ArrowLeft")
     check("all off again", ext() == 0)
-    key("ArrowDown", 6); key("ArrowRight")  # row 6: Exact perspective
-    check("Right toggles Exact perspective", ext() == 4)
+    key("ArrowDown", 6)                    # row 6: Perspective span, id's 16
+    spans = []
+    for _ in range(4):
+        key("ArrowRight"); spans.append(cvar("r_perspspan"))
+    check("Right steps Perspective span: 8, 4, exact, then id's 16 again", spans == ["8", "4", "1", "16"], str(spans))
     key("ArrowLeft")
-    check("...and back off", ext() == 0)
+    check("Left from id's 16 wraps to exact (the extras' old bit 4)", cvar("r_perspspan") == "1" and ext() == 4)
+    key("ArrowRight")
+    check("...and Right is id's 16 again", ext() == 0)
     key("Escape")
     check("Esc returns to the hub, on Picture and sound's row", scr() == EXTRAS and cur() == 1)
     key("ArrowDown"); key("Enter")
@@ -212,14 +220,15 @@ with sync_playwright() as p:
     check("the wasm_* console variables set the same settings", ext() == 3)
     # Key_Console's history and Tab, through the page's keys: Up Up brings
     # back "wasm_uncapped 1" (Backspace + 0 turns it off); Tab completes a
-    # cvar name ("wasm_ex" -> "wasm_exactpersp ").
+    # cvar name ("r_persp" -> "r_perspspan "). The retired wasm_exactpersp
+    # still sets the span's ends.
     key("ArrowUp", 2); key("Backspace"); pg.keyboard.type("0"); key("Enter")
     check("Up walks the console history", ext() == 2)
-    pg.keyboard.type("wasm_ex"); key("Tab"); pg.keyboard.type("1"); key("Enter")
-    check("Tab completes the cvar name", ext() == 6)
+    pg.keyboard.type("r_persp"); key("Tab"); pg.keyboard.type("1"); key("Enter")
+    check("Tab completes the cvar name", ext() == 6 and cvar("r_perspspan") == "1")
     pg.keyboard.type("wasm_exactpersp 0"); key("Enter")
     key("Backquote")
-    check("wasm_exactpersp 0", ext() == 2)
+    check("wasm_exactpersp 0: id's 16", ext() == 2 and cvar("r_perspspan") == "16")
     frames(pg)
     check("config.cfg keeps the change, and only what differs from Classic",
           cfg_has(pg, 'profile "classic"', 'wasm_showfps "1"')
@@ -298,8 +307,9 @@ with sync_playwright() as p:
     isolated.wait_until(pg3, "exp.menu_visible().then(v => !v)", 5)
     time.sleep(1.0)
     ext3 = pg3.evaluate("exp.extras()")
-    check("?2026: wasm_exactpersp starts on (uncapped, exact perspective, scaled 2-D)",
-          ext3 == 13 and pg3.evaluate("quake.text('cvar', 'wasm_exactpersp')") == "1", str(ext3))
+    check("?2026: exact perspective starts on (uncapped, exact perspective, scaled 2-D)",
+          ext3 == 13 and pg3.evaluate("quake.text('cvar', 'r_perspspan')") == "1"
+          and pg3.evaluate("quake.text('cvar', 'wasm_exactpersp')") == "1", str(ext3))
     pg3.evaluate("quake.pause()")
     pg3.evaluate(FROZEN)
     pg3.evaluate(GRAB, "_x_on")
@@ -307,7 +317,17 @@ with sync_playwright() as p:
     pg3.evaluate(FROZEN)
     pg3.evaluate(GRAB, "_x_off")
     d = pg3.evaluate(DIFF, ["_x_on", "_x_off"])
-    check("2026: wasm_exactpersp 0 redraws the walls with id's spans", d is not None and d["n"] > 1000, str(d))
+    check("2026: id's 16-pixel spans redraw the walls", d is not None and d["n"] > 1000, str(d))
+    # 8 and 4 between: each redraws the walls, nearer exact than the last.
+    near = {}
+    for span in (8, 4):
+        pg3.evaluate(f"quake.callLine('exec r_perspspan {span}')")
+        pg3.evaluate(FROZEN)
+        pg3.evaluate(GRAB, f"_x_{span}")
+        near[span] = pg3.evaluate(DIFF, ["_x_on", f"_x_{span}"])
+    n16, n8, n4 = d["n"] if d else 0, (near[8] or {}).get("n", 0), (near[4] or {}).get("n", 0)
+    check("2026: r_perspspan 8 and 4 redraw the walls, nearer exact at each step", n16 > n8 > n4 > 0,
+          f"pixels off exact: 16 {n16}, 8 {n8}, 4 {n4}")
     pg3.evaluate(f"exp.set_extras({ext3})")
     pg3.evaluate(FROZEN)
     pg3.evaluate(GRAB, "_x_on2")
