@@ -1194,35 +1194,53 @@ function mouseLook(dx, dy, at) {
 // K_MWHEELUP (239) or K_MWHEELDOWN (240), whatever the message's own delta —
 // Windows already chunks a wheel's spin into one message per notch. A
 // browser's `wheel` event has no notches, only a deltaY, and its size says
-// little: Chrome's notch is 100 px on Windows, but on macOS it is NSEvent's
-// accelerated deltaY times 40 (`kScrollbarPixelsPerCocoaTick`; Safari the
-// same, `pixelsPerLineStep`) — a few pixels for a slow notch — and a
-// trackpad's swipe is a stream of small steps. So the time decides: an event
-// WHEEL_ALONE_MS after the last is a notch of its own, whatever its size (a
-// mouse's notch comes alone), fired at once and counted as a whole notch's
-// worth; events closer than that are a stream (a trackpad, a fast spin),
-// accumulated toward the next notch at 100 px each (deltaMode 0 PIXEL as is;
-// 1 LINE — a wheel mouse's own notch in Firefox, 3 lines — times
-// WHEEL_NOTCH_PX/3; 2 PAGE, rare off a real wheel, as a full flick), the
-// direction's flip dropping what was carried, and capped so one fast flick or
-// a trackpad's fling can't cycle through every weapon. (A fast spin of a
-// macOS mouse is such a stream of small steps: its first notch fires, the
-// rest only as their accelerated pixels add up.) Unlike the buttons
-// (MOUSE_KEYNUMS, gated on locked()/bindGrabbing() below) the wheel needs no
-// capture — id's own never did — so this fires with the pointer locked or
-// free, and whatever has the keyboard: Key_Event routes it itself (the
-// console already scrolls on K_MWHEELUP/DOWN, consolekey() keeps them for it;
-// Customize controls' bind grab takes one like any key, M_Keys_Key); id's
-// menu has no other use for the wheel, so nothing here checks menuVisible()/
-// consoleVisible() first. Bound only in 2026 (Bindings::with_wheel) — id's
-// default.cfg predates the wheel, so Classic leaves it unbound and this KEY
-// record just finds nothing to run.
+// little: Chrome's notch is 100 px on Windows and 120 on Linux, but on macOS
+// it is NSEvent's accelerated deltaY times 40 (`kScrollbarPixelsPerCocoaTick`;
+// Safari the same, `pixelsPerLineStep`) — 4 px for a slow notch, 72 for a
+// quick one — and a trackpad's swipe is a stream of small steps. Three rules,
+// the first that applies:
+// - The platform's notches, where the browser passes them on: Chromium's
+//   legacy wheelDeltaY is the notch count × 120 for a wheel mouse
+//   (`wheel_ticks` × kTickMultiplier: WHEEL_DELTA on Windows, 120 an XInput
+//   notch on Linux, kCGScrollWheelEventDeltaAxis1's raw count on macOS), but
+//   3 × deltaY for a precise device (macOS's trackpad: its pixels ÷ 40 ×
+//   120), as in all of WebKit's (wheelTicks = deltaY ÷ 40) — so a pixel
+//   event whose wheelDeltaY is a multiple of 120 that is not 3 × its deltaY
+//   is that many notches, at any spacing. (At a page zoom other than 100%
+//   Chromium divides it by the zoom: the other rules take over.)
+// - Else an event WHEEL_ALONE_MS after the last is a notch of its own,
+//   whatever its size (a mouse's notch comes alone: Safari's), fired at once
+//   and counted as a whole notch's worth.
+// - Else it is a stream (a trackpad, a fast spin in Safari), accumulated
+//   toward the next notch at 100 px each (deltaMode 0 PIXEL as is; 1 LINE —
+//   Firefox's, whose notch is 3 lines on Windows and Linux — times
+//   WHEEL_NOTCH_PX/3; 2 PAGE, rare off a real wheel, as a full flick), the
+//   direction's flip dropping what was carried.
+// Each event is capped so one fast flick or a trackpad's fling can't cycle
+// through every weapon. Unlike the buttons (MOUSE_KEYNUMS, gated on
+// locked()/bindGrabbing() below) the wheel needs no capture — id's own never
+// did — so this fires with the pointer locked or free, and whatever has the
+// keyboard: Key_Event routes it itself (the console already scrolls on
+// K_MWHEELUP/DOWN, consolekey() keeps them for it; Customize controls' bind
+// grab takes one like any key, M_Keys_Key); id's menu has no other use for
+// the wheel, so nothing here checks menuVisible()/consoleVisible() first.
+// Bound only in 2026 (Bindings::with_wheel) — id's default.cfg predates the
+// wheel, so Classic leaves it unbound and this KEY record just finds nothing
+// to run.
 const WHEEL_NOTCH_PX = 100, WHEEL_LINE_PX = WHEEL_NOTCH_PX / 3, WHEEL_MAX_NOTCHES = 3, WHEEL_ALONE_MS = 100;
+const WHEEL_TICK = 120;    // wheelDeltaY a notch (kTickMultiplier, WHEEL_DELTA)
 let wheelAt = -Infinity;   // the last wheel event's timeStamp
 let wheelDir = 0;          // the stream's direction: + down, - up
 let wheelAccum = 0;        // pixels toward its next notch (below 0: what a lone notch still owes)
 const wheelFired = { up: 0, down: 0 };   // notches so far (the checks')
-let wheelWatch = null;     // the mouse check's, with ?mousecheck: (event, ms since the last, notches)
+let wheelWatch = null;     // the mouse check's, with ?mousecheck: (event, ms since the last, notches, rule)
+// The notches a pixel event's wheelDeltaY says the platform counted, or 0
+// when it says nothing (a precise device's, or none at all).
+function wheelTicks(e) {
+  const w = Math.abs(e.wheelDeltaY || 0);
+  if (e.deltaMode !== 0 || !e.deltaY || !w || w % WHEEL_TICK) return 0;
+  return Math.abs(w - 3 * Math.abs(e.deltaY)) < 2 ? 0 : w / WHEEL_TICK;
+}
 canvas.addEventListener('wheel', e => {
   if (!readyToPlay) return;
   e.preventDefault();
@@ -1231,20 +1249,23 @@ canvas.addEventListener('wheel', e => {
   const px = e.deltaMode === 1 ? e.deltaY * WHEEL_LINE_PX
            : e.deltaMode === 2 ? Math.sign(e.deltaY) * WHEEL_NOTCH_PX * WHEEL_MAX_NOTCHES
            : e.deltaY;
-  const dir = Math.sign(px);
-  let n = 0;
+  const dir = Math.sign(px), ticks = wheelTicks(e);
+  let n = 0, rule = 'none';
   if (!dir) {
     // no vertical movement (a horizontal swipe): it only keeps a stream going
+  } else if (ticks) {
+    [wheelDir, wheelAccum, n, rule] = [dir, 0, Math.min(ticks, WHEEL_MAX_NOTCHES), 'ticks'];
   } else if (since > WHEEL_ALONE_MS) {
-    [wheelDir, n] = [dir, 1];
+    [wheelDir, n, rule] = [dir, 1, 'alone'];
     wheelAccum = Math.min(0, Math.abs(px) - WHEEL_NOTCH_PX);
   } else {
     if (dir !== wheelDir) [wheelDir, wheelAccum] = [dir, 0];   // direction flipped: drop stale momentum
     wheelAccum = Math.min(WHEEL_NOTCH_PX * WHEEL_MAX_NOTCHES, wheelAccum + Math.abs(px));
     n = Math.max(0, Math.trunc(wheelAccum / WHEEL_NOTCH_PX));
     wheelAccum -= n * WHEEL_NOTCH_PX;
+    rule = 'stream';
   }
-  if (wheelWatch) wheelWatch(e, since, n * dir);
+  if (wheelWatch) wheelWatch(e, since, n * dir, rule);
   if (!n) return;
   wheelFired[dir < 0 ? 'up' : 'down'] += n;
   const key = dir < 0 ? 239 : 240;   // K_MWHEELUP (up) : K_MWHEELDOWN (down)
@@ -2907,26 +2928,40 @@ startTouch();
 // The mouse check (`?mousecheck` in the address, or quake.mousecheck() from
 // the console): what the mouse delivered and what the game made of it, a
 // second at a time, for a display and a browser the checks here cannot run
-// (PLATFORM.md, "The mouse at any frame rate"). With `?mousecheck` each
-// pointer lock arms a run of ten seconds from the first move, and the lock
-// ending ends it early. A line a second goes to the console, and the run's
-// summary after them; a box over the view shows the newest line and keeps
-// the last four summaries, to be copied once the lock is let go. Counts are
-// |movementX| (the turn's), an event at a time: the event's own (mousemove),
-// its coalesced samples' (pointermove: what the look takes), each raw update
-// (pointerrawupdate, where the browser has it), and what the program read.
+// (PLATFORM.md, "The mouse check"). With `?mousecheck` the pointer lock arms
+// a numbered run of ten seconds from the first move — and, once a run is
+// over, the next one, while the lock lasts; the lock ending ends a run early.
+// `?mousecheck=mouse,trackpad` names the runs in turn (and asks for each
+// device by name). A box over the view says what to do, counts down a run
+// with its live counts, keeps the last four summaries (numbered, stamped
+// with the time each run started) and the last three wheel events; the
+// console has a line a second as well. Counts are |movementX| (the turn's),
+// an event at a time: the event's own (mousemove), its coalesced samples'
+// (pointermove: what the look takes), each raw update (pointerrawupdate,
+// where the browser has it), and what the program read.
 // ===========================================================================
 const mouseCheck = (() => {
-  const RUN_S = 10;
-  const wanted = new URLSearchParams(location.search).has('mousecheck');
+  const RUN_S = 10, NEXT_MS = 1500, PEAK_MS = 100;
+  const query = new URLSearchParams(location.search);
+  const wanted = query.has('mousecheck');
+  const labels = (query.get('mousecheck') || '').split(',').map(s => s.trim()).filter(Boolean);
   // pointerrawupdate (Chromium, on a secure page, and Firefox): every sample
   // as it comes, listened to only during a run (a listener costs the page an
   // event per sample).
   const rawListen = 'onpointerrawupdate' in window;
-  let armed = false, run = null, box = null;
-  const kept = [], latest = [], wheels = [];   // the last runs' summaries; the newest line (or the hint); the last wheel events
+  let armed = false, run = null, box = null, runs = 0, nextTimer = 0;
+  const kept = [], wheels = [];   // the last runs' summaries; the last wheel events
+  let status = '';                // what to do now, or the run's live counts
+  // A tally of events; the peaks are the most events in PEAK_MS, a second's
+  // worth: the browser's rate while the hand moves, not the run's mean.
   const tally = () => ({ refreshes: 0, dts: [], moves: 0, counts: 0, pointers: 0, samples: 0, sampled: 0,
-                         fractional: 0, smallest: Infinity, raws: 0, rawCounts: 0 });
+                         fractional: 0, smallest: Infinity, raws: 0, rawCounts: 0,
+                         peak: { pointer: [0, -1, 0], raw: [0, -1, 0] } });
+  const bump = (p, at) => {   // p: [peak a second, bucket, events in it]
+    const b = Math.floor(at / PEAK_MS);
+    if (b !== p[1]) [p[1], p[2]] = [b, 0];
+    p[0] = Math.max(p[0], ++p[2] * (1000 / PEAK_MS));
+  };
   // The page's records as they stand, and the program's count of what it
   // read (records, their counts, the turn, host frames, the game's clock:
   // `mouse_count`). A call is queued behind every record sent before it, so
@@ -2937,12 +2972,10 @@ const mouseCheck = (() => {
     return { records, counts, turned, frames, time };
   }).catch(() => null);
   const median = xs => { const v = [...xs].sort((a, b) => a - b); return v.length ? v[v.length >> 1] : NaN; };
+  const label = n => labels.length ? labels[(n - 1) % labels.length] : '';
+  const named = n => `run #${n}` + (label(n) ? ` (${label(n)})` : '');
 
-  function show(text, summary = false, wheel = false) {
-    console.log(text);
-    if (wheel) { wheels.push(text); if (wheels.length > 3) wheels.shift(); }
-    else if (summary) { kept.push(text); if (kept.length > 4) kept.shift(); latest.length = 0; }
-    else latest.splice(0, latest.length, text);
+  function render() {
     if (!box) {
       box = document.createElement('pre');
       box.id = 'mouseCheck';
@@ -2951,7 +2984,14 @@ const mouseCheck = (() => {
         + 'font:11px/1.4 monospace;white-space:pre-wrap;user-select:text;z-index:5';
       wrap.appendChild(box);
     }
-    box.textContent = [...kept, ...latest, ...wheels].join('\n');
+    box.textContent = [...kept, status, ...wheels].filter(Boolean).join('\n');
+  }
+  const say = text => { status = text; render(); };
+  // What to do for the next run.
+  function prompt() {
+    const n = runs + 1, what = label(n) ? `the ${label(n)}` : 'the mouse';
+    say(locked() ? `${named(n)}: move ${what} now — ${RUN_S} seconds from the first move; Esc ends it`
+                 : `${named(n)}: in the game, click the view to capture the pointer, then move ${what}`);
   }
   // The browser, its system, the pixel ratio and the lock asked for.
   function browser() {
@@ -2973,9 +3013,9 @@ const mouseCheck = (() => {
     const parts = [`${head}: ${rate(t.refreshes)} Hz refresh` + (game ? `, ${rate(frames)} fps, ${f(frames / t.refreshes)} a refresh` : ''),
       `clock: tick ${f(median(t.dts) * 1000)} ms median` + (game ? `, game ${f((g1.time - g0.time) / s, 3)} s a second` : ''),
       `mousemove ${t.moves} × ${f(t.counts)} counts`,
-      `pointermove ${t.pointers} × ${f(t.sampled)} counts, ${per(t.sampled, t.pointers)} an event, `
+      `pointermove ${t.pointers} × ${f(t.sampled)} counts, ${per(t.sampled, t.pointers)} an event, peak ${t.peak.pointer[0]}/s, `
         + `in ${t.samples} samples (${per(t.samples, t.pointers)} an event), ${t.fractional} fractional`,
-      rawListen ? `rawupdate ${t.raws} × ${f(t.rawCounts)}` : 'rawupdate n/a'];
+      rawListen ? `rawupdate ${t.raws} × ${f(t.rawCounts)}, peak ${t.peak.raw[0]}/s` : 'rawupdate n/a'];
     const records = `records ${p1.sent - p0.sent} sent, ${p1.dropped - p0.dropped} dropped`;
     if (game) {
       const counts = g1.counts - g0.counts, turned = g1.turned - g0.turned;
@@ -3001,6 +3041,7 @@ const mouseCheck = (() => {
     if (e.pointerType !== 'mouse') return;
     const m = pointerMovement(e), took = m.own ? [e] : m.samples;
     t.pointers++;
+    bump(t.peak.pointer, e.timeStamp);
     t.samples += took.length;
     t.sampled += Math.abs(m.dx);
     for (const s of took) {
@@ -3009,19 +3050,41 @@ const mouseCheck = (() => {
       if (x && x < t.smallest) t.smallest = x;
     }
   }));
-  const onRaw = each((t, e) => { if (e.pointerType === 'mouse') { t.raws++; t.rawCounts += Math.abs(e.movementX); } });
+  const onRaw = each((t, e) => {
+    if (e.pointerType !== 'mouse') return;
+    t.raws++;
+    t.rawCounts += Math.abs(e.movementX);
+    bump(t.peak.raw, e.timeStamp);
+  });
   document.addEventListener('pointerlockchange', () => {
-    if (locked()) armed = wanted && !run;
-    else if (run) second(run, true);
+    if (!wanted) { if (!locked() && run) second(run, true); return; }
+    clearTimeout(nextTimer);
+    if (locked()) armed = !run;
+    else { armed = false; if (run) second(run, true); }
+    if (!run) prompt();
   });
 
   // A run of `seconds`: its summary, when it ends.
   function start(seconds = RUN_S) {
     if (run) return run.done;
-    const r = run = { win: tally(), all: tally(), seconds, t0: performance.now(), p0: sent(), g0: read() };
+    clearTimeout(nextTimer);
+    armed = false;
+    const n = ++runs, at = new Date().toTimeString().slice(0, 8);
+    const r = run = { n, at, win: tally(), all: tally(), seconds, t0: performance.now(), p0: sent(), g0: read() };
     r.done = new Promise(resolve => { r.resolve = resolve; });
     [r.wt, r.wp, r.wg] = [r.t0, r.p0, r.g0];
-    const refresh = () => { if (run === r) { r.win.refreshes++; r.all.refreshes++; requestAnimationFrame(refresh); } };
+    let shown = 0;
+    const refresh = now => {
+      if (run !== r) return;
+      r.win.refreshes++; r.all.refreshes++;
+      if (now - shown >= 100) {   // the live counts, ten times a second
+        shown = now;
+        const left = Math.max(0, Math.ceil(r.seconds - (performance.now() - r.t0) / 1000)), a = r.all;
+        say(`${named(n)}: ${left} s left — ${a.sampled.toFixed(0)} counts in ${a.pointers} events, `
+            + `peak ${a.peak.pointer[0]}/s; Esc ends it`);
+      }
+      requestAnimationFrame(refresh);
+    };
     requestAnimationFrame(refresh);
     if (rawListen) canvas.addEventListener('pointerrawupdate', onRaw);
     tickWatch = each((t, dt) => t.dts.push(dt));
@@ -3029,7 +3092,7 @@ const mouseCheck = (() => {
     return r.done;
   }
   // The second's line, and at the end of the run (its time up, or the lock
-  // gone) its summary.
+  // gone) its summary, `#run start-time (label)` before it.
   async function second(r, end) {
     if (r.over) return;
     const now = performance.now(), p = sent(), g = read(), t = r.win;
@@ -3044,21 +3107,36 @@ const mouseCheck = (() => {
       run = null;
     }
     const [g0, g1, gw] = await Promise.all([r.g0, g, wg]);
-    show(line(`mousecheck ${Math.round(elapsed)}/${r.seconds} s`, t, (now - wt) / 1000, wp, p, gw, g1, false));
+    console.log(`#${r.n} ` + line(`mousecheck ${Math.round(elapsed)}/${r.seconds} s`, t, (now - wt) / 1000, wp, p, gw, g1, false));
     if (last) {
-      const summary = line(`mousecheck ${elapsed.toFixed(1)} s`, r.all, elapsed, r.p0, p, g0, g1, true);
-      show(summary, true);
+      const summary = `#${r.n} ${r.at}` + (label(r.n) ? ` (${label(r.n)})` : '') + ' '
+        + line(`mousecheck ${elapsed.toFixed(1)} s`, r.all, elapsed, r.p0, p, g0, g1, true);
+      console.log(summary);
+      kept.push(summary);
+      if (kept.length > 4) kept.shift();
+      if (wanted) {
+        // The next run, a moment later (a hand still moving would start it
+        // at once), while the lock lasts; or when the next lock comes.
+        say(`${named(r.n)} done (its summary above); ${named(r.n + 1)} next`);
+        if (locked()) nextTimer = setTimeout(() => { if (!run && locked()) { armed = true; prompt(); } }, NEXT_MS);
+        else prompt();
+      } else say('');
       r.resolve(summary);
     }
   }
-  if (wanted) show('mousecheck: start a game, click the view to capture the mouse and move it: '
-                   + `${RUN_S} seconds from the first move (Esc ends a run early); the summary stays here`);
+  if (wanted) prompt();
   // With `?mousecheck`, every wheel event too (the last three stay): what
   // the browser sends (deltaY, its mode, the legacy wheelDeltaY), how long
-  // after the last, and the notches the page made of it.
-  if (wanted) wheelWatch = (e, since, n) => show(`wheel deltaY ${+e.deltaY.toFixed(3)} (mode ${e.deltaMode}), `
-    + `wheelDeltaY ${e.wheelDeltaY ?? '-'}, ` + (since === Infinity ? 'the first' : `${Math.round(since)} ms after the last`)
-    + `: ${n ? `${Math.abs(n)} ${n < 0 ? 'up' : 'down'}` : 'no notch'}`, false, true);
+  // after the last, the notches the page made of it and by which rule.
+  if (wanted) wheelWatch = (e, since, n, rule) => {
+    const text = `wheel deltaY ${+e.deltaY.toFixed(3)} (mode ${e.deltaMode}), wheelDeltaY ${e.wheelDeltaY ?? '-'}, `
+      + (since === Infinity ? 'the first' : `${Math.round(since)} ms after the last`)
+      + `: ${n ? `${Math.abs(n)} ${n < 0 ? 'up' : 'down'}` : 'no notch'} (${rule})`;
+    console.log(text);
+    wheels.push(text);
+    if (wheels.length > 3) wheels.shift();
+    render();
+  };
   return { start };
 })();
 quake.mousecheck = (seconds) => mouseCheck.start(seconds);
