@@ -8,7 +8,7 @@
 <meta name="description" content="Quake (1996), faithfully ported to dependency-free safe Rust and compiled to WebAssembly — play the shareware episode in your browser.">
 <meta name="color-scheme" content="dark">
 <meta name="theme-color" content="#0b0907">
-<title>quake-rs · Quake in safe-Rust WebAssembly</title>
+<title>quake-srp · Quake in safe-Rust WebAssembly</title>
 <!-- Installable (Add to Home Screen): the manifest, and iOS's own tags. The
      icons are original pixel art (web/icons/make_icons.py), not id's; the
      favicon is the 32-pixel one, inlined so it costs no request. -->
@@ -17,7 +17,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title" content="quake-rs">
+<meta name="apple-mobile-web-app-title" content="quake-srp">
 <link rel="icon" type="image/png" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAABn0lEQVR42o1WMU5EQQilNLqxMMYY4wk2Jl7Aeuut9zp2ew97Gw9g4iW8gaWNtY5hw+e/BwwJxYT/hwc8YJDLizOQ26sNK2vRK/6inaVpHfThb0Npej0PkezXDjC47K2bXqa+1GkBf+HTfwSd/OqFh+tzL5yN0CdpsqpGd/cblXGe0qsHCb9xTs36x/5OATQIMGeaVRVNCTT3h3UFsCB8ctjXEwcAzoF797+OWwgi7IalTKeVY+4ftyuAmokVyRk/4L4BcBBhipZG4y61C+y+B/BB8F0kmZkI3f9534dBhKNp4cAjQ2eBdQDw5RR2qBQBhu4zBkeQksz1w9Z/v18ZoGhpqfsLAIZ1FcXwAMxlME2hTPsAxcwQ1nqSCw48yd1GKyZo0QchB5giKFM/RAFjyDiE1uMqymac6T9fdkPenh9BDk83Q6ZvqoQPOvQzA2TWGUam24PFkVmvV5j0RQthzPR07cAyzYxmT1DBKnwSTmI2GrN5UO8M0s9P5mn44MRlWoyU5loXD7t6H+24X+1F/ZU2ZHi6tEmGXxdfp/BU/gA63kmGJJT9zAAAAABJRU5ErkJggg==">
 <!-- The service worker (offline, and cross-origin isolation where the
      server sends no headers) registers itself; main() waits for it. -->
@@ -214,7 +214,7 @@
       <canvas id="c"></canvas>
       <div id="overlay">
         <div id="boot">
-          <div id="bootTitle">QUAKE·RS</div>
+          <div id="bootTitle">QUAKE·SRP</div>
           <div id="bootMsg">fetching engine…</div>
           <div id="bootBar"><div id="bootFill"></div></div>
         </div>
@@ -225,7 +225,7 @@
       <div id="fsHint" class="chip"></div>
     </div>
     <div id="bar">
-      <span id="mark">QUAKE<span class="sep">·</span>RS</span>
+      <span id="mark">QUAKE<span class="sep">·</span>SRP</span>
       <span id="status">loading…</span>
       <span id="barBtns">
         <span id="gameCtl" hidden><button id="gameBtn" class="link" aria-expanded="false" aria-controls="gameMenu"
