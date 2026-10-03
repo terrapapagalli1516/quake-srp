@@ -4,6 +4,7 @@
 # server R2 (d5db64a): error/objerror as id's (CENSUS L16) — objerror frees self, so start.bsp's forced teleporter touch faults 1x not 3x and the shared random stream shifts for later maps; edicts vs id's C still 9/9
 # play: demo1..3's frame hashes re-recorded on q26/settings after merging q26/lerp, whose Classic demo playback draws between the recorded messages as id's CL_ReadFromServer/CL_LerpPoint do (it had shown each message's frame as it came); demo_lerp.py matches id's client over the whole loop (17,500 frames, clock identical, camera and entities within 2.5e-4); the demos' sound tallies and every walk/fire/quad hash unchanged
 # packclass 2026-10-02: world.rs sums a slanted plane's distance in f64 (id's x87 registers), so a point on a 45-degree clip plane lands on id's side (hip1m1/hip2m6/hip3m1's items, census/packs.py); fire_e1m1 moves (a muzzle-lit wall patch in frame 418, two pixels at 440; no f32/f64 sign flip in any walk/fire/quad/demo workload, instrumented, so this is trace magnitudes by ulps); every id-anchored check (edicts, demolerp, oracle, census) unchanged
+# sprites 2026-10-02: render/sprite.rs ports r_sprite.c/d_sprite.c (each sprite a clipped, perspective-textured polygon, id's span edges and 8-pixel steps) and R_DrawEntitiesOnList's one list (a sprite drawn after the alias models before it, so a 16-bit 1/z tie with a gib goes as id's); play.demo1 moves (its grenade explosions: 72 of the 660 frames, in 358-393 and 544-606, sampled at 360/390/570/600; demo3's frame 407 moves too, between samples); demo1's explosion frames as id's client plays them (compare.py --demo demo1 --settle 50-55 and 84-86, both aspects) now match id's C at every sprite pixel, where up to 9 pixels around each sprite were off; every other value unchanged
 # makestatic 2026-10-02: PF_makestatic frees its edict into a signon list the client draws, as id's does, so every edict number after a map's first static moves to id's (each matched entity is now id's number minus one, CENSUS L25's player-last offset, but for random fireballs and bubbles): census moves in edict numbers only (with them normalised, the report is the same but for its makestatic line's wording), edicts.start and e1m2..e1m7 lose their 'only in port' statics and the port's live counts equal id's (random fireballs and bubbles aside); e1m1 and e1m8 have no statics; goldens, play, timedemo, oracle, screen2d, demolerp, sound unchanged
 census.report 23dbb77f97b6e7ff
 edicts.e1m1 fea55149a7ee4427
@@ -26,11 +27,11 @@ oracle.e1m3_ents_320x200 100.0000
 oracle.e1m3_world_320x200 100.0000
 oracle.e1m7_ents_320x200 99.9969
 oracle.e1m7_world_320x200 99.9969
-play.demo1.320x200.hashes b20c8b4df6407a31
+play.demo1.320x200.hashes ea89c76d50f1558f
 play.demo1.320x200.sound 4b6fbbe022ae404b
-play.demo1.640x400.hashes 7fd3cfac381374e4
+play.demo1.640x400.hashes fdc89de05467fcb9
 play.demo1.640x400.sound 41ce0bfcc24841bb
-play.demo1.960x600.hashes 10c47a8f39e2c6cb
+play.demo1.960x600.hashes 573dbd55b854f173
 play.demo1.960x600.sound afd36cfccdc0a9de
 play.demo2.320x200.hashes 47d9d83abc3ada85
 play.demo2.320x200.sound 7367d12be2d39e68

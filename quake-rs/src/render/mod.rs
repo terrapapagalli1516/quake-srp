@@ -41,7 +41,7 @@ use crate::bsp::Bsp;
 use crate::math::{cross, dot, normalize, sub, Vec3};
 use alias::{prepare_alias_model, prepare_viewmodel, AliasDraw};
 use raster::{hash_color, raster_triangle, Projected};
-use sprite::draw_sprites;
+use sprite::{SpriteDraw, SpriteView};
 use warp::TurbTable;
 
 mod view;
@@ -810,8 +810,9 @@ pub struct Scene<'a> {
     /// The alias models (`cl_visedicts`' `mod_alias` entities), drawn after
     /// the world against its z-buffer (`R_DrawEntitiesOnList`).
     pub models: &'a [ModelInstance<'a>],
-    /// The sprite entities (`mod_sprite`: the explosion flash, bubbles),
-    /// z-tested after the alias models.
+    /// The sprite entities (`mod_sprite`: the explosion, bubbles, the
+    /// mission packs' bullet holes), z-tested among the alias models in id's
+    /// list order ([`SpriteInstance::models_before`], `R_DrawSprite`).
     pub sprites: &'a [SpriteInstance<'a>],
     /// The particles as `(world position, palette index)`, drawn after the
     /// sprites against the same z-buffer (`R_DrawParticles`). id draws them
@@ -1067,7 +1068,7 @@ impl Renderer {
                 });
             }
             prof.add(|s| s.world_pixels += drawn);
-            entities.draw(band, &frame, prof);
+            entities.draw(band, prof);
         });
         let threads = bands.len() as u64;
         for b in &bands {
@@ -1120,10 +1121,14 @@ impl Renderer {
 }
 
 /// A frame's entities ready for the bands: `R_DrawEntitiesOnList`'s alias
-/// models, `R_DrawParticles`' particles and `R_DrawViewModel`'s gun, each up
-/// to its rasteriser (the sprites are cheap enough to set up per band).
+/// models and sprites, `R_DrawParticles`' particles and `R_DrawViewModel`'s
+/// gun, each up to its rasteriser.
 struct Entities<'a> {
-    models: Vec<AliasDraw<'a>>,
+    /// The alias models, each with its place in the scene's list.
+    models: Vec<(usize, AliasDraw<'a>)>,
+    /// The sprites, each after this many of the scene's models
+    /// ([`SpriteInstance::models_before`]), in that order.
+    sprites: Vec<(usize, SpriteDraw<'a>)>,
     particles: Vec<part::ParticleDot>,
     gun: Option<AliasDraw<'a>>,
 }
@@ -1131,37 +1136,65 @@ struct Entities<'a> {
 impl<'a> Entities<'a> {
     /// Everything about the frame's entities that does not depend on the
     /// rows being drawn: the models' vertices, light and clipped triangles,
-    /// the particles' squares.
+    /// the sprites' clipped polygons and spans, the particles' squares.
     fn prepare(frame: &Frame<'_, 'a>, prof: &mut stats::Profiler) -> Entities<'a> {
         let scene = frame.scene;
-        let models = scene.models.iter().filter_map(|inst| prepare_alias_model(frame, inst, prof)).collect();
+        let models = (scene.models.iter().enumerate())
+            .filter_map(|(i, inst)| Some((i, prepare_alias_model(frame, inst, prof)?)))
+            .collect();
+        let ts = prof.now();
+        let view = SpriteView::new(frame);
+        let mut sprites: Vec<_> = (scene.sprites.iter())
+            .filter_map(|inst| Some((inst.models_before, SpriteDraw::prepare(&view, inst, scene.time)?)))
+            .collect();
+        sprites.sort_by_key(|&(before, _)| before);
+        if let Some(t) = ts { prof.add(|s| s.sprite_ns += t.elapsed().as_nanos() as u64); }
         let opts = &scene.options;
         let proj = part::ParticleProjection::new(&frame.cam, frame.w, frame.h, opts.aspect(), opts.video.hires);
         let particles = part::project_particles(&frame.cam, &proj, scene.particles);
         let gun = scene.viewmodel.as_ref().and_then(|vm| prepare_viewmodel(frame, vm));
-        Entities { models, particles, gun }
+        Entities { models, sprites, particles, gun }
     }
 
     /// The entities' pixels in `band`'s rows, against the world's 16-bit
-    /// 1/z, in id's order: the alias models, the particles, the sprites and
-    /// last the gun, each testing and writing the z-buffer (id draws the
-    /// particles after the gun; with the gun's tripled 1/z the order only
-    /// matters on exact ties). A phase timer each while profiling.
-    fn draw(&self, band: &mut band::Band, frame: &Frame, prof: &mut stats::Profiler) {
+    /// 1/z: the alias models and the sprites in id's list order
+    /// (`R_DrawEntitiesOnList`), the particles and last the gun,
+    /// each testing and writing the z-buffer (id draws the particles after
+    /// the gun; with the gun's tripled 1/z the order only matters on exact
+    /// ties). A phase timer each while profiling.
+    fn draw(&self, band: &mut band::Band, prof: &mut stats::Profiler) {
+        // R_DrawEntitiesOnList: the models, each sprite in its place among
+        // them.
         let ta = prof.now();
+        let mut sprite_ns = 0;
+        let mut draw_sprite = |sprite: &SpriteDraw, band: &mut band::Band| {
+            let t = prof.now();
+            sprite.draw(band);
+            if let Some(t) = t { sprite_ns += t.elapsed().as_nanos() as u64; }
+        };
+        let mut sprites = self.sprites.iter().peekable();
         if !self.models.is_empty() {
             let mut fb = polyse::PolyFramebuffer::new(band);
-            for m in &self.models {
+            for (index, m) in &self.models {
+                while let Some((_, sprite)) = sprites.next_if(|(before, _)| before <= index) {
+                    draw_sprite(sprite, fb.band());
+                }
                 m.draw(&mut fb);
             }
         }
-        if let Some(t) = ta { prof.add(|s| s.alias_ns += t.elapsed().as_nanos() as u64); }
+        for (_, sprite) in sprites {
+            draw_sprite(sprite, band);
+        }
+        if let Some(t) = ta {
+            let all = t.elapsed().as_nanos() as u64;
+            prof.add(|s| {
+                s.alias_ns += all.saturating_sub(sprite_ns);
+                s.sprite_ns += sprite_ns;
+            });
+        }
         let tp = prof.now();
         part::draw_particle_dots(band, &self.particles);
         if let Some(t) = tp { prof.add(|s| s.particle_ns += t.elapsed().as_nanos() as u64); }
-        let tsp = prof.now();
-        draw_sprites(band, frame);
-        if let Some(t) = tsp { prof.add(|s| s.sprite_ns += t.elapsed().as_nanos() as u64); }
         let tv = prof.now();
         if let Some(gun) = &self.gun {
             gun.draw(&mut polyse::PolyFramebuffer::new(band));
@@ -1595,6 +1628,30 @@ mod tests {
     }
 
     #[test]
+    fn a_sprite_and_a_model_at_one_depth_go_in_list_order() {
+        // R_DrawEntitiesOnList draws models and sprites in one list, each
+        // pixel `<=`-tested against the 16-bit 1/z: a flat triangle and a
+        // sprite both 100 units ahead tie, and the later one wins.
+        let world = demo_room();
+        let pal = fixtures::ramp_palette();
+        let (mdl, spr) = (fixtures::tiny_mdl(), fixtures::test_sprite(16, 16, 42));
+        let cam = Camera { pos: [0.0; 3], yaw: 0.0, pitch: 0.0, roll: 0.0, fov_deg: 90.0 };
+        // The triangle lies in the model's y = -16: turned by yaw 90 and put
+        // at x = 84, it faces the eye in the plane x = 100.
+        let models = [ModelInstance::with_frame(&mdl, [84.0, 0.0, 0.0], 90.0, 0, [200, 40, 40])];
+        let pixel = |models_before: usize| {
+            let sprites = [SpriteInstance { sprite: &spr, origin: [100.0, 0.0, 0.0], angles: [0.0; 3], frame: 0, models_before }];
+            let scene = Scene { models: &models, sprites: &sprites, ..Scene::new(&world, cam, 160, 120, &pal) };
+            // Inside both, below and right of the centre: world (100, -6, -6).
+            render_once(&scene).pixels[64 * 160 + 84]
+        };
+        let (model_last, sprite_last) = (pixel(0), pixel(1));
+        assert_eq!(sprite_last, 42, "the sprite after the model wins the tie");
+        assert_ne!(model_last, 42, "the model after the sprite wins it");
+        assert_eq!(pixel(usize::MAX), 42, "usize::MAX: after every model");
+    }
+
+    #[test]
     fn every_thread_count_draws_the_same_frame() {
         // The bands (band.rs) give each pixel its writes in the one-thread
         // order: the world's spans (a liquid, the sky, dynamically lit walls),
@@ -1608,7 +1665,7 @@ mod tests {
         let particles: Vec<(Vec3, u8)> = (0..300)
             .map(|i| ([-150.0 + i as f32, (i % 13) as f32 * 9.0 - 60.0, (i % 7) as f32 * 9.0], (i % 250) as u8))
             .collect();
-        let sprites = [SpriteInstance { sprite: &spr, origin: [-60.0, 20.0, 10.0], frame: 0 }];
+        let sprites = [SpriteInstance { sprite: &spr, origin: [-60.0, 20.0, 10.0], angles: [0.0; 3], frame: 0, models_before: 1 }];
         let gun = Viewmodel { mdl: &mdl, frame: 0, blend: None, origin_ofs: [8.0, 0.0, -6.0], angles: [cam.pitch, cam.yaw, 0.0] };
         let dlights = [crate::dlight::DynamicLight::new([0.0; 3], 250.0, f32::MAX, 0.0, 0.0, 0)];
         let world = Scene { time: 1.3, dlights: &dlights, ..Scene::new(&bsp, cam, 211, 157, &pal) };

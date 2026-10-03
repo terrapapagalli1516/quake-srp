@@ -37,6 +37,8 @@ Needs docker (for the build only), uv, cargo, and the shareware pak at
 | `--viewsize N` | id's `scr_viewsize` (default 120, the whole screen). Below 120 the 3-D view rectangle (`r_refdef.vrect` from id's `.json`) is compared: the port renders it placed on the screen (`quaketool view --vrect`) |
 | `--c-only --full --viewsize 100 --settle 10` | id's composited screen (sbar etc.) alone — the port's `view` cannot draw the HUD; `screen2d.py` compares the 2-D layer |
 | `--quaketool PATH` / `--oracle PATH` | A/B a different build of either side |
+| `--c-post CMD` | a console command for id's side once the map is loaded (repeatable; each `--c-post wait` holds what follows one frame): six waits then `--c-post "impulse 9"` with `--c-cmd +attack` fires rockets, `--settle 14`..`19` on e1m1 catches the explosion sprite on the far wall |
+| `--demo NAME` | id's side plays the demo (`playdemo NAME`) instead of loading a map, and the shot is frame `--settle` of its playback; `--maps` names the demo's map for the port (`--maps e1m3 --demo demo1 --settle 52`: a grenade explosion among gibs) |
 | `--game-dir NAME DIR` `--pak1 PAK` | a mission pack: `DIR`'s `pak0.pak`/`pak1.pak` layered over id1 as id's `-NAME` does (`-hipnotic`, `-rogue`), with id1's registered `pak1.pak` (id's own `-hipnotic` refuses the shareware id1); the port's `quaketool view` takes the same paks as a comma list |
 
 ### Reading the output

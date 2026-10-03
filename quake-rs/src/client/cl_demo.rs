@@ -687,7 +687,10 @@ fn render_demo_frame(
             sprite_insts.push(render::SpriteInstance {
                 sprite: spr,
                 origin: e.origin,
+                angles: e.angles,
                 frame: e.frame.max(0) as usize,
+                // R_DrawEntitiesOnList takes models and sprites in one list.
+                models_before: owned.len(),
             });
         }
     }

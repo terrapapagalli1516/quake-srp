@@ -4,7 +4,7 @@
 //! after the edge scan. `R_ScanEdges` leaves every pixel of the view in
 //! exactly one span, and after it every pass writes pixels through the
 //! z-buffer: the world's spans (`D_DrawSurfaces`, `D_DrawZSpans`), then the
-//! alias models, particles, sprites and gun, each testing and writing
+//! alias models and sprites, particles and gun, each testing and writing
 //! `d_pzbuffer`. So the view is cut into bands of whole rows, and each band
 //! runs the same passes, in id's order, on the pixels in its rows only. Every
 //! pixel then sees the same writes in the same order as in one pass over the

@@ -66,7 +66,7 @@ fn floor_div_mod(numer: f64, denom: f64) -> (i32, i32) {
 /// (a huge positive step would come out 0x7FFFFFFF, id's 0x80000000). Sliver
 /// triangles out of `R_AliasClipTriangle` reach this: a denominator of 1 or 2
 /// under a long edge makes a 1/z step of 1e11.
-fn c_ftoi(x: f64) -> i32 {
+pub(super) fn c_ftoi(x: f64) -> i32 {
     if x > -2_147_483_649.0 && x < 2_147_483_648.0 {
         x as i32
     } else {
@@ -127,6 +127,13 @@ pub(super) struct PolyFramebuffer<'b, 'a> {
 }
 
 impl<'b, 'a> PolyFramebuffer<'b, 'a> {
+    /// The band under the rasteriser, for the sprites `R_DrawEntitiesOnList`
+    /// draws between two models (the rasteriser's state carries on past
+    /// them, as id's globals do).
+    pub(super) fn band(&mut self) -> &mut Band<'a> {
+        self.band
+    }
+
     /// The rasteriser over `band`.
     pub(super) fn new(band: &'b mut Band<'a>) -> PolyFramebuffer<'b, 'a> {
         let width = band.width() as isize;

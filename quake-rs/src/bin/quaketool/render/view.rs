@@ -205,7 +205,9 @@ pub fn cmd_view(args: &[String]) -> CmdResult {
     // (model, origin, angles, frame, skin) per alias entity.
     type AliasDesc = (String, [f32; 3], [f32; 3], usize, i32);
     let mut alias_descs: Vec<AliasDesc> = Vec::new();
-    let mut sprite_descs: Vec<(String, [f32; 3], usize)> = Vec::new();
+    // (model, origin, angles, frame, alias entries before it) per sprite entity.
+    type SpriteDesc = (String, [f32; 3], [f32; 3], usize, usize);
+    let mut sprite_descs: Vec<SpriteDesc> = Vec::new();
     let mut ext_descs: Vec<(String, [f32; 3])> = Vec::new();
     let mut bmodels: Vec<render::BModelInstance> = Vec::new();
     let mut skipped = 0usize;
@@ -231,7 +233,7 @@ pub fn cmd_view(args: &[String]) -> CmdResult {
                 ext_descs.push((model, org));
             } else if model.ends_with(".spr") {
                 sprs.entry(model.clone()).or_insert_with(|| read_pak(&model).ok().and_then(|b| Sprite::parse(&b).ok()));
-                sprite_descs.push((model, org, fr as usize));
+                sprite_descs.push((model, org, ang, fr as usize, alias_descs.len()));
             } else if model.ends_with(".mdl") {
                 mdls.entry(model.clone()).or_insert_with(|| read_pak(&model).ok().and_then(|b| Mdl::parse(&b).ok()));
                 alias_descs.push((model, org, ang, fr as usize, sk as i32));
@@ -264,10 +266,24 @@ pub fn cmd_view(args: &[String]) -> CmdResult {
             _ => None,
         })
         .collect();
+    // The resolved models before each alias entry: where a sprite falls among
+    // the models on id's list (an unresolved model is not drawn).
+    let resolved_before: Vec<usize> = std::iter::once(0)
+        .chain(alias_descs.iter().scan(0, |n, (name, ..)| {
+            *n += usize::from(matches!(mdls.get(name), Some(Some(_))));
+            Some(*n)
+        }))
+        .collect();
     let sprites: Vec<render::SpriteInstance> = sprite_descs
         .iter()
-        .filter_map(|(name, org, frame)| match sprs.get(name) {
-            Some(Some(sprite)) => Some(render::SpriteInstance { sprite, origin: *org, frame: *frame }),
+        .filter_map(|(name, org, ang, frame, k)| match sprs.get(name) {
+            Some(Some(sprite)) => Some(render::SpriteInstance {
+                sprite,
+                origin: *org,
+                angles: *ang,
+                frame: *frame,
+                models_before: resolved_before[*k],
+            }),
             _ => None,
         })
         .collect();
