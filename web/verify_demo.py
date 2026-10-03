@@ -120,7 +120,7 @@ with sync_playwright() as p:
     # too, so a pair of grabs that straddles a flash says nothing about the
     # bar: take up to four pairs and judge the steadiest.
     pg.keyboard.press("Escape")
-    pg.wait_for_function("exp.menu_visible().then(v => !v)", timeout=5000)
+    isolated.wait_until(pg, "exp.menu_visible().then(v => !v)", 5)
     time.sleep(0.3)
     best = None
     for _ in range(4):

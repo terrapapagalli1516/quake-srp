@@ -49,14 +49,14 @@ def boot_walk(pg):
     pg.evaluate("document.getElementById('walkBtn').click()")
     time.sleep(1.0)
     pg.keyboard.press("Escape")  # boot lands in the menu; close it
-    pg.wait_for_function("exp.menu_visible().then(v => !v)", timeout=5000)
+    isolated.wait_until(pg, "exp.menu_visible().then(v => !v)", 5)
     time.sleep(0.3)
 
 
 def console_line(pg, line):
     """Open the drop-down console, type `line`, submit it."""
     pg.keyboard.press("Backquote")
-    pg.wait_for_function("exp.console_visible().then(v => v === 1)", timeout=5000)
+    isolated.wait_until(pg, "exp.console_visible().then(v => v === 1)", 5)
     pg.keyboard.type(line, delay=15)
     pg.keyboard.press("Enter")
 
@@ -86,12 +86,12 @@ with sync_playwright() as p:
     # SAVE through the real console: the program writes the file, the page
     # keeps it.
     console_line(pg, "save evidence")
-    pg.wait_for_function(KEPT.format(KEY), timeout=5000)
+    isolated.wait_until(pg, KEPT.format(KEY), 5)
     # ...and into menu slot SLOT (the Load menu's sN.sav), the same instant.
-    pg.wait_for_function("exp.console_visible().then(v => v === 1)", timeout=5000)
+    isolated.wait_until(pg, "exp.console_visible().then(v => v === 1)", 5)
     pg.keyboard.type(f"save s{SLOT}", delay=15)
     pg.keyboard.press("Enter")
-    pg.wait_for_function(KEPT.format(SLOT_KEY), timeout=5000)
+    isolated.wait_until(pg, KEPT.format(SLOT_KEY), 5)
     pg.keyboard.press("Backquote")  # close the console again
     text = pg.evaluate(f"quake.kept('{KEY}')") or ""
     size, head = len(text), text[:2]
@@ -117,7 +117,7 @@ with sync_playwright() as p:
 
     # LOAD through the console; on success the load closes the console.
     console_line(pg, "load evidence")
-    pg.wait_for_function("exp.console_visible().then(v => v === 0)", timeout=5000)
+    isolated.wait_until(pg, "exp.console_visible().then(v => v === 0)", 5)
     time.sleep(0.5)
     f_loaded = pg.evaluate(GRAB)
     pg.locator("#c").screenshot(path=os.path.join(WEB, "verify_save.png"))
@@ -139,7 +139,7 @@ with sync_playwright() as p:
         fails.append("the save did not survive the page reload")
     boot_walk(pg)
     console_line(pg, "load evidence")
-    pg.wait_for_function("exp.console_visible().then(v => v === 0)", timeout=5000)
+    isolated.wait_until(pg, "exp.console_visible().then(v => v === 0)", 5)
     time.sleep(0.5)
     f_reloaded = pg.evaluate(GRAB)
     d_again = diff_frac(f_reloaded, f_saved)
@@ -160,7 +160,7 @@ with sync_playwright() as p:
     forget = f"exp.menu_forget_save({SLOT})"
     pg.evaluate(forget)
     pg.keyboard.press("Escape")  # the menu, over the loaded game (paused)
-    pg.wait_for_function("exp.menu_visible().then(v => v === 1)", timeout=5000)
+    isolated.wait_until(pg, "exp.menu_visible().then(v => v === 1)", 5)
     for k in ["Enter", "ArrowDown", "Enter"]:  # Single Player > Load
         pg.keyboard.press(k)
         time.sleep(0.15)
@@ -244,7 +244,7 @@ with sync_playwright() as p:
         fails.append(f"the migrated settings did not apply: {settings}")
     boot_walk(pg2)
     console_line(pg2, "load migrated")
-    pg2.wait_for_function("exp.console_visible().then(v => v === 0)", timeout=5000)
+    isolated.wait_until(pg2, "exp.console_visible().then(v => v === 0)", 5)
     text = pg2.evaluate("quake.text('console_text')")
     if "Loading game from migrated.sav..." not in text or "ERROR" in text.split("Loading game from migrated.sav...")[-1]:
         fails.append("the migrated save did not load")

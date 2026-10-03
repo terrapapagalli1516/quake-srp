@@ -76,7 +76,7 @@ def walk(pg):
     pg.evaluate("document.getElementById('walkBtn').click()")
     time.sleep(1.0)
     pg.keyboard.press("Escape")
-    pg.wait_for_function("exp.menu_visible().then(v => !v)", timeout=5000)
+    isolated.wait_until(pg, "exp.menu_visible().then(v => !v)", 5)
 
 def frames(pg, n=4):
     pg.evaluate(f"""() => new Promise(r => {{ let k = {n};
@@ -217,7 +217,7 @@ with sync_playwright() as p:
     # 6a. A 2026 session's settings survive a reload.
     pg.evaluate("quake.callLine('exec vid_pixelsize 2; bind j \"+jump\"; viewsize 90')")
     frames(pg)
-    pg.wait_for_function("quake.kept('id1/config.cfg').then(t => !!t && t.includes('vid_pixelsize \"2\"'))", timeout=5000)
+    isolated.wait_until(pg, "quake.kept('id1/config.cfg').then(t => !!t && t.includes('vid_pixelsize \"2\"'))", 5)
     boot(pg)
     check("reloaded: the profile, the pixel size, the binding, Screen size",
           text(pg, "profile") == "2026" and cvar(pg, "vid_pixelsize") == "2" and cvar(pg, "viewsize") == "90"

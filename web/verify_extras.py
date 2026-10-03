@@ -89,12 +89,9 @@ FROZEN = "() => { quake.tick(0); quake.tick(0); }"
 # a change).
 CFG = "quake.kept('id1/config.cfg')"
 def cfg_has(pg, *lines):
-    try:
-        pg.wait_for_function(CFG + ".then(t => !!t && " + " && ".join(f"t.includes('{l}\\n')" for l in lines) + ")",
-                             timeout=5000)
-        return True
-    except Exception:
-        return False
+    return bool(isolated.wait_until(
+        pg, CFG + ".then(t => !!t && " + " && ".join(f"t.includes('{l}\\n')" for l in lines) + ")",
+        5, raising=False))
 
 # Keep a canvas grab in the page as window[name].
 GRAB = """name => {
@@ -207,7 +204,7 @@ with sync_playwright() as p:
     pg.evaluate("document.getElementById('walkBtn').click()")
     time.sleep(1.0)
     key("Escape")                      # close the boot menu
-    pg.wait_for_function("exp.menu_visible().then(v => !v)", timeout=5000)
+    isolated.wait_until(pg, "exp.menu_visible().then(v => !v)", 5)
     time.sleep(1.5)                    # a full measuring window
     pg.locator("#c").screenshot(path=os.path.join(WEB, "verify_extras_fps.png"))
     pg.evaluate("quake.pause()")
@@ -270,7 +267,7 @@ with sync_playwright() as p:
     pg.evaluate("document.getElementById('walkBtn').click()")
     time.sleep(1.0)
     key("Escape")
-    pg.wait_for_function("exp.menu_visible().then(v => !v)", timeout=5000)
+    isolated.wait_until(pg, "exp.menu_visible().then(v => !v)", 5)
     check("Classic: Alt+Enter is the fullscreen key by default (the State says so)",
           pg.evaluate("!!(quake.state.flags & 64)"))
     pg.evaluate("quake.callLine('exec idcontrols')")
@@ -342,7 +339,7 @@ with sync_playwright() as p:
         time.sleep(0.4)
         check("Esc keydown then lock loss: one toggle (menu open)", vis() == 1)
         key("Escape")
-        pg.wait_for_function("exp.menu_visible().then(v => !v)", timeout=5000)
+        isolated.wait_until(pg, "exp.menu_visible().then(v => !v)", 5)
         pg.locator("#c").click()
         pg.wait_for_function("document.pointerLockElement === document.getElementById('c')",
                              timeout=5000)
@@ -363,7 +360,7 @@ with sync_playwright() as p:
         # The console has the keyboard: Alt+Enter still toggles, and its
         # Enter never reaches the console (the line typed is not run).
         key("`")
-        pg.wait_for_function("exp.console_visible().then(v => !!v)", timeout=5000)
+        isolated.wait_until(pg, "exp.console_visible().then(v => !!v)", 5)
         pg.keyboard.type("echo zqzq")
         key("Alt+Enter")
         pg.wait_for_function("!document.fullscreenElement", timeout=5000)
@@ -375,14 +372,14 @@ with sync_playwright() as p:
         time.sleep(0.2)
         check("...the line is still there for Enter", ran())
         key("`")
-        pg.wait_for_function("exp.console_visible().then(v => !v)", timeout=5000)
+        isolated.wait_until(pg, "exp.console_visible().then(v => !v)", 5)
         # Windowed again: the old flow (lock loss opens, an Esc right after it
         # is a real second press).
         pg.locator("#c").click()
         pg.wait_for_function("document.pointerLockElement === document.getElementById('c')",
                              timeout=5000)
         pg.evaluate("document.exitPointerLock()")
-        pg.wait_for_function("exp.menu_visible().then(v => v === 1)", timeout=5000)
+        isolated.wait_until(pg, "exp.menu_visible().then(v => v === 1)", 5)
         key("Escape")
         check("windowed: lock loss opens, the next Esc closes", vis() == 0)
     elif has_kb:

@@ -500,7 +500,7 @@ def main():
         def set_viewsize(pg_, call_, vs):
             call_(f"exec viewsize {vs}")
             pg_.evaluate("window.dispatchEvent(new Event('resize'))")
-            wait(BAR_SETTLED_JS, pg_=pg_)
+            isolated.wait_until(pg_, BAR_SETTLED_JS, 5)   # async: `wait` (wait_for_function) would not wait
         def safe_zone_check(pg_, label):
             bar = pg_.evaluate(BAR_RECT_JS)
             bad = []

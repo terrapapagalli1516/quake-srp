@@ -71,7 +71,7 @@ with sync_playwright() as p:
     pg.evaluate("document.getElementById('walkBtn').click()")
     time.sleep(1.0)
     pg.keyboard.press("Escape")
-    pg.wait_for_function("exp.menu_visible().then(v => !v)", timeout=12000)
+    isolated.wait_until(pg, "exp.menu_visible().then(v => !v)", 12)
 
     for key, screen in [("F1", "help"), ("F2", "save"), ("F3", "load"), ("F4", "options")]:
         pg.keyboard.press(key)
