@@ -45,7 +45,7 @@ the volumes, the mouse).
 | Rumble on damage and on the big guns (the pad, or a phone's vibration) | `joy_rumble` (Rumble) | on | |
 | QuakeWorld's frame-rate readout | `wasm_showfps` (Show FPS) | off | Clutter. |
 | Exact perspective at every pixel | `wasm_exactpersp` (Exact perspective) | off | id's 16-pixel spans are part of the look. |
-| The `ED_Alloc` edict ceiling past id's 600 (`Vm::max_edicts`) | `sv_max_edicts` (console only, no settings row — nothing to choose until a map needs it) | on, 8192 | id's own number, kept for Classic; Rogue's `r2m6` needs more ("Files and the command line"). |
+| The `ED_Alloc` edict ceiling past id's 600 (`Vm::max_edicts`) | `sv_max_edicts` (console only, no settings row — nothing to choose until a map needs it) | on, 8192 | id's own number, kept for Classic. No map of id1 or the mission packs needs more: Rogue's `r2m6`, which seemed to, overflowed only while the port kept its statics' edicts ("`makestatic` frees its edict"). Room for bigger maps. |
 
 **The 2-D layer on a wide screen.** Every 2-D draw that WinQuake places by screen
 coordinates, and where it sits on a 2-D screen wider than 320 (any mode past 320x200 in
@@ -241,10 +241,10 @@ marked *(2026-06)* were not re-checked since. Struck items were closed on 2026-0
 - `give` is not `Host_Give_f`: it clamps, has an armour case, fills a missing amount, and
   selects the weapon (CENSUS L13).
 - No pitch drift on slopes: `cl.idealpitch` is fixed at 0 (CENSUS L3).
-- `makestatic` keeps the edict (id frees it into the signon) (CENSUS L17). Not invisible:
-  every static holds an edict id's frees and reuses, so a mission-pack map runs up to
-  106 more live edicts than id's (`r1m1`), and Rogue's `r2m6` overflows id's 600 in
-  Classic where id's C spawns it at 546 ("The mission packs' paths", P4).
+- ~~`makestatic` keeps the edict (id frees it into the signon) (CENSUS L17)~~ — ✅
+  makestatic: `PF_makestatic` writes the static into the server's signon list and frees
+  the edict, the client draws the list; the edict numbers and live counts are id's, and
+  `r2m6` spawns in Classic ("`makestatic` frees its edict", below).
 - `checkclient` traces a line of sight instead of using the 0.1 s client PVS (CENSUS L19).
 - The gibbed player's head leaves no blood trail: the client skips the player's edict
   before trails, where id skips only drawing it (CENSUS L23).
@@ -287,9 +287,9 @@ marked *(2026-06)* were not re-checked since. Struck items were closed on 2026-0
   edge list in a fixed order, not `cl_visedicts`' (exact ties only); `r_clearcolor` is
   fixed at 2; a camera inside solid shows floors id leaves as background (not understood,
   not reachable in play) (edge).
-- Statics use the edict's float origin and angles, not `svc_spawnstatic`'s bytes, and skip
-  the frustum test on their efrag leaves; the packet-overflow cutoff of
-  `SV_WriteEntitiesToClient` is not modelled (sim).
+- Statics skip the frustum test on their efrag leaves; the packet-overflow cutoff of
+  `SV_WriteEntitiesToClient` is not modelled (sim). (~~Statics use the edict's float
+  origin and angles, not `svc_spawnstatic`'s bytes~~: the bytes, since makestatic.)
 - `SV_ClipToLinks` uses `maxs - mins` where id reads `v.size` (differs only if QuakeC sets
   `mins`/`maxs` without `setsize`) (sim).
 - Sprites other than `SPR_VP_PARALLEL` are drawn as facing billboards (`render/sprite.rs`):
@@ -372,7 +372,9 @@ marked *(2026-06)* were not re-checked since. Struck items were closed on 2026-0
   *Corrected 2026-10-02* ("The mission packs' paths", P4): id's C does run `r2m6`
   (`census/packs.py`: the `campaign` lines are one a frame, not a hang) and peaks at 546
   edicts; the port's 632 are 541 plus 91 `makestatic` edicts id frees (CENSUS L17). The
-  overflow is the port's, not the map's.
+  overflow is the port's, not the map's. *Fixed* (`fleet/makestatic`): `r2m6` spawns
+  under id's 600 in Classic, 541 live edicts after its entities load, and 542 at
+  t = 4.7 and 10.7 s with the player, as id's C (`census/packs.py`).
 - Rogue's demo wire format for a weapon past the standard 7 (the `1<<i`
   re-expansion `demo.rs` already documents as not modelled, for any non-standard progs)
   applies to the mission packs too, if a demo of theirs is ever added — none is in scope
@@ -3094,7 +3096,8 @@ same trick `make_paks.py` used for id1's registered `pak1.pak`).
   player maps — `rogue`'s own deathmatch-only maps, `ctf1`/`b_lnail*`/`b_mrock*`/
   `b_plas*`, spawn too, untested for actual deathmatch play, which the port has none
   of); `hip1m1`→`hip1m2` and `r1m1`→`r1m2` play start to exit with inventory carried
-  across (`quaketool changelevel`).
+  across (`quaketool changelevel`). *Since `fleet/makestatic` it spawns, under id's 600:
+  the overflow was the port's own kept statics ("`makestatic` frees its edict").*
 - **The browser**: `?game=hipnotic`/`?game=rogue` is wired through to `-hipnotic`/
   `-rogue` and, checked live (headless Chromium, no hipnotic data present), fails
   exactly as id's own engine would — silently plays plain shareware, since an empty
@@ -3358,8 +3361,8 @@ was done. Struck items are fixed on this branch.
   ("Illegible server message"): the C oracle ends hip1m1 the moment its player walks into
   the first `trigger_secret`. The port skips the command and its string. A deliberate
   departure from id's C (whose engine cannot play these progs), in both profiles.
-- **P4 `makestatic` keeps its edict** (CENSUS L17; open: brief B1). `server/pr_cmds.rs:325`,
-  `vm.rs:1093`. id's `PF_makestatic` writes `svc_spawnstatic` into the signon and frees
+- **P4 ~~`makestatic` keeps its edict~~** (CENSUS L17; fixed on `fleet/makestatic`:
+  "`makestatic` frees its edict", below). `server/pr_cmds.rs:325`, `vm.rs:1093`. id's `PF_makestatic` writes `svc_spawnstatic` into the signon and frees
   the edict, which the next spawn reuses at once (`freetime` < 2). The port keeps every
   static alive: 0-106 more live edicts per pack level (torches, flames, candles,
   lanterns, `func_illusionary`), and Rogue's `r2m6` overflows 600 in Classic ("ED_Alloc:
@@ -3463,9 +3466,10 @@ was done. Struck items are fixed on this branch.
 
 **For follow-up agents** (each Classic-relevant unless said; prove against id's C):
 
-- **B1 (P4): `makestatic` frees its edict.** Snapshot what `svc_spawnstatic` carries
-  (model, frame, colormap, skin, origin, angles) into a server-side signon list, `ED_Free`
-  the edict, and draw statics from that list in `client/cl_main.rs` (today the static
+- ✅ **B1 (P4): `makestatic` frees its edict** (done, `fleet/makestatic`). Snapshot what
+  `svc_spawnstatic` carries (model, frame, colormap, skin, origin, angles) into a
+  server-side signon list, `ED_Free` the edict, and draw statics from that list in
+  `client/cl_main.rs` (today the static
   path keys off `Vm::is_static_edict` in the edict loop, ~628-720) and in
   `quake-wasm/src/cl_walk.rs` (837, 922). Keep the floats or take id's wire bytes (the
   Open list's statics item) — say which. Savegames: id's saves no statics (the map's
@@ -3505,3 +3509,74 @@ boots `$QUAKE_SCREEN_BASEDIR`/`$QUAKE_SCREEN_GAME`).
 `func_clock`, `effect_finale` camera and hipend cutscene against id's C; sound; any pack
 level in a browser. The 3-D sweep's views are static ones: entities in motion, monsters'
 attacks and Rogue's own monsters' models in action were not compared.
+
+## `makestatic` frees its edict (2026-10-02, branch `fleet/makestatic`)
+
+AUDIT P4, CENSUS L17. id's `PF_makestatic` writes `svc_spawnstatic` (model, frame,
+colormap, skin, origin, angles) into `sv.signon` and `ED_Free`s the edict; the next
+`ED_Alloc` takes the slot at once (`freetime` < 2 during the load). The port kept every
+static alive behind a flag on the VM, so every edict number after a map's first static
+was off from id's, a mission-pack level ran up to 106 more live edicts than id's, and
+Rogue's `r2m6` overflowed id's 600 in Classic.
+
+**What changed.**
+- `bi_makestatic` (`server/pr_cmds.rs`) records a `StaticEntity` (`server/msg.rs`) and
+  frees the edict. The record is what id's client read back: the frame and skin bytes,
+  and the origin and angles through `MSG_WriteCoord`/`MSG_WriteAngle` (`wire_coord`,
+  `wire_angle`; the client's old `net_angle` moved beside them). No colormap:
+  `CL_ParseStatic` gives every static `vid.colormap`.
+- The server owns the list for the level (`Server::statics`), filled from the outbox
+  after each QuakeC window, the way the light styles are. The client draws statics from
+  it (`cl_main.rs` `static_desc`: `CL_ParseStatic` and `R_AddEfrags`), not from the edict
+  loop. `Vm`'s `edict_static`, `is_static_edict` and `make_static` are gone.
+- `quaketool scene` draws the statics after the live edicts: the goldens are unchanged.
+- **The wire bytes, not the floats.** Classic is id's, and id's client drew the bytes;
+  demo playback already did. On the shareware maps it changes nothing: every static has
+  angles 0 and whole-unit origins. The packs' statics have whole-unit origins, and a
+  few have a yaw that is no multiple of 1.40625 degrees (150, 250, -2: torches and small
+  flames), which now draws as id's did, up to 1.4 degrees off the map's. 2026 gains
+  nothing from the floats, so both profiles share one path.
+- **Savegames.** A save writes the freed slots as empty blocks, so it holds no statics,
+  as id's. A load re-runs the map's spawn functions (`Host_Loadgame_f`'s
+  `SV_SpawnServer`), which rebuild the list before the save's edicts are read
+  (`a_save_holds_no_statics_and_its_load_rebuilds_them`, which also checks that a new
+  save's load leaves every slot as saved).
+- **The port's own older saves** (the user's, in IndexedDB) hold each static as a live
+  edict, which would draw on top of the respawned static. The load migrates them
+  (`save.rs` `free_statics_an_old_save_kept`): a loaded edict whose `svc_spawnstatic`
+  would be exactly one the spawn wrote, `SOLID_NOT` and with no `think`, is freed as a
+  newer save's `{}` block. No save id's engine or this port now writes holds one.
+  `an_old_save_s_kept_statics_are_freed_on_load` crafts such a save on the start map:
+  its load has the new save's live edicts and frame, 9 alias models drawn (14 without
+  the migration).
+
+**Proof.**
+- `classic_check`: ALL PASS. `census` and `edicts` re-recorded with a note: the census
+  report changes only in edict numbers and its makestatic line's wording. The edict diffs
+  of the nine maps shrink from 1,185 rows to 606. Of the entities they match, 469 were
+  numbered other than id's minus one (CENSUS L25's player offset); 30 still are, all
+  random fireballs and bubbles. Every map's live count equals id's, random spawns aside.
+  goldens, play (all 42), timedemo, oracle, screen2d, demolerp and sound are unchanged.
+  The play hashes do cover statics: with them hidden, 9 of `walk_e1m3`'s 22 change.
+- `census/packs.py`, all 35 pack levels: no "only in port" statics left. The rows that
+  remain (two classless thinkers on hip3m1 at 10.7 s, a fireball on hip3m2) were there
+  before too, things monsters and random numbers start. The live counts at
+  t = 10.7 s equal id's on 31 levels; the 4 others (hip1m1, hip2m4, hip3m1, hip3m2) differ
+  by things monsters or random numbers start (P17). `r2m6` now compares: C 545 / 542 /
+  542 live edicts at t = 1.7 / 4.7 / 10.7 s, the port 542 / 542 / 542 (id's three extra at
+  1.7 are zombie gibs).
+- `r2m6_spawns_under_ids_600_edicts` (ignored, real data): Classic's ceiling, 91 statics,
+  541 live edicts after the entities load.
+- `makestatic_records_the_wire_static_and_frees_the_edict`: the bytes, the wire origin
+  and angles, the edict free, and the next spawn takes its slot.
+
+**`sv_max_edicts`** stays a 2026 extra: 600 in Classic, 8192 in 2026, as room for maps
+past 600. No map of id1 or either pack needs it. Its docs and console help say so.
+
+**Left open.**
+- A `makestatic` after the client's signon would draw at once. id's client only sees it
+  at its next signon. No progs does this: every `makestatic` in id1, Hipnotic and Rogue
+  is in a spawn function (`census/qcsym.py ... calls makestatic`).
+- `CL_ParseStatic`'s `MAX_STATIC_ENTITIES` (128, "Too many static entities") is not
+  modelled. No map checked reaches it: `r1m1`'s 106 statics are the packs' most, and
+  the shareware maps have at most 44 (`e1m3`).

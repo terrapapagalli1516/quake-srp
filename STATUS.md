@@ -141,19 +141,23 @@ agent before the chair merged them; `main` and both pages were updated after eac
   English messages; `maps/b_exbox2.bsp`, which the re-release moved into `id1`, put back
   in hipnotic's pak) and a `pak1.pak` without e4m5's stray teleporter (id's own map bug:
   "couldn't find target" ended the game).
-- **The edict pool** (`fleet/edicts`). Rogue's `r2m6` needs 632 edicts; id's `MAX_EDICTS`
-  is 600. `sv_max_edicts` (console only): 600 in Classic, 8192 in 2026, sized where
-  `SV_SpawnServer` sizes `sv.edicts`, carried across changelevel and restart, saves load
-  under the live ceiling, at most 32000. With it off, id's "ED_Alloc: no free edicts".
+- **The edict pool** (`fleet/edicts`). `sv_max_edicts` (console only): 600 in Classic,
+  8192 in 2026, sized where `SV_SpawnServer` sizes `sv.edicts`, carried across
+  changelevel and restart, saves load under the live ceiling, at most 32000. With it off,
+  id's "ED_Alloc: no free edicts". *Corrected 2026-10-02* (`fleet/makestatic`): the 632
+  edicts Rogue's `r2m6` seemed to need were the port's own count, its 91 statics keeping
+  edicts id's `makestatic` frees. It spawns under 600 in Classic, as in id's C. No map of
+  id1 or the packs needs the extra; it stays as room for bigger maps.
 - **Found on the way:** the e4m5 teleporter above (verified reachable: open space; the
   e4m8 one is inside solid); `verify_loops`'s audio-underrun count fails when run
   under load 7–15 on any build (it passes in a quiet window); Chrome's main-thread rAF
   cap (last round) is unchanged.
 - **Not done, noted:** the user's side note that the sky could be more fluid in places
   for 2026 — likely `R_MakeSky`'s whole-texel scroll steps; a `screenshot` download;
-  mission-pack cases in `oracle/screen2d.py` (the review's comparison was ad hoc); whether
+  mission-pack cases in `oracle/screen2d.py` (the review's comparison was ad hoc); ~~whether
   Rogue's own engine raised `MAX_EDICTS` (its source was never released, and id's C can't
-  run `-rogue` on r2m6 for a missing `campaign` cvar).
+  run `-rogue` on r2m6 for a missing `campaign` cvar)~~ (moot: id's C runs it, at 542-546
+  edicts; `fleet/packclass`, `fleet/makestatic`).
 
 ---
 

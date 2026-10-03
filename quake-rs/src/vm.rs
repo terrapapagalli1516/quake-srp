@@ -268,10 +268,8 @@ const RUNAWAY: u32 = 100_000;
 pub const MAX_EDICTS: usize = 600;
 
 /// The `sv_max_edicts` cvar's own ceiling: not id's (there is no real
-/// engine's own number to match here — the real, never-open-sourced Rogue
-/// engine that shipped `r2m6` is undocumented; see `AUDIT.md`), so this is
-/// the port's own choice, well clear of where an edict number stops being
-/// representable at all: `svc_spawnbaseline`/`svc_update`'s entity number is
+/// engine's own number to match here), so this is the port's own choice,
+/// well clear of where an edict number stops being representable at all: `svc_spawnbaseline`/`svc_update`'s entity number is
 /// a signed 16-bit field end to end (`common.c`'s `MSG_ReadShort` casts
 /// through `(short)`), so 32768 would read back as -32768 — and every
 /// parser here already rejects a negative entity number, demo.rs's
@@ -395,13 +393,6 @@ pub struct Vm {
     /// `edict_t.num_leafs`/`leafnums` per edict, written by `SV_LinkEdict`
     /// ([`Vm::set_edict_leafs`]); missing entries read as no leaves.
     edict_leafs: Vec<EdictLeafs>,
-    /// The edicts `makestatic` turned into client statics. The C writes one
-    /// `svc_spawnstatic` into the signon and frees the edict, and the client
-    /// draws it through efrags (`R_AddEfrags` / `R_StoreEfrags`) and never
-    /// relinks it. The port keeps the edict (edict numbering and savegames
-    /// follow it) and marks it here, so the client can treat it as a static.
-    /// Missing entries read as not static; `ED_Alloc` and `ED_Free` clear it.
-    edict_static: Vec<bool>,
     /// The host session's random streams ([`QRand`]) that `random()` and the
     /// monsters' chase directions draw from: a VM's own fresh ones until the
     /// host hands it its session's ([`Vm::set_rand`]).
@@ -457,7 +448,6 @@ impl Vm {
             stmt_count: 0,
             edict_freetime: Vec::new(),
             edict_leafs: Vec::new(),
-            edict_static: Vec::new(),
             rand: Rc::new(QRand::new()),
             halted: None,
             stack: Vec::new(),
@@ -937,9 +927,6 @@ impl Vm {
         if let Some(free) = self.edict_free.get_mut(e) {
             *free = false;
         }
-        if let Some(st) = self.edict_static.get_mut(e) {
-            *st = false;
-        }
     }
 
     /// The first slot `ED_Alloc` may hand out: free, and either freed in the
@@ -1037,9 +1024,6 @@ impl Vm {
         self.set_ent_float(e, fo.nextthink, -1.0);
         let e = e as usize;
         self.edict_free[e] = true;
-        if let Some(st) = self.edict_static.get_mut(e) {
-            *st = false;
-        }
         if self.edict_freetime.len() <= e {
             self.edict_freetime.resize(e + 1, 0.0);
         }
@@ -1093,24 +1077,6 @@ impl Vm {
             self.edict_free.truncate(n);
             self.edict_fields.truncate(n * self.entityfields());
         }
-    }
-
-    /// Whether `makestatic` turned edict `e` into a client static.
-    pub fn is_static_edict(&self, e: i32) -> bool {
-        usize::try_from(e).ok().and_then(|e| self.edict_static.get(e)).copied().unwrap_or(false)
-    }
-
-    /// Mark edict `e` a client static (`PF_makestatic`). The world and negative
-    /// indices are ignored.
-    pub fn make_static(&mut self, e: i32) {
-        let Ok(e) = usize::try_from(e) else { return };
-        if e == 0 {
-            return;
-        }
-        if self.edict_static.len() <= e {
-            self.edict_static.resize(e + 1, false);
-        }
-        self.edict_static[e] = true;
     }
 
     /// Flat cell index for edict `e`, field `ofs`, or `None` if out of range.
@@ -2295,9 +2261,8 @@ mod tests {
     #[test]
     fn set_max_edicts_raises_or_restores_the_ed_alloc_ceiling() {
         // The 2026-only sv_max_edicts extra: spawn_checked (PF_Spawn) holds at
-        // id's MAX_EDICTS until raised, then holds at the raised ceiling too —
-        // this is what fixes Rogue's r2m6 ("ED_Alloc: no free edicts" past 600
-        // edicts; AUDIT.md "the mission packs").
+        // id's MAX_EDICTS until raised, then holds at the raised ceiling too
+        // (room for a map past 600 edicts; none id or the packs shipped is).
         let mut b = Builder::new();
         b.entityfields = 1;
         let _main = add_function(&mut b, "main", vec![Statement { op: Op::Done, a: 0, b: 0, c: 0 }]);

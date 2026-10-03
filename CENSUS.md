@@ -3,9 +3,9 @@
 **Status on 2026-09-26** (`quake/2026`): all 18 HIGH and MED findings (F1–F18) are
 fixed, each by the commit named in its row. Of the 25 LOWs:
 - 18 are fixed: L1 L2 L4–L11 L14–L16 L18 L20–L22 L24. L10 was fixed on `quake/polish4a`
-  and L16 on `q26/server`.
+  and L16 on `q26/server`. L17 was fixed later, on `fleet/makestatic` (2026-10-02).
 - Two are fixed in part: L12 (all but the F-keys, `t` and `zoom_in`) and L25.
-- Five are open: L3 L13 L17 L19 L23. `AUDIT.md`, "Open, as of 2026-09-26", lists them
+- Four are open: L3 L13 L19 L23. `AUDIT.md`, "Open, as of 2026-09-26", lists them
   with the rest.
 
 The departures in "Rule departures on by default" below are settled: since
@@ -82,7 +82,7 @@ evidence; anything marked *hunch* has none beyond reading.
 | L14 | ✅ fixed in d21a2b9. New Game while a game runs has no "Are you sure?" (`M_SinglePlayer_Key` → `SCR_ModalMessage`). | menu.c |
 | L15 | ✅ fixed: `misc/null.wav` queues and overrides, and an inaudible sound ends the sound on its (entity, channel), since d7583c6 (F9) — one whose first decode is still pending too since eddd9e0 (`quake/polish2`); each side clamped at full before the master volume, and one-shots re-spatialised every frame, on `quake/polish3` (`web/verify_loops.py` section 4). Sound: near-side gain clamped after the master volume (C clamps per side at 255 before `volume`) — up to 1.43× louder close and panned at volume 0.7; one-shots are not re-spatialised each frame; an inaudible new sound (gain ≤ 0.02) does not cut the old one on its (entity, channel); `misc/null.wav` never overrides. | snd_dma.c `SND_Spatialize`/`SND_PickChannel`; `web/index.html playRouted`, `queue_sounds` |
 | L16 | ✅ fixed on `q26/server` (2026-09-26): `error` and `objerror` print id's banner and `ED_Print (self)`, `objerror` frees `self`, and `Host_Error` ends the game (AUDIT.md, "QuakeC errors end the game"). Was: ⏸ left open on quake/fix-server: making `objerror`/`error` end the game (Host_Error) needs a disconnect-to-console path the browser shell does not have, for a teleporter no normal play reaches. `objerror`/`error` are non-fatal (C: `Host_Error`, which ends the game; `objerror` also frees `self`). The census hits one: start.bsp's `trigger_teleport` targeting `t11` (an 18-unit box at z −673..−655) points at an `info_null`, which removes itself at spawn → "couldn't find target"; id would drop to the console, the port carries on. Probably unreachable in normal play (*hunch* — the box sits far below the hub). | pr_cmds.c `PF_objerror`; `builtins::pf_objerror` |
-| L17 | ⏸ left open on quake/fix-server: freeing the flames needs a static-entity list the renderer draws (cl_walk/render, other agents' files) and savegame handling, for no visible change. `makestatic` is a no-op: the 6–44 flames per map stay live edicts (C frees them after `svc_spawnstatic`). No visible effect; costs `MAX_EDICTS` headroom and savegame size. | pr_cmds.c `PF_makestatic`; `install_engine_builtins` #69 |
+| L17 | ✅ fixed on `fleet/makestatic` (2026-10-02): `PF_makestatic` writes the static into the server's signon list (`Server::statics`, what `svc_spawnstatic` carried) and frees the edict; the client draws the list. Edict numbers and live counts are id's; Rogue's `r2m6`, which the kept statics pushed past 600, spawns in Classic (`AUDIT.md`, "`makestatic` frees its edict"). Before: ⏸ left open on quake/fix-server: freeing the flames needs a static-entity list the renderer draws (cl_walk/render, other agents' files) and savegame handling, for no visible change. `makestatic` is a no-op: the 6–44 flames per map stay live edicts (C frees them after `svc_spawnstatic`). No visible effect; costs `MAX_EDICTS` headroom and savegame size. | pr_cmds.c `PF_makestatic`; `install_engine_builtins` #69 |
 | L18 | ✅ fixed in 0d7f01c. The world edict has `solid 0`/`movetype 0`; `SV_SpawnServer` sets `SOLID_BSP`/`MOVETYPE_PUSH`. The only progs reader (`ClientObituary`) also checks `attacker != world`: no effect found. | oracle edict diff (`worldspawn movetype 7/0 solid 4/0`); `Server::set_map_name` |
 | L19 | `checkclient` uses a line-of-sight trace, not the cached 0.1 s client PVS; `FindTarget` follows it with `visible()` so the result only differs by the PVS staleness. | pr_cmds.c `PF_checkclient`; `bi_checkclient` |
 | L20 | ✅ fixed in a19ec64. The spawn settle frames skip `StartFrame` (C's `SV_Physics` always runs it); nothing reads `skill`/`framecount` in those 0.2 s. | sv_phys.c; `Server::spawn_entities` |
@@ -233,7 +233,7 @@ cd quake-rs && cargo build --release
 cd .. && oracle/build.sh                                                  # id's side (docker)
 uv run census/oracle_run.py --dev --out /tmp/o 'map e1m6' 'waits 5' 'oracle_edicts {out}/c.txt'
 quake-rs/target/release/quaketool census-edicts quake-data/ID1/PAK0.PAK e1m6 1.7 > /tmp/o/port.txt
-uv run census/edict_diff.py /tmp/o/c.txt /tmp/o/port.txt --t 1.7 --skip bodyque,player,light_torch_small_walltorch,light_flame_large_yellow,light_flame_small_yellow,light_flame_small_white
+uv run census/edict_diff.py /tmp/o/c.txt /tmp/o/port.txt --t 1.7
 uv run census/qcsym.py quake-data/ID1/PAK0.PAK calls stuffcmd cvar_set   # the progs' own calls
 cd quake-wasm && cargo test --release census                              # the fixed findings' acceptance tests
 cd quake-wasm && cargo test --release census -- --ignored                 # a new open finding's test (none today)

@@ -146,8 +146,9 @@ pub struct Cvars {
     /// Classic, where id's own 600 is also the port's; higher in 2026). A
     /// departure, but an unusual one: it never changes anything *drawn* —
     /// id's `MAX_EDICTS` is an engine limit, not game design — only whether
-    /// a map that spawns more than 600 edicts (Rogue's `r2m6`; `AUDIT.md`
-    /// "the mission packs") can be played at all. Clamped to
+    /// a map that needs more than 600 edicts can be played at all. No map of
+    /// id1 or the two mission packs does (Rogue's `r2m6` peaks at 546, as in
+    /// id's C); it is room for bigger maps. Clamped to
     /// [`crate::vm::MAX_EDICTS`]..=[`crate::vm::MAX_EDICTS_LIMIT`].
     pub max_edicts: u32,
     /// `in_touch`: on a touch screen, the page's touch controls for play —
@@ -222,7 +223,8 @@ impl Cvars {
     /// clutter, and id's 16-pixel spans are part of the look. A gamepad
     /// works as a modern twin-stick pad ([`JoyCvars::modern`]). The edict
     /// pool grows past id's 600 (`max_edicts`, QuakeSpasm's own default) —
-    /// invisible on every shareware/registered map, needed by Rogue's `r2m6`.
+    /// invisible on every map id or the mission packs shipped, room for
+    /// bigger ones.
     pub fn modern() -> Cvars {
         Cvars {
             cl_forwardspeed: 400.0,
@@ -476,7 +478,7 @@ pub const CVARS: &[Cvar] = &[
         set: |c, v| c.sound = if on(v) { SoundMode::Modern } else { SoundMode::Classic } },
     Cvar { name: "r_threads", archive: true, departure: false, help: "3-D view threads, 0 auto",
         get: |c| c.threads.cvar().to_string(), set: |c, v| c.threads = Threads::from_cvar(atof(v)) },
-    Cvar { name: "sv_max_edicts", archive: true, departure: true, help: "edict pool past id's 600 (needs r2m6)",
+    Cvar { name: "sv_max_edicts", archive: true, departure: true, help: "edict pool past id's 600, for big maps",
         get: |c| c.max_edicts.to_string(),
         set: |c, v| c.max_edicts = atof(v).clamp(MAX_EDICTS as f32, MAX_EDICTS_LIMIT as f32) as u32 },
     Cvar { name: "in_touch", archive: true, departure: true, help: "touch controls on a touch screen",

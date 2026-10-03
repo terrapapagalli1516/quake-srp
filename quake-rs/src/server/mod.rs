@@ -78,8 +78,8 @@ mod sv_world;
 
 pub use lightstyle::{lightstyle_scales_at, MAX_LIGHTSTYLES};
 pub use msg::{
-    te_consts, wire_coord, GameMessage, Outbox, ParticleBurst, SoundEvent, StaticSound, SvcEvent,
-    TempEntityEvent,
+    te_consts, wire_angle, wire_coord, GameMessage, Outbox, ParticleBurst, SoundEvent, StaticEntity,
+    StaticSound, SvcEvent, TempEntityEvent,
 };
 pub use pr_cmds::install_engine_builtins;
 pub use sv_main::{EntityDlight, EF_BRIGHTLIGHT, EF_DIMLIGHT, EF_MUZZLEFLASH};
@@ -660,6 +660,11 @@ pub struct Server {
     /// a new server, so a changelevel re-populates it from the new worldspawn.
     /// (`pub(crate)`: `Host_Loadgame_f` overwrites all 64 from the savegame.)
     pub(crate) lightstyles: [String; MAX_LIGHTSTYLES],
+    /// The signon's static entities (`svc_spawnstatic`), owned like the
+    /// light styles and filled the same way ([`Server::statics`]). Empty in a
+    /// new server; a savegame's load rebuilds it by re-running the map's
+    /// spawn functions, as id's did (a save holds no statics).
+    statics: Vec<StaticEntity>,
     /// `sv.name` (server.h): the bare map name (`"e1m1"`), recorded by
     /// [`Server::set_map_name`]. `Host_Savegame_f` writes it into the `.sav`
     /// header so a load knows which map to spawn.

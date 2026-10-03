@@ -63,7 +63,7 @@ use crate::cd_audio::CdCall;
 use crate::pak::Pak;
 use crate::particles::{Lcg, ParticleSystem, TrailHead};
 use crate::render;
-use crate::server::{Server, SoundEvent, StaticSound};
+use crate::server::{wire_angle, Server, SoundEvent, StaticSound};
 use crate::stepping::{Stepping, Tick72};
 use crate::tent::{BeamSegment, Beams};
 use crate::wad::Qpic;
@@ -526,14 +526,6 @@ pub fn color_for_name(name: &str) -> [u8; 3] {
     table[(h % table.len() as u32) as usize]
 }
 
-/// An angle as it crosses the wire in `svc_setangle`: `MSG_WriteAngle`
-/// (`((int)f*256/360) & 255`) then `MSG_ReadAngle` (`MSG_ReadChar() *
-/// (360.0/256)`) — whole degrees truncated, then 256 steps, signed.
-pub fn net_angle(f: f32) -> f32 {
-    let b = ((f as i32).wrapping_mul(256) / 360) & 255;
-    (b as u8 as i8) as f32 * (360.0 / 256.0)
-}
-
 /// The view angles a freshly spawned client starts with, as `(yaw, pitch)`:
 /// Host_Spawn_f (host_cmd.c) sends `svc_setangle` with the player entity's
 /// `angles` right after PutClientInServer ("never send a roll angle"), so the
@@ -542,7 +534,7 @@ pub fn net_angle(f: f32) -> f32 {
 /// the connect, before the settle frames.
 pub fn spawn_view_angles(server: &Server, player: i32) -> (f32, f32) {
     let a = server.vm.ent_vec(player, server.vm.fo().angles);
-    (net_angle(a[1]), clamp_pitch(net_angle(a[0])))
+    (wire_angle(a[1]), clamp_pitch(wire_angle(a[0])))
 }
 
 /// Shared tail of the walk builders ([`build_walk_map`](host_cmd::build_walk_map) / the savegame load

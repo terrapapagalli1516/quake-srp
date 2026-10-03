@@ -4164,9 +4164,9 @@ mod tests {
         // advanced configuration and the port's stick shaping and menu keys,
         // tuned on the console as id's joy* were), and sv_max_edicts: there
         // is nothing to CHOOSE (raising the edict pool changes nothing a
-        // player can see or feel on any shareware/registered map, only
-        // whether a map past id's 600-edict ceiling — Rogue's r2m6 —
-        // spawns at all; AUDIT.md "the mission packs"), so a console cvar
+        // player can see or feel on any map id or the mission packs
+        // shipped, only whether a map past id's 600-edict ceiling spawns
+        // at all), so a console cvar
         // (like id's own `sv_gravity`, which also has no menu row) is the
         // whole interface.
         let pad_layout = |n: &str| n.starts_with("joy") && n != "joystick" && n != "joy_rumble";

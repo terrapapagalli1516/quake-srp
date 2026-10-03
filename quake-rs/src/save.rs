@@ -51,8 +51,8 @@ use crate::error::{QError, Result};
 use crate::progs::{EType, Progs};
 use crate::qrand::QRand;
 use crate::server::{
-    ed_new_string, link_edict, parse_float, parse_int, parse_vector, Server, Tokenizer,
-    MAX_LIGHTSTYLES, NUM_SPAWN_PARMS,
+    ed_new_string, link_edict, parse_float, parse_int, parse_vector, Server, Solid, StaticEntity,
+    Tokenizer, MAX_LIGHTSTYLES, NUM_SPAWN_PARMS,
 };
 use crate::vm::Vm;
 
@@ -622,6 +622,7 @@ impl Server {
         }
         let n = entnum as usize;
         server.vm.truncate_edicts(n);
+        free_statics_an_old_save_kept(&mut server);
 
         // sv.time = time; (`float time`, read by fscanf "%f": the double
         // clock restarts from that float. The globals block may have set the
@@ -643,6 +644,45 @@ impl Server {
         }
 
         Ok(server)
+    }
+}
+
+/// A migration for the port's own old saves, not id's: until 2026-10-02
+/// (`fleet/makestatic`) the port's `makestatic` kept its edict alive, so a
+/// save it wrote holds every torch, flame and `func_illusionary` as a live
+/// edict. Loaded over the respawned map, which has just written each of
+/// them into the signon again, every one would draw twice: as the static
+/// and as an entity on top of it. So a loaded edict whose `svc_spawnstatic`
+/// would be exactly one the spawn wrote (model, frame, skin, wire origin
+/// and angles), and that is `SOLID_NOT` with no `think` (every `makestatic`
+/// spawn function in id1 and both mission packs leaves it so), is freed
+/// as the `{}` block a newer save writes for it would have left it:
+/// fields zeroed, slot free. Each static frees at most one edict. A save id's
+/// engine or a newer port wrote holds no such edict, so nothing changes for
+/// it. Cheap: a few field tests per edict, and the record built only for
+/// the handful that pass them, against a list of at most ~100 statics.
+fn free_statics_an_old_save_kept(server: &mut Server) {
+    let vm = &server.vm;
+    let (think, model) = (vm.fo().think, vm.fo().model);
+    let mut unmatched: Vec<&StaticEntity> = server.statics().iter().collect();
+    let mut kept = Vec::new();
+    for e in 1..vm.num_edicts() as i32 {
+        if unmatched.is_empty() {
+            break;
+        }
+        let quiet = vm.solid(e) == Solid::Not && vm.ent_int(e, think) == 0;
+        if vm.is_free_edict(e) || !quiet || vm.ent_str(e, model).is_empty() {
+            continue;
+        }
+        let rec = StaticEntity::of_edict(vm, e);
+        if let Some(i) = unmatched.iter().position(|st| **st == rec) {
+            unmatched.swap_remove(i);
+            kept.push(e as usize);
+        }
+    }
+    for e in kept {
+        server.vm.load_edict(e);
+        server.vm.mark_edict_free(e);
     }
 }
 

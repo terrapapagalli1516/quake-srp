@@ -8,10 +8,10 @@
 //!
 //! **The pixel path is kept verbatim.** The sha256 of `scene` on e1m1..e1m3
 //! are the goldens (`oracle/classic_check.py`), and `scene` makes them through
-//! its own entity gathering: straight from the server's edicts, every model at
-//! frame 0 and skin 0, not through the game client (`quake_rs::client`) that
-//! the page, `play` and `shot` run. Any change here that reaches the pixels
-//! means new goldens.
+//! its own entity gathering: straight from the server's edicts and statics,
+//! every model at frame 0 and skin 0, not through the game client
+//! (`quake_rs::client`) that the page, `play` and `shot` run. Any change here
+//! that reaches the pixels means new goldens.
 //!
 //! Debug knobs, from the environment (the goldens set none):
 //! `QUAKE_AIM_DOOR` frames the nearest door instead; `QUAKE_DLIGHT` injects a
@@ -91,20 +91,21 @@ pub fn cmd_scene(pak_path: &str, map_name: &str, out: &str, opts: &[String]) -> 
     let mut ext_owned: Vec<(Bsp, [f32; 3])> = Vec::new();
     let mut skipped_load = 0usize;
 
-    let n = server.vm.num_edicts();
-    for e in 0..n {
-        // Skip free edicts (and the implicit world at 0 has no .mdl model).
-        if server.vm.is_free_edict(e as i32) {
-            continue;
-        }
-        let ent = e as i32;
-        // Only render entities whose QuakeC spawn actually setmodel'd (modelindex
-        // != 0); a passable func_episodegate keeps its "*N" map key but no
-        // modelindex and is invisible in Quake.
-        if server.vm.ent_get_float(ent, "modelindex") == 0.0 {
-            continue;
-        }
-        let model = server.vm.ent_get_string(ent, "model");
+    // Every model to draw, as (model, origin, angles, frame, is a monster):
+    // each live edict whose QuakeC spawn actually setmodel'd (modelindex != 0;
+    // a passable func_episodegate keeps its "*N" map key but no modelindex and
+    // is invisible in Quake), then the signon's statics (the torches and
+    // flames, whose edicts makestatic freed).
+    let vm = &server.vm;
+    let live = (0..vm.num_edicts() as i32)
+        .filter(|&e| !vm.is_free_edict(e) && vm.ent_get_float(e, "modelindex") != 0.0)
+        .map(|e| {
+            let monster = vm.ent_get_string(e, "classname").starts_with("monster");
+            let frame = vm.ent_get_float(e, "frame") as i32;
+            (vm.ent_get_string(e, "model"), vm.ent_get_vector(e, "origin"), vm.ent_get_vector(e, "angles"), frame, monster)
+        });
+    let statics = server.statics().iter().map(|st| (st.model.clone(), st.origin, st.angles, i32::from(st.frame), false));
+    for (model, origin, angles, frame, monster) in live.chain(statics) {
         if model.is_empty() {
             continue;
         }
@@ -112,9 +113,7 @@ pub fn cmd_scene(pak_path: &str, map_name: &str, out: &str, opts: &[String]) -> 
         // the entity origin (the world pass only draws model 0).
         if let Some(num) = model.strip_prefix('*') {
             if let Ok(idx) = num.parse::<usize>() {
-                let origin = server.vm.ent_get_vector(ent, "origin");
-                let angles = server.vm.ent_get_vector(ent, "angles");
-                bmodels.push(render::BModelInstance { model_index: idx, origin, frame: server.vm.ent_get_float(ent, "frame") as i32, angles });
+                bmodels.push(render::BModelInstance { model_index: idx, origin, frame, angles });
             }
             continue;
         }
@@ -132,7 +131,6 @@ pub fn cmd_scene(pak_path: &str, map_name: &str, out: &str, opts: &[String]) -> 
                     ext_cache.insert(model.clone(), parsed);
                 }
                 if let Some(Some(bsp)) = ext_cache.get(&model) {
-                    let origin = server.vm.ent_get_vector(ent, "origin");
                     ext_owned.push((bsp.clone(), origin));
                 }
             }
@@ -158,11 +156,9 @@ pub fn cmd_scene(pak_path: &str, map_name: &str, out: &str, opts: &[String]) -> 
             continue;
         };
 
-        let origin = server.vm.ent_get_vector(ent, "origin");
-        let angles = server.vm.ent_get_vector(ent, "angles");
         let yaw = angles[1]; // angles = [pitch, yaw, roll]
         let color = color_for_name(&model);
-        if server.vm.ent_get_string(ent, "classname").starts_with("monster") {
+        if monster {
             monster_origins.push(origin);
         }
         owned.push((mdl.clone(), origin, yaw, color));

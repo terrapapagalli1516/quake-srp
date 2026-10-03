@@ -319,8 +319,10 @@ impl Server {
         }
 
         // Worldspawn (and any other spawn function) may have called lightstyle();
-        // apply those patterns to the owned table.
+        // apply those patterns to the owned table. The torches and flames
+        // called makestatic(): the signon's statics.
         self.apply_lightstyles();
+        self.apply_statics();
 
         // SV_SpawnServer: "run two frames to allow everything to settle" with
         // host_frametime = 0.1. The first frame fires each entity's spawn-set
@@ -599,22 +601,18 @@ mod tests {
     }
 
     /// Rogue's `r2m6` on real data: `#[ignore]`d (needs the mission pack's own
-    /// `progs.dat`/`r2m6.bsp`, which this repo does not carry — see
-    /// `AUDIT.md` "the mission packs" and `fleet/edicts.md`). Point
-    /// `QUAKE_R2M6_DIR` at a directory holding both files (built with
-    /// `mission_paks.py`, or
-    /// copied from another checkout) and run
+    /// `progs.dat`/`r2m6.bsp`, which this repo does not carry). Point
+    /// `QUAKE_R2M6_DIR` at a directory holding both files (extracted from
+    /// Rogue's `pak0.pak` with `quaketool cat`) and run
     /// `cargo test --release r2m6 -- --ignored`.
     ///
-    /// With the extra off, `spawn_entities` hits id's own ceiling exactly as
-    /// the AUDIT found it: `plat2_spawn_inside_trigger` calling `spawn()`
-    /// once too many during the map's own entity load, the literal
-    /// `Sys_Error` text, no byte changed from Classic. With it on
-    /// (`set_max_edicts`, as `sv_max_edicts` would from the console), the
-    /// same map's entities spawn clean.
+    /// The map was the reason for `sv_max_edicts`: it overflowed id's 600
+    /// while its 91 statics each kept an edict. `makestatic` frees them as
+    /// id's does, and it spawns under id's own ceiling (Classic), with the
+    /// live edicts id's C has (`census/packs.py`).
     #[test]
     #[ignore]
-    fn r2m6_needs_more_than_ids_600_edicts() {
+    fn r2m6_spawns_under_ids_600_edicts() {
         let Ok(dir) = std::env::var("QUAKE_R2M6_DIR") else {
             eprintln!("QUAKE_R2M6_DIR not set; skipping (see this test's doc comment)");
             return;
@@ -624,30 +622,18 @@ mod tests {
         let progs = Progs::parse(&progs_bytes).expect("parse progs.dat");
         let bsp = crate::bsp::Bsp::parse(&bsp_bytes).expect("parse r2m6.bsp");
 
-        // Extra off (Classic, or 2026 with sv_max_edicts left at its 600
-        // default): id's own ceiling, id's own wording.
-        let mut classic = Server::new(bsp.clone(), progs.clone()).expect("server");
-        classic.set_map_name("r2m6");
-        let err = classic.spawn_entities().unwrap_err();
-        let crate::QError::Program(e) = err else { panic!("expected a QuakeC program error, got {err:?}") };
-        assert_eq!(e.function, "plat2_spawn_inside_trigger", "the AUDIT's own culprit");
-        assert_eq!(e.message, "ED_Alloc: no free edicts", "id's exact Sys_Error text");
-
-        // Extra on: raise the ceiling before spawn_entities, as a front-end's
-        // sv_max_edicts would. r2m6 spawns clean; print how many edicts it
-        // actually needed (for the report — this is the number the brief
-        // asked for, not a value to assert exactly, since it may shift if
-        // the port's spawn functions change).
-        let mut modern = Server::new(bsp, progs).expect("server");
-        modern.set_max_edicts(8192);
-        modern.set_map_name("r2m6");
-        let report = modern.spawn_entities().expect("r2m6 spawns with the extra on");
+        let mut server = Server::new(bsp, progs).expect("server");
+        assert_eq!(server.vm.max_edicts(), crate::vm::MAX_EDICTS, "id's ceiling: Classic");
+        server.set_map_name("r2m6");
+        let report = server.spawn_entities().expect("r2m6 spawns under id's 600");
         println!(
-            "r2m6: {} entity blocks -> {} spawned, {} live edicts (id's ceiling was 600)",
+            "r2m6: {} entity blocks -> {} spawned, {} statics, {} live edicts of {} slots",
             report.total,
             report.spawned,
-            modern.live_entities()
+            server.statics().len(),
+            server.live_entities(),
+            server.vm.num_edicts()
         );
-        assert!(modern.live_entities() > 600, "r2m6 is the whole point: it needs more than id's 600");
+        assert_eq!(server.statics().len(), 91, "the torches, candles and lanterns");
     }
 }
