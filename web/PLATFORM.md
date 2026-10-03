@@ -936,6 +936,46 @@ little at 120 and at 480 Hz alike beside a trackpad, whose own rate is
 near the display's, that turns as it should. Not verified here (no Mac);
 the mouse check measures it (below).
 
+What the merged event carries nobody on the bug measured, and AppKit's
+source is closed; Chromium adds nothing of its own (it reads the one
+event's field). The reading that fits what is in hand is the newest
+report's movement alone, not the sum: the reporter's games turned slow, and
+so does the mouse that was measured, where a sum would have made it fast (7 cm a full
+turn at 800 CPI). The game then gets the display's rate ÷ the mouse's
+polling rate of the counts: for a 1000 Hz mouse a third at the 328 Hz the
+mouse check saw, an eighth on a 120 Hz Mac, a sixteenth on a 60 Hz one
+(and half of an office mouse's 125 Hz there) — a constant factor on a given
+display, which Mouse Speed makes up. A full turn in centimetres of mouse
+travel, 1000 Hz mouse (id's own default was 35 cm with 1996's 400 CPI; 15
+to 40 is the usual range):
+
+| | every count | 120 Hz Mac | 60 Hz Mac |
+|---|---|---|---|
+| 800 CPI, Mouse Speed 3 (the default) | 7 | 60 | 119 |
+| 800 CPI, Mouse Speed 11 (the slider's end) | 2 | 16 | 32 |
+| 1600 CPI, the default | 3.6 | 30 | 60 |
+| 1600 CPI, the slider's end | 1 | 8 | 16 |
+
+So id's 1 to 11 reaches a usual turn in every one of them (800 CPI at
+60 Hz only at its end), and the slider stays id's; the console's
+`sensitivity 20` goes past it (no limit, saved in `config.cfg`; the slider
+then shows its end, as id's). What Mouse Speed cannot give back is the
+fineness: one report stands for a frame's, so at Mouse Speed 11 a count is
+0.59°, and a slow, small move (under a count a millisecond) reads as
+nothing in most frames. A mouse that polls no faster than the display
+refreshes (125 Hz on a 120 Hz Mac) loses nothing; the default is then fast
+(the first column) and the slider goes down instead. A pointer utility
+is not in it: its pointer settings are properties of the
+system's acceleration (`HIDPointerResolution`, `HIDMouseAcceleration`,
+`HIDUseLinearScalingMouseAcceleration`), which
+shape the accelerated pointer the unadjusted lock does not read, and its
+event tap leaves moves alone but for its hold-a-button gestures
+(its event tap); a hardware DPI it sets on a mouse changes
+the counts as any DPI setting does. The page does nothing by itself here
+(it cannot know a mouse's polling rate): the README and the keys drawer say
+to raise Mouse Speed. Not verified: the factor on a real Mac (the mouse
+check's counts over 10 cm along a ruler would give it), Firefox there.
+
 **The mouse check.** For a display, a device and a browser the local checks cannot
 run, the page measures itself. Open it with `?mousecheck` in the address —
 `?mousecheck=mouse,trackpad` names the runs in turn — start a game and click
