@@ -4230,13 +4230,15 @@ mod tests {
         // frame at every whole texel and glides between them; Classic turns
         // it off with the rest, the console alone. r_lerplightstyles, for
         // both reasons: no room, and id's light at every whole tenth of a
-        // second, gliding between.
+        // second, gliding between. r_torchflicker: no room, and a strength
+        // to tune by eye in the console, not a switch.
         let pad_layout = |n: &str| n.starts_with("joy") && n != "joystick" && n != "joy_rumble";
         let listed = |c: &&cvar::Cvar| {
             ((c.departure || shared_control(c.name)) && !c.name.starts_with("cl_") && !pad_layout(c.name) || c.name == "cl_jumpswim")
                 && c.name != "sv_max_edicts"
                 && c.name != "r_fluidsky"
                 && c.name != "r_lerplightstyles"
+                && c.name != "r_torchflicker"
         };
         for c in cvar::CVARS.iter().filter(listed) {
             assert_eq!(SETTING_ROWS.iter().filter(|r| r.cvar == c.name).count(), 1, "{}: one row", c.name);

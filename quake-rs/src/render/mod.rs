@@ -59,6 +59,7 @@ mod polyse;
 mod sprite;
 mod part;
 mod stats;
+mod torch;
 mod video;
 #[cfg(test)]
 pub(crate) mod fixtures;
@@ -95,6 +96,7 @@ pub use view::{
 pub use vis::point_in_leaf;
 pub use band::Threads;
 pub use sky::SkyScroll;
+pub use torch::TorchFlicker;
 pub use video::{FovMode, VideoCvars, HIRES_MAXHEIGHT, HIRES_MAXWIDTH, MAXHEIGHT, MAXWIDTH};
 pub use world::{BModelInstance, ExternalBModel};
 pub(crate) use band::map_rows;
@@ -930,17 +932,26 @@ struct Frame<'s, 'a> {
     geom: ViewGeom,
     /// The liquids' `sintable` (`R_InitTurb`).
     turb: TurbTable,
+    /// The steady torches and their scales this frame (the 2026
+    /// `r_torchflicker`, [`torch`]), or `None`: id's light.
+    torches: Option<&'s torch::TorchSet>,
 }
 
 impl<'s, 'a> Frame<'s, 'a> {
     /// `scene` in a `w x h` view (already clamped to the cvars' largest).
+    #[cfg(test)]
     fn new(scene: &'s Scene<'a>, w: usize, h: usize) -> Frame<'s, 'a> {
+        Frame::with_torches(scene, w, h, None)
+    }
+
+    /// [`Frame::new`] lit by the steady torches' flicker as `torches` says.
+    fn with_torches(scene: &'s Scene<'a>, w: usize, h: usize, torches: Option<&'s torch::TorchSet>) -> Frame<'s, 'a> {
         let opts = &scene.options;
         let geom = ViewGeom::of(w, h, opts.window);
         let (screen_w, screen_h) = opts.screen.map_or((geom.proj_w, geom.proj_h), |s| (s.vid_w, s.vid_h));
         let fov_x = opts.video.fov_mode.fov_x(scene.camera.fov_deg, screen_w, screen_h, opts.aspect());
         let cam = Camera { fov_deg: fov_x, ..scene.camera };
-        Frame { scene, cam, w, h, geom, turb: TurbTable::new() }
+        Frame { scene, cam, w, h, geom, turb: TurbTable::new(), torches }
     }
 
     /// `scr_fov`, the cvar: what id tests on the cvar itself (no gun over 90,
@@ -974,6 +985,9 @@ pub struct Renderer {
     edge: edge::EdgeState,
     /// The world's per-face caches, the surface cache among them.
     surfaces: surf::SurfaceCaches,
+    /// The world's steady torches and what they light (`r_torchflicker`),
+    /// found the first frame the extra is on.
+    torches: Option<torch::TorchSet>,
     /// id's z-buffer, `d_pzbuffer`: the 16-bit 1/z of every pixel of the view,
     /// `(1/z * 0x8000 * 0x10000) >> 16` (larger is nearer). Never cleared:
     /// every frame's world spans write all of it (`D_DrawZSpans`), and the
@@ -1024,6 +1038,7 @@ impl Renderer {
             map: None,
             edge: edge::EdgeState::new(),
             surfaces: surf::SurfaceCaches::default(),
+            torches: None,
             zbuf: Vec::new(),
             warp: warp::WarpTables::default(),
             prof: stats::Profiler::default(),
@@ -1039,6 +1054,7 @@ impl Renderer {
         self.map = Some(MapShape::of(world));
         self.edge.begin_map(world);
         self.surfaces.begin_map(world.faces.len());
+        self.torches = None;
     }
 
     /// Turn the profiler on with its counters at zero: the frames drawn from
@@ -1166,7 +1182,17 @@ impl Renderer {
             self.begin_map(scene.world);
         }
         self.zbuf.resize(w.saturating_mul(h), 0);
-        let frame = Frame::new(scene, w, h);
+        // EXTRA (r_torchflicker): the steady torches, found the first frame
+        // the extra is on, at their scales for this frame's time.
+        let video = scene.options.video;
+        let torches = if video.torches.is_off() {
+            None
+        } else {
+            let set = self.torches.get_or_insert_with(|| torch::TorchSet::build(scene.world));
+            set.animate(scene.time, video.lightstyles, video.torches);
+            Some(&*set)
+        };
+        let frame = Frame::with_torches(scene, w, h, torches);
         let Some(world) = self.edge.build(&frame, &mut self.surfaces, &mut self.prof) else {
             return;
         };

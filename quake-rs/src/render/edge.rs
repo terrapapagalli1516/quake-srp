@@ -36,13 +36,14 @@
 use crate::bsp::{Bsp, DFace, TexInfo, CONTENTS_SOLID};
 use crate::math::{dot, normalize, sub, Vec3};
 use super::light::{
-    any_dlight_reaches, face_lightmap_dyn, mark_dlights, mark_dlights_more, LightMap,
+    any_dlight_reaches, face_lightmap_with, mark_dlights, mark_dlights_more, LightMap,
 };
 use super::raster::{
     hash_index, shade_index, span_at, span_cached, span_tex, span_turb, BlockFixed, ScreenProj,
 };
 use super::sky::{draw_sky_span, sky_dome_scale, sky_texture, SkyView};
 use super::stats::Profiler;
+use super::torch::FaceTorches;
 use super::surf::{
     classify_surface, face_world_poly, texture_animation, MipView, SurfBlock, SurfKind, SurfaceCaches,
     SurfaceRequest,
@@ -1974,6 +1975,12 @@ impl EdgeState {
             return Paint::Fill(clear);
         };
         let face_bits = if e.world_bsp { bits.get(fi).copied().unwrap_or(0) } else { 0 };
+        // The steady torches lighting it (`r_torchflicker`): the world's
+        // faces and its brush models', lit in place as LIGHT.EXE lit them.
+        let torches = match frame.torches {
+            Some(t) if e.world_bsp => t.face(fi),
+            _ => FaceTorches::NONE,
+        };
         // The port's own flat-shading fallback (id has none: an unlit face is
         // simply fullbright). `light_dir` is a world-space constant, so a
         // rotated entity's rest-frame normal has to make the same trip back
@@ -1987,10 +1994,10 @@ impl EdgeState {
         let lightmap: Option<LightMap> = if turbulent {
             None
         } else if s.ent == 0 {
-            caches.world_lightmap(bsp, fi, face, light_styles, e.dlights, face_bits)
+            caches.world_lightmap(bsp, fi, face, light_styles, torches, e.dlights, face_bits)
         } else if face_world_poly(bsp, face, &mut self.poly) {
             prof.add(|st| st.sub_lm_builds += 1);
-            face_lightmap_dyn(bsp, face, &self.poly, light_styles, e.dlights, face_bits)
+            face_lightmap_with(bsp, face, &self.poly, light_styles, torches, e.dlights, face_bits)
         } else {
             None
         };
@@ -2009,6 +2016,7 @@ impl EdgeState {
                             lightmap: lm,
                             colormap: cm,
                             light_styles,
+                            torches,
                             dlit: any_dlight_reaches(bsp, face, e.dlights, face_bits),
                             // D_MipLevelForScale on the surface's nearest 1/z
                             mip: ti.map_or(0, |t| mipview.level_for_nearzi(s.nearzi, t)),

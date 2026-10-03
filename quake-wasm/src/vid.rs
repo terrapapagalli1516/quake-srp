@@ -22,7 +22,7 @@
 
 use quake_rs::client::Vid;
 use quake_rs::cvar::Cvars;
-use quake_rs::render::{self, FovMode, MipCvars, SkyScroll, VideoCvars};
+use quake_rs::render::{self, FovMode, MipCvars, SkyScroll, TorchFlicker, VideoCvars};
 use quake_rs::server::LerpLightStyles;
 
 use crate::app::{ensure_app, App, APP};
@@ -183,6 +183,7 @@ pub(crate) fn set_video(name: &str) -> i32 {
         (c.native, c.fov_adapt) = (modern, modern);
         c.sky = if modern { SkyScroll::Fluid } else { SkyScroll::Classic };
         c.lightstyles = if modern { LerpLightStyles::Smooth } else { LerpLightStyles::Classic };
+        c.torches = if modern { TorchFlicker::MODERN } else { TorchFlicker::OFF };
         if modern {
             c.pixel_size = 1;
         }
@@ -246,7 +247,7 @@ pub(crate) fn vid(a: &App) -> Vid {
         height: h,
         display_aspect,
         exact_perspective: c.exact_persp,
-        video: VideoCvars { fov_mode, hires: native, sky: c.sky, lightstyles: c.lightstyles },
+        video: VideoCvars { fov_mode, hires: native, sky: c.sky, lightstyles: c.lightstyles, torches: c.torches },
         mip: MipCvars { mipscale: c.d_mipscale, mipcap: c.d_mipcap },
     }
 }
@@ -355,6 +356,30 @@ mod tests {
         assert_eq!(lerp(), LerpLightStyles::Smooth);
         assert_eq!(set_video("classic"), 1);
         assert_eq!(lerp(), LerpLightStyles::Classic);
+    }
+
+    /// The steady torches' flicker follows `r_torchflicker`, a strength: off
+    /// in Classic, on in 2026 and `set_video`'s `modern`, any value between 0
+    /// and 2 from the console (the user tunes it by eye), read back as set.
+    #[test]
+    fn the_torches_follow_r_torchflicker() {
+        let torches = || APP.with(|c| vid(c.borrow().as_ref().unwrap()).video.torches);
+        assert_eq!(boot(), 1);
+        assert_eq!(torches(), TorchFlicker::OFF, "the tests start in Classic");
+        use_2026();
+        assert_eq!(torches(), TorchFlicker::MODERN);
+        crate::host_cmd::execute_console_command("r_torchflicker 0.35");
+        assert_eq!(torches().value(), 0.35);
+        let cvar = quake_rs::cvar::find("r_torchflicker").expect("the cvar");
+        assert_eq!(APP.with(|c| cvar.get(&c.borrow().as_ref().unwrap().settings.cvars)), "0.35");
+        crate::host_cmd::execute_console_command("r_torchflicker 7");
+        assert_eq!(torches().value(), 2.0, "at most 2");
+        crate::host_cmd::execute_console_command("r_torchflicker 0");
+        assert!(torches().is_off());
+        assert_eq!(set_video("modern"), 1);
+        assert_eq!(torches(), TorchFlicker::MODERN);
+        assert_eq!(set_video("classic"), 1);
+        assert_eq!(torches(), TorchFlicker::OFF);
     }
 
     /// A phone's small, dense screen starts Auto at 2x2 whatever its threads;

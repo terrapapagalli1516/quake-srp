@@ -11,6 +11,8 @@
 //! --sky classic|fluid      the clouds in id's whole-texel steps, or gliding (`r_fluidsky`)
 //! --lightstyles classic|smooth  the animated lights in id's ten steps a second, or
 //!                          gliding between them (`r_lerplightstyles`)
+//! --torchflicker S         the steady torches flicker at strength S, 0 (id's) to 2
+//!                          (`r_torchflicker`; 1 the flicker style's own swing)
 //! --display W:H|square     the display's width:height (square: the mode's own,
 //!                          square pixels); the default is the command's
 //! --scaled2d 0|1           the status bar, menus and console blown up from 320x200
@@ -18,7 +20,7 @@
 //!                          the pixels are the same for any N)
 //! ```
 
-use quake_rs::render::{FovMode, SkyScroll, VideoCvars};
+use quake_rs::render::{FovMode, SkyScroll, TorchFlicker, VideoCvars};
 use quake_rs::server::LerpLightStyles;
 
 /// The parsed video options (see the module docs).
@@ -69,6 +71,10 @@ impl VideoArgs {
                     "smooth" => LerpLightStyles::Smooth,
                     _ => return Err(format!("--lightstyles: expected classic or smooth, got {val:?}")),
                 }
+            }
+            "--torchflicker" => {
+                let v: f32 = val.parse().map_err(|_| format!("--torchflicker: expected a strength 0..2, got {val:?}"))?;
+                self.cvars.torches = TorchFlicker::from_value(v);
             }
             "--threads" => {
                 self.threads = val.parse().ok().filter(|&n| n > 0).ok_or_else(|| format!("--threads: expected a count, got {val:?}"))?;
@@ -138,6 +144,8 @@ pub const HELP: &[(&str, &str)] = &[
     ("--fov-mode classic|horplus", "how `fov` meets the display's shape"),
     ("--hires 0|1", "views past 1280x1024, particles and the warp at 320x200 proportions"),
     ("--sky classic|fluid", "the clouds in id's whole-texel steps, or gliding (`r_fluidsky`)"),
+    ("--lightstyles classic|smooth", "the animated lights in id's ten steps a second, or gliding (`r_lerplightstyles`)"),
+    ("--torchflicker S", "the steady torches flicker at strength S, 0 (id's) to 2 (`r_torchflicker`)"),
     ("--display W:H|square", "the display's width:height (square: the mode's own); the default is the command's"),
     ("--scaled2d 0|1", "the status bar, menus and console blown up from 320x200"),
     ("--threads N", "draw each frame's 3-D view on N threads (default 1; the pixels are the same for any N)"),

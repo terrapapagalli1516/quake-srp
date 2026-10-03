@@ -129,6 +129,16 @@ fn lightstyle_value(map: &[u8], i: i64, frac: f32, lerp: LerpLightStyles) -> i32
     }
 }
 
+/// `map`'s value at `letters` along it — the letter `floor(letters)`, gliding
+/// toward the next by the fraction ([`lightstyle_value`]): a light style is
+/// at `time * 10`. The steady torches' flicker (`render::torch`) reads
+/// world.qc's flicker patterns through it, each at its own phase.
+pub(crate) fn lightstyle_value_at(map: &[u8], letters: f64, lerp: LerpLightStyles) -> i32 {
+    let p = if letters.is_finite() { letters } else { 0.0 };
+    let i = p.floor();
+    lightstyle_value(map, i as i64, (p - i) as f32, lerp)
+}
+
 /// `R_AnimateLight` (r_light.c) over an arbitrary style table: the per-style
 /// brightness scale at game `time`, one entry per [`MAX_LIGHTSTYLES`] index,
 /// stepped as id's or gliding ([`LerpLightStyles`]). Shared by
@@ -148,7 +158,13 @@ fn lightstyle_value(map: &[u8], i: i64, frac: f32, lerp: LerpLightStyles) -> i32
 ///   (so `'a'` → 0 = dark, `'m'` → 264 = normal, `'z'` → 550 ≈ double-bright);
 ///   gliding, the value between `string[k]` and `string[(k+1) mod L]` by the
 ///   fraction of `time*10` ([`lightstyle_value`]).
-pub fn lightstyle_scales_at(styles: &[String], time: f32, lerp: LerpLightStyles) -> [f32; MAX_LIGHTSTYLES] {
+///
+/// `time` is the client's clock (`cl.time`, a `double`): Classic reads it as
+/// id's renderer does, the `float` `cl.time` (`r_refdef`'s — the bits the port
+/// always used), so its letters are id's; the glide reads its fraction off the
+/// `double`, so the glide stays smooth however long a level runs (on a
+/// `float` clock two 480 Hz frames share a time after about 10 hours).
+pub fn lightstyle_scales_at(styles: &[String], time: f64, lerp: LerpLightStyles) -> [f32; MAX_LIGHTSTYLES] {
     // Normalise by 256 — id's white point — NOT by 'm' (264). R_AnimateLight
     // sets d_lightstylevalue[j] = (letter-'a')*22 (so worldspawn's lightstyle
     // (0,"m") gives style 0 = 264), and R_BuildLightMap renders luxel*scale
@@ -160,12 +176,21 @@ pub fn lightstyle_scales_at(styles: &[String], time: f32, lerp: LerpLightStyles)
     // value is a whole number of units, so the scale is exact in f32 and the
     // renderer's `luxel * scale` is id's integer product.
     const NORMAL: f32 = 256.0;
-    // The animation phase in characters, floor(time*10) and its fraction. A
-    // non-finite time counts as 0; a phase past i64 saturates (the `as` cast)
-    // and past f32's range has no fraction, so nothing overflows or panics.
-    let p = if time.is_finite() { time * 10.0 } else { 0.0 };
-    let i = p.floor() as i64;
-    let frac = if p.is_finite() { p - p.floor() } else { 0.0 };
+    // The animation phase in characters, floor(time*10) and its fraction —
+    // Classic's on the f32 clock, the glide's on the f64. A non-finite time
+    // counts as 0; a phase past i64 saturates (the `as` cast) and past the
+    // float's range has no fraction, so nothing overflows or panics.
+    let (i, frac) = match lerp {
+        LerpLightStyles::Classic => {
+            let t = time as f32;
+            let p = if t.is_finite() { t * 10.0 } else { 0.0 };
+            (p.floor() as i64, 0.0)
+        }
+        LerpLightStyles::Smooth => {
+            let p = if time.is_finite() { time * 10.0 } else { 0.0 };
+            (p.floor() as i64, if p.is_finite() { (p - p.floor()) as f32 } else { 0.0 })
+        }
+    };
     std::array::from_fn(|j| {
         let map = styles.get(j).map(|s| s.as_bytes()).unwrap_or(b"");
         lightstyle_value(map, i, frac, lerp) as f32 / NORMAL
@@ -200,7 +225,7 @@ impl Server {
     /// (exactly id's steady-world brightness — normalising by `'m'` itself made the
     /// whole static-lit world ~1 colormap row too dark). An UNSET style still maps
     /// to `1.0` (R_AnimateLight's `length == 0` default of 256).
-    pub fn lightstyle_scales(&self, time: f32, lerp: LerpLightStyles) -> [f32; MAX_LIGHTSTYLES] {
+    pub fn lightstyle_scales(&self, time: f64, lerp: LerpLightStyles) -> [f32; MAX_LIGHTSTYLES] {
         // Delegates to the shared table-driven helper so demo playback (the
         // recorded svc_lightstyle table) animates through the IDENTICAL logic.
         lightstyle_scales_at(&self.lightstyles, time, lerp)
@@ -402,7 +427,7 @@ mod tests {
         let table = worldspawn_table();
         for n in -500..5000 {
             let t = n as f32 * 0.0137;
-            let sc = lightstyle_scales_at(&table, t, Classic);
+            let sc = lightstyle_scales_at(&table, f64::from(t), Classic);
             let tenth = (t * 10.0).floor() as i64;
             for (j, map) in WORLDSPAWN.iter().enumerate() {
                 assert_eq!(units(sc[j]), letter(map, tenth), "style {j} at t = {t}");
@@ -424,13 +449,13 @@ mod tests {
         let mut on_the_tenth = 0;
         for n in 0..20_000i64 {
             let t = n as f32 / 10.0;
-            let smooth = lightstyle_scales_at(&table, t, Smooth);
+            let smooth = lightstyle_scales_at(&table, f64::from(t), Smooth);
             for (j, map) in WORLDSPAWN.iter().enumerate() {
                 assert_eq!(units(smooth[j]), letter(map, n), "style {j} at tenth {n}");
             }
             if (t * 10.0).floor() as i64 == n {
                 on_the_tenth += 1;
-                assert_eq!(smooth, lightstyle_scales_at(&table, t, Classic), "tenth {n}: id's frame");
+                assert_eq!(smooth, lightstyle_scales_at(&table, f64::from(t), Classic), "tenth {n}: id's frame");
             }
         }
         assert!(on_the_tenth > 15_000, "most whole tenths are whole on the f32 clock ({on_the_tenth})");
@@ -445,7 +470,7 @@ mod tests {
     fn smooth_blends_to_the_next_letter_in_steps() {
         let table = worldspawn_table();
         for n in 0..1000i64 {
-            let mid = lightstyle_scales_at(&table, (n as f32 + 0.5) / 10.0, Smooth);
+            let mid = lightstyle_scales_at(&table, f64::from((n as f32 + 0.5) / 10.0), Smooth);
             for (j, map) in WORLDSPAWN.iter().enumerate() {
                 let want = (letter(map, n) + letter(map, n + 1)) / 2;
                 assert!((units(mid[j]) - want).abs() <= GLIDE_STEP / 2, "style {j}, tenth {n}.5: {} vs {want}", units(mid[j]));
@@ -456,7 +481,7 @@ mod tests {
             let t = f as f32 / 4800.0;
             let p = t * 10.0;
             let (n, frac) = (p.floor() as i64, p - p.floor());
-            let sc = lightstyle_scales_at(&table, t, Smooth);
+            let sc = lightstyle_scales_at(&table, f64::from(t), Smooth);
             for (j, map) in WORLDSPAWN.iter().enumerate() {
                 let (a, b) = (letter(map, n), letter(map, n + 1));
                 let v = units(sc[j]);
@@ -468,7 +493,7 @@ mod tests {
         }
         // The flicker's tenth 1, 'm' (264) to 'n' (286), at 4800 Hz.
         let values: std::collections::BTreeSet<i32> =
-            (480..960).map(|f| units(lightstyle_scales_at(&table, f as f32 / 4800.0, Smooth)[1])).collect();
+            (480..960).map(|f| units(lightstyle_scales_at(&table, f64::from(f as f32 / 4800.0), Smooth)[1])).collect();
         assert_eq!(values.into_iter().collect::<Vec<_>>(), (264..=286).step_by(2).collect::<Vec<_>>());
     }
 
@@ -479,7 +504,7 @@ mod tests {
     fn one_letter_patterns_hold_and_a_replaced_pattern_snaps() {
         let table = worldspawn_table();
         for f in 0..2400 {
-            let sc = lightstyle_scales_at(&table, f as f32 / 240.0, Smooth);
+            let sc = lightstyle_scales_at(&table, f64::from(f as f32 / 240.0), Smooth);
             assert_eq!(sc[0], 264.0 / 256.0, "'m' is steady");
             assert_eq!(sc[63], 0.0, "'a' is steady");
             assert!(sc[12..63].iter().all(|&s| s == 1.0), "unset styles are 1.0");
@@ -501,6 +526,27 @@ mod tests {
         assert_eq!(server.lightstyle_scales(t, Classic)[1], 0.0);
     }
 
+    /// A long level: 28 hours in, a `float` clock steps 128 times a second,
+    /// so two 480 Hz frames would share a time; the glide reads the `double`
+    /// clock and still moves a step every frame or two through a changing
+    /// tenth, while Classic is the letter of the `float` time as before.
+    #[test]
+    fn the_glide_runs_on_the_double_clock() {
+        let table = worldspawn_table();
+        // Tenth 1_008_000 of the flicker (style 1) is letter 1_008_000 % 23
+        // = 2 ('n'), the next 'm': a one-letter tenth, 11 steps of 2.
+        let t0 = 100_800.0f64;
+        let values: Vec<i32> = (0..48).map(|k| units(lightstyle_scales_at(&table, t0 + f64::from(k) / 480.0, Smooth)[1])).collect();
+        let distinct: std::collections::BTreeSet<i32> = values.iter().copied().collect();
+        assert_eq!(distinct.len(), 12, "the 11 steps from 'n' to 'm', and 'm': {values:?}");
+        assert!(values.windows(2).all(|w| w[1] <= w[0]), "down, never back: {values:?}");
+        for k in 0..48 {
+            let t = t0 + f64::from(k) / 480.0;
+            let tenth = ((t as f32) * 10.0).floor() as i64;
+            assert_eq!(units(lightstyle_scales_at(&table, t, Classic)[1]), letter(WORLDSPAWN[1], tenth), "{t}");
+        }
+    }
+
     /// Any clock is safe: before 0 the pattern runs backwards through the
     /// same values; a clock that is not finite is time 0; past f32's range
     /// (`time*10` overflows) the phase saturates with no fraction, as
@@ -510,11 +556,11 @@ mod tests {
         let table = worldspawn_table();
         let at_zero = lightstyle_scales_at(&table, 0.0, Smooth);
         for t in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
-            assert_eq!(lightstyle_scales_at(&table, t, Smooth), at_zero, "{t}");
-            assert_eq!(lightstyle_scales_at(&table, t, Classic), lightstyle_scales_at(&table, 0.0, Classic), "{t}");
+            assert_eq!(lightstyle_scales_at(&table, f64::from(t), Smooth), at_zero, "{t}");
+            assert_eq!(lightstyle_scales_at(&table, f64::from(t), Classic), lightstyle_scales_at(&table, 0.0, Classic), "{t}");
         }
         for t in [-1e-9, -0.05, -0.1, -123.456, -1e30, 1e30, f32::MAX, f32::MIN, 16_777_217.0] {
-            let sc = lightstyle_scales_at(&table, t, Smooth);
+            let sc = lightstyle_scales_at(&table, f64::from(t), Smooth);
             assert!(sc.iter().all(|&s| (0.0..=550.0 / 256.0).contains(&s)), "{t}: {sc:?}");
             for s in sc {
                 units(s);
@@ -523,7 +569,7 @@ mod tests {
         // Past 2^23 tenths an f32 clock has no fraction left: the glide is
         // id's letter there.
         for t in [1e30, f32::MAX, f32::MIN] {
-            assert_eq!(lightstyle_scales_at(&table, t, Smooth), lightstyle_scales_at(&table, t, Classic), "{t}");
+            assert_eq!(lightstyle_scales_at(&table, f64::from(t), Smooth), lightstyle_scales_at(&table, f64::from(t), Classic), "{t}");
         }
         // Before 0: tenth -1 is the pattern's last letter, gliding to its
         // first — SLOW STROBE's z (550) to a, three quarters of the way:

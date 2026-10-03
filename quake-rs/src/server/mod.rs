@@ -77,6 +77,7 @@ mod sv_user;
 mod sv_world;
 
 pub use lightstyle::{lightstyle_scales_at, LerpLightStyles, GLIDE_STEP, MAX_LIGHTSTYLES};
+pub(crate) use lightstyle::lightstyle_value_at;
 pub use msg::{
     te_consts, wire_angle, wire_coord, GameMessage, Outbox, ParticleBurst, SoundEvent, StaticEntity,
     StaticSound, SvcEvent, TempEntityEvent,

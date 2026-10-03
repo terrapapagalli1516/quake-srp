@@ -196,7 +196,7 @@ pub fn cmd_view(args: &[String]) -> CmdResult {
     let angles = angles.unwrap_or([0.0, start.map_or(0.0, |(_, a)| a), 0.0]);
     let cam = Camera { pos: origin, yaw: angles[1], pitch: -angles[0], roll: angles[2], fov_deg: fov };
     let time = time.unwrap_or_else(|| server.time());
-    let light_styles = server.lightstyle_scales(time, video.cvars.lightstyles);
+    let light_styles = server.lightstyle_scales(f64::from(time), video.cvars.lightstyles);
 
     // The entity list, resolved against per-name model caches (each file parsed once).
     let mut mdls: HashMap<String, Option<Mdl>> = HashMap::new();

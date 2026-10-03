@@ -838,18 +838,21 @@ fn render_demo_frame(
         d.particles.integrate(cl_frametime, v.time, d.sv_gravity * 0.05);
     }
     // The RECORDED svc_lightstyle table drives the world lighting through the
-    // same R_AnimateLight 10 Hz logic the live walk uses (lightstyle_scales_at)
-    // — the demo's torch flicker matches the recording exactly — stepped or
-    // gliding as `r_lerplightstyles` says, as live play is (the attract demo
-    // is the first thing a visitor sees). A synthetic demo without a table
-    // (tests) falls back to the previous seeded default: style 0 = 'm'
-    // (264/256, id's steady-world brightness), the rest neutral.
+    // same R_AnimateLight 10 Hz logic the live walk uses (lightstyle_scales_at,
+    // on the double clock `d.time`, whose float is `v.time`) — in Classic the
+    // demo's flicker matches the recording exactly — stepped or gliding as
+    // `r_lerplightstyles` says, as live play is. (Of the attract loop, the
+    // first thing a visitor sees, only demo3's views hold an animated light;
+    // the steady torches' flicker, `r_torchflicker`, is the renderer's, and
+    // lights all three.) A synthetic demo without a table (tests) falls back
+    // to the previous seeded default: style 0 = 'm' (264/256, id's
+    // steady-world brightness), the rest neutral.
     let demo_styles = if f.lightstyles.is_empty() {
         let mut s = render::NEUTRAL_LIGHTSTYLE_SCALES;
         s[0] = 264.0 / 256.0;
         s
     } else {
-        crate::server::lightstyle_scales_at(&f.lightstyles, v.time, vid.video.lightstyles)
+        crate::server::lightstyle_scales_at(&f.lightstyles, d.time, vid.video.lightstyles)
     };
     // The first-person weapon viewmodel: SU_WEAPON is the model PRECACHE index
     // (`view->model = cl.model_precache[cl.stats[STAT_WEAPON]]`, V_CalcRefdef),
@@ -1288,6 +1291,33 @@ mod tests {
         let stepped = demo_frame(&mut d, 0.0, false, &VID).image;
         assert!((d.time - 0.95).abs() < 1e-6, "{}", d.time);
         assert!(stepped.pixels != glided.pixels, "mid-tenth the glide is between the letters");
+    }
+
+    /// The demo's steady torches flicker as the live game's do
+    /// (`r_torchflicker`, the video cvars'): the renderer finds them in the
+    /// map's entity lump and lights them by the demo's clock, so playback
+    /// moves the light — and with the extra off it is id's frame.
+    #[test]
+    fn the_steady_torches_flicker_in_playback_as_the_cvars_say() {
+        let msg = |n: u8| DemoFrame {
+            time: f32::from(n) / 10.0,
+            prev_time: f32::from(n - 1) / 10.0,
+            viewheight: 22.0,
+            lightstyles: std::rc::Rc::new(vec!["m".into()]),
+            ..Default::default()
+        };
+        let mut room = render::fixtures::lightmapped_demo_room(120, 0);
+        room.entities = "{ \"classname\" \"worldspawn\" }\n{ \"classname\" \"light_flame_large_yellow\" \"origin\" \"64 0 -64\" }".into();
+        let mut d = playback_in(room, render::fixtures::ramp_palette(), (10..40).map(msg).collect());
+        d.viewsize = 120.0;
+        let lit = Vid { video: render::VideoCvars { torches: render::TorchFlicker::STYLE, ..render::VideoCvars::CLASSIC }, ..VID };
+        let mut moved = 0;
+        for f in 0..30 {
+            let flicker = demo_frame(&mut d, if f == 0 { 1.0 / 72.0 } else { 0.05 }, false, &lit).image;
+            let id = demo_frame(&mut d, 0.0, false, &VID).image;
+            moved += usize::from(flicker.pixels != id.pixels);
+        }
+        assert!(moved > 20, "the flame's light moves in playback ({moved} of 30)");
     }
 
     /// `U_NOLERP` (id's monsters): drawn where the message put them in the

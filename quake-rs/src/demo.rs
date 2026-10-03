@@ -429,8 +429,9 @@ pub struct DemoFrame {
     /// The recorded lightstyle table (`cl_lightstyle[]`, `svc_lightstyle`) as of
     /// this frame — the signon carries the full set, and a switch-triggered
     /// light can update one mid-demo. Shared (`Rc`) across frames; a front-end
-    /// feeds it to [`crate::server::lightstyle_scales_at`] for the exact 10 Hz
-    /// `R_AnimateLight` flicker the recording's world had.
+    /// feeds it to [`crate::server::lightstyle_scales_at`]: in Classic the
+    /// exact 10 Hz `R_AnimateLight` flicker the recording's world had, with
+    /// `r_lerplightstyles` the same letters glided between.
     pub lightstyles: Rc<Vec<String>>,
     /// The per-client view/inventory state from this block's `svc_clientdata`
     /// (`CL_ParseClientdata`): stats, items, punchangle, velocity. Drives the
