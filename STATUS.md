@@ -818,7 +818,8 @@ Render @ browser res now: 320×200 **2.81 ms (355 fps)**, 640×400 **5.49 ms (18
 ### Next perf ideas (2026-05-31) — superseded by `PERF_PLAN.md`
 
 The list (clone-hunt leftovers, caching inline submodels' lightmaps, `simd128`, 16-pixel
-spans, mip selection) was re-measured on 2026-09-25: `simd128` gave nothing, the 16-pixel
+spans, mip selection) was re-measured on 2026-09-25: `simd128` gave nothing (it does since the
+span loops got tight: the browser builds use it, PERF_PLAN.md §15), the 16-pixel
 spans and the mip levels are done (as fidelity fixes), and `draw_submodel` and
 `compute_visible_faces` no longer exist (id's edge renderer draws the brush models).
 

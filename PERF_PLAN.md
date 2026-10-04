@@ -1,7 +1,7 @@
 # quake-rust — performance plan
 
 *Status (2026-10-02): a working log. "Where it stands" sums it up; the numbered sections
-below are the rounds of work, each measured as it landed (§11 and §12 are the latest). The
+below are the rounds of work, each measured as it landed (§14 and §15 are the latest). The
 current figures are in `README.md`, "Numbers".*
 
 ## Where it stands (2026-09-26, the 2026 push)
@@ -160,7 +160,8 @@ does at viewsize 100. That is 24% fewer 3-D pixels, and it fixes two framing bug
 
 **Committed quick wins: none, deliberately.** I measured the build-configuration candidates:
 
-- `+simd128`: no measurable change.
+- `+simd128`: no measurable change. (Since 2026-10-03 the browser builds use it: with today's
+  span loops the vectorized z-buffer row pays, 2–9% of a frame: §15.)
 - `wasm-opt -O3`: −2 to −5% and identical output, but it needs binaryen in the build (§6).
 - `opt-level`, `lto`, `codegen-units` and `panic=abort` are already optimal in `quake-wasm/Cargo.toml`.
 
@@ -1015,7 +1016,9 @@ Everything outside render3d (post3d + hud2d + menu + blend + pack) at 1280×800 
 
 - **`-C target-feature=+simd128`**: identical hashes and no measurable change. LLVM
   auto-vectorised almost nothing (+67 bytes). It would also drop Safari < 16.4. Revisit only with
-  hand-written SIMD, for example for A3's span loop or the B1/B2 pack.
+  hand-written SIMD, for example for A3's span loop or the B1/B2 pack. *(Revisited 2026-10-03:
+  once the span loops were tight, the one loop LLVM vectorizes, the z-buffer row, was worth
+  2–9% of a frame, and the browser builds now use it, dropping Safari < 16.4: §15.)*
 - **16-pixel affine subdivision on its own**: no wasm gain on top of A1. Do it for fidelity, as
   part of A3, not for speed. **Done anyway, for fidelity** (branch `quake/w2b`: `D_DrawSpans16`
   and `Turbulent8` over z-test runs, see `AUDIT.md`), and in wasm it is a gain after all, because
@@ -1611,3 +1614,189 @@ game before the renderer 0.20, the walk 0.15 (three views' walks), the 2-D layer
 the entities' setup 0.11, the lookups 0.09 (a lightmap is still built, or its luxels
 copied, for a surface whose block the cache then has: `D_CacheSurface` asks the cache
 first).
+
+## 15. The cost of a pixel (2026-10-04, branch `fleet/opt-pixels`)
+
+At an Android phone's native 2640×1080 a frame has four times the pixels of its 2×2 picture,
+so the inner loops are four times the work. This round made the pixel loops cheaper
+without changing a pixel: two people's work, measured again together on top of §14
+(main `0b9eda9`, merged into the branch).
+
+**What changed** (every commit keeps every pixel: "Proof"):
+
+- **The span loops ask for each segment's end a segment ahead** (`dd8393b`,
+  `raster::segments_ahead`). id's span routines divide for a segment's end on
+  reaching the segment, and its pixels wait for the quotient; asked for a segment
+  early, the divide runs while the segment before is drawn. Spans 64 to 4 and the
+  liquids. The largest single gain, and largest at the 2026 default, span 8.
+- **The z-buffer row vectorizes again** (`2c43152`). §14's spans in row order bind
+  each surface's `izistep` by reference, and the loop that writes `D_DrawZSpans`' 16-bit
+  1/z for every world pixel read it again after every store (the compiler cannot
+  prove the z row does not overlap it): scalar, an `i32.load` a pixel in wasm, no SSE
+  natively. A local copy gives the vector loop back (wasm: `i32x4` lanes narrowed to
+  `i16x8`, one `v128.store` per eight pixels; natively `paddd`/`packssdw`). This is
+  also most of what §14 found one thread paying: Classic native at 2640×1080 is now
+  21–25% faster than main (below).
+- **The browser builds use wasm SIMD** (`f5cc8f9`, `quake-wasm/.cargo/config.toml`):
+  no source asks for it; what LLVM vectorizes is the z row above. It leaves behind
+  Chrome < 91, Firefox < 89 and Safari < 16.4 (March 2023); the page says so plainly
+  (`web/PLATFORM.md`, "What the browser must give").
+- **The exact span tests "inside the block" once** (`ae486a9`): one unsigned compare for
+  both coordinates, the four clamps only as the fallback.
+- **The alias spans draw on their run of the row, the z test first** (`011b8ef`):
+  `D_PolysetDrawSpans8`'s loop on one slice of the row, the texel fetched only where
+  the z test passes, as id's loop does.
+- **The sky**: id's 256×128 sky read as an array, no bounds check (`9820b52`,
+  `9c53699`), and each 32-pixel segment's end (`D_Sky_uv_To_st`: a square root and
+  divisions) asked for a segment ahead (`7120633`).
+- **The underwater warp** walks its tables with the row's pixels (`748f1eb`): two of
+  the four reads a pixel lose their index check.
+
+**Proof.** Main's `quaketool` against the branch's: 378 `view`s (nine maps, 320×200 to
+2640×1080, Classic and the 2026 video at spans 64, 32, 16, 8, 4 and exact, level, up at
+the sky and down at the floors; on 1 and 8 threads), 162 `shot`s under water, slime and
+lava (with and without the status bar), 126 `shot`s at monsters and items with the gun
+(view sizes 50–120, shots fired), and 48 runs of `play` hashes (demo1–3 and three
+walks, Classic and spans 16, 8 and exact, 1 and 8 threads): no difference. The wasm
+build, SIMD and all, gives the native `play` hashes under V8. The goldens;
+`classic_check` ALL PASS; both crates' tests (each loop against its reference: the C
+spans and `D_DrawSpans16` in id's order over 2,000,000 random spans, the alias spans
+against the pixel-by-pixel loop, the unchecked sky against the guarded one, the sky
+walk against `D_DrawSkyScans8` in its own order).
+
+**Each change's share** (the merged tip against the tip without that change, so each
+is measured on top of all the others; demo1's timedemo at 2640×1080, the 2026 video,
+the frame-time change at span 8 / 16 / exact; medians, interleaved, under the fleet's
+measurement lock, pinned to the 8 physical cores. Native: `quaketool`, 5 runs. V8:
+the same program as wasm under node, 5 runs. Page: headless Chromium, the threads
+build, `timedemo demo1` at pixel size 1, 3 rounds):
+
+| change | native, 1 thread | native, 8 threads | V8, 1 thread | page, 8 threads |
+|---|---|---|---|---|
+| segment ends ahead | −12 / −12 / +2% | −8 / −8 / 0% | −20 / −11 / 0% | −8 / −5 / 0% |
+| z row vectorized | −10 / −11 / −6% | −8 / −8 / −5% | −11 / −12 / −7% | −5 / −5 / −3% |
+| wasm SIMD | — | — | −8 / −9 / −5% | −4 / −3 / −2% |
+| exact: one test | 0 / 0 / −9% | 0 / 0 / −6% | 0 / 0 / −8% | 0 / 0 / −3% |
+| alias row runs | −3 / −4 / −2% | −2 / −3 / −2% | −5 / −5 / −3% | −2 / −1 / −1% |
+| sky read, a sky view | −8 / −11 / −7% | 0 / −5 / −6% | −7 / −8 / −5% | not measured |
+| sky ends ahead, a sky view | −2 / −1 / −2% | −4 / −3 / −2% | −6 / −6 / −3% | 0 (demo1) |
+| warp, under water | −18 / −20 / −12% | −12 / −13 / −10% | −36 / −37 / −23% | not measured |
+
+(The sky rows are a view half sky, e1m5 looking up; the warp row a view under e1m4's
+lake; demo1 has little sky and no water. The `view`s are the renderer alone, 30 frames.)
+
+**Main against the branch** (the whole of it, cheap exact aside):
+
+| | 2640×1080: span 8 / 16 / exact | 1920×1080 |
+|---|---|---|
+| native, 1 thread | 6.89 → 5.02 / 6.31 → 4.60 / 9.40 → 7.69 ms | 5.29 → 3.91 / 4.88 → 3.60 / 7.14 → 5.83 |
+| native, 8 threads | 1.76 → 1.54 / 1.66 → 1.47 / 2.13 → 1.95 | 1.42 → 1.26 / 1.35 → 1.22 / 1.73 → 1.56 |
+| V8, 1 thread | 8.43 → 5.99 / 7.04 → 5.45 / 11.42 → 9.62 | 6.48 → 4.66 / 5.50 → 4.29 / 8.71 → 7.34 |
+| page, 1 thread | 8.57 → 6.14 / 7.17 → 5.65 / 11.63 → 9.92 | not measured |
+| page, 8 threads | 2.62 → 2.23 / 2.38 → 2.15 / 3.10 → 2.88 | 2.03 → 1.73 / 1.86 → 1.68 / 2.39 → 2.18 |
+
+Classic, natively on one thread (`timedemo demo1`, id's 16 with the ends ahead):
+2.414 ms against main's 3.234 at 2640×1080 (−25%), 0.730 against 0.858 at 640×400
+(−15%); the e1m1 and e1m3 views −21 to −25% at 2640×1080. That is §14's one-thread
+price paid back and more.
+
+**The native build is a lottery of ±5–10%, and it is where the loops fall.** With
+quake-rs's release profile (fat LTO, 16 codegen units), reverting the sky read or the
+warp — code demo1 barely or never runs — made demo1 9–10% slower on one thread. The
+timedemo's phases (`--profile 1`) say where: the RGBA pack took 0.73 ms a frame in one
+build and 1.18 in the other, the same instructions at other addresses, and the 3-D
+phase the same. Built with `-C llvm-args=-align-loops=64` (every loop starting a
+64-byte line), both packs take 0.73 and the 3-D phase does not move. With one codegen
+unit the pack holds and the draw loops move instead (e1m6's walls: every variant 5–10%
+faster than that build of the tip). So the native numbers in the table above are the
+ones that held, within a few points, in both profiles; a native difference under ~10%
+between two builds is evidence only if it does. The wasm builds showed none of it (the
+unrelated reverts: 0.0 ± 0.5%). Aligning the loops would be a flag in a
+`quake-rs/.cargo/config.toml` and 5% on the binary; two builds are a reason to try it,
+not to adopt it.
+
+**codegen-units = 1 for quake-rs: no.** Against the shipped 16, one unit is slower
+natively: demo1 at 2640×1080 +8 / +6 / +5% on one thread (span 8 / 16 / exact), +3 /
++2 / +2% on eight, the e1m6 walls view +16% on one thread; 1920×1080 +5–7% and +2–3%.
+(The page's crate already builds with one unit; this is `quaketool` only.)
+
+**Not measured:** a phone (none connected this round); Safari (no local WebKit).
+
+### Cheap exact: the divide every 16 pixels, the same pixels (`raster::span_exact_cached`)
+
+Exact perspective divides at every pixel. Along a span a texel coordinate is a
+hyperbola in the pixel, `65536 (sz + k dsz) / (zi + k dzi)`; through three of its points
+16 pixels apart (the knots, by the divide) a parabola stays within a bound that follows
+from the hyperbola's third derivative, `6 |sz dzi − dsz zi| dzi² z⁴ / 65536³`, times
+0.0642 × 16³. So a span is drawn in 32-pixel segments: two divides a segment, asked for
+a segment ahead; the parabola stepped by forward differences in fixed point (16.16 with
+7 more bits), s and t side by side in one `u64`; and every pixel tested, one AND a
+pixel, for being further from both its texel's edges than the bound plus the
+arithmetic's own errors (the guard: `GUARD_SLACK` lists them). A pixel that is, reads
+the divide's texel. The few that are not are drawn again by the divide, and of those
+the ones the divide's own rounding could tip (within 2 units of an edge) by replaying
+the reference's accumulators (`zi += dzi` …) up to them. A span of 32 pixels or fewer,
+a grazing one (rounding noise over a quarter unit, a guard over 6000), a block wider
+than 512 texels, or a segment that would leave the block, is drawn by the divide.
+
+In demo1 at 2640×1080 (counted): 93% of the segments clear, 5% with a pixel near an
+edge, 2% at the block's edge; 1.6% of the exact pixels in spans too short.
+
+**Size:** about 210 lines of code and 130 of comments in `raster.rs` (the proof
+among them), and 270 lines of tests.
+
+**Proof.** A proof, in `raster.rs`'s comments (the review's, written down there): the
+reference's rounding is at most half `exact_plan`'s `noise`, so its value is within
+1.125 units of the true coordinate, and a knot's too; the knots' errors reach the
+parabola times at most 1.25; the interpolation error is at most `es` (the third
+derivative's bound, `z` largest at an outer knot); the fixed-point floors lose under
+2.0 units by a segment's last pixel. So the reference is within `es + 4.54` units of
+the parabola, under the guard `floor(es) + 9`: a pixel the guard test clears reads the
+reference's texel, inside the block, and a pixel it does not is drawn by the divide,
+where a 1-unit "near the edge" window would do (the code keeps 2). Tests: the fuzz
+against the divide at every pixel (30,000 random spans by default, 2,000,000 pass with
+`QUAKE_FUZZ_SPANS`); the proof's inequality checked at every pixel a parabola draws
+(worst `|R - y/128| - es` 2.98 units over 2,000,000 spans, the interpolation 0.998 of
+`es`, the rounding 0.457 of `noise`); and a steered fuzz that moves the worst pixel of
+a segment to just inside its guard on the side that would tip it: the smallest margin
+is 5.99 units, and with a guard slack of 3 instead of 9 it fails (at 4 it passes: the
+worst case seen needs 4, the proof 6). The random fuzz cannot tell 3 from 9. Against
+the branch without it: the view sweep at exact (nine maps, every size, 1 and 8 threads:
+1,242 `view`s and `shot`s), the all-spans sweep (540) and `play` hashes at exact (16
+runs), no difference; the wasm build's `play` hashes equal the native ones.
+
+**Speed** (demo1, exact, the frame-time change; as in the tables above; measured on
+`94d3bf9`. The same arithmetic with its parts named, `c7a4ade`, draws the renderer's
+views at exact 1–3% faster natively and 0–2% in V8, while its native timedemo lost
+0.45 ms a frame to the RGBA pack's alignment, the lottery above: against `2997189`
+7.66 → 7.22 ms, where `94d3bf9` gave 6.87 in the same sitting):
+
+| | 2640×1080 | 1920×1080 |
+|---|---|---|
+| native, 1 thread | 7.81 → 6.96 ms (−11%) | 5.92 → 5.42 (−8%) |
+| native, 8 threads | 1.95 → 1.84 (−5%) | 1.54 → 1.48 (−4%) |
+| V8, 1 thread | 9.74 → 8.26 (−15%) | −14% |
+| page, 1 thread | 10.08 → 8.50 (−16%) | not measured |
+| page, 8 threads | 2.84 → 2.60 (−9%) | −7% |
+
+In the page spans 8 and 16 do not move (±0.5%). Natively the review measured span 8
+3.7% slower with it (5.07 → 5.26 ms, in both of its holds): not the span loops, which it
+does not touch, but where the code lands (the lottery above).
+
+The renderer's own views at exact, 2640×1080, one thread: e1m6's walls −13% natively,
+−22% in V8; e1m3 −3% / −9%; e1m4's lake −3% / −3%; e1m1's start 0% / −8%, and at
+1920×1080 natively +8%. That one is the first prototype's "13% slower": e1m1's start is
+an eye on the 16-unit grid looking straight along an axis, and there many pixel centres
+fall exactly on texel edges. 19% of its segments have a near pixel (demo1: 5%), 87% of
+those pixels need the replay, 1.2 million accumulator steps a frame (demo1: 84,000),
+about 0.8 ms natively, where the divide it saves is cheap. The same view from 0.4 unit
+and 0.3° away: −17% natively (−12% at 1920×1080), −24% in V8. Play rarely stands on
+the grid; the demos do not. (The prototype also redrew the overlapping last segment's
+near pixels; that segment is now drawn aside and only its new pixels kept: 4–10 points
+faster in V8, a point slower natively. Why V8 gained that much I did not pin down.)
+
+**Exact against the spans, with it** (demo1 at 2640×1080): in the page on one thread
+8.50 ms against 6.23 at span 8 and 5.74 at 16 (1.36x and 1.48x), on 8 threads 2.60
+against 2.21 and 2.14 (1.18x, 1.21x); in V8 on one thread 8.26 against 5.99 and 5.45
+(1.38x, 1.52x); natively 6.96 against 5.02 and 4.60 (1.39x, 1.51x). Without it exact
+was 1.3–1.8x span 16; with it 1.2–1.5x: better, still the dearest.

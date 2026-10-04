@@ -890,7 +890,7 @@ ledger:
 clone/alloc hunt landed; 36 fps @1080p idle, per-pixel bound; SIMD remains the
 only further ~2× lever and is unscheduled). *(Superseded by `PERF_PLAN.md`,
 2026-09-25: the larger levers were Quake's own techniques; `simd128` measured
-no gain.)*
+no gain. Since 2026-10-03 it does, and the browser builds use it: PERF_PLAN.md §15.)*
 
 ## Session 6 — demo playback parity (2026-06-11, branch `ship/demo-parity`)
 

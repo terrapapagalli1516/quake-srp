@@ -2035,10 +2035,12 @@ every band waits for the slowest): hotter and not smoother. For a phone,
 deploy the single-threaded build, or set `vid_pixelsize 2`. (Since then a
 touch screen starts at 2×2 on four threads whatever it offers, the machine's
 numbers, and a phone has been measured: "On an Android phone", below.)
-iOS Safari: `SharedArrayBuffer` needs iOS 15.2 and https (the page says so
-when it is missing); rAF runs at 60 Hz (Safari's default even on 120 Hz
-screens), 30 Hz in Low Power Mode; Web Audio follows the silent switch;
-the Screen Wake Lock needs iOS 16.4 (18.4 in a home-screen app). Memory:
+iOS Safari: the game needs iOS 16.4 (WebAssembly SIMD, which the browser
+builds use: "What the browser must give") and https for `SharedArrayBuffer`
+(the page says so when either is missing); rAF runs at 60 Hz (Safari's
+default even on 120 Hz screens), 30 Hz in Low Power Mode; Web Audio
+follows the silent switch; the Screen Wake Lock needs iOS 16.4 (18.4 in a
+home-screen app). Memory:
 the single-threaded build's memory grows as the game needs it (the pak
 stays outside it, "Files"); the threads build declares a shared memory of
 up to 1 GiB (16384 pages), which a browser reserves up front for a
@@ -2285,9 +2287,10 @@ through Firefox with a display (WebGL2 on the same GPU, shared views
 taken). Not checked: Safari, iOS, Firefox on Windows or macOS, a GPU driving a
 real high-refresh display. From the platforms' documentation, not from a
 run: Safari has `SharedArrayBuffer` under COOP/COEP since 15.2 (iOS 15.2),
-with `Atomics.wait` in workers; iOS has no pointer lock, and a phone plays
-with the touch controls ("Touch"). The program's own memory no longer
-holds the 18 MB pak, which helps where wasm memory is tight (iOS).
+with `Atomics.wait` in workers, and WebAssembly SIMD since 16.4 (iOS 16.4,
+March 2023), which makes 16.4 the floor; iOS has no pointer lock, and a
+phone plays with the touch controls ("Touch"). The program's own memory no
+longer holds the 18 MB pak, which helps where wasm memory is tight (iOS).
 
 ## Build, serve, deploy
 

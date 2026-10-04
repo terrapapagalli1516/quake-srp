@@ -2217,12 +2217,15 @@ impl WorldDraw<'_> {
                 if !background {
                     drawn += n as u64;
                 }
-                // D_DrawZSpans
+                // D_DrawZSpans. The step is copied out of the surface first:
+                // read through its reference, it is read again after every
+                // store (the compiler cannot tell the z row from it), and
+                // the loop is not vectorized (the browser builds' SIMD).
                 let zi = (ziorigin + v as f32 * zistepv + u as f32 * zistepu) as f64;
-                let mut izi = c_ftoi(zi * 32768.0 * 65536.0);
+                let (mut izi, izistep) = (c_ftoi(zi * 32768.0 * 65536.0), *izistep);
                 for z in zrow {
                     *z = (izi >> 16) as i16;
-                    izi = izi.wrapping_add(*izistep);
+                    izi = izi.wrapping_add(izistep);
                 }
             }
         }
