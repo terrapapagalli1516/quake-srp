@@ -324,6 +324,12 @@ impl Settings {
     }
 }
 
+/// The slop options with no row on the Slop Options pages, set on the console
+/// alone: `sv_max_edicts`, which a player has nothing to choose in (the
+/// menu's tests keep this list and the pages in step). The standing counts
+/// them apart from the rows ([`Standing::line`]).
+pub const CONSOLE_ONLY: &[&str] = &["sv_max_edicts"];
+
 /// Where the settings stand against the preset applied last
 /// ([`Settings::standing`]): what the menus and the console say of them.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -354,28 +360,45 @@ impl Standing {
         self.changed.iter().any(|&c| Standing::row(c) == Standing::row(name))
     }
 
-    /// How many rows differ (the pixel size and `vid_native` one, the pad
-    /// one; a slop option with no menu row, as `sv_max_edicts`, one).
+    /// Whether nothing differs: the settings are the preset.
+    pub fn is_preset(&self) -> bool {
+        self.changed.is_empty()
+    }
+
+    /// How many rows of the Slop Options pages differ (the pixel size and
+    /// `vid_native` one, the pad one): each a white value to find.
     pub fn rows(&self) -> usize {
-        let mut rows: Vec<&str> = self.changed.iter().map(|&c| Standing::row(c)).collect();
+        let mut rows: Vec<&str> =
+            self.changed.iter().filter(|c| !CONSOLE_ONLY.contains(c)).map(|&c| Standing::row(c)).collect();
         rows.sort_unstable();
         rows.dedup();
         rows.len()
     }
 
-    /// The Options row's value: the preset's name, or `custom`.
-    pub fn word(&self) -> &'static str {
-        if self.changed.is_empty() { self.preset.name() } else { "custom" }
+    /// How many of the slop options with no row ([`CONSOLE_ONLY`]) differ:
+    /// the console's `preset` names them.
+    pub fn console(&self) -> usize {
+        self.changed.iter().filter(|c| CONSOLE_ONLY.contains(c)).count()
     }
 
-    /// The line under the Slop Options list: "Your settings are the slop
-    /// preset", or "Yours differ from Classic in 2 rows" — at most 36
-    /// characters, a menu help line's width.
+    /// The Options row's value: the preset's name, or `custom`.
+    pub fn word(&self) -> &'static str {
+        if self.is_preset() { self.preset.name() } else { "custom" }
+    }
+
+    /// The line under the Slop Options list, at most 36 characters (a menu
+    /// help line's width): "Your settings are the slop preset", "Yours
+    /// differ from Classic in 2 rows", and for the slop options set on the
+    /// console alone, which no row shows, "Yours differ in 1 console setting"
+    /// or "Yours: 2 rows, 1 console setting" — no count without a white
+    /// value or the console's `preset` to point at.
     pub fn line(&self) -> String {
-        match self.rows() {
-            0 => format!("Your settings are the {} preset", self.preset.title()),
-            1 => format!("Yours differ from {} in 1 row", self.preset.title()),
-            n => format!("Yours differ from {} in {n} rows", self.preset.title()),
+        let plural = |n: usize, one: &str| if n == 1 { format!("1 {one}") } else { format!("{n} {one}s") };
+        match (self.rows(), self.console()) {
+            (0, 0) => format!("Your settings are the {} preset", self.preset.title()),
+            (rows, 0) => format!("Yours differ from {} in {}", self.preset.title(), plural(rows, "row")),
+            (0, console) => format!("Yours differ in {}", plural(console, "console setting")),
+            (rows, console) => format!("Yours: {}, {}", plural(rows, "row"), plural(console, "console setting")),
         }
     }
 }
@@ -494,9 +517,16 @@ mod tests {
         s.cvars.max_edicts = 600;
         let st = s.standing();
         assert_eq!(st.changed, ["joystick", "vid_native", "vid_pixelsize", "sv_max_edicts", "joy_deadzone", "joy_exponent", "bind"]);
-        assert_eq!(st.rows(), 4, "the picture, the pad, the edicts, the wheel");
+        assert_eq!((st.rows(), st.console()), (3, 1), "the picture, the pad, the wheel; the edicts on the console");
+        assert_eq!(st.line(), "Yours: 3 rows, 1 console setting");
         assert!(st.differs("vid_native") && st.differs("vid_pixelsize") && st.differs("joystick") && st.differs("bind"));
         assert!(!st.differs("joy_rumble"), "the rumble is its own row");
+        // A console setting alone: no row to count, the console to point at.
+        let mut edicts = Settings::default();
+        edicts.cvars.max_edicts = 600;
+        let st = edicts.standing();
+        assert_eq!((st.word(), st.rows(), st.console(), st.is_preset()), ("custom", 0, 1, false));
+        assert_eq!(st.line(), "Yours differ in 1 console setting");
 
         // Classic's words.
         let mut c = Settings::new(Preset::Classic, Machine::default());
@@ -509,6 +539,7 @@ mod tests {
         all.cvars = Cvars::slop().with_id_controls();
         assert!(all.standing().rows() >= 10 && all.standing().line().len() <= 36, "{}", all.standing().line());
         assert_eq!("Yours differ from Classic in 99 rows".len(), 36);
+        assert!(format!("Yours: 99 rows, {} console settings", CONSOLE_ONLY.len().max(2)).len() <= 36);
     }
 
     /// A Classic `config.cfg` lists no slop option: its `preset "classic"`

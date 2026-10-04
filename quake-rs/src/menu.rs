@@ -2772,7 +2772,7 @@ fn draw_options_screen(
         // is — white when they are no preset (a value that differs from it).
         let ry = OPTIONS_ROW_Y0 + ROW_SLOP_OPTIONS as f32 * OPTIONS_ROW_STEP;
         let standing = settings.standing();
-        let print = if standing.changed.is_empty() { m_print } else { draw_string_scaled };
+        let print = if standing.is_preset() { m_print } else { draw_string_scaled };
         print(image, cc, OPTIONS_WIDGET_X, ry, standing.word(), scale, ox, oy);
 
         // The flashing cursor: M_DrawCharacter(200, 32 + cursor*8, 12 + (blink)).
@@ -4768,7 +4768,9 @@ mod tests {
         // ceiling spawns at all), so a console cvar (like id's own
         // `sv_gravity`, which also has no menu row) is the whole interface.
         let pad_layout = |n: &str| n.starts_with("joy") && n != "joystick" && n != "joy_rumble";
-        let listed = |c: &&cvar::Cvar| c.departure && !pad_layout(c.name) && !matches!(c.name, "sv_max_edicts" | "vid_pixelsize");
+        let listed = |c: &&cvar::Cvar| {
+            c.departure && !pad_layout(c.name) && !crate::settings::CONSOLE_ONLY.contains(&c.name) && c.name != "vid_pixelsize"
+        };
         for c in cvar::CVARS.iter().filter(listed) {
             assert_eq!(page_rows().filter(|(_, _, r)| r.cvar == c.name).count(), 1, "{}: one row", c.name);
         }

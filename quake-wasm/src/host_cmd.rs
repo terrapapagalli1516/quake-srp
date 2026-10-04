@@ -298,7 +298,7 @@ fn cmd_version(_: &Args) {
     ensure_app(|a| {
         let standing = a.settings.standing();
         a.console.println(format!("Version {}", quake_rs::console::CON_VERSION));
-        let custom = if standing.changed.is_empty() { "" } else { ", custom" };
+        let custom = if standing.is_preset() { "" } else { ", custom" };
         a.console.println(format!("quake-rs, preset {}{custom}", standing.preset.name()));
     });
 }
@@ -400,7 +400,7 @@ fn cmd_preset(args: &Args) {
             let standing = a.settings.standing();
             a.console.println(format!("\"preset\" is \"{}\"", standing.preset.name()));
             a.console.println(standing.line());
-            if !standing.changed.is_empty() {
+            if !standing.is_preset() {
                 for line in wrap(standing.changed.iter().copied(), LIST_WIDTH) {
                     a.console.println(line);
                 }
