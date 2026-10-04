@@ -15,7 +15,9 @@ not a fallback).
 | ![E1M1 in the Classic profile](screenshots/classic-e1m1.png) | ![E1M1 in the 2026 profile](screenshots/2026-e1m1.png) |
 | 320x200 in a 4:3 frame, id's status bar, id's 72 fps cap | the window's shape and size in whole pixels (here 960x540 shown at 2x), no frame-rate cap |
 
-Both are stills from `quaketool shot`, so the 2026 crosshair isn't drawn.
+Both are stills from `quaketool shot`, so the 2026 crosshair isn't drawn. The 2026 one is
+`quaketool shot quake-data/ID1/PAK0.PAK maps/e1m1.bsp out.ppm --res 960x540 --zoom 2 --video modern --scaled2d 1 --sbaroverlay 1`,
+which draws the profile's defaults: Screen size 110 (no inventory bar) and perspective every 8 pixels.
 
 id Software's *Quake* (1996), ported to Rust from the WinQuake C source, with only the
 standard library and no `unsafe` code. With every extra switched off it is id's game,
