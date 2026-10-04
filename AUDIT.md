@@ -3072,7 +3072,7 @@ Two "look" problems the closing review found playing the 2026 default in a brows
 - **The fade dither at a big "scaled 2-D" scale: already fixed, not a
   regression.** Checked directly (not just read): `fade_screen` (`draw.rs`)
   already dithers on `screen_2d`'s own scale, not the framebuffer's raw
-  pixels — it has since `8f9dd64` (2026-09-25, "the scaled layout becomes an
+  pixels — it has since `d6a7c25` (2026-09-25, "the scaled layout becomes an
   opt-in extra"), a day before the review that still listed this. A probe
   at 1920x1080 (scale 5, squarely in the review's "4-6x") confirmed whole
   5x5 blocks, no 1-pixel screen-door; a new test pins it down exactly:
@@ -3080,12 +3080,12 @@ Two "look" problems the closing review found playing the 2026 default in a brows
   asserts every dither cell is one whole `scale x scale` block at that
   scene (alongside the existing `fade_screen_matches_the_per_pixel_dither_
   at_any_scale`, which already covered the general formula across sizes
-  `8f9dd64` never exercised at exactly review-sized windows). Likeliest
+  `d6a7c25` never exercised at exactly review-sized windows). Likeliest
   explanation: the review played a deployed build that predated that day's
   later merges. No production code changed for this half of the brief.
 
 Screenshots (this branch's scratch dir, named in its report): Video Options
-in 2026 and Classic, before (native 6d51ef1) and after this branch; a menu
+in 2026 and Classic, before (native 77c024a) and after this branch; a menu
 over the game at a 4-6x 2-D scale, before and after (unchanged, proving the
 dither was never touched).
 
@@ -3420,7 +3420,7 @@ run it either (P3, P6, P7).
 Each item: the feature, where the port diverges, what a player sees, how sure, and what
 was done. Struck items are fixed on this branch.
 
-- **P1 ~~`items2`~~** (fixed, `b74ab63`). `SV_WriteClientdataToMessage` sends `items |
+- **P1 ~~`items2`~~** (fixed, `4e784ad`). `SV_WriteClientdataToMessage` sends `items |
   items2 << 23` for a progs that declares `items2` (`GetEdictFieldValue`) and `items |
   serverflags << 28` (the runes) only for one that does not; both packs declare it.
   `client/cl_main.rs` `server_items` always mixed in the runes: Hipnotic's wetsuit and
@@ -3430,7 +3430,7 @@ was done. Struck items are fixed on this branch.
   (the wrong icons) before and 100.00% after, every shot but the Tab bar's clock (27 px:
   id's signon of a bigger map takes one more 0.1 s frame, the Open list's connect-time
   item). id1's progs has no `items2`; nothing changes there.
-- **P2 ~~A point on a slanted clip plane~~** (fixed, `e4d6a1f`). `world.rs`
+- **P2 ~~A point on a slanted clip plane~~** (fixed, `a6381a1`). `world.rs`
   `plane_distance`: id's x87 registers evaluate `DotProduct (normal, p) - dist` almost
   exactly; the port's `f32` rounding put points lying on 45-degree planes on the other
   side. Three items differ in the packs: hip1m1's shells (1184 -160 -176) and hip2m6's
@@ -3439,7 +3439,7 @@ was done. Struck items are fixed on this branch.
   Certain (`oracle_move` at each point; Python id-style descents of the clip hulls); all
   three match after. id1's identity values move only in `play.fire_e1m1` (re-recorded,
   `oracle/classic_expected.txt` says why); every id-anchored check is unchanged.
-- **P3 `svc_achievement` (52)** (kept, named, `f6eabdd`). The re-release progs write
+- **P3 `svc_achievement` (52)** (kept, named, `0bac5b8`). The re-release progs write
   `WriteByte 52` + a string when a monster kills another (`Killed`, `MSG_ALL`), at every
   secret (`multi_trigger`, `MSG_ONE`), at a pack's end. id's client Host_Errors on it
   ("Illegible server message"): the C oracle ends hip1m1 the moment its player walks into
@@ -3456,7 +3456,7 @@ was done. Struck items are fixed on this branch.
   monster gibbed at once) hits ED_Alloc on seven pack levels (hip1m4, hip2m2, r1m4,
   r1m7, r2m4, r2m5, r2m7) with the kept statics eating the margin; whether id's would
   overflow too under that stress is not known. Certain about the statics.
-- **P5 ~~Oriented sprites~~** (fixed, `fleet/sprites` `5593d24`: id's `r_sprite.c`/`d_sprite.c` ported, every type; was: open, brief B2). `render/sprite.rs:30` draws every sprite as a
+- **P5 ~~Oriented sprites~~** (fixed, `fleet/sprites` `2e04d52`: id's `r_sprite.c`/`d_sprite.c` ported, every type; was: open, brief B2). `render/sprite.rs:30` draws every sprite as a
   camera-facing billboard. Hipnotic's bullet holes are `progs/s_bullet.spr`, an
   `SPR_ORIENTED` sprite (type 3, never in id1) placed on the wall by `placebullethole`
   for every shotgun or super-shotgun pellet that hits the world (up to 10, for 300 s):
@@ -3464,7 +3464,7 @@ was done. Struck items are fixed on this branch.
   out of it and turn with the view. Certain: the 3-D oracle on hip1m1 after `+attack`,
   seen along the wall (id's thin slivers; the port's billboards, cut by the wall).
   `s_blood1.spr` (type 3, `wallsprite`) is placed by no map.
-- **P6 ~~The re-release's strings are localization keys~~** (fixed, `fleet/strings` `7ec0858`: `localization.rs`, the pack's `loc_english.txt` in its pak; was: open, brief B3). 136 of
+- **P6 ~~The re-release's strings are localization keys~~** (fixed, `fleet/strings` `ac8f712`: `localization.rs`, the pack's `loc_english.txt` in its pak; was: open, brief B3). 136 of
   Hipnotic's string immediates and 190 of Rogue's in `sprint`/`bprint`/`centerprint`/
   `dprint`/`WriteString` are `$qc_...` keys, and the formatted ones take arguments the
   re-release's engine substitutes (`sprint(other, "$qc_got_item", self.netname)` with

@@ -674,7 +674,7 @@ facing it, where the most drawn surfaces are torch-lit), the 2026 video
 settings in both, the counters from one run of each, the 3-D view's median
 ms a frame from three of each, interleaved, the counters off, native release
 build, 2026-10-03, load 0–5. Each cell is without the shadows (the first
-build, `0e4459c`) → with them, run in the same sitting (→ with the bakes on
+build, `4ccf7fd`) → with them, run in the same sitting (→ with the bakes on
 the threads, on eight); the time is what the flicker adds to id's view (1080p: 3.9–5.0 ms on one thread, 1.4–1.7 on
 eight; 1315x535: 1.6–2.0 and 0.8–1.1):
 

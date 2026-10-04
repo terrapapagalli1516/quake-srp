@@ -1620,16 +1620,16 @@ first).
 At an Android phone's native 2640×1080 a frame has four times the pixels of its 2×2 picture,
 so the inner loops are four times the work. This round made the pixel loops cheaper
 without changing a pixel: two people's work, measured again together on top of §14
-(main `90f447f`, merged into the branch).
+(main `d40a672`, merged into the branch).
 
 **What changed** (every commit keeps every pixel: "Proof"):
 
-- **The span loops ask for each segment's end a segment ahead** (`0503d27`,
+- **The span loops ask for each segment's end a segment ahead** (`1596242`,
   `raster::segments_ahead`). id's span routines divide for a segment's end on
   reaching the segment, and its pixels wait for the quotient; asked for a segment
   early, the divide runs while the segment before is drawn. Spans 64 to 4 and the
   liquids. The largest single gain, and largest at the 2026 default, span 8.
-- **The z-buffer row vectorizes again** (`e79af12`). §14's spans in row order bind
+- **The z-buffer row vectorizes again** (`ad23c32`). §14's spans in row order bind
   each surface's `izistep` by reference, and the loop that writes `D_DrawZSpans`' 16-bit
   1/z for every world pixel read it again after every store (the compiler cannot
   prove the z row does not overlap it): scalar, an `i32.load` a pixel in wasm, no SSE
@@ -1637,19 +1637,19 @@ without changing a pixel: two people's work, measured again together on top of �
   `i16x8`, one `v128.store` per eight pixels; natively `paddd`/`packssdw`). This is
   also most of what §14 found one thread paying: Classic native at 2640×1080 is now
   21–25% faster than main (below).
-- **The browser builds use wasm SIMD** (`45d1ed2`, `quake-wasm/.cargo/config.toml`):
+- **The browser builds use wasm SIMD** (`7d1b7ab`, `quake-wasm/.cargo/config.toml`):
   no source asks for it; what LLVM vectorizes is the z row above. It leaves behind
   Chrome < 91, Firefox < 89 and Safari < 16.4 (March 2023); the page says so plainly
   (`web/PLATFORM.md`, "What the browser must give").
-- **The exact span tests "inside the block" once** (`f491bb9`): one unsigned compare for
+- **The exact span tests "inside the block" once** (`b236d27`): one unsigned compare for
   both coordinates, the four clamps only as the fallback.
-- **The alias spans draw on their run of the row, the z test first** (`51c3cf7`):
+- **The alias spans draw on their run of the row, the z test first** (`8eba516`):
   `D_PolysetDrawSpans8`'s loop on one slice of the row, the texel fetched only where
   the z test passes, as id's loop does.
-- **The sky**: id's 256×128 sky read as an array, no bounds check (`d0667a2`,
-  `cdf56a9`), and each 32-pixel segment's end (`D_Sky_uv_To_st`: a square root and
-  divisions) asked for a segment ahead (`e76edd1`).
-- **The underwater warp** walks its tables with the row's pixels (`e4e77e9`): two of
+- **The sky**: id's 256×128 sky read as an array, no bounds check (`fb10900`,
+  `071f2b7`), and each 32-pixel segment's end (`D_Sky_uv_To_st`: a square root and
+  divisions) asked for a segment ahead (`409de9f`).
+- **The underwater warp** walks its tables with the row's pixels (`fbd5fff`): two of
   the four reads a pixel lose their index check.
 
 **Proof.** Main's `quaketool` against the branch's: 378 `view`s (nine maps, 320×200 to
@@ -1766,10 +1766,10 @@ the branch without it: the view sweep at exact (nine maps, every size, 1 and 8 t
 runs), no difference; the wasm build's `play` hashes equal the native ones.
 
 **Speed** (demo1, exact, the frame-time change; as in the tables above; measured on
-`196b49c`. The same arithmetic with its parts named, `a87fa35`, draws the renderer's
+`911ab32`. The same arithmetic with its parts named, `13a9fd7`, draws the renderer's
 views at exact 1–3% faster natively and 0–2% in V8, while its native timedemo lost
-0.45 ms a frame to the RGBA pack's alignment, the lottery above: against `990f5e5`
-7.66 → 7.22 ms, where `196b49c` gave 6.87 in the same sitting):
+0.45 ms a frame to the RGBA pack's alignment, the lottery above: against `a7ef153`
+7.66 → 7.22 ms, where `911ab32` gave 6.87 in the same sitting):
 
 | | 2640×1080 | 1920×1080 |
 |---|---|---|
