@@ -7,7 +7,7 @@
 
 use quake_rs::render::{self, build_gamma_table};
 use quake_rs::client::cl_input::derive_key_move;
-use quake_rs::client::host::{host_filter_time, host_filter_time_display, host_filter_time_uncapped, FrameCap};
+use quake_rs::client::host::{host_filter_time, host_filter_time_capped, host_filter_time_uncapped, FrameCap};
 use quake_rs::stepping::Stepping;
 
 use crate::app::ensure_app;
@@ -20,15 +20,14 @@ use crate::cl_walk::step_walk;
 /// gate exactly, as the oracle proves it); every call without the cap while
 /// a `timedemo` runs (id's `cls.timedemo`: [`host_filter_time_uncapped`]);
 /// or, with any other `host_maxfps` (the slop preset's), a frame on a
-/// display refresh ([`host_filter_time_display`]) stepped as a run of id's
-/// 72 Hz frames ([`Stepping::Uncapped`], `FRAMERATE.md`). A cap of 60 to 240
-/// draws as none does here: holding the frames to it is the page's frame
-/// loop's part, which does not do it yet.
+/// display refresh — every one with no cap, else the first at least 1/cap
+/// after the last frame ([`host_filter_time_capped`]) — stepped as a run of
+/// id's 72 Hz frames ([`Stepping::Uncapped`], `FRAMERATE.md`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FrameGate {
     Classic,
     Timedemo,
-    Display,
+    Display(FrameCap),
 }
 
 impl FrameGate {
@@ -36,7 +35,7 @@ impl FrameGate {
         match (timedemo, cap) {
             (true, _) => FrameGate::Timedemo,
             (false, FrameCap::ID) => FrameGate::Classic,
-            (false, _) => FrameGate::Display,
+            (false, cap) => FrameGate::Display(cap),
         }
     }
 
@@ -45,14 +44,14 @@ impl FrameGate {
         match self {
             FrameGate::Classic => host_filter_time(realtime, oldrealtime),
             FrameGate::Timedemo => Some(host_filter_time_uncapped(realtime, oldrealtime)),
-            FrameGate::Display => host_filter_time_display(realtime, oldrealtime),
+            FrameGate::Display(cap) => host_filter_time_capped(realtime, oldrealtime, cap),
         }
     }
 
     /// How the game steps a frame of any length.
     fn stepping(self) -> Stepping {
         match self {
-            FrameGate::Display => Stepping::Uncapped,
+            FrameGate::Display(_) => Stepping::Uncapped,
             FrameGate::Classic | FrameGate::Timedemo => Stepping::Classic,
         }
     }
@@ -518,16 +517,15 @@ mod tests {
     // -- the frame gate: id's 72, timedemo, the others; wasm_showfps ----------
 
     #[test]
-    fn the_frame_gate_is_ids_at_72_and_every_refresh_otherwise() {
+    fn the_frame_gate_is_ids_at_72_and_the_display_with_its_cap_otherwise() {
         assert_eq!(FrameGate::new(FrameCap::ID, false), FrameGate::Classic, "72: id's own gate");
         assert_eq!(FrameGate::new(FrameCap::NONE, true), FrameGate::Timedemo, "a timedemo runs back to back");
         assert_eq!(FrameGate::new(FrameCap::ID, true), FrameGate::Timedemo, "in Classic too, as id's cls.timedemo");
-        assert_eq!(FrameGate::new(FrameCap::NONE, false), FrameGate::Display);
-        for cap in [60, 120, 144, 240] {
-            assert_eq!(FrameGate::new(FrameCap::new(cap), false), FrameGate::Display, "{cap}: the slop timing");
+        for cap in [0, 60, 120, 144, 240].map(FrameCap::new) {
+            assert_eq!(FrameGate::new(cap, false), FrameGate::Display(cap), "{cap:?}: the slop timing");
         }
         assert_eq!(
-            [FrameGate::Classic, FrameGate::Timedemo, FrameGate::Display].map(FrameGate::stepping),
+            [FrameGate::Classic, FrameGate::Timedemo, FrameGate::Display(FrameCap::NONE)].map(FrameGate::stepping),
             [Stepping::Classic, Stepping::Classic, Stepping::Uncapped],
             "only the uncapped host steps the game as 72 Hz runs"
         );
@@ -546,7 +544,7 @@ mod tests {
             let (mut realtime, mut old, mut game) = (0.0f64, 0.0f64, 0.0f64);
             for _ in 0..hz as usize * 2 {
                 realtime += (1.0 / hz) as f32 as f64;
-                let f = FrameGate::Display.frame_time(realtime, &mut old);
+                let f = FrameGate::Display(FrameCap::NONE).frame_time(realtime, &mut old);
                 game += f.expect("uncapped: every refresh is a host frame");
             }
             assert!((game - realtime).abs() < 1e-4, "{hz} Hz: game {game} vs real {realtime}");
@@ -555,8 +553,9 @@ mod tests {
         // next call rather than running ahead of the clock (a timedemo's
         // frame is clamped up to 1 ms, as id's).
         let mut old = 0.0;
-        assert_eq!(FrameGate::Display.frame_time(0.5, &mut old), Some(HOST_FRAMETIME_MAX));
-        assert_eq!(FrameGate::Display.frame_time(0.5001, &mut old), None);
+        let display = FrameGate::Display(FrameCap::NONE);
+        assert_eq!(display.frame_time(0.5, &mut old), Some(HOST_FRAMETIME_MAX));
+        assert_eq!(display.frame_time(0.5001, &mut old), None);
         assert_eq!(FrameGate::Timedemo.frame_time(0.5001, &mut old), Some(HOST_FRAMETIME_MIN));
         assert_eq!(old, 0.5001);
     }
@@ -617,7 +616,9 @@ mod tests {
     }
 
     /// `host_maxfps 0` runs a frame every refresh, `host_maxfps 72` id's gate
-    /// again; the retired `wasm_uncapped` (and the checks' bit 1) set them.
+    /// again, `host_maxfps 60` every second refresh of a 120 Hz display and
+    /// `144` every one; the retired `wasm_uncapped` (and the checks' bit 1)
+    /// set the two ends.
     #[test]
     fn step_with_no_cap_runs_one_frame_per_refresh_and_72_restores_ids_gate() {
         assert_eq!(boot(), 1);
@@ -631,6 +632,15 @@ mod tests {
         assert!((walk_clock() - w0 - 1.0).abs() < 1e-3, "the world still advances 1 s a second");
         crate::host_cmd::execute_console_command("host_maxfps 72");
         assert_eq!(second_at_144hz(), 72, "72 again: id's gate is back");
+        let refreshes_at_120hz = || (0..120).map(|_| step(1.0 / 120.0)).collect::<Vec<i32>>();
+        crate::host_cmd::execute_console_command("host_maxfps 60");
+        let w0 = walk_clock();
+        let ran = refreshes_at_120hz();
+        assert_eq!(ran.iter().sum::<i32>(), 60, "60: every second refresh of 120 Hz");
+        assert!(ran.windows(2).all(|w| w[0] != w[1]), "evenly: {ran:?}");
+        assert!((walk_clock() - w0 - 1.0).abs() < 1e-3, "the world still advances 1 s a second");
+        crate::host_cmd::execute_console_command("host_maxfps 144");
+        assert_eq!(refreshes_at_120hz().iter().sum::<i32>(), 120, "a cap above the display: every refresh");
         crate::host_cmd::execute_console_command("wasm_uncapped 1");
         assert_eq!(second_at_144hz(), 144, "the old name: none");
         crate::menu::set_extras(0);
