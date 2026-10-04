@@ -2980,13 +2980,19 @@ function noteRefresh(now) {
 function frameCame() { return Atomics.load(ctl, C.FRAMES) !== pacing.frames; }
 
 // A frame took `ms` from its tick to its answer (WAIT_MS when the wait gave
-// up on it): the moving average, in which one long frame (a level load)
-// counts as two and a half times the line at most, so it alone crosses
-// nothing; then which way the next refresh goes.
+// up on it): into the moving average, in which one long frame (a level
+// load) counts as two and a half times the upper line at most, so it alone
+// crosses nothing.
 function noteFrameTime(ms) {
-  const [above, below] = pacingLines();
   pacing.lastTurn = ms;
-  pacing.turn += (Math.min(ms, 2.5 * above) - pacing.turn) * 0.1;
+  pacing.turn += (Math.min(ms, 2.5 * pacingLines()[0]) - pacing.turn) * 0.1;
+  choosePacing();
+}
+
+// Whether the next refresh waits for its frame: by the frame's time against
+// the lines (between them, as it was), or as `force` says.
+function choosePacing() {
+  const [above, below] = pacingLines();
   if (pacing.force !== null) pacing.relaxed = pacing.force && canAwait;
   else if (pacing.turn > above) pacing.relaxed = canAwait;
   else if (pacing.turn < below) pacing.relaxed = false;
