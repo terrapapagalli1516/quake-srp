@@ -13,7 +13,7 @@ use quake_rs::client::{cl_demo, host_cmd};
 use quake_rs::pak::Pak;
 use quake_rs::qrand::QRand;
 use quake_rs::render::{self, build_gamma_table, Console, Menu, MenuPics};
-use quake_rs::settings::{Preset, Settings};
+use quake_rs::settings::{Machine, Preset, Settings};
 use quake_rs::wad::Qpic;
 
 use crate::common::{pak, registered};
@@ -61,7 +61,8 @@ pub(crate) struct App {
     /// 0 = walk, 1 = demo.
     pub(crate) mode: u8,
     /// The session's settings: id's cvars and key bindings, with the port's
-    /// departures and the preset they came from (`quake_rs::settings`).
+    /// departures, the preset they came from and the machine whose numbers
+    /// it has (`quake_rs::settings`; `main` names the machine at start).
     /// The menu, the console, the input and the frame all read and change
     /// this one value; `config.cfg` keeps it.
     pub(crate) settings: Settings,
@@ -69,10 +70,6 @@ pub(crate) struct App {
     /// its CSS size times `devicePixelRatio`), which `vid_native` renders
     /// into. `None` until the page says (natively, in the tests).
     pub(crate) window: Option<(u32, u32)>,
-    /// The page's `devicePixelRatio` (the `Window` record; 1 until it says):
-    /// how many device pixels make a CSS pixel, which tells a phone's small,
-    /// dense screen from a desktop's ([`crate::vid::phone_sized`]).
-    pub(crate) dpr: f32,
     /// The main-menu engine. Lives at the App level (mode-independent) so it can
     /// overlay WHATEVER is playing — the walk OR the attract demo (any key
     /// during demo playback brings it up, as in Quake); while `menu.visible`,
@@ -166,11 +163,6 @@ pub(crate) struct App {
     /// outside it (`M_Menu_Main_f` switches the demo loop off while the menu
     /// is up; `M_Main_Key`'s Escape puts it back). 0 at start, a C static.
     pub(crate) m_save_demonum: i32,
-    /// The threads the host offers the program: the page's pool of thread
-    /// workers plus the program's own (`-hwthreads`, from `wasi.js`), else
-    /// `std::thread::available_parallelism`; 1 without threads. The
-    /// `r_threads` setting resolves against it each frame.
-    pub(crate) hw_threads: usize,
     /// The gamepad: in_win.c's joystick state and the slop rumble's
     /// ([`crate::input::PadHost`]).
     pub(crate) pad: crate::input::PadHost,
@@ -590,9 +582,8 @@ pub(crate) fn ensure_app(f: impl FnOnce(&mut App)) {
                 walk: None,
                 demo: None,
                 mode: 0,
-                settings: Settings::new(START_PRESET),
+                settings: Settings::new(START_PRESET, Machine::default()),
                 window: None,
-                dpr: 1.0,
                 menu: Menu::new(),
                 menu_pics: MenuPics::default(),
                 conchars: None,
@@ -617,7 +608,6 @@ pub(crate) fn ensure_app(f: impl FnOnce(&mut App)) {
                 key_repeats: [0; 256],
                 shift_down: false,
                 m_save_demonum: 0,
-                hw_threads: 1,
                 pad: crate::input::PadHost::default(),
                 mouse: crate::input::MouseCount::default(),
                 quit: false,

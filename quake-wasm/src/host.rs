@@ -205,11 +205,11 @@ pub(crate) fn step(dt: f32) -> i32 {
         if a.demoplayback() && !a.cls.timedemo && dt > 0.0 && a.demo.as_ref().is_some_and(|d| d.at_end()) {
             host_end_game(a);
         }
-        // The renderer's threads (`r_threads` against what the host offers),
-        // to whichever game draws: every Walk and DemoPlay the host builds (a
-        // boot, a load, the attract loop's next demo) draws on the setting
-        // from its first frame.
-        let threads = a.settings.cvars.threads.resolve(a.hw_threads);
+        // The renderer's threads (`r_threads`), to whichever game draws:
+        // every Walk and DemoPlay the host builds (a boot, a load, the
+        // attract loop's next demo) draws on the setting from its first
+        // frame.
+        let threads = a.settings.cvars.threads;
         if let Some(wk) = a.walk.as_mut() {
             wk.key_move = km;
             wk.viewsize = viewsize;
@@ -568,7 +568,7 @@ mod tests {
         assert_eq!(stepping(), Stepping::Classic);
         assert_eq!((video_cvars().fov_mode, video_cvars().hires, quake_rs::draw::scaled_2d()), (FovMode::Classic, false, false));
         use_slop();
-        crate::vid::set_window(1600, 1000, 1.0);
+        crate::vid::set_window(1600, 1000);
         step(0.0);
         assert_eq!(stepping(), Stepping::Uncapped);
         assert_eq!((video_cvars().fov_mode, video_cvars().hires, quake_rs::draw::scaled_2d()), (FovMode::HorPlus, true, true));
@@ -698,13 +698,13 @@ mod tests {
             // slop preset's own 110 (the bar alone).
             for (ww, wh, viewsize) in [(1920, 1080, 100.0), (1920, 1080, 110.0), (1315, 535, 100.0), (1315, 535, 110.0)] {
                 crate::host_cmd::execute_console_command(&format!("viewsize {viewsize}"));
-                crate::vid::set_window(ww, wh, 1.0);
+                crate::vid::set_window(ww, wh);
                 step(0.0);
                 let (w, h) = APP.with(|c| {
                     let b = c.borrow();
                     (b.as_ref().unwrap().render_w, b.as_ref().unwrap().render_h)
                 });
-                assert_eq!((w, h), (ww as usize, wh as usize), "Auto: one device pixel a pixel");
+                assert_eq!((w, h), (ww as usize, wh as usize), "1x: one device pixel a pixel");
                 let refdef = render::calc_refdef(w, h, viewsize, false, render::SbarLayout::Overlay);
                 let below = refdef.below.expect("the view stands on the bar");
                 let bar = render::status_bar_rect(w, h, refdef.sb_lines).expect("a bar");

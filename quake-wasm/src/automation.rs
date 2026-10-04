@@ -60,11 +60,10 @@ fn done(f: impl FnOnce()) -> Answer {
     Answer::from(0.0)
 }
 
-/// The threads the renderer draws the next frame with (`r_threads`
-/// resolved against what the host offers).
+/// The threads the renderer draws the next frame with (`r_threads`).
 fn render_threads() -> i32 {
     let mut n = 1;
-    crate::app::ensure_app(|a| n = a.settings.cvars.threads.resolve(a.hw_threads));
+    crate::app::ensure_app(|a| n = a.settings.cvars.threads);
     n as i32
 }
 
@@ -115,7 +114,7 @@ pub(crate) fn call(line: &str) -> Answer {
         "set_resolution" => done(|| set_resolution(int(0), int(1))),
         // The page's box in device pixels and its devicePixelRatio (what its
         // `Window` record says; the ratio is optional, 1 when left out).
-        "set_window" => done(|| set_window(f(0) as u32, f(1) as u32, f(2) as f32)),
+        "set_window" => done(|| set_window(f(0) as u32, f(1) as u32)),
         "set_video" => crate::vid::set_video(rest).into(),
         "render_threads" => render_threads().into(),
         "viewsize" => viewsize().into(),

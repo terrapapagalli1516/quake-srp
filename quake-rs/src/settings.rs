@@ -13,6 +13,15 @@
 //! - **Slop** ([`Preset::Slop`], the default): the best experience of an
 //!   idealized software-rendered Quake in 2026 ([`Cvars::slop`]).
 //!
+//! **The machine picks the numbers.** A few slop options are numbers whose
+//! best value depends on the machine: the renderer's threads and the pixel
+//! size. A preset's values are built from a [`Machine`] — the facts the
+//! host knows at start (a touch screen, the threads it offers), never read
+//! again in a session — so a phone starts at 2x on four threads and a
+//! desktop at 1x on every one. They are numbers, never "auto": the console
+//! and the menus show what the game runs at, and `config.cfg` keeps a
+//! number only when the player chose one that differs from his machine's.
+//!
 //! **Screen size follows the preset only while it is the preset's.** It is
 //! id's own cvar (`viewsize`), not a slop option, but the two presets start
 //! it apart: Classic at id's 100, slop one step larger at 110, so the HUD
@@ -54,6 +63,53 @@
 use crate::cvar::{self, Cvars};
 use crate::keys::Bindings;
 
+/// What the host knows of the machine at start, and the presets' numbers
+/// built from it ([`Preset::cvars`]). Read once, when the session starts:
+/// a window resized or a phone turned does not change it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Machine {
+    /// The primary pointer is coarse (`(pointer: coarse)`, the page's own
+    /// test for its touch controls): a phone or a tablet.
+    pub touch: bool,
+    /// The threads the host offers the renderer (`-hwthreads`, at least 1).
+    pub threads: usize,
+}
+
+impl Default for Machine {
+    /// A plain machine: no touch screen, one thread.
+    fn default() -> Self {
+        Machine { touch: false, threads: 1 }
+    }
+}
+
+impl Machine {
+    /// The most threads a touch screen starts the renderer on. A phone's
+    /// cores are several times slower than a desktop's and slow further as
+    /// it warms; on an Android phone (8 threads offered), three
+    /// draw worse than four and five or six no better (`fleet/opt-phone`'s
+    /// measurements, 2026-10-03).
+    pub const TOUCH_THREADS: usize = 4;
+
+    /// The pixel size a touch screen starts at: on an Android phone at 1x (2640x1080)
+    /// a frame took 13 ms dry and 19 ms underwater against 60 Hz's 16.7,
+    /// throttled at 40 C; at 2x, 8 and 9 ms. A game pixel at 2x is still
+    /// under a CSS pixel there, finer than the eye resolves at arm's length.
+    pub const TOUCH_PIXEL_SIZE: u8 = 2;
+
+    /// The renderer's threads to start at (`r_threads`): every thread
+    /// offered, or at most [`Machine::TOUCH_THREADS`] on a touch screen.
+    pub fn render_threads(self) -> usize {
+        let all = self.threads.max(1);
+        if self.touch { all.min(Machine::TOUCH_THREADS) } else { all }
+    }
+
+    /// The pixel size to start at (`vid_pixelsize`): 1, or
+    /// [`Machine::TOUCH_PIXEL_SIZE`] on a touch screen.
+    pub fn pixel_size(self) -> u8 {
+        if self.touch { Machine::TOUCH_PIXEL_SIZE } else { 1 }
+    }
+}
+
 /// The two presets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Preset {
@@ -94,12 +150,16 @@ impl Preset {
         }
     }
 
-    /// The preset's cvars.
-    pub fn cvars(self) -> Cvars {
-        match self {
+    /// The preset's cvars on `machine`: [`Cvars::classic`] or
+    /// [`Cvars::slop`], with the numbers the machine picks — the renderer's
+    /// threads and the pixel size, the same in both presets (Classic's
+    /// picture is a video mode, so its pixel size waits for `vid_native`).
+    pub fn cvars(self, machine: Machine) -> Cvars {
+        let values = match self {
             Preset::Classic => Cvars::classic(),
             Preset::Slop => Cvars::slop(),
-        }
+        };
+        Cvars { threads: machine.render_threads(), pixel_size: machine.pixel_size(), ..values }
     }
 
     /// The preset's Screen size (`viewsize`): `default.cfg`'s 100 in
@@ -107,7 +167,7 @@ impl Preset {
     /// Options > "Reset to defaults" sets, and what the tools that draw the
     /// slop frame use ([`Cvars::slop`]).
     pub fn viewsize(self) -> f32 {
-        self.cvars().viewsize
+        self.cvars(Machine::default()).viewsize
     }
 
     /// The preset's bindings: `default.cfg`, with WASD and the gamepad
@@ -122,13 +182,16 @@ impl Preset {
     }
 }
 
-/// The session's settings: the preset they were last set from, the cvars,
-/// the key bindings. The host owns one and hands it by reference to the
-/// menu (which edits it), the input and the frame.
+/// The session's settings: the preset they were last set from, the machine
+/// whose numbers it has, the cvars, the key bindings. The host owns one and
+/// hands it by reference to the menu (which edits it), the input and the
+/// frame.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Settings {
     /// The preset applied last (`config.cfg`'s base).
     pub preset: Preset,
+    /// The machine the presets' numbers are built for.
+    pub machine: Machine,
     /// The console variables.
     pub cvars: Cvars,
     /// keys.c's `keybindings`.
@@ -136,16 +199,16 @@ pub struct Settings {
 }
 
 impl Default for Settings {
-    /// The slop preset.
+    /// The slop preset on a plain machine.
     fn default() -> Self {
-        Settings::new(Preset::default())
+        Settings::new(Preset::default(), Machine::default())
     }
 }
 
 impl Settings {
-    /// `preset`'s values.
-    pub fn new(preset: Preset) -> Settings {
-        Settings { preset, cvars: preset.cvars(), binds: preset.bindings() }
+    /// `preset`'s values on `machine`.
+    pub fn new(preset: Preset, machine: Machine) -> Settings {
+        Settings { preset, machine, cvars: preset.cvars(machine), binds: preset.bindings() }
     }
 
     /// `preset`'s engine with id's own 1996 controls (`default.cfg`'s
@@ -156,9 +219,11 @@ impl Settings {
     /// play`/`sound` call `Settings::id(Preset::Classic)`, never
     /// `Settings::new`, so `classic_check`/`oracle_move`/`rotate_check`/
     /// `sound_walk` keep comparing id's controls), and the console's
-    /// `idcontrols` for a live session.
+    /// `idcontrols` for a live session. On a plain machine: the harness
+    /// gives the renderer its own thread count.
     pub fn id(preset: Preset) -> Settings {
-        Settings { preset, cvars: preset.cvars().with_id_controls(), binds: Bindings::default_cfg() }
+        let machine = Machine::default();
+        Settings { preset, machine, cvars: preset.cvars(machine).with_id_controls(), binds: Bindings::default_cfg() }
     }
 
     /// Apply `preset`: every *engine* slop option to its value
@@ -171,7 +236,7 @@ impl Settings {
     /// only applied Classic gets id's inventory bar back, and a player who
     /// chose a size keeps it.
     pub fn apply_preset(&mut self, preset: Preset) {
-        let values = preset.cvars();
+        let values = preset.cvars(self.machine);
         if self.cvars.viewsize == self.preset.viewsize() {
             self.cvars.viewsize = values.viewsize;
         }
@@ -209,7 +274,7 @@ impl Settings {
         let mut t = String::from("// generated by quake, do not modify\n");
         t.push_str(&format!("preset \"{}\"\n", self.preset.name()));
         self.binds.write_changes(&self.preset.bindings(), &mut t);
-        cvar::write_changes(&self.cvars, &self.preset.cvars(), &mut t);
+        cvar::write_changes(&self.cvars, &self.preset.cvars(self.machine), &mut t);
         t
     }
 }
@@ -230,7 +295,7 @@ mod tests {
 
         // Classic: the engine off, but the controls (the module docs'
         // "the user's call") are the shared slop ones by default too.
-        let classic = Settings::new(Preset::Classic);
+        let classic = Settings::new(Preset::Classic, Machine::default());
         assert_eq!(classic.cvars, Cvars::classic());
         assert_eq!(classic.cvars.viewsize, 100.0, "Classic: default.cfg's, with id's inventory bar");
         assert!(!classic.cvars.uncapped && !classic.cvars.native, "the engine: id's");
@@ -267,7 +332,7 @@ mod tests {
         assert_eq!(s.binds.get(K_MWHEELUP), None, "the wheel turns off with the preset");
 
         s.apply_preset(Preset::Slop);
-        assert!(s.cvars.uncapped && !s.cvars.show_fps && s.cvars.pixel_size == 0, "the engine: back to slop's");
+        assert!(s.cvars.uncapped && !s.cvars.show_fps && s.cvars.pixel_size == 1, "the engine: back to slop's");
         assert_eq!((s.cvars.viewsize, s.cvars.gamma), (80.0, 0.8));
         assert!(!s.cvars.freelook, "apply_preset never touched the control");
         assert_eq!(s.binds.command(b'j'), Some(BIND_ATTACK), "the rebind still survives");
@@ -301,7 +366,7 @@ mod tests {
         }
 
         // Moved in Classic: kept going the other way, too.
-        let mut s = Settings::new(Preset::Classic);
+        let mut s = Settings::new(Preset::Classic, Machine::default());
         s.cvars.viewsize = 70.0;
         s.apply_preset(Preset::Slop);
         assert_eq!(s.cvars.viewsize, 70.0, "Classic -> slop keeps a chosen size");
@@ -330,11 +395,11 @@ mod tests {
         let mut t = Settings::default();
         t.cvars.viewsize = 100.0;
         assert_eq!(t.config_text(), "// generated by quake, do not modify\npreset \"slop\"\nviewsize \"100\"\n");
-        let mut t = Settings::new(Preset::Classic);
+        let mut t = Settings::new(Preset::Classic, Machine::default());
         assert_eq!(t.config_text(), "// generated by quake, do not modify\npreset \"classic\"\n", "Classic's 100 is not written");
         t.cvars.viewsize = 110.0;
         assert_eq!(t.config_text(), "// generated by quake, do not modify\npreset \"classic\"\nviewsize \"110\"\n");
-        let mut s = Settings::new(Preset::Classic);
+        let mut s = Settings::new(Preset::Classic, Machine::default());
         s.cvars.viewsize = 110.0;
         s.cvars.show_fps = true;
         s.binds.bind(b'q', BIND_FORWARD); // 'q' is unbound by default; 'w' already is +forward
@@ -359,12 +424,51 @@ mod tests {
         assert!(!s.cvars.always_run(), "not in default.cfg");
         assert_eq!(s.binds, Preset::Slop.bindings());
         // Classic: default.cfg's viewsize 100, as in WinQuake.
-        let mut c = Settings::new(Preset::Classic);
+        let mut c = Settings::new(Preset::Classic, Machine::default());
         c.cvars.viewsize = 50.0;
         c.reset_defaults();
         assert_eq!(c.cvars.viewsize, 100.0);
         // ...and a reset leaves the preset as it was.
         assert_eq!((c.preset, s.preset), (Preset::Classic, Preset::Slop));
+    }
+
+    /// The numbers a preset takes from the machine: a touch screen starts at
+    /// 2x on at most four threads, anything else at 1x on every thread, in
+    /// either preset; and `config.cfg` writes a number only when it differs
+    /// from this machine's, so the same 2x is a choice on a desktop and
+    /// nothing at all on a phone.
+    #[test]
+    fn the_machine_picks_the_presets_numbers() {
+        let phone = Machine { touch: true, threads: 8 };
+        let desktop = Machine { touch: false, threads: 16 };
+        for preset in [Preset::Slop, Preset::Classic] {
+            let c = preset.cvars(phone);
+            assert_eq!((c.pixel_size, c.threads), (2, 4), "{preset:?} on a phone");
+            let c = preset.cvars(desktop);
+            assert_eq!((c.pixel_size, c.threads), (1, 16), "{preset:?} on a desktop");
+        }
+        assert_eq!(Machine { touch: true, threads: 2 }.render_threads(), 2, "four at most, not four at least");
+        assert_eq!(Machine { touch: false, threads: 0 }.render_threads(), 1, "always one");
+        assert_eq!(Preset::Slop.cvars(Machine::default()), Cvars::slop(), "a plain machine: one thread, 1x");
+        assert_eq!(Preset::Classic.cvars(Machine::default()), Cvars::classic());
+
+        let head = "// generated by quake, do not modify\npreset \"slop\"\n";
+        let on_phone = Settings::new(Preset::Slop, phone);
+        assert_eq!(on_phone.config_text(), head, "the phone's own numbers are not written");
+        let mut at_2x = Settings::new(Preset::Slop, desktop);
+        at_2x.cvars.pixel_size = 2;
+        assert_eq!(at_2x.config_text(), format!("{head}vid_pixelsize \"2\"\n"), "2x is a choice on a desktop");
+        let mut at_1x = on_phone.clone();
+        at_1x.cvars.pixel_size = 1;
+        at_1x.cvars.threads = 8;
+        assert_eq!(at_1x.config_text(), format!("{head}vid_pixelsize \"1\"\nr_threads \"8\"\n"), "and 1x on eight a choice on a phone");
+
+        // Applying a preset keeps the machine's numbers where they are
+        // slop options, and never touches the threads (no slop option).
+        let mut s = Settings::new(Preset::Slop, phone);
+        s.cvars.threads = 6;
+        s.apply_preset(Preset::Classic);
+        assert_eq!((s.cvars.pixel_size, s.cvars.threads, s.machine), (2, 6, phone));
     }
 
     /// The console's and `config.cfg`'s words for a preset: its name, and

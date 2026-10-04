@@ -141,7 +141,7 @@ pub enum RowKind {
     Preset,
     /// A cvar that is on or off (`M_DrawCheckbox`); any key flips it.
     Toggle,
-    /// `vid_pixelsize`: `auto`, then 1..=4; left and right step it.
+    /// `vid_pixelsize`: 1..=4; left and right step it.
     PixelSize,
     /// `crosshair`: `off`, `cross` (the slop one), `id's +`; left and right
     /// step it.
@@ -227,7 +227,7 @@ pub const PICTURE_ROWS: [SettingRow; 10] = [
     SettingRow {
         cvar: "vid_pixelsize",
         label: "            Pixel size",
-        help: ["Screen pixels per game pixel;", "auto keeps the frame fast"],
+        help: ["Screen pixels per game pixel;", "more: fewer pixels, faster frames"],
         kind: RowKind::PixelSize,
     },
     SettingRow {
@@ -369,10 +369,7 @@ impl SettingRow {
     pub fn value(&self, s: &Settings) -> String {
         match self.kind {
             RowKind::Preset => s.preset.name().to_string(),
-            RowKind::PixelSize => match s.cvars.pixel_size {
-                0 => "auto".to_string(),
-                n => n.to_string(),
-            },
+            RowKind::PixelSize => s.cvars.pixel_size.to_string(),
             RowKind::Crosshair => match s.cvars.crosshair {
                 Crosshair::Off => checkbox_text(false),
                 Crosshair::Cross => "cross",
@@ -408,7 +405,7 @@ impl SettingRow {
 
     /// Left (`step` -1) or right (+1) on it, as `M_AdjustSliders` does a
     /// checkbox or a slider: a preset, a toggle or the wheel flips whatever
-    /// the direction, the pixel size steps (auto, 1, 2, 3, 4, wrapping), and
+    /// the direction, the pixel size steps (1, 2, 3, 4, wrapping), and
     /// so do the crosshair (off, cross, id's +) and the perspective span
     /// (id's 16, 8, 4, exact); a slider steps, clamped at its ends as id's
     /// are; a page row changes nothing.
@@ -416,8 +413,8 @@ impl SettingRow {
         match self.kind {
             RowKind::Preset => s.apply_preset(s.preset.toggled()),
             RowKind::PixelSize => {
-                let n = i32::from(PIXEL_SIZE_MAX) + 1;
-                s.cvars.pixel_size = (i32::from(s.cvars.pixel_size) + step).rem_euclid(n) as u8;
+                let n = i32::from(PIXEL_SIZE_MAX);
+                s.cvars.pixel_size = (i32::from(s.cvars.pixel_size) - 1 + step).rem_euclid(n) as u8 + 1;
             }
             RowKind::Crosshair => {
                 let n = i32::from(s.cvars.crosshair.cvar()) + step;
@@ -452,7 +449,7 @@ impl SettingRow {
     pub fn console_hint(&self) -> String {
         match self.kind {
             RowKind::Preset => "console: preset slop|classic".to_string(),
-            RowKind::PixelSize => format!("console: {} 0-{PIXEL_SIZE_MAX}", self.cvar),
+            RowKind::PixelSize => format!("console: {} 1-{PIXEL_SIZE_MAX}", self.cvar),
             RowKind::Crosshair => format!("console: {} 0/1/2", self.cvar),
             RowKind::PerspSpan => format!("console: {} 64/32/16/8/4/1", self.cvar),
             RowKind::Toggle => format!("console: {} 0/1", self.cvar),
@@ -535,12 +532,12 @@ pub const RESOLUTION_PRESETS: [(i32, i32); 7] = [
 ];
 
 /// Video Options' native-resolution rows, appended after [`RESOLUTION_PRESETS`]
-/// when they show ([`Menu::native_rows_shown`]): Auto, then the whole pixel
-/// sizes 1..=[`PIXEL_SIZE_MAX`] — one row per value `vid_pixelsize` takes,
-/// the row's offset from [`RESOLUTION_PRESETS`]'s end IS the value (0 =
-/// Auto). The slop preset's own "native resolution" extra (AUDIT.md), off
-/// in Classic: a departure from id's `VID_MenuDraw`, which has no such rows.
-const NATIVE_ROWS: usize = PIXEL_SIZE_MAX as usize + 1;
+/// when they show ([`Menu::native_rows_shown`]): the whole pixel sizes
+/// 1..=[`PIXEL_SIZE_MAX`] — one row per value `vid_pixelsize` takes, the
+/// row's offset from [`RESOLUTION_PRESETS`]'s end the value less one. The
+/// slop preset's own "native resolution" option (AUDIT.md), off in Classic:
+/// a departure from id's `VID_MenuDraw`, which has no such rows.
+const NATIVE_ROWS: usize = PIXEL_SIZE_MAX as usize;
 
 // --- analog cvar ranges (M_AdjustSliders) + their slider fraction mapping ------
 
@@ -1492,12 +1489,12 @@ impl Menu {
                 let row = self.cursor();
                 if self.native_rows && row >= RESOLUTION_PRESETS.len() {
                     // PORT ROW (not in id's Quake, off in Classic): Enter on
-                    // one of the native-resolution rows (Auto, 1x..4x pixel
+                    // one of the native-resolution rows (1x..4x pixel
                     // size) turns native resolution back on at that pixel
                     // size — reversing a fixed mode picked below, or just
                     // reaffirming the live one (AUDIT.md's "native
                     // resolution" departure).
-                    let pixel = (row - RESOLUTION_PRESETS.len()).min(NATIVE_ROWS - 1);
+                    let pixel = (row - RESOLUTION_PRESETS.len()).min(NATIVE_ROWS - 1) + 1;
                     s.cvars.native = true;
                     s.cvars.pixel_size = pixel as u8;
                 } else {
@@ -1981,8 +1978,8 @@ impl Menu {
     }
 
     /// How many rows [`MenuScreen::Video`] has right now: [`RESOLUTION_PRESETS`],
-    /// plus the native-resolution rows ([`NATIVE_ROWS`]: Auto, 1x..4x pixel
-    /// size) appended when they show ([`Menu::native_rows_shown`]). Appended,
+    /// plus the native-resolution rows ([`NATIVE_ROWS`]: 1x..4x pixel size)
+    /// appended when they show ([`Menu::native_rows_shown`]). Appended,
     /// not prepended, so a fixed mode's row index never moves.
     fn video_rows(&self) -> usize {
         RESOLUTION_PRESETS.len() + if self.native_rows { NATIVE_ROWS } else { 0 }
@@ -1996,7 +1993,7 @@ impl Menu {
     /// which this engine-level `Menu` does not store.
     fn video_current_row(&self, pixel_size: u8) -> usize {
         if self.native_rows && self.actual_native {
-            RESOLUTION_PRESETS.len() + usize::from(pixel_size).min(NATIVE_ROWS - 1)
+            RESOLUTION_PRESETS.len() + usize::from(pixel_size.max(1) - 1).min(NATIVE_ROWS - 1)
         } else {
             self.res_preset
         }
@@ -3016,7 +3013,7 @@ fn draw_keys_screen(
 ///
 /// **slop only** ([`Menu::native_rows_shown`]; off in Classic, where this
 /// draws exactly as above and nothing else — `VID_MenuDraw` unchanged):
-/// [`NATIVE_ROWS`] more rows follow the presets — Auto, then pixel sizes
+/// [`NATIVE_ROWS`] more rows follow the presets — pixel sizes
 /// 1..=[`PIXEL_SIZE_MAX`] — so the screen can be honest about what native
 /// resolution actually is. While the picture really is native
 /// ([`Menu::actual_native`]) no preset is current; the matching native row
@@ -3057,12 +3054,12 @@ fn draw_video_screen(
     }
     let mut rows = RESOLUTION_PRESETS.len();
     if menu.native_rows_shown() {
-        // PORT ROWS (not in id's Quake, off in Classic): Auto, 1x..4x. The
+        // PORT ROWS (not in id's Quake, off in Classic): 1x..4x. The
         // live one (if native_now) prints the actual render size, honestly —
         // the others are just the choice, not yet applied.
-        for p in 0..=PIXEL_SIZE_MAX {
+        for p in 1..=PIXEL_SIZE_MAX {
             let y = VIDEO_ROW_Y0 + TEXT_ROW_STEP * rows as f32;
-            let label = if p == 0 { "Native  Auto".to_string() } else { format!("Native  {p}x") };
+            let label = format!("Native  {p}x");
             if native_now && settings.cvars.pixel_size == p {
                 let (aw, ah) = menu.actual_size();
                 draw_string_scaled(image, cc, 16.0, y, &format!("{label}  {aw}x{ah}"), scale, ox, oy);
@@ -3206,7 +3203,7 @@ mod tests {
     use super::*;
     use crate::cvar::Cvars;
     use crate::screen::VIEWSIZE_DEFAULT;
-    use crate::settings::{Preset, Settings};
+    use crate::settings::{Machine, Preset, Settings};
 
     /// default.cfg's `sensitivity 3`, `volume 0.7`, `gamma 1.0`.
     const SENS_DEFAULT: f32 = 3.0;
@@ -3980,7 +3977,7 @@ mod tests {
         // Classic default.cfg's `viewsize 100`.
         s.reset_defaults();
         assert_eq!(s.cvars.viewsize, 110.0);
-        let mut classic = Settings::new(Preset::Classic);
+        let mut classic = Settings::new(Preset::Classic, Machine::default());
         classic.cvars.viewsize = 40.0;
         classic.reset_defaults();
         assert_eq!(classic.cvars.viewsize, VIEWSIZE_DEFAULT, "default.cfg: viewsize 100");
@@ -4367,7 +4364,7 @@ mod tests {
 
     #[test]
     fn classic_slop_applies_the_preset_and_its_hub_opens_each_page() {
-        let (mut m, mut s) = (Menu::new(), Settings::new(Preset::Classic));
+        let (mut m, mut s) = (Menu::new(), Settings::new(Preset::Classic, Machine::default()));
         m.open();
         m.set_cursor(2);
         m.select(&mut s); // -> Options
@@ -4376,9 +4373,9 @@ mod tests {
         m.set_cursor(ROW_PRESET);
         m.take_sounds();
         m.adjust(-1, &mut s);
-        assert_eq!(s, Settings::new(Preset::Slop), "every slop option and key to slop's");
+        assert_eq!(s, Settings::new(Preset::Slop, Machine::default()), "every slop option and key to slop's");
         m.adjust(1, &mut s);
-        assert_eq!(s, Settings::new(Preset::Classic), "and back: id's");
+        assert_eq!(s, Settings::new(Preset::Classic, Machine::default()), "and back: id's");
         assert_eq!(m.take_sounds(), vec![MenuSound::Menu3; 2]);
         assert_eq!(m.select(&mut s), MenuAction::None);
         assert_eq!((m.screen(), m.cursor()), (MenuScreen::Extras, 0), "the hub, on the preset row");
@@ -4387,9 +4384,9 @@ mod tests {
         // The hub's preset row is the Options row's switch: any direction,
         // and Enter (menu2 + menu3, an Options checkbox row's).
         m.adjust(1, &mut s);
-        assert_eq!((s.preset, s.cvars.pixel_size), (Preset::Slop, 0), "slop, its pixel size");
+        assert_eq!((s.preset, s.cvars.pixel_size), (Preset::Slop, 1), "slop, its pixel size");
         m.select(&mut s);
-        assert_eq!(s, Settings::new(Preset::Classic));
+        assert_eq!(s, Settings::new(Preset::Classic, Machine::default()));
         assert_eq!(m.take_sounds(), vec![MenuSound::Menu3, MenuSound::Menu2, MenuSound::Menu3]);
         assert_eq!(EXTRAS_HUB_ROWS[0].console_hint(), "console: preset slop|classic");
 
@@ -4402,11 +4399,11 @@ mod tests {
             m.set_cursor(1 + i);
             m.adjust(-1, &mut s);
             m.adjust(1, &mut s);
-            assert_eq!(s, Settings::new(Preset::Classic), "{page:?}: left and right change nothing");
+            assert_eq!(s, Settings::new(Preset::Classic, Machine::default()), "{page:?}: left and right change nothing");
             assert_eq!(m.take_sounds(), vec![MenuSound::Menu3; 2]);
             assert_eq!(m.select(&mut s), MenuAction::None);
             assert_eq!((m.screen(), m.cursor()), (MenuScreen::ExtrasPage(page), 0));
-            assert_eq!(s, Settings::new(Preset::Classic), "{page:?}: opening it changes nothing");
+            assert_eq!(s, Settings::new(Preset::Classic, Machine::default()), "{page:?}: opening it changes nothing");
             assert_eq!(m.take_sounds(), vec![MenuSound::Menu2]);
             m.move_cursor(-1);
             assert_eq!(m.cursor(), page.rows().len() - 1, "{page:?}: up from the top wraps to the last row");
@@ -4425,7 +4422,7 @@ mod tests {
 
     #[test]
     fn each_settings_row_changes_its_setting() {
-        let (mut m, mut s) = (Menu::new(), Settings::new(Preset::Classic));
+        let (mut m, mut s) = (Menu::new(), Settings::new(Preset::Classic, Machine::default()));
         m.open();
         // Each toggle row flips its cvar whatever the direction; Enter too,
         // with menu2 + menu3 like an Options checkbox row. Most rows are
@@ -4449,17 +4446,18 @@ mod tests {
             assert_eq!(m.take_sounds(), vec![MenuSound::Menu2, MenuSound::Menu3]);
             assert_eq!(row.console_hint(), format!("console: {} 0/1", row.cvar));
         }
-        assert_eq!(s, Settings::new(Preset::Classic));
+        assert_eq!(s, Settings::new(Preset::Classic, Machine::default()));
 
-        // The pixel size steps: auto, 1..4, and wraps.
+        // The pixel size steps: 1..4, and wraps.
         let pixel = on_row(&mut m, "vid_pixelsize");
-        assert_eq!(pixel.value(&s), "auto");
-        let steps: Vec<u8> = (0..6).map(|_| { m.adjust(1, &mut s); s.cvars.pixel_size }).collect();
-        assert_eq!(steps, [1, 2, 3, 4, 0, 1]);
+        assert_eq!(pixel.value(&s), "1");
+        let steps: Vec<u8> = (0..5).map(|_| { m.adjust(1, &mut s); s.cvars.pixel_size }).collect();
+        assert_eq!(steps, [2, 3, 4, 1, 2]);
         m.adjust(-1, &mut s);
         m.adjust(-1, &mut s);
         assert_eq!((s.cvars.pixel_size, pixel.value(&s).as_str()), (4, "4"));
-        assert_eq!(pixel.console_hint(), "console: vid_pixelsize 0-4");
+        assert_eq!(pixel.console_hint(), "console: vid_pixelsize 1-4");
+        m.adjust(1, &mut s);
         // The crosshair steps the same way: off, the cross, id's +, wrapping.
         let crosshair = on_row(&mut m, "crosshair");
         assert_eq!(crosshair.value(&s), "off");
@@ -4520,9 +4518,9 @@ mod tests {
         assert_eq!((row_of("bind").0, wheel.kind), (ExtrasPage::Controls, RowKind::Wheel));
         assert_eq!(wheel.value(&s), "off");
         m.adjust(-1, &mut s);
-        assert_eq!((wheel.value(&s).as_str(), &s.binds), ("on", &Settings::new(Preset::Slop).binds));
+        assert_eq!((wheel.value(&s).as_str(), &s.binds), ("on", &Settings::new(Preset::Slop, Machine::default()).binds));
         m.select(&mut s);
-        assert_eq!((wheel.value(&s).as_str(), &s.binds), ("off", &Settings::new(Preset::Classic).binds));
+        assert_eq!((wheel.value(&s).as_str(), &s.binds), ("off", &Settings::new(Preset::Classic, Machine::default()).binds));
         // Bound by hand, it reads "custom"; a key puts the cycle back over
         // the player's binding, the next one takes it off.
         s.binds.bind(K_MWHEELUP, BIND_JUMP);
@@ -4657,7 +4655,7 @@ mod tests {
         // Options: the port's row is the 14th, at y=136 (the C's _WIN32 row),
         // right-justified with id's labels ("Classic / slop" ends at x=184),
         // the preset at x=220.
-        let (mut m, mut s) = (Menu::new(), Settings::new(Preset::Classic));
+        let (mut m, mut s) = (Menu::new(), Settings::new(Preset::Classic, Machine::default()));
         m.open();
         m.set_cursor(2);
         m.select(&mut s);
@@ -5497,9 +5495,9 @@ mod tests {
         // native resolution with no sign it had. Now: synced to a genuinely
         // native frame that matches NO fixed preset (960x540, not
         // 960x600), opening Video Options lands on the native row for the
-        // live pixel size (Auto, Settings::default()'s), not a stale preset.
+        // live pixel size (1x, Settings::default()'s), not a stale preset.
         let (mut m, mut s) = (Menu::new(), Settings::default());
-        assert_eq!(s.cvars.pixel_size, 0, "slop defaults to Auto");
+        assert_eq!(s.cvars.pixel_size, 1, "slop on a plain machine: 1x");
         m.sync_resolution(960, 540, true, true);
         assert_eq!(m.actual_size(), (960, 540));
         assert!(m.actual_native());
@@ -5512,7 +5510,7 @@ mod tests {
         assert_eq!(
             m.cursor(),
             RESOLUTION_PRESETS.len(),
-            "opens on the native row (Auto), not a fixed-mode guess"
+            "opens on the native row (1x), not a fixed-mode guess"
         );
         // The old bug: a fresh Menu's res_preset defaults to 0, and nothing
         // here ever set it to match 960x540 (there IS no such preset) — so a
@@ -5560,8 +5558,8 @@ mod tests {
         m.select(&mut s);
         m.move_cursor(ROW_VIDEO as i32);
         m.select(&mut s);
-        // Row RESOLUTION_PRESETS.len() + 2 is the "2x" native row.
-        m.set_cursor(RESOLUTION_PRESETS.len() + 2);
+        // Row RESOLUTION_PRESETS.len() + 1 is the "2x" native row.
+        m.set_cursor(RESOLUTION_PRESETS.len() + 1);
         m.take_sounds();
         assert_eq!(m.select(&mut s), MenuAction::ResolutionChanged);
         assert!(s.cvars.native);
@@ -5574,7 +5572,7 @@ mod tests {
         // modern=false (Classic: the host never passes it true there) keeps
         // VID_MenuDraw's plain grid even if `native` itself were somehow on —
         // the native rows are a slop extra, not a reaction to the raw cvar.
-        let (mut m, mut s) = (Menu::new(), Settings::new(Preset::Classic));
+        let (mut m, mut s) = (Menu::new(), Settings::new(Preset::Classic, Machine::default()));
         m.sync_resolution(1920, 1080, true, false);
         m.open();
         m.move_cursor(2);
@@ -5606,18 +5604,18 @@ mod tests {
         }
         let conchars = crate::wad::Qpic { width: 128, height: 128, data };
         let (mut m, s) = (Menu::new(), Settings::default());
-        m.sync_resolution(960, 540, true, true); // genuinely native, Auto
+        m.sync_resolution(960, 540, true, true); // genuinely native, 1x
         m.open();
         m.screen = MenuScreen::Video;
-        m.set_cursor(RESOLUTION_PRESETS.len()); // the Auto native row
+        m.set_cursor(RESOLUTION_PRESETS.len()); // the 1x native row
         let mut img = Image::new(320, 200, 0);
         draw_menu(&mut img, &m, &s, &MenuPics::default(), Some(&conchars), clock(0.0, 0.0));
         let row_px = |row: usize| (36 + row * 8 + 3) * 320 + 16 + 3;
         assert_eq!(img.pixels[row_px(RESOLUTION_PRESETS.len())], 6, "the live native row is M_PrintWhite");
         assert_eq!(img.pixels[row_px(4)], 5, "960x600 is NOT current (it isn't what the screen is)");
         // The actual render size is printed on that row: "960x540" starts
-        // right after "Native  Auto  " (14 columns in, from x=16).
-        let digit_px = (36 + RESOLUTION_PRESETS.len() * 8 + 3) * 320 + 16 + 14 * 8 + 3;
+        // right after "Native  1x  " (12 columns in, from x=16).
+        let digit_px = (36 + RESOLUTION_PRESETS.len() * 8 + 3) * 320 + 16 + 12 * 8 + 3;
         assert_eq!(img.pixels[digit_px], 6, "the live size is printed, in white, on its row");
     }
 }

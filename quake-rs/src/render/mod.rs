@@ -96,7 +96,6 @@ pub use view::{
     viewmodel_fudge, viewmodel_origin_ofs,
 };
 pub use vis::point_in_leaf;
-pub use band::Threads;
 pub use sky::SkyScroll;
 pub use torch::TorchFlicker;
 pub use video::{FovMode, VideoCvars, HIRES_MAXHEIGHT, HIRES_MAXWIDTH, MAXHEIGHT, MAXWIDTH};

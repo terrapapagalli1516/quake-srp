@@ -92,7 +92,7 @@ pub(crate) fn exec_config() -> Option<String> {
 mod tests {
     use super::*;
     use crate::app::{boot, ensure_app, APP};
-    use quake_rs::settings::{Preset, Settings};
+    use quake_rs::settings::{Machine, Preset, Settings};
 
     fn settings() -> Settings {
         APP.with(|c| c.borrow().as_ref().unwrap().settings.clone())
@@ -139,7 +139,7 @@ mod tests {
         assert_eq!(boot(), 1);
         ensure_app(|a| a.settings = Settings::default());
         exec_config();
-        assert_eq!(settings(), Settings::new(Preset::Classic), "Classic, whatever the start");
+        assert_eq!(settings(), Settings::new(Preset::Classic, Machine::default()), "Classic, whatever the start");
     }
 
     #[test]

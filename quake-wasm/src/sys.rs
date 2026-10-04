@@ -173,7 +173,7 @@ impl<W: Write> Sys<W> {
                     self.write_sound(0.0, None)?;
                     self.out.flush()?;
                 }
-                Event::Window { w, h, dpr } => crate::vid::set_window(w, h, dpr),
+                Event::Window { w, h } => crate::vid::set_window(w, h),
                 Event::Present(format) => crate::app::ensure_app(|a| a.present.set_format(format)),
                 Event::Gamepad(pad) => gamepad(pad),
                 Event::Call { id, line } => {
@@ -327,8 +327,7 @@ fn ui_state() -> UiState {
     let (native, alt_enter, pixel_size) = APP.with(|c| {
         c.borrow().as_ref().map_or((false, false, 0), |a| {
             let native = crate::vid::native(a);
-            let threads = crate::vid::render_threads(a);
-            let pixel = a.window.filter(|_| native).map_or(0, |w| crate::vid::pixel_size(&a.settings.cvars, w, a.dpr, threads));
+            let pixel = a.window.filter(|_| native).map_or(0, |w| crate::vid::pixel_size(&a.settings.cvars, w));
             (native, a.settings.cvars.alt_enter, pixel)
         })
     });
@@ -472,9 +471,9 @@ mod tests {
     }
 
     /// The slop preset's native resolution through the protocol: the page's
-    /// `Window` in device pixels, the picture at a whole fraction of it (Auto:
-    /// the smallest pixel that keeps a 1080p frame's cost on one thread), and
-    /// the `State` that tells the page to fill its box with that pixel size.
+    /// `Window` in device pixels, the picture at a whole fraction of it (the
+    /// pixel size, or the next one up whose frame the memory holds), and the
+    /// `State` that tells the page to fill its box with that pixel size.
     /// Classic shows its video mode in the 4:3 box whatever the window —
     /// `STATE_ALT_ENTER` stays set even there, a shared control now, not the
     /// engine (`quake_rs::settings`'s module docs).
@@ -493,8 +492,8 @@ mod tests {
             (w, h, state.u32_at(0) & (STATE_NATIVE | STATE_ALT_ENTER), state.u32_at(8))
         };
         assert_eq!(frame_and_state("slop", (1920, 1080)), (1920, 1080, STATE_NATIVE | STATE_ALT_ENTER, 1));
-        assert_eq!(frame_and_state("slop", (3840, 2160)), (1920, 1080, STATE_NATIVE | STATE_ALT_ENTER, 2), "4K: 2x2 pixels");
-        assert_eq!(frame_and_state("slop", (5120, 2880)), (1706, 960, STATE_NATIVE | STATE_ALT_ENTER, 3), "5K: 3x3");
+        assert_eq!(frame_and_state("slop", (3840, 2160)), (3840, 2160, STATE_NATIVE | STATE_ALT_ENTER, 1), "4K: 1x");
+        assert_eq!(frame_and_state("slop", (5120, 2880)), (2560, 1440, STATE_NATIVE | STATE_ALT_ENTER, 2), "5K: 2x, what the memory holds");
         assert_eq!(frame_and_state("slop", (1300, 700)), (1300, 700, STATE_NATIVE | STATE_ALT_ENTER, 1), "any aspect");
         assert_eq!(frame_and_state("classic", (1920, 1080)), (960, 600, STATE_ALT_ENTER, 0), "the mode, in the 4:3 box; Alt+Enter is a shared control, on here too");
     }

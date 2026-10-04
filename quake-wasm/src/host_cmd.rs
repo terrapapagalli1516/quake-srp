@@ -746,24 +746,28 @@ mod tests {
         assert_eq!(viewsize(), 110.0, "no binding runs while the menu is up");
     }
 
+    /// `r_threads` is a number, the machine's to start with (a preset on
+    /// six threads offered: six), never "auto"; 0 or less reads as 1.
     #[test]
     fn r_threads_is_a_cvar_every_frame_hands_the_renderer() {
+        use quake_rs::settings::{Machine, Settings};
         let last_line = || {
             APP.with(|c| c.borrow().as_ref().unwrap().console.lines().last().map(str::to_string))
         };
         let threads = || walk_mut(|w| w.renderer.threads());
         assert_eq!(boot(), 1);
         close_menu();
-        APP.with(|c| c.borrow_mut().as_mut().unwrap().hw_threads = 6);
+        ensure_app(|a| a.settings = Settings::new(Preset::Classic, Machine { touch: false, threads: 6 }));
         console_toggle();
         run_console_line("r_threads");
-        assert_eq!(last_line().as_deref(), Some("\"r_threads\" is \"0\""));
+        assert_eq!(last_line().as_deref(), Some("\"r_threads\" is \"6\""), "the machine's number");
         step(0.0);
-        assert_eq!(threads(), 6, "0: every thread the host offers");
+        assert_eq!(threads(), 6);
         run_console_line("r_threads 0");
-        APP.with(|c| c.borrow_mut().as_mut().unwrap().hw_threads = 1);
+        run_console_line("r_threads");
+        assert_eq!(last_line().as_deref(), Some("\"r_threads\" is \"1\""), "0 reads as 1");
         step(0.0);
-        assert_eq!(threads(), 1, "no threads offered: one");
+        assert_eq!(threads(), 1);
         run_console_line("r_threads 3");
         step(0.0);
         assert_eq!(threads(), 3);

@@ -17,7 +17,7 @@
 //! | 6 | `AudioReady` | `ready u8`, `0 u8 ×3`, `rate u32` (the device's sample rate; 0 unknown) |
 //! | 7 | `Call` | `id u32`, then a UTF-8 line `name arg...` (automation, [`crate::automation`]) |
 //! | 8 | `End` | — (the host's "nothing more is queued", the answer to a polling `Sync`) |
-//! | 9 | `Window` | `w u32`, `h u32`: the page's box for the picture in device pixels (CSS size x `devicePixelRatio`), which native resolution renders into; `dpr f32`: that `devicePixelRatio` (absent from an older page: read as 1) |
+//! | 9 | `Window` | `w u32`, `h u32`: the page's box for the picture in device pixels (CSS size x `devicePixelRatio`), which native resolution renders into; a page may send its `devicePixelRatio` after them (`f32`), which the program no longer reads: a touch screen is the command line's `-touch` |
 //! | 10 | `AudioClock` | `pos u32`: the sample pairs the page's audio device has played (a wrapping count; the page sends it before each `Tick`) |
 //! | 11 | `AudioWake` | `pos u32`: the same, from the host between ticks while the device plays: mix now (`S_ExtraUpdate`) |
 //! | 12 | `Present` | `format u8`: how the page shows frames ([`FORMAT_RGBA8`] or [`FORMAT_INDEXED8`]; RGBA until it says) |
@@ -93,7 +93,7 @@ pub(crate) enum Event {
     /// The host has nothing more queued (the answer to a polling sync).
     End,
     /// The page's box for the picture, in device pixels.
-    Window { w: u32, h: u32, dpr: f32 },
+    Window { w: u32, h: u32 },
     /// How the page shows the frames from now on: [`FORMAT_RGBA8`] or
     /// [`FORMAT_INDEXED8`] (another value is RGBA).
     Present(u8),
@@ -141,7 +141,7 @@ pub(crate) fn read_event(r: &mut impl Read) -> io::Result<Option<Event>> {
             Event::Call { id, line: String::from_utf8_lossy(p.rest()).into_owned() }
         }
         IN_END => Event::End,
-        IN_WINDOW => Event::Window { w: p.u32(), h: p.u32(), dpr: p.f32() },
+        IN_WINDOW => Event::Window { w: p.u32(), h: p.u32() },
         IN_PRESENT => Event::Present(p.u8()),
         IN_GAMEPAD => Event::Gamepad(read_pad(&mut p)),
         other => Event::Unknown(other),

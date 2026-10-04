@@ -476,10 +476,10 @@ mod tests {
 
     #[test]
     fn classic_slop_applies_the_preset_and_its_page_each_setting() {
-        use quake_rs::settings::{Preset, Settings};
+        use quake_rs::settings::{Machine, Preset, Settings};
         let settings = || APP.with(|c| c.borrow().as_ref().unwrap().settings.clone());
         assert_eq!(boot(), 1);
-        assert_eq!(settings(), Settings::new(Preset::Classic), "the tests start in Classic");
+        assert_eq!(settings(), Settings::new(Preset::Classic, Machine::default()), "the tests start in Classic");
         menu_down();
         menu_down();
         menu_select(); // -> Options
@@ -487,7 +487,7 @@ mod tests {
             menu_down(); // the port's row 13, Classic / slop
         }
         menu_right();
-        assert_eq!(settings(), Settings::new(Preset::Slop), "right: every setting to slop's");
+        assert_eq!(settings(), Settings::new(Preset::Slop, Machine::default()), "right: every setting to slop's");
         menu_left();
         assert_eq!(settings().preset, Preset::Classic, "left: back");
         menu_select();
@@ -499,8 +499,8 @@ mod tests {
         assert_eq!(extras(), 1);
         menu_down();
         menu_down();
-        menu_right(); // Pixel size: auto -> 1
-        assert_eq!(settings().cvars.pixel_size, 1);
+        menu_right(); // Pixel size: 1 -> 2
+        assert_eq!(settings().cvars.pixel_size, 2);
         menu_cancel();
         assert_eq!(menu_screen_id(), 10, "Esc returns to the hub");
         menu_down();

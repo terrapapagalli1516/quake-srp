@@ -39,14 +39,14 @@
 use crate::client::in_win::JoyCvars;
 use crate::client::lerpmodels::LerpModels;
 use crate::client::lerpmove::LerpMove;
-use crate::render::{Crosshair, PerspSpan, SkyScroll, Threads, TorchFlicker};
+use crate::render::{Crosshair, PerspSpan, SkyScroll, TorchFlicker};
 use crate::snd::SoundMode;
 use crate::screen::{SbarLayout, VIEWSIZE_DEFAULT, VIEWSIZE_MAX, VIEWSIZE_MIN, VIEWSIZE_MODERN, VIEWSIZE_STEP};
 use crate::server::LerpLightStyles;
 use crate::vm::{MAX_EDICTS, MAX_EDICTS_LIMIT};
 
-/// The port's pixel sizes for [`Cvars::pixel_size`]: 0 is Auto, 1..=4 a
-/// fixed size.
+/// The largest of the port's pixel sizes, [`Cvars::pixel_size`]: 1 to 4
+/// device pixels a side to one of the picture's.
 pub const PIXEL_SIZE_MAX: u8 = 4;
 
 /// The longest player name: `Host_Name_f` cuts it to 15 characters
@@ -128,10 +128,11 @@ pub struct Cvars {
     /// off, the video mode [`Cvars::vid_resolution`] in a 4:3 box, as a 1996
     /// monitor showed it.
     pub native: bool,
-    /// `vid_pixelsize`: with [`Cvars::native`], how many device pixels make
-    /// one of the picture's (0: Auto, the smallest that keeps a frame
-    /// affordable; 1..=[`PIXEL_SIZE_MAX`]). Whole pixels either way, never
-    /// smoothed.
+    /// `vid_pixelsize`: with [`Cvars::native`], how many device pixels a
+    /// side make one of the picture's, 1..=[`PIXEL_SIZE_MAX`]: whole pixels,
+    /// never smoothed. The presets start it at the machine's number
+    /// ([`crate::settings::Machine::pixel_size`]); the host takes the next
+    /// size up when a frame this size would not fit its memory.
     pub pixel_size: u8,
     /// `fov_adapt`: Hor+ — `fov` spans a 4:3 screen and a wider one sees more
     /// at the sides ([`crate::render::FovMode::HorPlus`]).
@@ -165,10 +166,11 @@ pub struct Cvars {
     /// (its faults fixed, `snd::Fixes::ALL`, at the device's rate) instead
     /// of id's as written at 11025 Hz.
     pub sound: SoundMode,
-    /// `r_threads`: how many threads draw the 3-D view (0: Auto, as many as
-    /// the platform offers). The pixels are the same for any count, so it is
-    /// no departure.
-    pub threads: Threads,
+    /// `r_threads`: how many threads draw the 3-D view, at least 1. The
+    /// presets start it at the machine's number
+    /// ([`crate::settings::Machine::render_threads`]). The pixels are the
+    /// same for any count, so it is no departure.
+    pub threads: usize,
     /// `sv_max_edicts`: the `ED_Alloc` ceiling ([`crate::vm::MAX_EDICTS`] in
     /// Classic, where id's own 600 is also the port's; higher in slop). A
     /// departure, but an unusual one: it never changes anything *drawn* —
@@ -214,7 +216,10 @@ impl Cvars {
     /// *controls* — Always Run, mouse look, the gamepad, Space swims up,
     /// Alt+Enter — are already the shared default here too (the module
     /// docs say why); id's own 1996 ones (arrows, no mouse look, no
-    /// gamepad, Always Run off) are [`Cvars::with_id_controls`].
+    /// gamepad, Always Run off) are [`Cvars::with_id_controls`]. The numbers
+    /// a machine picks (the renderer's threads, the pixel size) are a plain
+    /// machine's here, one thread at 1x: the presets give them the host's
+    /// ([`crate::settings::Preset::cvars`]).
     pub fn classic() -> Cvars {
         Cvars {
             viewsize: VIEWSIZE_DEFAULT,
@@ -240,7 +245,7 @@ impl Cvars {
             scaled_2d: false,
             sbar_layout: SbarLayout::Classic,
             native: false,
-            pixel_size: 0,
+            pixel_size: 1,
             fov_adapt: false,
             freelook: true,
             jumpswim: true,
@@ -249,7 +254,7 @@ impl Cvars {
             lerpmodels: LerpModels::Classic,
             sky: SkyScroll::Classic,
             sound: SoundMode::Classic,
-            threads: Threads::Auto,
+            threads: 1,
             max_edicts: MAX_EDICTS as u32,
             touch: false,
             touch_accel: 0.0,
@@ -535,9 +540,9 @@ pub const CVARS: &[Cvar] = &[
         set: |c, v| c.sbar_layout = if on(v) { SbarLayout::Overlay } else { SbarLayout::Classic } },
     Cvar { name: "vid_native", archive: true, departure: true, help: "fill the window, native pixels",
         get: |c| flag(c.native), set: |c, v| c.native = on(v) },
-    Cvar { name: "vid_pixelsize", archive: true, departure: true, help: "0 auto, 1..4 pixels a pixel",
+    Cvar { name: "vid_pixelsize", archive: true, departure: true, help: "1..4 screen pixels a pixel",
         get: |c| c.pixel_size.to_string(),
-        set: |c, v| c.pixel_size = atof(v).clamp(0.0, f32::from(PIXEL_SIZE_MAX)) as u8 },
+        set: |c, v| c.pixel_size = atof(v).clamp(1.0, f32::from(PIXEL_SIZE_MAX)) as u8 },
     Cvar { name: "fov_adapt", archive: true, departure: true, help: "wider screens see more (Hor+)",
         get: |c| flag(c.fov_adapt), set: |c, v| c.fov_adapt = on(v) },
     Cvar { name: "freelook", archive: true, departure: false, help: "mouse look without +mlook",
@@ -558,8 +563,8 @@ pub const CVARS: &[Cvar] = &[
     Cvar { name: "snd_modern", archive: true, departure: true, help: "slop mixer: device rate, fixes",
         get: |c| flag(c.sound == SoundMode::Modern),
         set: |c, v| c.sound = if on(v) { SoundMode::Modern } else { SoundMode::Classic } },
-    Cvar { name: "r_threads", archive: true, departure: false, help: "3-D view threads, 0 auto",
-        get: |c| c.threads.cvar().to_string(), set: |c, v| c.threads = Threads::from_cvar(atof(v)) },
+    Cvar { name: "r_threads", archive: true, departure: false, help: "threads that draw the 3-D view",
+        get: |c| c.threads.to_string(), set: |c, v| c.threads = atof(v).max(1.0) as usize },
     Cvar { name: "sv_max_edicts", archive: true, departure: true, help: "edict pool past id's 600, for big maps",
         get: |c| c.max_edicts.to_string(),
         set: |c, v| c.max_edicts = atof(v).clamp(MAX_EDICTS as f32, MAX_EDICTS_LIMIT as f32) as u32 },
