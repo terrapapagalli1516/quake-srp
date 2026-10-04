@@ -169,7 +169,7 @@ pub(crate) fn apply_settings(a: &mut App) {
 /// The checks' and the benchmark's shorthand for the picture (the
 /// `set_video` call): `modern` is the 2026 profile's — native resolution at
 /// one device pixel a pixel, Hor+, the fluid sky, the gliding light styles,
-/// the flickering torches, exact perspective:
+/// the flickering torches, the profile's perspective span (8):
 /// `quaketool --video modern` — whose size then follows the window
 /// (`set_window`); `classic` a video mode in the 4:3 box with id's field of
 /// view, sky and light styles. Returns 1 for a known name.
@@ -182,7 +182,7 @@ pub(crate) fn set_video(name: &str) -> i32 {
     ensure_app(|a| {
         let c = &mut a.settings.cvars;
         (c.native, c.fov_adapt) = (modern, modern);
-        c.persp_span = if modern { render::PerspSpan::Exact } else { render::PerspSpan::Spans16 };
+        c.persp_span = if modern { Cvars::modern().persp_span } else { Cvars::classic().persp_span };
         c.sky = if modern { SkyScroll::Fluid } else { SkyScroll::Classic };
         c.lightstyles = if modern { LerpLightStyles::Smooth } else { LerpLightStyles::Classic };
         c.torches = if modern { TorchFlicker::MODERN } else { TorchFlicker::OFF };
@@ -344,26 +344,28 @@ mod tests {
     }
 
     /// The renderer's perspective follows `r_perspspan`: id's 16-pixel spans
-    /// in Classic, exact at every pixel in 2026 (the user's call: at 1080p
-    /// and above the spans' affine steps show), 8 or 4 when set; the old
-    /// `wasm_exactpersp` sets its two ends; and `set_video`'s `modern` is
-    /// `quaketool --video modern`'s, exact perspective with the rest.
+    /// in Classic, every 8 in 2026 (the user's call: at 1080p and above the
+    /// 16-pixel affine steps show; 8 is id's own portable-C loop), the other
+    /// spans and exact when set; the old `wasm_exactpersp` sets its two ends;
+    /// and `set_video`'s `modern` is `quaketool --video modern`'s, the
+    /// profile's span with the rest.
     #[test]
     fn the_perspective_follows_r_perspspan() {
         let span = || APP.with(|c| vid(c.borrow().as_ref().unwrap()).persp_span);
         assert_eq!(boot(), 1);
         assert_eq!(span(), PerspSpan::Spans16, "the tests start in Classic: id's spans");
         use_2026();
-        assert_eq!(span(), PerspSpan::Exact, "2026: exact at every pixel");
-        for (line, want) in [("r_perspspan 8", PerspSpan::Spans8), ("r_perspspan 4", PerspSpan::Spans4),
+        assert_eq!(span(), PerspSpan::Spans8, "2026: id's portable C loop, every 8 pixels");
+        for (line, want) in [("r_perspspan 4", PerspSpan::Spans4), ("r_perspspan 1", PerspSpan::Exact),
                              ("r_perspspan 64", PerspSpan::Spans64), ("r_perspspan 32", PerspSpan::Spans32),
                              ("wasm_exactpersp 0", PerspSpan::Spans16), ("wasm_exactpersp 1", PerspSpan::Exact),
-                             ("r_perspspan 16", PerspSpan::Spans16)] {
+                             ("r_perspspan 16", PerspSpan::Spans16), ("r_perspspan 8", PerspSpan::Spans8)] {
             crate::host_cmd::execute_console_command(line);
             assert_eq!(span(), want, "{line}");
         }
+        assert_eq!(set_video("classic"), 1);
         assert_eq!(set_video("modern"), 1);
-        assert_eq!(span(), PerspSpan::Exact);
+        assert_eq!(span(), PerspSpan::Spans8);
         assert_eq!(set_video("classic"), 1);
         assert_eq!(span(), PerspSpan::Spans16);
     }

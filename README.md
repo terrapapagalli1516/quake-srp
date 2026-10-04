@@ -156,7 +156,7 @@ play with the same ones, and a switch leaves them as they are.
 | lights | the flickering ones snap ten times a second; most torches and flames steady, as the map baked them | the flickering ones glide; the steady torches and flames flicker gently about their light (`r_torchflicker`, a strength) |
 | controls | WASD, mouse look, Always Run, a twin-stick gamepad with rumble (the same in both; `idcontrols` is id's `default.cfg`) | the same, plus the mouse wheel for weapons, a crosshair and touch controls |
 | sound | id's mixer at 11025 Hz | id's mixer at the device's rate, with four of id's bugs fixed |
-| perspective | id's spans: exact every 16 pixels, affine in between | exact at every pixel of walls and liquids (or every 64, 32, 8 or 4: Perspective span, `r_perspspan`; 32 on a phone and 64 at 1080p are about what 1996 looked like) |
+| perspective | id's spans: exact every 16 pixels, affine in between | exact every 8 pixels along walls and liquids, id's own portable-C loop (Perspective span, `r_perspspan`: 64, 32, 16, 8, 4 or exact at every pixel; 32 on a phone and 64 at 1080p are about what 1996 looked like) |
 
 In both profiles the renderer splits each frame across all CPU cores, and the picture is the
 same on any number of them.

@@ -4470,11 +4470,12 @@ mod tests {
         let console = cvar::find("crosshair").unwrap().get(&s.cvars);
         assert_eq!((s.cvars.crosshair, console.as_str()), (Crosshair::Glyph, "2"), "left wraps to id's +");
         assert_eq!(crosshair.console_hint(), "console: crosshair 0/1/2");
-        // And the perspective span: 64, 32, id's 16 (Classic's), 8, 4, exact
-        // (2026's), right the finer, wrapping; the console reads the span's
+        // And the perspective span: 64, 32, id's 16 (Classic's), 8 (2026's),
+        // 4, exact, right the finer, wrapping; the console reads the span's
         // pixels.
         let span = on_row(&mut m, "r_perspspan");
         assert_eq!((span.value(&s).as_str(), span.label.trim_start()), ("id's 16", "Perspective span"));
+        assert_eq!(span.value(&Settings::default()), "8", "2026 starts at 8: id's portable C loop");
         let steps: Vec<String> = (0..7).map(|_| { m.adjust(1, &mut s); span.value(&s) }).collect();
         assert_eq!(steps, ["8", "4", "exact", "64", "32", "id's 16", "8"]);
         m.adjust(-1, &mut s);

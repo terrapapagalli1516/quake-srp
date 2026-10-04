@@ -773,8 +773,9 @@ and above they see the affine steps as a wobble along a wall seen at a grazing
 angle), and then asked for the steps between, and then for longer ones
 ("better for performance? a retro look?"): `r_perspspan 64|32|16|8|4|1`, the
 Picture and sound page's Perspective span row (`64`, `32`, `id's 16`, `8`,
-`4`, `exact`; right is the finer). Classic is 16; 2026 stays exact (1) until
-they have tried them. The old `wasm_exactpersp` is a view onto it: `1` sets exact, `0` id's
+`4`, `exact`; right is the finer). Classic is 16; 2026 was exact (1) until they had
+tried them, and then (2026-10-03) they chose 8, id's portable C loop, for every device.
+The old `wasm_exactpersp` is a view onto it: `1` sets exact, `0` id's
 16, and it reads 1 only while the span is 1; nothing writes it any more, so
 a saved `wasm_exactpersp "1"` (a Classic player who switched it on) draws
 exact perspective as before and the next save writes `r_perspspan "1"`.
@@ -1012,18 +1013,21 @@ tell.)
 
 **What moved besides.** `--video modern` (`quaketool`) and
 `set_video("modern")` (the page's checks, `bench.py --video modern`) are the
-2026 set and draw exact perspective; `--perspspan 16|8|4|1` (and the older
+2026 set and draw the profile's span, 8 (from 2026-10-03 to the day 8 became the
+default they drew exact); `--perspspan 16|8|4|1` (and the older
 `--exactpersp 0|1`, its ends) is a video option of `shot`, `view`, `play` and
 `timedemo`; `compare.py --perspspan N` hands it to the port. A number taken
 with `--video modern` before 2026-10-03 (PERF_PLAN.md §11, PLATFORM.md's
 measurements, the tables above for light styles and torches, whose harness
 draws `VideoCvars::MODERN` with id's spans in both columns) has id's spans
-and the slower 16. The page's settings checks (`verify_settings`,
-`verify_extras`, `verify_save`) expect the 2026 extras to be 13 (uncapped,
-exact perspective, scaled 2-D) or 15 with Show FPS; `extras()`'s bit 4 is
+and the slower 16 (the 2026 frames' hashes moved with the span: 16, then exact,
+then 8). The page's settings checks (`verify_settings`,
+`verify_extras`, `verify_save`) expect the 2026 extras to be 9 (uncapped,
+scaled 2-D; the span is 8) or 11 with Show FPS; `extras()`'s bit 4 is
 "the span is 1" (clearing it leaves a span other than exact as it is). And the Auto pixel size (`vid::AUTO_PIXEL_BUDGET`, "about
 6 ms" a 1080p frame a thread) was set against id's spans; with exact
-perspective a 1080p demo1 frame on one thread is 7-8 ms, at 64 about 5. Not changed.
+perspective a 1080p demo1 frame on one thread is 7-8 ms, at 64 about 5 (the 3-D
+view at 8, the default, costs 7-11% more than at 16). Not changed.
 
 ## Rerun it
 
