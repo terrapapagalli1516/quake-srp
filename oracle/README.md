@@ -484,7 +484,9 @@ lines surviving a console toggle; the console lingering after `map`/`load`.
   2026", 291 while it read "Web extras"): the user's two rows, the
   `fleet/slopoptions` design. Row 2 reads "Reset to slop" where id's reads
   "Reset to defaults" (it resets to the slop preset); the 14th row, "Slop
-  Options" with where the settings stand printed at x=220 ("classic"), sits in
+  Options" with where the settings stand printed at x=220 ("custom", white:
+  the harness runs Classic with id's own 1996 controls, and the controls are
+  slop options, so its settings differ from the Classic preset), sits in
   the slot of the `_WIN32` build's "Use Mouse"; a 15th, "Reset to Classic", is
   under it at y=144. id's DOS/Linux list has neither. The `menu_options`
   scenario reaches Video Options with twelve DOWNs, not one UP, since UP from

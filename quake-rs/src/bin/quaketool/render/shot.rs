@@ -209,7 +209,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_shot_of_each_layout_starts_at_its_profiles_screen_size() {
+    fn a_shot_of_each_layout_starts_at_its_presets_screen_size() {
         assert_eq!(default_viewsize(render::SbarLayout::Classic), render::VIEWSIZE_DEFAULT, "id's 100, with the inventory bar");
         assert_eq!(default_viewsize(render::SbarLayout::Overlay), 110.0, "the slop preset's: the status bar alone");
     }

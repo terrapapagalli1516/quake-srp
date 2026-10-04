@@ -6,7 +6,7 @@ with the level:
 
   1. boot walk e1m1 -> the placed static loops (machine hums) are registered
      with the mixer and the two automatic leaf-ambient channels (water1,
-     wind2) are up; the ring runs at the device's rate (the 2026 mixer) and
+     wind2) are up; the ring runs at the device's rate (the slop mixer) and
      the worklet plays it without running dry;
   2. `map e1m2` (a real level swap) -> S_StopAllSounds: the generation bumps,
      the ring is cleared of what was mixed ahead, and the new level's loops
@@ -87,7 +87,7 @@ with sync_playwright() as p:
     s1 = stats(pg)
     ch = channels(pg)
     check("audio context running, the worklet playing the ring", r["running"] and r["worklet"], str(r))
-    check("the 2026 mixer at the device's rate", s1["mode"] == "2026" and int(s1["rate"]) == int(s1["device_rate"]),
+    check("the slop mixer at the device's rate", s1["mode"] == "slop" and int(s1["rate"]) == int(s1["device_rate"]),
           f"mode {s1['mode']} rate {s1['rate']} device {s1['device_rate']}")
     check("e1m1's static loops registered with the mixer", int(s1["statics"]) >= 5, f"{s1['statics']} loops")
     amb = sorted(c["i"] for c in ch if c["i"] < 4)

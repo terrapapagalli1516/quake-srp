@@ -700,7 +700,7 @@ fn client_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid, dra
             .retain(|&e, _| !vm.is_free_edict(e));
     }
     let smooth = w.lerpmove == LerpMove::Smooth;
-    // r_nailbarrels (the 2026 extra): the player's own nails, as (index in
+    // r_nailbarrels (a slop option): the player's own nails, as (index in
     // `descs`, edict), drawn leaving the nailgun's barrels once the camera
     // and the gun are placed (below).
     let barrel_nails = w.nailbarrels == NailBarrels::Barrels;
@@ -968,7 +968,7 @@ fn client_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid, dra
     let hide_gun = intermission
         || w.server.vm.ent_float(w.player, w.server.vm.fo().health) <= 0.0
         || (w.server.vm.ent_float(w.player, w.server.vm.fo().items) as i32) & IT_INVISIBILITY != 0;
-    // r_nailbarrels (the 2026 extra): each of the player's nails drawn
+    // r_nailbarrels (a slop option): each of the player's nails drawn
     // leaving the barrel it fires from, while the nailgun is drawn where
     // V_CalcRefdef puts it this frame (`client::nailbarrels`); the world
     // stops the offset short of its surfaces.

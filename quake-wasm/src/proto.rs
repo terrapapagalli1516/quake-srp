@@ -35,7 +35,7 @@
 //! | 12 | `Reply` | `id u32`, `value f64`, then UTF-8 text (the answer to a `Call`) |
 //! | 13 | `Bench` | `f64` per value (`--features bench`: the frame's phase times) |
 //! | 14 | `Pcm` | `start u32` (the pair it plays at, in the `AudioClock`'s count), `rate u32`, `flags u32` (1: silence what was mixed ahead first, `S_ClearBuffer`), then 16-bit stereo pairs: what the mixer painted this tick, for the page's ring |
-//! | 15 | `Audio` | `rate u32`, `mode u32` (0 Classic, 1 2026), `starts u32`, `local u32`, `stops u32`, `clears u32`, `painted u32`: the sound device's counts |
+//! | 15 | `Audio` | `rate u32`, `mode u32` (0 Classic, 1 slop), `starts u32`, `local u32`, `stops u32`, `clears u32`, `painted u32`: the sound device's counts |
 //! | 16 | `Cd` | `serial u32` (a new value: play `track` from its top), `track u8`, `looping u8`, `mode u8` (0 stopped, 1 playing, 2 paused), `0 u8`, `volume f32` (0..1): the CD player's state, written when it changes (only with a disc: the player's music) |
 //! | 17 | `FrameAt` | `w u16`, `h u16`, `format u8`, `slot u8`, `0 u16`, `pixels u32`, `palette u32`: a frame left in the program's shared memory, at those addresses ([`crate::present`]) |
 //! | 18 | `Quit` | `registered u8`, `0 u8 ×3`, then (if the pak had the file) 4000 bytes: id's end screen (`end2.bin` registered, else `end1.bin` — 80x25 of (character, attribute) VGA text-mode pairs, the DOS build's version stamped into row 0 as `Sys_Quit` did). Written once, the game's last message: `Host_Quit_f`/`M_Quit_Key` decided to quit, the host should leave fullscreen and release the pointer, and the program ends right after (as id's `exit(0)` did) |
@@ -249,7 +249,7 @@ pub(crate) const PCM_CLEAR: u32 = 1;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct AudioCounts {
     pub(crate) rate: u32,
-    /// 0 Classic, 1 2026.
+    /// 0 Classic, 1 slop.
     pub(crate) mode: u32,
     pub(crate) starts: u32,
     pub(crate) local: u32,

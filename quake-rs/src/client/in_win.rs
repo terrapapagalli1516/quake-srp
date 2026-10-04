@@ -65,9 +65,9 @@ pub const JOY_MAX_AXES: usize = 6;
 ///
 /// id's are the `joystick` switch and the "advanced controller
 /// configuration": `joyadvanced`, which axis drives what (`joyadvaxis*`), and
-/// each control's threshold and sensitivity. The slop preset's twin-stick
-/// layout is id's own advanced configuration ([`JoyCvars::modern`]), plus
-/// the port's stick shaping. (in_win.c archives none of them but `joystick`:
+/// each control's threshold and sensitivity. The presets' twin-stick layout
+/// (the controls are shared: both have it) is id's own advanced
+/// configuration ([`JoyCvars::twin_stick`]), plus the port's stick shaping. (in_win.c archives none of them but `joystick`:
 /// "advanced controller configuration needs to be executed each time". The
 /// port keeps them in `config.cfg` like every setting a preset sets, so a
 /// player's changes to the layout last.)
@@ -145,13 +145,13 @@ impl JoyCvars {
         }
     }
 
-    /// The slop preset's pad: a modern twin-stick layout as id's advanced
+    /// The presets' pad: a modern twin-stick layout as id's advanced
     /// configuration — the left stick (X, Y) walks and strafes, the right
     /// stick (U, R) turns and looks — with no thresholds (the port's round
     /// dead zone does their work), the strafe the right way round for a side
     /// axis (id's -1 suits a turn axis strafing with `+strafe`), a 245°/s
     /// turn at full tilt (id's 140), the look curve, menu keys and rumble.
-    pub fn modern() -> JoyCvars {
+    pub fn twin_stick() -> JoyCvars {
         JoyCvars {
             enabled: true,
             advanced: true,

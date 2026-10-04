@@ -276,7 +276,7 @@ impl Cvars {
             max_edicts: MAX_EDICTS as u32,
             touch: true,
             touch_accel: 0.0,
-            joy: JoyCvars::modern(),
+            joy: JoyCvars::twin_stick(),
             lightstyles: LerpLightStyles::Classic,
             torches: TorchFlicker::OFF,
         }
@@ -318,7 +318,7 @@ impl Cvars {
             lerpmodels: LerpModels::Smooth,
             nailbarrels: NailBarrels::Barrels,
             sky: SkyScroll::Fluid,
-            sound: SoundMode::Modern,
+            sound: SoundMode::Slop,
             max_edicts: 8192,
             lightstyles: LerpLightStyles::Smooth,
             torches: TorchFlicker::MODERN,
@@ -589,8 +589,8 @@ pub const CVARS: &[Cvar] = &[
         get: |c| flag(c.sky == SkyScroll::Fluid),
         set: |c, v| c.sky = if on(v) { SkyScroll::Fluid } else { SkyScroll::Classic } },
     Cvar { name: "snd_modern", archive: true, departure: true, help: "slop mixer: device rate, fixes",
-        get: |c| flag(c.sound == SoundMode::Modern),
-        set: |c, v| c.sound = if on(v) { SoundMode::Modern } else { SoundMode::Classic } },
+        get: |c| flag(c.sound == SoundMode::Slop),
+        set: |c, v| c.sound = if on(v) { SoundMode::Slop } else { SoundMode::Classic } },
     Cvar { name: "r_threads", archive: true, departure: false, help: "threads that draw the 3-D view",
         get: |c| c.threads.to_string(), set: |c, v| c.threads = atof(v).max(1.0) as usize },
     Cvar { name: "sv_max_edicts", archive: true, departure: true, help: "edict pool past id's 600, for big maps",
@@ -695,7 +695,7 @@ mod tests {
     }
 
     #[test]
-    fn the_profiles_differ_only_in_departures_and_the_screen_size() {
+    fn the_presets_differ_only_in_slop_options_and_the_screen_size() {
         let (id, slop) = (Cvars::classic(), Cvars::slop());
         for c in CVARS {
             if c.get(&id) != c.get(&slop) {
@@ -732,7 +732,7 @@ mod tests {
             assert_eq!(c.departure, !name.starts_with("cl_") || name == "cl_jumpswim", "{name}: a slop option, but Always Run");
         }
         assert_eq!(id.joy, slop.joy, "the whole gamepad layout, not just `joystick`");
-        assert_eq!(id.joy, JoyCvars::modern(), "Cvars::classic already has the slop pad");
+        assert_eq!(id.joy, JoyCvars::twin_stick(), "Cvars::classic already has the slop pad");
 
         // with_id_controls touches only the controls: everything else stays
         // whatever preset it came from.

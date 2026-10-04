@@ -70,7 +70,7 @@ pub fn cmd_sound(pak_path: &str, demo: &str, out_path: &str, rest: &[String]) ->
         }
         i += 1;
     }
-    let mode = if classic { SoundMode::Classic } else { SoundMode::Modern };
+    let mode = if classic { SoundMode::Classic } else { SoundMode::Slop };
 
     let pak = open_pak(pak_path)?;
     let name = cl_demo::default_extension(demo, ".dem");
