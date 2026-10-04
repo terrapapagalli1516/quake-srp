@@ -87,12 +87,17 @@ pub(crate) fn clamp_resolution(w: i32, h: i32) -> (usize, usize) {
 /// would not — the player's own pick included, so a forced 1x on an 8K
 /// screen draws at 2x instead of stopping the game. 4 at most.
 pub(crate) fn pixel_size(cvars: &Cvars, window: (u32, u32)) -> u32 {
+    pixel_size_for(cvars.pixel_size, window)
+}
+
+/// [`pixel_size`] for the setting `asked`.
+fn pixel_size_for(asked: u8, window: (u32, u32)) -> u32 {
     let max = u32::from(quake_rs::cvar::PIXEL_SIZE_MAX);
     let fits = |&p: &u32| {
         let (w, h) = frame_size(window, p);
         w * h <= MAX_FRAME_PIXELS
     };
-    (u32::from(cvars.pixel_size).clamp(1, max)..=max).find(fits).unwrap_or(max)
+    (u32::from(asked).clamp(1, max)..=max).find(fits).unwrap_or(max)
 }
 
 /// The native picture's size for a `win_w x win_h` box at pixel size `p`:
@@ -127,17 +132,16 @@ pub(crate) fn native(a: &App) -> bool {
 /// native-resolution rows belong in the list at all (the slop preset, or a
 /// native picture in Classic — `vid_native 1` from the console; otherwise
 /// Classic's list is `RESOLUTION_PRESETS` alone), and the size each of them
-/// gives ([`picture_size`] at 1x..4x, the memory limit included). Every
+/// gives (1x..4x on the box, the memory limit included). Every
 /// caller that used to hand `Menu::sync_resolution` the render size alone
 /// goes through this now, so the facts can never drift out of sync with it.
 pub(crate) fn sync_menu_resolution(a: &mut App) {
     let native = native(a);
     let native_rows = native || a.settings.preset == quake_rs::settings::Preset::Slop;
     let mut sizes = [(0, 0); quake_rs::menu::NATIVE_ROWS];
-    if a.window.is_some() {
+    if let Some(win) = a.window {
         for (p, size) in (1..).zip(&mut sizes) {
-            let cvars = Cvars { native: true, pixel_size: p, ..a.settings.cvars.clone() };
-            let (w, h) = picture_size(&cvars, a.window);
+            let (w, h) = frame_size(win, pixel_size_for(p, win));
             *size = (w as i32, h as i32);
         }
     }
