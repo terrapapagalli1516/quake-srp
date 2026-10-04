@@ -1529,8 +1529,8 @@ in a torch-lit room, one for its bakes.
   share the round (`Renderer::render_into_with`, `band::Target`): each is prepared in
   turn on the calling thread, then the frame's rows are cut into strips wherever a view
   begins or ends, each strip holding a band of every view lying in it, all taken from
-  one queue. Three to eight rounds a frame became one. (`cl_demo.rs` still draws the
-  view and then each window: one round a view. `client::draw_view` is the one call.)
+  one queue. Three to eight rounds a frame became one. (`client::draw_view` is the one
+  call; demo playback draws through it as live play does.)
 - **The spans in row order.** The scan's spans stay as it makes them, row after row,
   each naming its surface; a band draws one run of them. Before, each of the 32 bands
   walked every surface's whole span list to find its rows.
@@ -1584,8 +1584,8 @@ run to run, and the frames of the fast runs are 7.55 and 7.62 against 7.52.)
 interleaved rounds): natively at 2631×1071, 2026 video, 99.7 → 102.4 fps on one thread,
 254 → 260 on four, 327 → 353 on eight. In the page (headless Chromium, the threads
 build, `?2026` with the overlay, a 2538×828 frame at pixel size 1): 316 → 369 fps on
-8 threads (3.17 → 2.71 ms a frame), 268 → 299 on 4; with `cl_demo.rs` drawing through
-`client::draw_view`, 386 and 301.
+8 threads (3.17 → 2.71 ms a frame), 268 → 299 on 4, and 386 and 301 once demo playback
+drew through `client::draw_view` too (it had kept a round a view).
 
 **Not measured:** an Android phone. These are a desktop's cores awake; what a round of
 threads costs there when the workers slept 10 ms, and what the calling thread's part
