@@ -158,11 +158,16 @@ pub(crate) fn native(a: &App) -> bool {
 pub(crate) fn sync_menu_resolution(a: &mut App) {
     let native = native(a);
     let native_rows = native || a.settings.preset == quake_rs::settings::Preset::Slop;
-    let mut sizes = [(0, 0); quake_rs::menu::NATIVE_ROWS];
+    // A pixel size the box cannot be drawn at — `pixel_size_for` would draw
+    // another — is left out of the list rather than offered under another's
+    // size.
+    let mut sizes: quake_rs::menu::NativeSizes = [Some((0, 0)); quake_rs::menu::NATIVE_ROWS];
     if let Some(win) = a.window {
-        for (p, size) in (1..).zip(&mut sizes) {
-            let (w, h) = frame_size(win, pixel_size_for(p, win));
-            *size = (w as i32, h as i32);
+        for (p, size) in (1u8..).zip(&mut sizes) {
+            *size = (pixel_size_for(p, win) == u32::from(p)).then(|| {
+                let (w, h) = frame_size(win, u32::from(p));
+                (w as i32, h as i32)
+            });
         }
     }
     let (w, h) = (a.render_w as i32, a.render_h as i32);
