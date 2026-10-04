@@ -2872,12 +2872,17 @@ const WAIT_MS = 30;
 // frame (a moving average), against the display's period as the refreshes
 // show it; two thresholds, so it does not flap. Without Atomics.waitAsync
 // every refresh waits, as before.
+// What it costs: a frame longer than a refresh is shown at the refresh
+// after it is done, where the wait showed it the moment it was done — up to
+// a refresh later (PLATFORM.md has the measurement); `?wait` keeps the wait.
 const pacing = {
   refresh: 1000 / 60,      // the display's period: the refreshes' shortest spacing lately, ms
   turn: 0,                 // the program's time to answer a tick with a frame, ms (moving average)
   lastTurn: 0,             // ...and the last such answer's
   relaxed: false,          // the refresh does not wait for its frame
-  force: null,             // the checks': true/false holds `relaxed` there
+  // true/false holds `relaxed` there: the checks', and `?wait` in the address
+  // (every refresh waits for its frame, as the page did before: to compare by feel).
+  force: new URLSearchParams(location.search).has('wait') ? false : null,
   at: 0,                   // the last refresh's time
   postedAt: 0,             // when the tick in flight was posted, and FRAMES then
   frames: 0,

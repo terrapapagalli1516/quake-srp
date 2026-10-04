@@ -14,7 +14,8 @@
      key's time to the present of the frame that consumed it is at least the
      frame's own time, with the wait and without);
   5. a browser without `Atomics.waitAsync` waits always, as before;
-  6. no console errors.
+  6. `?wait` in the address: slow frames are waited for too;
+  7. no console errors.
 
 `stall_ms` makes a host frame slow on demand and exists only in a
 `--features bench` build (verify_audio_resilience.py says why and how to
@@ -55,8 +56,8 @@ WINDOW = """(secs) => new Promise(done => {
   }, secs * 1000);
 })"""
 
-def boot(pg):
-    pg.goto(f"http://127.0.0.1:{PORT}/index.html?2026", wait_until="load")
+def boot(pg, query="?2026"):
+    pg.goto(f"http://127.0.0.1:{PORT}/index.html{query}", wait_until="load")
     pg.wait_for_function("window.quake && quake.ready && quake.firstFrameAt > 0", timeout=120000)
     pg.evaluate("document.getElementById('overlay').click()")   # the first gesture
     time.sleep(0.3)
@@ -86,14 +87,14 @@ def settle(pg, relaxed, secs=2.0):
 with sync_playwright() as p:
     br = isolated.launch(p, ["--no-sandbox", "--autoplay-policy=no-user-gesture-required"])
     errs = []
-    def page(init=None):
+    def page(init=None, query="?2026"):
         ctx = br.new_context(viewport={"width": 820, "height": 560})
         if init:
             ctx.add_init_script(init)
         pg = ctx.new_page()
         pg.on("console", lambda m: errs.append(m.text) if m.type == "error" else None)
         pg.on("pageerror", lambda e: errs.append("PAGEERROR: " + str(e)))
-        boot(pg)
+        boot(pg, query)
         return pg
 
     pg = page()
@@ -159,6 +160,19 @@ with sync_playwright() as p:
     check("no Atomics.waitAsync: slow frames are still waited for", o["relaxed"] == 0 and abs(o["wait"] - o["turn"]) < 1.0,
           f"wait {o['wait']:.1f} ms, frame {o['turn']:.1f} ms")
     slow(pg, bench, False)
+    pg.context.close()
+
+    # 6. ?wait: the old way by choice (a bench build makes the frames slow;
+    # on a plain one the page's choice is what is checked).
+    pg = page(query="?2026&wait")
+    if bench:
+        pg.evaluate(f"quake.call('stall_ms', {STALL_MS})")
+    time.sleep(2.0)
+    o = window(pg)
+    check("?wait: every refresh waits for its frame", o["relaxed"] == 0 and abs(o["wait"] - o["turn"]) < 1.0,
+          f"wait {o['wait']:.1f} ms, frame {o['turn']:.1f} ms")
+    if bench:
+        pg.evaluate("quake.call('stall_ms', 0)")
     pg.context.close()
 
     check("no console errors", not errs, "; ".join(errs[:3]))

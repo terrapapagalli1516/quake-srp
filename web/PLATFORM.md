@@ -88,6 +88,24 @@ AudioWorklet (audio thread): plays the sound ring, moves its clock
   A browser without `Atomics.waitAsync` waits always. `verify_pacing.py`
   checks both ways and the switch, with frames made slow on purpose
   (`stall_ms`, a bench build).
+  *What it costs.* A frame that takes under a refresh reaches the screen at
+  the same refresh either way (the wait's frame, drawn at the refresh's
+  end, misses that refresh's deadline too). A frame that takes longer is
+  now drawn at the refresh after it is done, where the wait drew it the
+  moment it was done: half a refresh later on average, a whole one at
+  worst — and by Chromium's pipeline (one main frame a refresh) possibly a
+  refresh more at the glass, which nothing here can measure. To the draw
+  call, with frames held at 21 ms on a desktop at 60 Hz, a key took 21 ms
+  with the wait and 39 without; the first figure flatters the wait (the
+  check's keys can only be made between frames, where a real one waits out
+  the spin: about 31), so the cost is about 8 ms there, and half that at
+  120 Hz — against frames that are themselves 3–4 ms shorter on the phone.
+  More frames and fewer late ones for a few milliseconds of delay, only
+  while the game is slower than the display. `?wait` in the address keeps
+  the wait always, to compare by feel. (Open: drawing the frame the moment
+  it is done, from the `waitAsync`'s continuation with no refresh callback
+  pending, should get that refresh's main frame and cost nothing; not
+  built.)
 - **The 72 fps gate stays in the program.** A tick is the display's refresh
   and `dt` is the raw time since the last one, exactly the old `step(dt)`
   export's argument; `Host_FilterTime` decides whether a host frame runs.
