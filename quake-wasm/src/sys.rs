@@ -498,8 +498,9 @@ mod tests {
         assert_eq!(frame_and_state("classic", (1920, 1080)), (960, 600, STATE_ALT_ENTER, 0), "the mode, in the 4:3 box; Alt+Enter is a shared control, on here too");
     }
 
-    /// The flags the page's touch controls read: `in_touch` (on in slop),
-    /// the menu waiting for y or n, the live game paused.
+    /// The flags the page's touch controls read: `in_touch` (on in both
+    /// presets, off only by hand), the menu waiting for y or n, the live
+    /// game paused.
     #[test]
     fn the_state_says_touch_a_question_and_pause() {
         let flags_after = |lines: &[&str]| {
@@ -513,7 +514,8 @@ mod tests {
             state.u32_at(0) & (STATE_TOUCH | STATE_ASK | STATE_PAUSED)
         };
         assert_eq!(flags_after(&["exec preset slop"]), STATE_TOUCH);
-        assert_eq!(flags_after(&["exec preset classic"]), 0);
+        assert_eq!(flags_after(&["exec preset classic"]), STATE_TOUCH, "Classic must not leave a phone unplayable");
+        assert_eq!(flags_after(&["exec in_touch 0"]), 0);
         assert_eq!(flags_after(&["boot", "menu_cancel", "exec pause"]), STATE_PAUSED);
         assert_eq!(flags_after(&["exec pause"]), 0, "unpaused");
         let quit = ["boot", "menu_up", "menu_select"];

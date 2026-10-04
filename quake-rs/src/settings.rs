@@ -29,27 +29,30 @@
 //! new preset's start if it still equals the old preset's (the player never
 //! moved it), and keeps it otherwise, like id's other settings.
 //!
-//! **The controls are the player's**, not the engine's, so applying a preset
-//! leaves them alone, like id's own settings (Brightness, the volumes, the
-//! mouse): WASD and the gamepad ([`Bindings::with_wasd`],
-//! [`Bindings::with_gamepad`] — [`Preset::bindings`] applies both to
-//! *either* preset), mouse look, Space-swims-up, Alt+Enter and Always Run
-//! (`freelook`, `cl_jumpswim`, `vid_altenter`, `cl_forwardspeed`/
-//! `cl_backspeed` — on by default in [`Cvars::classic`] too, the module
-//! docs of [`crate::cvar`] say why). Classic with the original controls is
-//! hard to use these days: that was the user's call (2026-10-03); id's own
-//! 1996 controls are one explicit step away, never a preset:
-//! [`Settings::id`], and the console's `idcontrols`. The one exception is
-//! the mouse wheel's weapon cycle ([`Bindings::with_wheel`]): the user
-//! wanted that to stay a slop option, so [`Settings::apply_preset`] still
-//! turns it on and off with the preset.
+//! **The two actions.** Applying a preset ([`Settings::apply_preset`]:
+//! Options > "Reset to Classic", the console's `preset`, the address's
+//! `?classic`) sets every slop option and leaves the rest as the player has
+//! it: his key bindings and id's own Options (Brightness, the volumes, the
+//! mouse, Always Run, the look toggles) — but for the wheel's weapon cycle,
+//! a slop option of a *binding* ([`Bindings::with_wheel`]), and Screen
+//! size, above. "Reset to slop" ([`Settings::reset`]) sets everything: the
+//! slop preset on this machine, its bindings and id's defaults.
 //!
-//! A new *engine* departure takes a `departure` slot here, as smooth
-//! monster movement (`r_lerpmove`), the slop mixer (`snd_modern`) and the
-//! touch controls (`in_touch`) did; a new *control* takes one too, but
-//! [`Settings::apply_preset`] must also learn to leave it alone (as it
-//! already does for every `departure` field but the wheel's bindings).
+//! **The controls are shared.** Both presets have the same ones: WASD and
+//! the gamepad ([`Bindings::with_wasd`], [`Bindings::with_gamepad`] —
+//! [`Preset::bindings`] applies both to *either* preset), mouse look,
+//! Space-swims-up, Alt+Enter, the touch controls and Always Run (the module
+//! docs of [`crate::cvar`] say which are slop options). Classic with the
+//! original controls is hard to use these days: that was the user's call
+//! (2026-10-03); id's own 1996 controls are one explicit step away, never a
+//! preset: [`Settings::id`], and the console's `idcontrols`.
 //!
+//! **Where the settings stand** ([`Settings::standing`]): every slop option
+//! (and the wheel) against the preset applied last — the preset, or "yours
+//! differ in N rows". The menus show it (the Options row's value, the
+//! white values on the Slop Options pages, their line) and so does the
+//! console (`preset`, `version`).
+
 //! **Persistence, the id way.** [`Settings::config_text`] is
 //! `Host_WriteConfiguration`'s `config.cfg`: `bind` lines and archived cvars,
 //! exec'd at the next start as `quake.rc` does. It keeps what the player
@@ -110,7 +113,7 @@ impl Machine {
     }
 }
 
-/// The two presets.
+/// The two presets: the project's, fixed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Preset {
     /// id's WinQuake engine: every slop option off. (The controls are the
@@ -126,6 +129,14 @@ impl Preset {
     pub fn name(self) -> &'static str {
         match self {
             Preset::Classic => "classic",
+            Preset::Slop => "slop",
+        }
+    }
+
+    /// Its name in a sentence: "slop", "Classic" (the menus' lines).
+    pub fn title(self) -> &'static str {
+        match self {
+            Preset::Classic => "Classic",
             Preset::Slop => "slop",
         }
     }
@@ -226,15 +237,13 @@ impl Settings {
         Settings { preset, machine, cvars: preset.cvars(machine).with_id_controls(), binds: Bindings::default_cfg() }
     }
 
-    /// Apply `preset`: every *engine* slop option to its value
-    /// (`departure` cvars — the controls are not among them, see the module
-    /// docs). The wheel is the controls' one exception, a slop option of
-    /// its *binding*, so it alone follows the preset; every other binding
-    /// (WASD, the gamepad, any rebind) and id's own settings are kept — but
-    /// for Screen size, which takes the new preset's start if it still is
-    /// the old preset's (never moved by the player), so a visitor who has
-    /// only applied Classic gets id's inventory bar back, and a player who
-    /// chose a size keeps it.
+    /// Apply `preset`: every slop option to its value on this machine (the
+    /// `departure` cvars, and the wheel's binding), keeping the player's
+    /// key bindings and id's own settings — but for Screen size, which
+    /// takes the new preset's start if it still is the old preset's (never
+    /// moved by the player), so a visitor who has only applied Classic gets
+    /// id's inventory bar back, and a player who chose a size keeps it.
+    /// What Options > "Reset to Classic" does, and the console's `preset`.
     pub fn apply_preset(&mut self, preset: Preset) {
         let values = preset.cvars(self.machine);
         if self.cvars.viewsize == self.preset.viewsize() {
@@ -248,6 +257,30 @@ impl Settings {
             Preset::Slop => std::mem::take(&mut self.binds).with_wheel(),
         };
         self.preset = preset;
+    }
+
+    /// Options > "Reset to slop": everything to the slop preset on this
+    /// machine — every slop option, the key bindings, id's own Options and
+    /// the video mode — as a first session has them. Nothing is deleted:
+    /// the next `config.cfg` written is the preset's one line, and the
+    /// player's other files (the saves, his own paks and CD tracks) are the
+    /// host's, untouched.
+    pub fn reset(&mut self) {
+        *self = Settings::new(Preset::Slop, self.machine);
+    }
+
+    /// Where the settings stand against the preset applied last: the slop
+    /// options (by console name; `bind` for the wheel's binding) whose
+    /// value differs from the preset's on this machine. Screen size is
+    /// id's own, and the presets start it apart, so it is not counted.
+    pub fn standing(&self) -> Standing {
+        let values = self.preset.cvars(self.machine);
+        let mut changed: Vec<&'static str> =
+            cvar::CVARS.iter().filter(|c| c.departure && c.get(&self.cvars) != c.get(&values)).map(|c| c.name).collect();
+        if self.binds.wheel() != self.preset.bindings().wheel() {
+            changed.push("bind");
+        }
+        Standing { preset: self.preset, changed }
     }
 
     /// Options > "Reset to defaults", `exec default.cfg`: `unbindall`, the
@@ -276,6 +309,62 @@ impl Settings {
         self.binds.write_changes(&self.preset.bindings(), &mut t);
         cvar::write_changes(&self.cvars, &self.preset.cvars(self.machine), &mut t);
         t
+    }
+}
+
+/// Where the settings stand against the preset applied last
+/// ([`Settings::standing`]): what the menus and the console say of them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Standing {
+    /// The preset applied last.
+    pub preset: Preset,
+    /// The slop options that differ from it, by console name (`bind` for
+    /// the wheel's binding), in [`crate::cvar::CVARS`]' order.
+    pub changed: Vec<&'static str>,
+}
+
+impl Standing {
+    /// The row a slop option is shown on, by the name of its row's own
+    /// setting: its own, but for the pixel size, which shares Video
+    /// Options' choice with `vid_native` (one picture size to a player),
+    /// and the pad's layout, tuned on the console under `joystick`'s row.
+    fn row(name: &str) -> &str {
+        match name {
+            "vid_pixelsize" => "vid_native",
+            n if n.starts_with("joy") && n != "joy_rumble" => "joystick",
+            n => n,
+        }
+    }
+
+    /// Whether the row of setting `name` (a cvar, or `bind` for the wheel)
+    /// differs from the preset: a value the menus show white.
+    pub fn differs(&self, name: &str) -> bool {
+        self.changed.iter().any(|&c| Standing::row(c) == Standing::row(name))
+    }
+
+    /// How many rows differ (the pixel size and `vid_native` one, the pad
+    /// one; a slop option with no menu row, as `sv_max_edicts`, one).
+    pub fn rows(&self) -> usize {
+        let mut rows: Vec<&str> = self.changed.iter().map(|&c| Standing::row(c)).collect();
+        rows.sort_unstable();
+        rows.dedup();
+        rows.len()
+    }
+
+    /// The Options row's value: the preset's name, or `custom`.
+    pub fn word(&self) -> &'static str {
+        if self.changed.is_empty() { self.preset.name() } else { "custom" }
+    }
+
+    /// The line under the Slop Options list: "Your settings are the slop
+    /// preset", or "Yours differ from Classic in 2 rows" — at most 36
+    /// characters, a menu help line's width.
+    pub fn line(&self) -> String {
+        match self.rows() {
+            0 => format!("Your settings are the {} preset", self.preset.title()),
+            1 => format!("Yours differ from {} in 1 row", self.preset.title()),
+            n => format!("Yours differ from {} in {n} rows", self.preset.title()),
+        }
     }
 }
 
@@ -311,32 +400,113 @@ mod tests {
         assert_eq!(id.cvars.uncapped, classic.cvars.uncapped, "the engine is Classic's regardless");
     }
 
+    /// Reset to Classic (applying a preset): every slop option to the
+    /// preset's, the controls on the Slop Options pages included; the
+    /// player's keys and id's own Options kept, the wheel's binding the
+    /// preset's.
     #[test]
-    fn a_preset_resets_the_engine_and_keeps_the_controls_and_ids_settings() {
+    fn a_preset_sets_every_slop_option_and_keeps_the_keys_and_ids_settings() {
         let mut s = Settings::default(); // slop
         s.cvars.viewsize = 80.0; // id's own setting
         s.cvars.gamma = 0.8; // id's own setting
-        s.cvars.show_fps = true; // an engine slop option
-        s.cvars.pixel_size = 3; // an engine slop option
-        s.cvars.freelook = false; // a control, turned off by hand
+        s.cvars.set_always_run(false); // id's own Options row
+        s.cvars.show_fps = true; // a slop option
+        s.cvars.pixel_size = 3; // a slop option
+        s.cvars.freelook = false; // a slop option that is a control
+        s.cvars.joy.deadzone = 0.5; // the pad's layout, on the console
         s.binds.bind(b'j', BIND_ATTACK); // a rebind, not the wheel
 
         s.apply_preset(Preset::Classic);
         let mut want = Cvars::classic();
         want.viewsize = 80.0;
         want.gamma = 0.8;
-        want.freelook = false; // kept, not reset to Classic's (on) default
-        assert_eq!(s.cvars, want, "the engine off; id's own settings and the control kept as changed");
+        want.set_always_run(false);
+        assert_eq!(s.cvars, want, "every slop option Classic's; id's own settings kept as changed");
         assert_eq!(s.binds.command(b'j'), Some(BIND_ATTACK), "the rebind survives the preset");
         assert_eq!(s.binds.command(b'w'), Some(BIND_FORWARD), "WASD is untouched");
         assert_eq!(s.binds.get(K_MWHEELUP), None, "the wheel turns off with the preset");
 
         s.apply_preset(Preset::Slop);
-        assert!(s.cvars.uncapped && !s.cvars.show_fps && s.cvars.pixel_size == 1, "the engine: back to slop's");
-        assert_eq!((s.cvars.viewsize, s.cvars.gamma), (80.0, 0.8));
-        assert!(!s.cvars.freelook, "apply_preset never touched the control");
+        assert!(s.cvars.uncapped && !s.cvars.show_fps && s.cvars.pixel_size == 1 && s.cvars.freelook, "slop's");
+        assert_eq!((s.cvars.viewsize, s.cvars.gamma, s.cvars.always_run()), (80.0, 0.8, false));
         assert_eq!(s.binds.command(b'j'), Some(BIND_ATTACK), "the rebind still survives");
         assert!(s.binds.get(K_MWHEELUP).is_some(), "the wheel is back");
+    }
+
+    /// Reset to slop: everything, keys and id's Options too, as a first
+    /// session on this machine has them.
+    #[test]
+    fn reset_is_the_slop_preset_whole() {
+        let phone = Machine { touch: true, threads: 8 };
+        let mut s = Settings::new(Preset::Classic, phone);
+        s.cvars.viewsize = 50.0;
+        s.cvars.gamma = 0.6;
+        s.cvars.set_name("ranger");
+        s.cvars.vid_resolution = (640, 400);
+        s.cvars.threads = 2;
+        s.binds.unbind_all();
+        s.reset();
+        assert_eq!(s, Settings::new(Preset::Slop, phone));
+        assert_eq!(s.config_text(), "// generated by quake, do not modify\npreset \"slop\"\n");
+    }
+
+    /// The standing: the preset while every slop option is its, else the
+    /// rows that differ — one for the picture's size and one for the pad
+    /// however many of their cvars, none for Screen size or id's Options.
+    #[test]
+    fn the_standing_counts_the_rows_that_differ_from_the_preset() {
+        let mut s = Settings::default();
+        let st = s.standing();
+        assert_eq!((st.word(), st.rows(), st.line().as_str()), ("slop", 0, "Your settings are the slop preset"));
+        s.cvars.show_fps = true;
+        let st = s.standing();
+        assert_eq!((st.word(), st.rows(), st.line().as_str()), ("custom", 1, "Yours differ from slop in 1 row"));
+        assert!(st.differs("wasm_showfps") && !st.differs("crosshair"));
+        s.cvars.show_fps = false;
+        assert_eq!(s.standing().rows(), 0, "and back: the preset again");
+
+        // Not slop options: Screen size, id's Options, the threads.
+        s.cvars.viewsize = 80.0;
+        s.cvars.gamma = 0.7;
+        s.cvars.set_always_run(false);
+        s.cvars.threads = 3;
+        assert_eq!(s.standing().word(), "slop");
+
+        // One row for the picture's size and one for the pad.
+        s.cvars.native = false;
+        s.cvars.pixel_size = 3;
+        s.cvars.joy.enabled = false;
+        s.cvars.joy.deadzone = 0.1;
+        s.cvars.joy.exponent = 1.0;
+        s.binds = std::mem::take(&mut s.binds).without_wheel();
+        s.cvars.max_edicts = 600;
+        let st = s.standing();
+        assert_eq!(st.changed, ["joystick", "vid_native", "vid_pixelsize", "sv_max_edicts", "joy_deadzone", "joy_exponent", "bind"]);
+        assert_eq!(st.rows(), 4, "the picture, the pad, the edicts, the wheel");
+        assert!(st.differs("vid_native") && st.differs("vid_pixelsize") && st.differs("joystick") && st.differs("bind"));
+        assert!(!st.differs("joy_rumble"), "the rumble is its own row");
+
+        // Classic's words.
+        let mut c = Settings::new(Preset::Classic, Machine::default());
+        assert_eq!(c.standing().line(), "Your settings are the Classic preset");
+        c.cvars.crosshair = crate::render::Crosshair::Glyph;
+        c.cvars.show_fps = true;
+        assert_eq!((c.standing().word(), c.standing().line().as_str()), ("custom", "Yours differ from Classic in 2 rows"));
+        // Every line fits a menu help line's 36 columns.
+        let mut all = Settings::new(Preset::Classic, Machine::default());
+        all.cvars = Cvars::slop().with_id_controls();
+        assert!(all.standing().rows() >= 10 && all.standing().line().len() <= 36, "{}", all.standing().line());
+        assert_eq!("Yours differ from Classic in 99 rows".len(), 36);
+    }
+
+    /// A Classic `config.cfg` lists no slop option: its `preset "classic"`
+    /// line turns them all off, so one a later version adds is off too.
+    #[test]
+    fn a_classic_file_with_no_line_for_a_slop_option_keeps_it_off() {
+        let mut s = Settings::default(); // what a session starts with, before config.cfg
+        s.apply_preset(Preset::Classic); // the file's first line
+        assert_eq!(s, Settings::new(Preset::Classic, Machine::default()), "every slop option, the new ones too");
+        assert_eq!(s.standing().word(), "classic");
     }
 
     /// Screen size is id's own setting, but the presets start it apart (110

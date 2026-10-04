@@ -19,21 +19,21 @@
 //! `viewsize` starts one step larger in [`Cvars::slop`], so the HUD takes
 //! less of a slop screen; it stays id's own cvar, and
 //! [`crate::settings::Settings::apply_preset`] moves it with the preset only
-//! while the player has not moved it). And **the port's
-//! departures** from id's game, each marked [`Cvar::departure`]
-//! ([`crate::settings::Preset`] switches them: off in [`Cvars::classic`],
-//! on in [`Cvars::slop`]) — `crosshair`, the renderer and stepping
-//! extras, the slop mixer, the bigger edict pool.
+//! while the player has not moved it). And **the slop options**, the port's
+//! departures from id's game, each marked [`Cvar::departure`]: a preset
+//! ([`crate::settings::Preset`]) sets them all, off in [`Cvars::classic`]
+//! and on in [`Cvars::slop`] — `crosshair`, the renderer and stepping
+//! options, the slop mixer, the bigger edict pool.
 //!
-//! A departure can still be a *control* rather than the engine: Always Run
-//! (`cl_forwardspeed`/`cl_backspeed`), mouse look (`freelook`), the
-//! gamepad (`joystick` and in_win.c's advanced configuration, the slop
-//! pad layout), Space-swims-up (`cl_jumpswim`) and Alt+Enter
-//! (`vid_altenter`) are departures from id's own defaults, but not from
-//! each other's — they are the player's, the same whichever preset was
-//! applied, and [`crate::settings::Settings::apply_preset`] leaves them
-//! alone, like id's own settings (Screen size, Mouse Speed). id's
-//! 1996 ones are one explicit step away, never a preset:
+//! A slop option can be a *control* rather than the engine: mouse look
+//! (`freelook`), the gamepad (`joystick`, in_win.c's advanced configuration
+//! as the slop pad layout, and the port's `joy_*`), Space-swims-up
+//! (`cl_jumpswim`), Alt+Enter (`vid_altenter`) and the touch controls
+//! (`in_touch`) depart from id's own defaults but not from each other's:
+//! both presets have them on, so applying either changes one only where the
+//! player changed it. Always Run (`cl_forwardspeed`/`cl_backspeed`) is
+//! on in both too, but it is id's own Options row, so no preset touches it.
+//! id's 1996 controls are one explicit step away, never a preset:
 //! [`Cvars::with_id_controls`], the console's `idcontrols`.
 
 use crate::client::in_win::JoyCvars;
@@ -183,7 +183,9 @@ pub struct Cvars {
     /// `in_touch`: on a touch screen, the page's touch controls for play —
     /// a stick, look by dragging, fire, jump and next weapon (quake-wasm's
     /// `web/touch.js`). id's Quake has none; without them a phone can only
-    /// open the menu, which stays tappable either way.
+    /// open the menu, which stays tappable either way — so they are on in
+    /// both presets (input, not the engine): the Classic preset must not
+    /// leave a phone unplayable.
     pub touch: bool,
     /// `in_touchaccel`: how much a fast drag turns further than a slow one
     /// of the same length (0: none, the view turns with the finger).
@@ -214,7 +216,8 @@ impl Cvars {
     /// id's WinQuake: every *engine* departure off (rendering, stepping,
     /// timing — everything `oracle/classic_check.py` compares). The
     /// *controls* — Always Run, mouse look, the gamepad, Space swims up,
-    /// Alt+Enter — are already the shared default here too (the module
+    /// Alt+Enter, the touch controls — are already the shared default here
+    /// too (the module
     /// docs say why); id's own 1996 ones (arrows, no mouse look, no
     /// gamepad, Always Run off) are [`Cvars::with_id_controls`]. The numbers
     /// a machine picks (the renderer's threads, the pixel size) are a plain
@@ -256,7 +259,7 @@ impl Cvars {
             sound: SoundMode::Classic,
             threads: 1,
             max_edicts: MAX_EDICTS as u32,
-            touch: false,
+            touch: true,
             touch_accel: 0.0,
             joy: JoyCvars::modern(),
             lightstyles: LerpLightStyles::Classic,
@@ -270,8 +273,8 @@ impl Cvars {
     /// layer at id's proportions with the world on beside the status bar,
     /// the crosshair, monsters that glide between their steps and whose
     /// animation blends between frames, clouds that glide across the sky,
-    /// flickering lights that glide between their brightnesses, and touch
-    /// controls on a phone, and perspective found exactly every 8 pixels
+    /// flickering lights that glide between their brightnesses, and
+    /// perspective found exactly every 8 pixels
     /// along the walls and liquids (id's own portable-C loop, `D_DrawSpans8`:
     /// the user's call, 2026-10-03, for every device). That one is not
     /// Classic's because of the resolution: id's 16-pixel affine spans were a
@@ -301,7 +304,6 @@ impl Cvars {
             sky: SkyScroll::Fluid,
             sound: SoundMode::Modern,
             max_edicts: 8192,
-            touch: true,
             lightstyles: LerpLightStyles::Smooth,
             torches: TorchFlicker::MODERN,
             ..Cvars::classic()
@@ -390,8 +392,8 @@ pub struct Cvar {
     pub name: &'static str,
     /// `config.cfg` keeps it (id's `archive`).
     pub archive: bool,
-    /// A departure from id's game: a preset sets it ([`Cvars::classic`]
-    /// has it off).
+    /// A slop option, a departure from id's game: a preset sets it
+    /// ([`Cvars::classic`] has it off, or at the value both presets share).
     pub departure: bool,
     /// One line for the console's list.
     pub help: &'static str,
@@ -458,39 +460,39 @@ pub const CVARS: &[Cvar] = &[
         get: |c| number_string(c.joy.wwhack2), set: |c, v| c.joy.wwhack2 = atof(v) },
     Cvar { name: "joywwhack1", archive: false, departure: false, help: "WingMan Warrior U axis fix",
         get: |c| number_string(c.joy.wwhack1), set: |c, v| c.joy.wwhack1 = atof(v) },
-    Cvar { name: "joyyawsensitivity", archive: true, departure: false, help: "joystick turn scale (sign: way)",
+    Cvar { name: "joyyawsensitivity", archive: true, departure: true, help: "joystick turn scale (sign: way)",
         get: |c| number_string(c.joy.yaw_sensitivity), set: |c, v| c.joy.yaw_sensitivity = atof(v) },
-    Cvar { name: "joypitchsensitivity", archive: true, departure: false, help: "joystick look scale",
+    Cvar { name: "joypitchsensitivity", archive: true, departure: true, help: "joystick look scale",
         get: |c| number_string(c.joy.pitch_sensitivity), set: |c, v| c.joy.pitch_sensitivity = atof(v) },
-    Cvar { name: "joysidesensitivity", archive: true, departure: false, help: "joystick strafe scale",
+    Cvar { name: "joysidesensitivity", archive: true, departure: true, help: "joystick strafe scale",
         get: |c| number_string(c.joy.side_sensitivity), set: |c, v| c.joy.side_sensitivity = atof(v) },
-    Cvar { name: "joyforwardsensitivity", archive: true, departure: false, help: "joystick walk scale",
+    Cvar { name: "joyforwardsensitivity", archive: true, departure: true, help: "joystick walk scale",
         get: |c| number_string(c.joy.forward_sensitivity), set: |c, v| c.joy.forward_sensitivity = atof(v) },
-    Cvar { name: "joyyawthreshold", archive: true, departure: false, help: "joystick turn dead zone",
+    Cvar { name: "joyyawthreshold", archive: true, departure: true, help: "joystick turn dead zone",
         get: |c| number_string(c.joy.yaw_threshold), set: |c, v| c.joy.yaw_threshold = atof(v) },
-    Cvar { name: "joypitchthreshold", archive: true, departure: false, help: "joystick look dead zone",
+    Cvar { name: "joypitchthreshold", archive: true, departure: true, help: "joystick look dead zone",
         get: |c| number_string(c.joy.pitch_threshold), set: |c, v| c.joy.pitch_threshold = atof(v) },
-    Cvar { name: "joysidethreshold", archive: true, departure: false, help: "joystick strafe dead zone",
+    Cvar { name: "joysidethreshold", archive: true, departure: true, help: "joystick strafe dead zone",
         get: |c| number_string(c.joy.side_threshold), set: |c, v| c.joy.side_threshold = atof(v) },
-    Cvar { name: "joyforwardthreshold", archive: true, departure: false, help: "joystick walk dead zone",
+    Cvar { name: "joyforwardthreshold", archive: true, departure: true, help: "joystick walk dead zone",
         get: |c| number_string(c.joy.forward_threshold), set: |c, v| c.joy.forward_threshold = atof(v) },
-    Cvar { name: "joyadvaxisv", archive: true, departure: false, help: "axis V: 1 fwd 2 look 3 side 4 turn",
+    Cvar { name: "joyadvaxisv", archive: true, departure: true, help: "axis V: 1 fwd 2 look 3 side 4 turn",
         get: |c| number_string(c.joy.advaxis[5]), set: |c, v| c.joy.advaxis[5] = atof(v) },
-    Cvar { name: "joyadvaxisu", archive: true, departure: false, help: "axis U: 1 fwd 2 look 3 side 4 turn",
+    Cvar { name: "joyadvaxisu", archive: true, departure: true, help: "axis U: 1 fwd 2 look 3 side 4 turn",
         get: |c| number_string(c.joy.advaxis[4]), set: |c, v| c.joy.advaxis[4] = atof(v) },
-    Cvar { name: "joyadvaxisr", archive: true, departure: false, help: "axis R: 1 fwd 2 look 3 side 4 turn",
+    Cvar { name: "joyadvaxisr", archive: true, departure: true, help: "axis R: 1 fwd 2 look 3 side 4 turn",
         get: |c| number_string(c.joy.advaxis[3]), set: |c, v| c.joy.advaxis[3] = atof(v) },
-    Cvar { name: "joyadvaxisz", archive: true, departure: false, help: "axis Z: 1 fwd 2 look 3 side 4 turn",
+    Cvar { name: "joyadvaxisz", archive: true, departure: true, help: "axis Z: 1 fwd 2 look 3 side 4 turn",
         get: |c| number_string(c.joy.advaxis[2]), set: |c, v| c.joy.advaxis[2] = atof(v) },
-    Cvar { name: "joyadvaxisy", archive: true, departure: false, help: "axis Y: 1 fwd 2 look 3 side 4 turn",
+    Cvar { name: "joyadvaxisy", archive: true, departure: true, help: "axis Y: 1 fwd 2 look 3 side 4 turn",
         get: |c| number_string(c.joy.advaxis[1]), set: |c, v| c.joy.advaxis[1] = atof(v) },
-    Cvar { name: "joyadvaxisx", archive: true, departure: false, help: "axis X: 1 fwd 2 look 3 side 4 turn",
+    Cvar { name: "joyadvaxisx", archive: true, departure: true, help: "axis X: 1 fwd 2 look 3 side 4 turn",
         get: |c| number_string(c.joy.advaxis[0]), set: |c, v| c.joy.advaxis[0] = atof(v) },
-    Cvar { name: "joyadvanced", archive: true, departure: false, help: "axis maps from joyadvaxis*",
+    Cvar { name: "joyadvanced", archive: true, departure: true, help: "axis maps from joyadvaxis*",
         get: |c| flag(c.joy.advanced), set: |c, v| c.joy.advanced = on(v) },
     Cvar { name: "joyname", archive: false, departure: false, help: "the controller's name",
         get: |c| c.joy.name.clone(), set: |c, v| c.joy.name = v.to_string() },
-    Cvar { name: "joystick", archive: true, departure: false, help: "use the joystick / gamepad",
+    Cvar { name: "joystick", archive: true, departure: true, help: "use the joystick / gamepad",
         get: |c| flag(c.joy.enabled), set: |c, v| c.joy.enabled = on(v) },
     Cvar { name: "_cl_color", archive: true, departure: false, help: "shirt*16 + pants colour",
         get: |c| c.cl_color.to_string(), set: |c, v| c.cl_color = atof(v) as i32 },
@@ -545,11 +547,11 @@ pub const CVARS: &[Cvar] = &[
         set: |c, v| c.pixel_size = atof(v).clamp(1.0, f32::from(PIXEL_SIZE_MAX)) as u8 },
     Cvar { name: "fov_adapt", archive: true, departure: true, help: "wider screens see more (Hor+)",
         get: |c| flag(c.fov_adapt), set: |c, v| c.fov_adapt = on(v) },
-    Cvar { name: "freelook", archive: true, departure: false, help: "mouse look without +mlook",
+    Cvar { name: "freelook", archive: true, departure: true, help: "mouse look without +mlook",
         get: |c| flag(c.freelook), set: |c, v| c.freelook = on(v) },
-    Cvar { name: "cl_jumpswim", archive: true, departure: false, help: "+jump also swims up",
+    Cvar { name: "cl_jumpswim", archive: true, departure: true, help: "+jump also swims up",
         get: |c| flag(c.jumpswim), set: |c, v| c.jumpswim = on(v) },
-    Cvar { name: "vid_altenter", archive: true, departure: false, help: "Alt+Enter toggles fullscreen",
+    Cvar { name: "vid_altenter", archive: true, departure: true, help: "Alt+Enter toggles fullscreen",
         get: |c| flag(c.alt_enter), set: |c, v| c.alt_enter = on(v) },
     Cvar { name: "r_lerpmove", archive: true, departure: true, help: "monsters glide between steps",
         get: |c| flag(c.lerpmove == LerpMove::Smooth),
@@ -572,13 +574,13 @@ pub const CVARS: &[Cvar] = &[
         get: |c| flag(c.touch), set: |c, v| c.touch = on(v) },
     Cvar { name: "in_touchaccel", archive: true, departure: false, help: "touch look acceleration, 0 none",
         get: |c| number_string(c.touch_accel), set: |c, v| c.touch_accel = atof(v).clamp(0.0, 4.0) },
-    Cvar { name: "joy_deadzone", archive: true, departure: false, help: "round stick dead zone, 0 off",
+    Cvar { name: "joy_deadzone", archive: true, departure: true, help: "round stick dead zone, 0 off",
         get: |c| number_string(c.joy.deadzone), set: |c, v| c.joy.deadzone = atof(v) },
-    Cvar { name: "joy_exponent", archive: true, departure: false, help: "look stick curve, 1 straight",
+    Cvar { name: "joy_exponent", archive: true, departure: true, help: "look stick curve, 1 straight",
         get: |c| number_string(c.joy.exponent), set: |c, v| c.joy.exponent = atof(v) },
-    Cvar { name: "joy_menukeys", archive: true, departure: false, help: "pad A/B/D-pad work the menus",
+    Cvar { name: "joy_menukeys", archive: true, departure: true, help: "pad A/B/D-pad work the menus",
         get: |c| flag(c.joy.menu_keys), set: |c, v| c.joy.menu_keys = on(v) },
-    Cvar { name: "joy_rumble", archive: true, departure: false, help: "pad rumble strength, 0 off",
+    Cvar { name: "joy_rumble", archive: true, departure: true, help: "pad rumble strength, 0 off",
         get: |c| number_string(c.joy.rumble), set: |c, v| c.joy.rumble = atof(v) },
     Cvar { name: "r_lerplightstyles", archive: true, departure: true, help: "flickering lights glide, not snap",
         get: |c| flag(c.lightstyles == LerpLightStyles::Smooth),
@@ -680,19 +682,21 @@ mod tests {
     }
 
     /// The controls (module docs): departures from id, but not from each
-    /// other — [`Cvars::classic`] and [`Cvars::slop`] already agree on
-    /// them, so [`crate::settings::Settings::apply_preset`] (which resets
-    /// only [`Cvar::departure`] fields to the new preset's) leaves them as
-    /// the player set them. [`Cvars::with_id_controls`] is the one way back
-    /// to id's own.
+    /// other — [`Cvars::classic`] and [`Cvars::slop`] agree on them. The
+    /// ones on the Controls page and the pad's layout are slop options
+    /// (a preset puts back a player's change); Always Run is id's own
+    /// Options row and no slop option. [`Cvars::with_id_controls`] is the
+    /// one way back to id's own.
     #[test]
     fn the_controls_are_the_same_in_both_presets() {
         let (id, slop) = (Cvars::classic(), Cvars::slop());
         for name in [
             "cl_forwardspeed", "cl_backspeed", "freelook", "cl_jumpswim", "vid_altenter", "joystick", "joy_rumble",
+            "joyadvanced", "joy_deadzone", "in_touch",
         ] {
             let c = find(name).unwrap();
             assert_eq!(c.get(&id), c.get(&slop), "{name}: the same in both presets");
+            assert_eq!(c.departure, !name.starts_with("cl_") || name == "cl_jumpswim", "{name}: a slop option, but Always Run");
         }
         assert_eq!(id.joy, slop.joy, "the whole gamepad layout, not just `joystick`");
         assert_eq!(id.joy, JoyCvars::modern(), "Cvars::classic already has the slop pad");

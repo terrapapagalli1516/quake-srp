@@ -290,14 +290,16 @@ fn cmd_disconnect(_: &Args) {
 }
 
 /// `Host_Version_f`: id prints `VERSION` then the EXE's build timestamp; this
-/// port has no such timestamp, so its second line names itself and the
-/// preset instead — the same two facts [`quake_rs::console::CON_VERSION`]
-/// (the console background's and the DOS end screen's stamp) and the
-/// Options screen already show.
+/// port has no such timestamp, so its second line names itself and where the
+/// settings stand (`quake_rs::settings::Settings::standing`) instead — the
+/// same facts [`quake_rs::console::CON_VERSION`] (the console background's
+/// and the DOS end screen's stamp) and the Options screen already show.
 fn cmd_version(_: &Args) {
     ensure_app(|a| {
+        let standing = a.settings.standing();
         a.console.println(format!("Version {}", quake_rs::console::CON_VERSION));
-        a.console.println(format!("quake-rs, preset {}", a.settings.preset.name()));
+        let custom = if standing.changed.is_empty() { "" } else { ", custom" };
+        a.console.println(format!("quake-rs, preset {}{custom}", standing.preset.name()));
     });
 }
 
@@ -383,18 +385,27 @@ fn cmd_unbindall(_: &Args) {
     ensure_app(|a| a.settings.binds.unbind_all());
 }
 
-/// The port's `preset`: prints the preset, or applies `slop` or `classic`
-/// (every slop option off) to the *engine*
-/// ([`quake_rs::settings::Settings::apply_preset`]). The controls (WASD,
-/// mouse look, the gamepad, Space-swims-up, Alt+Enter, Always Run) are not
-/// among them — they are the player's, the same either way — so this
-/// leaves them as they are; `idcontrols` is the one step to id's own. Its
-/// old name, `profile`, still runs it ([`OLD_COMMANDS`]), and the old
-/// words for the presets still name them ([`Preset::parse`]): a
-/// `config.cfg` or an address from before the rename keeps working.
+/// The port's `preset`: prints the preset applied last and where the
+/// settings stand against it (the rows that differ, by their settings'
+/// names), or applies `slop` or `classic` — every slop option to the
+/// preset's, the player's keys and id's own Options kept
+/// ([`quake_rs::settings::Settings::apply_preset`], Options > "Reset to
+/// Classic" without the question). `idcontrols` is the one step to id's
+/// own controls. Its old name, `profile`, still runs it ([`OLD_COMMANDS`]),
+/// and the old words for the presets still name them ([`Preset::parse`]):
+/// a `config.cfg` or an address from before the rename keeps working.
 fn cmd_preset(args: &Args) {
     ensure_app(|a| match args.argc() {
-        1 => a.console.println(format!("\"preset\" is \"{}\"", a.settings.preset.name())),
+        1 => {
+            let standing = a.settings.standing();
+            a.console.println(format!("\"preset\" is \"{}\"", standing.preset.name()));
+            a.console.println(standing.line());
+            if !standing.changed.is_empty() {
+                for line in wrap(standing.changed.iter().copied(), LIST_WIDTH) {
+                    a.console.println(line);
+                }
+            }
+        }
         _ => match Preset::parse(args.argv(1)) {
             Some(p) => a.settings.apply_preset(p),
             None => a.console.println("preset slop|classic : the port's slop options, or id's engine"),
@@ -1151,14 +1162,15 @@ mod tests {
         assert!(console_scrollback() >= 2, "god with no walk prints a guard message");
     }
 
-    /// The controls are the player's, the preset the engine: `preset`
-    /// leaves the controls alone (and the wheel, the one control that is a
-    /// slop option, follows it), and `idcontrols` is the one step to id's
-    /// own 1996 ones — the engine untouched, whichever preset is live.
-    /// `profile`, the command's old name, and `2026`, the slop preset's,
-    /// still work.
+    /// `preset` sets every slop option and keeps the player's keys and id's
+    /// own Options (the wheel's binding, a slop option, follows it), and
+    /// `idcontrols` is the one step to id's own 1996 controls — the engine
+    /// untouched, whichever preset is live; a preset applied after it puts
+    /// the slop options among them back (mouse look, the pad) and keeps the
+    /// keys and Always Run, id's Options row. `profile`, the command's old
+    /// name, and `2026`, the slop preset's, still work.
     #[test]
-    fn idcontrols_is_ids_1996_controls_and_the_preset_leaves_the_controls_alone() {
+    fn idcontrols_is_ids_1996_controls_and_a_preset_keeps_the_keys() {
         use quake_rs::keys::{BIND_FORWARD, BIND_LOOKUP, K_MWHEELUP};
         let live = || APP.with(|c| c.borrow().as_ref().unwrap().settings.clone());
         assert_eq!(boot(), 1);
@@ -1166,10 +1178,10 @@ mod tests {
         let s = live();
         assert!(s.binds.get(K_MWHEELUP).is_some() && s.cvars.uncapped && s.cvars.freelook && s.preset == Preset::Slop);
 
-        execute_console_command("preset classic"); // the engine: the wheel off, the controls kept
+        execute_console_command("preset classic"); // the engine: the wheel off, the shared controls as they were
         let s = live();
         assert!(!s.cvars.uncapped && s.binds.get(K_MWHEELUP).is_none(), "the wheel is slop's alone");
-        assert!(s.cvars.freelook && s.cvars.always_run() && s.cvars.joy.enabled, "the controls are kept");
+        assert!(s.cvars.freelook && s.cvars.always_run() && s.cvars.joy.enabled, "the shared controls");
         assert_eq!(s.binds.command(b'w'), Some(BIND_FORWARD));
 
         execute_console_command("preset slop");
@@ -1181,9 +1193,30 @@ mod tests {
         assert_eq!(s.cvars.joy, quake_rs::client::in_win::JoyCvars::classic(), "id's joystick: off");
         assert!(s.cvars.uncapped && s.preset == Preset::Slop, "the engine untouched");
 
-        execute_console_command("preset classic"); // and a preset keeps id's controls as they are
+        execute_console_command("preset classic"); // the slop options back, the keys and Always Run kept
         let s = live();
-        assert!(!s.cvars.freelook && s.binds.command(b'w').is_none() && !s.cvars.uncapped);
+        assert!(s.cvars.freelook && s.cvars.joy.enabled && !s.cvars.uncapped, "every slop option Classic's");
+        assert!(s.binds.command(b'w').is_none() && !s.cvars.always_run(), "id's keys and Always Run kept");
+    }
+
+    /// `preset` alone says where the settings stand: the preset, and the
+    /// rows that differ from it by their settings' names; `version` too.
+    #[test]
+    fn preset_and_version_say_where_the_settings_stand() {
+        let lines = || APP.with(|c| c.borrow().as_ref().unwrap().console.lines().map(str::to_string).collect::<Vec<_>>());
+        assert_eq!(boot(), 1);
+        close_menu();
+        console_toggle();
+        run_console_line("preset");
+        assert_eq!(lines()[lines().len() - 2..], ["\"preset\" is \"classic\"", "Your settings are the Classic preset"]);
+        run_console_line("wasm_showfps 1; crosshair 2");
+        run_console_line("preset");
+        assert_eq!(lines()[lines().len() - 3..], ["\"preset\" is \"classic\"", "Yours differ from Classic in 2 rows", "  crosshair wasm_showfps"]);
+        run_console_line("version");
+        assert_eq!(lines().last().map(String::as_str), Some("quake-rs, preset classic, custom"), "as the Options row says it");
+        run_console_line("preset classic");
+        run_console_line("version");
+        assert_eq!(lines().last().map(String::as_str), Some("quake-rs, preset classic"));
     }
 
     /// `Host_Quit_f`'s branch: `quit` with the console NOT the keyboard's
