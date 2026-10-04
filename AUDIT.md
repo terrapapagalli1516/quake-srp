@@ -75,7 +75,7 @@ screen.
 
 | slop option | setting (its page and row) | slop | why |
 |---|---|---|---|
-| No 72 fps cap: a host frame on every display refresh, with the game stepped as id's 72 Hz frames step it (`Stepping::Uncapped`); or a cap of 60 to 240 on that timing | `host_maxfps` (QuakeSpasm's name; Picture and sound > Frame rate cap: 60, id's 72, 120, 144, 240, none); the retired `wasm_uncapped` sets its ends (1 none, 0 72) | none (60 on a touch screen; Classic id's 72, `Host_FilterTime`'s own gate exactly) | The game must play the same from 60 to 480 Hz. id's gate caps the game at 72 fps, so a 120 Hz display runs at 60. The stepping keeps jumps, flashes, trails and clocks on id's 72 Hz values (`FRAMERATE.md`). A cap other than 72 draws on the first refresh at least 1/cap after the last frame (`host_filter_time_capped`): 60 on a 120 Hz display is every second refresh, evenly; a cap above the display's rate draws every refresh; one that does not divide it runs below itself (60 on 144 Hz: 48). |
+| No 72 fps cap: a host frame on every display refresh, with the game stepped as id's 72 Hz frames step it (`Stepping::Uncapped`); or a cap of 60 to 240 on that timing | `host_maxfps` (QuakeSpasm's name; Picture and sound > Frame rate cap: 60, id's 72, 120, 144, 240, none); the retired `wasm_uncapped` sets its ends (1 none, 0 72) | none (60 on a touch screen; Classic id's 72, `Host_FilterTime`'s own gate exactly) | The game must play the same from 60 to 480 Hz. id's gate caps the game at 72 fps, so a 120 Hz display runs at 60. The stepping keeps jumps, flashes, trails and clocks on id's 72 Hz values (`FRAMERATE.md`). A cap other than 72 holds the frames drawn, not the game: a host frame runs on every refresh, and the picture is drawn on the first refresh at least 1/cap after the last one (`FrameCap::picture_due`; the others run undrawn, `cl_main::walk_frame_undrawn`): 60 on a 120 Hz display draws every second refresh, evenly; a cap above the display's rate draws every refresh; one that does not divide it draws below itself (60 on 144 Hz: 48 pictures a second) while the game runs at 144 (`quaketool framerate --cap 60 --check`). |
 | The picture fills the window at the window's aspect, at its device pixels divided by a whole pixel size, with square pixels; the renderer's `hires` (views past 1280x1024, particles and the underwater warp in proportion). Video Options lists Native 1x..4x below `RESOLUTION_PRESETS`, each with the size it gives, the live one white, and Enter switches back to it after a fixed mode, with a line that a mode above draws in a 4:3 box; the rows show in slop or whenever the picture is native (Classic with `vid_native 1`), else the screen is `VID_MenuDraw`'s alone. No frame bigger than the threads build's 512 MiB holds (`vid::MAX_FRAME_PIXELS`, 12 million pixels, measured): past it the next pixel size, the player's pick included | `vid_native`, `vid_pixelsize` 1..4 (Picture and sound > Resolution, which shows the size and opens Video Options, the one place it is chosen) | on, 1x (2x on a touch screen) | id's modes stop at 1280x1024 and are shown in a 4:3 box. Whole pixels keep the chunky software look. A phone at 1x drew 13-19 ms frames against 60 Hz's 16.7, at 2x 8-9 ms. ("High resolutions and Hor+"; "Slop Options, two presets" for the memory) |
 | Hor+: `fov` spans a 4:3 screen, and a wider screen sees more at the sides | `fov_adapt` (Picture and sound > Widescreen FOV) | on | id spreads `fov` over any width, so a wide screen loses the top and bottom. |
 | The 2-D layer (status bar, menus, console) at the largest whole multiple of 320x200 that fits; on its screen, wider than 320 on most frames (384 at 16:9), the level-complete screen centred as the status bar is (`Sbar_DrawPic`'s `(vid.width - 320)>>1`, `Screen2d::centred_320_x`) | `wasm_scaled2d` (Picture and sound > Scaled 2-D layer) | on | id draws it 1:1, so at 1440p the status bar is a 24-pixel strip. `Sbar_IntermissionOverlay` draws at fixed coordinates laid out for 320 columns, so on a wider screen it sits left of the centred bar, menus and finale ("The 2-D layer on a wide screen", below). |
@@ -3834,3 +3834,31 @@ at the top, is the result; here what changed, and what moved against id.
   screen's 2x in a box under 640x400 (Firefox's emulated phone, whose devicePixelRatio is
   lost on an isolated page) draws at 1x, instead of a frame held to 200 rows and drawn
   taller than its box.
+
+### The review's fix round (2026-10-04, branch `fleet/slopfix`)
+
+- **The cap holds the picture, not the game.** The second stage's cap skipped whole host
+  frames, so a cap that did not divide the display's rate ran the game below the range
+  the port proves: 60 gave 48 game frames a second on 144 Hz, 45 on 90, 37.5 on 75, and
+  52-55 on an Android phone, where `framerate --rates 36,45,48,60` and
+  `50,52,55` fail (the stairs' fall speed, a fall's damage, the lift). Now a host frame runs
+  on every refresh (`host_filter_time_display`, `Stepping::Uncapped`) and only the picture
+  is held to the cap (`FrameCap::picture_due`); the frames between run undrawn
+  (`cl_main::walk_frame_undrawn`, `cl_demo::demo_frame_undrawn`: everything but the
+  pixels). `quaketool framerate --cap 60 --check` runs each scenario's capped twin at 60,
+  72, 90, 105, 110, 120, 144 and 240 Hz: every capped value is the uncapped one at its
+  rate, exactly. (One uncapped value is outside its tolerance at 90 Hz, a rate the plain
+  `--check` does not run: the grenade's explosion point, 638.9 against 648.5 ±8.5 —
+  the game's at 90 Hz, cap or none, and FRAMERATE.md's to look at.) An undrawn frame
+  costs `framerate --budget`'s "sim": 0.04 ms against 0.98-1.82 for a whole frame on one
+  thread, so the cap keeps its heat saving.
+- **0 for `vid_pixelsize` or `r_threads` is this machine's number** (`Settings::set_cvar`),
+  not 1x or one thread, and is not written to `config.cfg`.
+- **Video Options offers only the native sizes the window can be drawn at**
+  (`menu::NativeSizes`); the white row is the one drawn (`Menu::native_row_drawn`).
+- **The standing counts the console-only slop options apart** (`settings::CONSOLE_ONLY`:
+  `sv_max_edicts`): "Yours differ in 1 console setting", "Yours: 2 rows, 1 console
+  setting".
+- **Names.** `SoundMode::Slop` ("slop"; `2026` and `modern` still parse), `JoyCvars::twin_stick`
+  (both presets' pad); the cvar `snd_modern` and the checks' `set_video modern` keep their
+  first names, which files and scripts carry.

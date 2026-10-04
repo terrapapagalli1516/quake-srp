@@ -153,7 +153,7 @@ turns most of them on; **Classic** turns them off. The controls are the same in 
 
 | | Classic | slop |
 |---|---|---|
-| frame rate | id's 72 fps cap | a frame every display refresh (Frame rate cap: none, or 60 to 240); jumps, lifts, flashes and trails are stepped to match 72 Hz, within the tolerances [FRAMERATE.md](FRAMERATE.md) states |
+| frame rate | id's 72 fps cap | a frame every display refresh (Frame rate cap: none, or 60 to 240 frames drawn a second, the game still every refresh); jumps, lifts, flashes and trails are stepped to match 72 Hz, within the tolerances [FRAMERATE.md](FRAMERATE.md) states |
 | picture | a fixed mode (960x600 by default) in a 4:3 frame, id's 90° field of view | the window's own size and shape in whole pixels (1x, 2x on a touch screen; Video Options lists 1x to 4x with the size each gives), a wider view on wide screens |
 | status bar, menus, console | 1:1, as id drew them; Screen size 100: the status bar with the inventory bar above it | scaled up by a whole number; Screen size starts one step larger, 110: the status bar without the inventory bar, so the HUD takes less of the screen |
 | monsters | move in id's 0.1 s steps, and change pose ten times a second | glide between the steps, and blend between poses (the gun too) |
