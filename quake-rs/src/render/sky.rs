@@ -265,8 +265,8 @@ fn sky_layers_sample(layers: &SkyLayers, s: i32, t: i32, front: i32) -> u8 {
 /// segment, and its pixels wait for that square root and those divisions.
 /// Here each segment's end is asked for a segment ahead, before the pixels of
 /// the one before, so it is worked out while they are drawn: the same values
-/// (each end is a function of its pixel alone), a sky pixel 6-10% faster
-/// (PERF_PLAN.md, §15).
+/// (each end is a function of its pixel alone), a view half sky 6% faster in
+/// the browser and 1-4% natively (PERF_PLAN.md, §15).
 #[inline]
 fn sky_span(out: &mut [u8], u: i32, v: i32, count: i32, view: &SkyView, sample: impl Fn(i32, i32) -> u8) {
     // Where the segment from pixel `k0` ends, exactly: the next segment's
