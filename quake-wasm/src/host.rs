@@ -869,13 +869,13 @@ mod tests {
         step(0.0);
         assert_eq!(base, grab(), "dt=0 frames are deterministic");
 
-        // Brightness right one notch (Options row 4): gamma 1.0 -> 0.95
+        // Brightness right one notch (Options row 3): gamma 1.0 -> 0.95
         // (v_gamma.value -= dir * 0.05) — the presented bytes must change.
         menu_cancel();
         menu_down();
         menu_down();
         menu_select(); // -> Options
-        for _ in 0..4 {
+        for _ in 0..3 {
             menu_down(); // ROW_BRIGHTNESS
         }
         menu_right();

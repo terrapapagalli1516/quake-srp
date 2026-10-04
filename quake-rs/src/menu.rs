@@ -54,45 +54,47 @@ pub use crate::keys::{
 const MAIN_ITEMS: usize = 5;
 /// `SINGLEPLAYER_ITEMS` (menu.c): the single-player menu has 3 entries.
 const SINGLEPLAYER_ITEMS: usize = 3;
-/// `OPTIONS_ITEMS` (menu.c): id's 13 rows plus this port's two. The row
-/// indices 0..=12 match `M_AdjustSliders` / `M_Options_Key`:
-/// 0 Customize controls, 1 Go to console, 2 Reset to defaults (the port's
-/// "Reset to slop"), 3 Screen size, 4 Brightness, 5 Mouse Speed, 6 CD Music
-/// Volume, 7 Sound Volume, 8 Always Run, 9 Invert Mouse, 10 Lookspring, 11
-/// Lookstrafe, 12 Video Options. Rows 13 and 14 are the port's: "Slop
-/// Options" ([`ROW_SLOP_OPTIONS`]), in the slot the C's own `_WIN32` build
-/// gives its 14th row ("Use Mouse", y=136, `OPTIONS_ITEMS 14`), and "Reset to
-/// Classic" ([`ROW_RESET_CLASSIC`]) under it, the last row the plaque spans.
+/// `OPTIONS_ITEMS` (menu.c): id's 13 rows less "Reset to defaults", plus
+/// this port's three, the two resets last (the user's order, 2026-10-04).
+/// id's rows keep their order but sit one higher than in id's game, where
+/// row 2 was "Reset to defaults": 0 Customize controls, 1 Go to console, 2
+/// Screen size, 3 Brightness, 4 Mouse Speed, 5 CD Music Volume, 6 Sound
+/// Volume, 7 Always Run, 8 Invert Mouse, 9 Lookspring, 10 Lookstrafe, 11
+/// Video Options; then the port's: 12 "Slop Options" ([`ROW_SLOP_OPTIONS`]),
+/// 13 "Reset to Classic" and 14 "Reset to slop" ([`ROW_RESET_CLASSIC`],
+/// [`ROW_RESET_SLOP`]), the last row the plaque spans, where no stray press
+/// from the top lands (and each asks first).
 const OPTIONS_ITEMS: usize = 15;
 
-/// `OptionRow` — the stable index for each Options row (matches the C's
-/// `options_cursor` cases in `M_AdjustSliders` / `M_Options_Key`).
+/// `OptionRow` — the index of each Options row (`options_cursor`, as
+/// `M_AdjustSliders` / `M_Options_Key` switch on it; one less than id's
+/// from Screen size on).
 const ROW_CONTROLS: usize = 0;
 const ROW_CONSOLE: usize = 1;
-/// id's "Reset to defaults" (`exec default.cfg`), here "Reset to slop":
-/// everything to the slop preset ([`crate::settings::Settings::reset`]),
-/// keys and id's Options too, after a question ([`Question::ResetSlop`]).
-/// The user's rename: the port's defaults are the slop preset.
-const ROW_RESET_SLOP: usize = 2;
-const ROW_SCREENSIZE: usize = 3;
-const ROW_BRIGHTNESS: usize = 4;
-const ROW_MOUSESPEED: usize = 5;
-const ROW_CDVOLUME: usize = 6;
-const ROW_SNDVOLUME: usize = 7;
-const ROW_ALWAYSRUN: usize = 8;
-const ROW_INVERTMOUSE: usize = 9;
-const ROW_LOOKSPRING: usize = 10;
-const ROW_LOOKSTRAFE: usize = 11;
-const ROW_VIDEO: usize = 12;
-/// PORT ROW (not in id's Quake): "Slop Options", its value where the
-/// settings stand ([`crate::settings::Standing::word`]: `slop`, `classic`
-/// or `custom`); Enter opens [`MenuScreen::SlopOptions`], the port's pages,
-/// as Video Options opens its screen; left and right change nothing.
-const ROW_SLOP_OPTIONS: usize = 13;
-/// PORT ROW: "Reset to Classic", every slop option to the Classic preset
-/// ([`crate::settings::Settings::apply_preset`]), the keys and id's Options
-/// kept, after a question ([`Question::ResetClassic`]).
-const ROW_RESET_CLASSIC: usize = 14;
+const ROW_SCREENSIZE: usize = 2;
+const ROW_BRIGHTNESS: usize = 3;
+const ROW_MOUSESPEED: usize = 4;
+const ROW_CDVOLUME: usize = 5;
+const ROW_SNDVOLUME: usize = 6;
+const ROW_ALWAYSRUN: usize = 7;
+const ROW_INVERTMOUSE: usize = 8;
+const ROW_LOOKSPRING: usize = 9;
+const ROW_LOOKSTRAFE: usize = 10;
+const ROW_VIDEO: usize = 11;
+/// PORT ROW (not in id's Quake): "Slop Options"; Enter opens
+/// [`MenuScreen::SlopOptions`], the port's pages, as Video Options opens its
+/// screen; left and right change nothing. It shows no value: the menus do
+/// not say where the settings stand (the console's `preset` does).
+const ROW_SLOP_OPTIONS: usize = 12;
+/// PORT ROW: "Reset to Classic": everything to the Classic preset on this
+/// machine ([`crate::settings::Settings::reset`]) — keys, id's own Options,
+/// the video mode, every slop option — after a question
+/// ([`Question::ResetClassic`]).
+const ROW_RESET_CLASSIC: usize = 13;
+/// PORT ROW, in place of id's "Reset to defaults" (`exec default.cfg`):
+/// "Reset to slop", everything to the slop preset, the port's defaults, the
+/// same way ([`Question::ResetSlop`]).
+const ROW_RESET_SLOP: usize = 14;
 
 // ---------------------------------------------------------------------------
 // Slop Options: three pages, every departure from id's Quake a row
@@ -102,11 +104,11 @@ const ROW_RESET_CLASSIC: usize = 14;
 // Options: Video Options (`M_Menu_Video_f`, back with Escape to Options on
 // its row). The port's settings are the same: Options > "Slop Options",
 // Enter, opens a screen ([`MenuScreen::SlopOptions`]) with a row for each
-// page ([`SlopPage`]) and where the settings stand against the preset; Enter
-// on a page's row opens the page ([`MenuScreen::SlopPage`]); Escape goes
-// back a screen each time, onto the row it came from (every screen's cursor
-// is kept, like id's statics). A value that differs from the preset applied
-// last is white, as Video Options marks its current mode white.
+// page ([`SlopPage`]); Enter on a page's row opens the page
+// ([`MenuScreen::SlopPage`]); Escape goes back a screen each time, onto the
+// row it came from (every screen's cursor is kept, like id's statics). The
+// menus do not say where the settings stand, nor mark what differs from a
+// preset: the console's `preset` does (the user's call, 2026-10-04).
 
 /// The Slop Options pages, the slop options by kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -154,10 +156,6 @@ pub enum RowKind {
     /// ([`FrameCap::STEPS`]), the most frames drawn a second; left and right
     /// step it, right the more frames.
     FrameCap,
-    /// The picture's size (`vid_native`, `vid_pixelsize`): shows the size the
-    /// game draws at; Enter opens Video Options, the one place it is
-    /// chosen; left and right change nothing.
-    Resolution,
     /// `crosshair`: `off`, `cross` (the slop one), `id's +`; left and right
     /// step it.
     Crosshair,
@@ -201,7 +199,7 @@ pub const SLOP_OPTIONS_ROWS: [SettingRow; 3] = [
     SettingRow {
         cvar: "",
         label: "     Picture and sound",
-        help: ["Frame rate, resolution, 2-D layer,", "crosshair, and the sound's rate"],
+        help: ["Frame rate, field of view, 2-D", "layer, crosshair, the sound's rate"],
         kind: RowKind::Page(SlopPage::Picture),
     },
     SettingRow {
@@ -218,19 +216,14 @@ pub const SLOP_OPTIONS_ROWS: [SettingRow; 3] = [
     },
 ];
 
-/// [`SlopPage::Picture`]'s rows: the frame, then the sound.
-pub const PICTURE_ROWS: [SettingRow; 9] = [
+/// [`SlopPage::Picture`]'s rows: the frame, then the sound. (The picture's
+/// size is chosen in Video Options alone, id's own screen for it.)
+pub const PICTURE_ROWS: [SettingRow; 8] = [
     SettingRow {
         cvar: "host_maxfps",
         label: "        Frame rate cap",
         help: ["Frames drawn a second, at most;", "id's 72 holds the game to it too"],
         kind: RowKind::FrameCap,
-    },
-    SettingRow {
-        cvar: "vid_native",
-        label: "            Resolution",
-        help: ["The size the game draws at; Enter", "opens Video Options to change it"],
-        kind: RowKind::Resolution,
     },
     SettingRow {
         cvar: "fov_adapt",
@@ -373,16 +366,14 @@ pub const CONTROLS_ROWS: [SettingRow; 7] = [
 
 impl SettingRow {
     /// The value it shows at x=220 (empty for a slider, which draws its
-    /// knob there, and for a page row); `picture` is the size the game draws
-    /// at ([`Menu::actual_size`]), what the Resolution row shows.
-    pub fn value(&self, s: &Settings, (w, h): (i32, i32)) -> String {
+    /// knob there, and for a page row).
+    pub fn value(&self, s: &Settings) -> String {
         match self.kind {
             RowKind::FrameCap => match s.cvars.max_fps {
                 FrameCap::NONE => "none".to_string(),
                 FrameCap::ID => "id's 72".to_string(),
                 cap => cap.cvar().to_string(),
             },
-            RowKind::Resolution => format!("{w}x{h}"),
             RowKind::Crosshair => match s.cvars.crosshair {
                 Crosshair::Off => checkbox_text(false),
                 Crosshair::Cross => "cross",
@@ -421,7 +412,7 @@ impl SettingRow {
     /// direction, the frame-rate cap (60, id's 72, 120, 144, 240, none), the
     /// crosshair (off, cross, id's +) and the perspective span (id's 16, 8,
     /// 4, exact) step, wrapping; a slider steps, clamped at its ends as id's
-    /// are; the Resolution row and a page row change nothing.
+    /// are; a page row changes nothing.
     pub fn adjust(&self, s: &mut Settings, step: i32) {
         match self.kind {
             RowKind::FrameCap => s.cvars.max_fps = s.cvars.max_fps.stepped(step),
@@ -450,7 +441,7 @@ impl SettingRow {
                 let binds = std::mem::take(&mut s.binds);
                 s.binds = if binds.wheel() == Wheel::Cycle { binds.without_wheel() } else { binds.with_wheel() };
             }
-            RowKind::Resolution | RowKind::Page(_) => {}
+            RowKind::Page(_) => {}
         }
     }
 
@@ -458,7 +449,6 @@ impl SettingRow {
     pub fn console_hint(&self) -> String {
         match self.kind {
             RowKind::FrameCap => format!("console: {} 0 or {}-{}", self.cvar, FrameCap::MIN, FrameCap::MAX),
-            RowKind::Resolution => "console: vid_native, vid_pixelsize".to_string(),
             RowKind::Crosshair => format!("console: {} 0/1/2", self.cvar),
             RowKind::PerspSpan => format!("console: {} 64/32/16/8/4/1", self.cvar),
             RowKind::Toggle => format!("console: {} 0/1", self.cvar),
@@ -696,8 +686,8 @@ pub enum MenuScreen {
     /// presets ([`NATIVE_ROWS`]), each with the size it gives, honestly
     /// marking whichever is actually showing and letting Enter switch
     /// between them; otherwise (Classic) this screen is `VID_MenuDraw`'s
-    /// alone. Opened from Options, or from Slop Options' Resolution row, and
-    /// Escape goes back there.
+    /// alone. Opened from Options, the one place the picture's size is
+    /// chosen, and Escape goes back there.
     Video,
     /// The Help/Ordering screen (`m_help`): pages through
     /// `gfx/help0.lmp`..`help5.lmp` with left/right ([`NUM_HELP_PAGES`] pages).
@@ -705,8 +695,8 @@ pub enum MenuScreen {
     /// The Quit confirmation prompt (`m_quit`): "Are you sure you want to quit?".
     Quit,
     /// PORT SCREEN (not in id's Quake): Options > Slop Options, Enter: a row
-    /// for each [`SlopPage`] ([`SLOP_OPTIONS_ROWS`]) and where the settings
-    /// stand against the preset, drawn in `M_Options_Draw`'s idiom. Enter on
+    /// for each [`SlopPage`] ([`SLOP_OPTIONS_ROWS`]), drawn in
+    /// `M_Options_Draw`'s idiom. Enter on
     /// a page's row opens it, as Options' Video Options row opens its
     /// screen; Escape returns to Options on its row.
     SlopOptions,
@@ -899,8 +889,8 @@ pub enum Question {
     NewGame,
     /// Options > "Reset to slop" (PORT): everything to the slop preset.
     ResetSlop,
-    /// Options > "Reset to Classic" (PORT): every slop option to the
-    /// Classic preset.
+    /// Options > "Reset to Classic" (PORT): everything to the Classic
+    /// preset.
     ResetClassic,
 }
 
@@ -912,7 +902,7 @@ impl Question {
         match self {
             Question::NewGame => "Are you sure you want to\nstart a new game?\n",
             Question::ResetSlop => "Reset everything to the slop\npreset: keys, Options, video?\nSaved games stay.\n",
-            Question::ResetClassic => "Reset every slop option to\nthe Classic preset? Your keys\nand Options stay.\n",
+            Question::ResetClassic => "Reset everything to the Classic\npreset: keys, Options, video?\nSaved games stay.\n",
         }
     }
 }
@@ -960,8 +950,8 @@ pub struct Menu {
     /// sets it too.
     res_preset: usize,
     /// The actual current render size ([`sync_resolution`](Menu::sync_resolution)):
-    /// what Slop Options' Resolution row shows, so no menu shows a number
-    /// the screen isn't.
+    /// which native row of Video Options is the one drawn, so no menu marks a
+    /// size the screen isn't.
     actual_size: (i32, i32),
     /// What each pixel size gives on the page's box (`sync_resolution`'s
     /// `native_sizes`): the native rows Video Options offers, and what each
@@ -977,9 +967,6 @@ pub struct Menu {
     /// picture). Off (Classic), the list is [`RESOLUTION_PRESETS`] alone,
     /// `VID_MenuDraw` unchanged.
     native_rows: bool,
-    /// Where Video Options was opened from, and Escape returns to: Options,
-    /// or Slop Options' Picture page (its Resolution row).
-    video_from: MenuScreen,
     /// The current Help page (`help_page`, `0..NUM_HELP_PAGES`).
     help_page: usize,
     /// Which screen the Quit prompt was raised from, restored on "No"
@@ -1039,7 +1026,6 @@ impl Menu {
             native_sizes: [Some((0, 0)); NATIVE_ROWS],
             actual_native: false,
             native_rows: false,
-            video_from: MenuScreen::Options,
             help_page: 0,
             quit_prev: MenuScreen::Main,
             quit_in_menus: true,
@@ -1360,9 +1346,8 @@ impl Menu {
     ///   resolution back on at the highlighted pixel size
     ///   ([`MenuAction::ResolutionChanged`]).
     /// * Options > Slop Options (port row): the port's pages; there, a
-    ///   page's row opens the page (menu2, as Video Options opens), the
-    ///   Resolution row opens Video Options, and any other row changes
-    ///   (menu2 + menu3, like an Options checkbox).
+    ///   page's row opens the page (menu2, as Video Options opens), and any
+    ///   other row changes (menu2 + menu3, like an Options checkbox).
     /// * Help and the Quit prompt: Enter is inert ([`MenuAction::None`]; only
     ///   y/Y answers the prompt, [`Menu::keydown`]).
     pub fn select(&mut self, s: &mut Settings) -> MenuAction {
@@ -1485,7 +1470,7 @@ impl Menu {
                 ROW_VIDEO => {
                     // M_Menu_Video_f.
                     self.snd(MenuSound::Menu2);
-                    self.open_video(MenuScreen::Options, s);
+                    self.open_video(s);
                     MenuAction::None
                 }
                 ROW_SLOP_OPTIONS => {
@@ -1559,14 +1544,13 @@ impl Menu {
                 // Enter latches m_entersound (menu2) on every row, as
                 // M_Options_Key's does. A page's row opens it, as Options'
                 // Video Options row opens its screen (on the page's own kept
-                // cursor), and the Resolution row opens Video Options; any
+                // cursor); any
                 // other row is an Options checkbox or slider row, which
                 // falls through to M_AdjustSliders (1), its own menu3.
                 self.snd(MenuSound::Menu2);
                 let row = self.screen.setting_rows().and_then(|rows| rows.get(self.cursor()));
                 match row.map(|r| r.kind) {
                     Some(RowKind::Page(p)) => self.screen = MenuScreen::SlopPage(p),
-                    Some(RowKind::Resolution) => self.open_video(self.screen, s),
                     _ => self.adjust(1, s),
                 }
                 MenuAction::None
@@ -1750,11 +1734,11 @@ impl Menu {
                 MenuAction::NewGame
             }
             Question::ResetSlop => {
-                s.reset();
+                s.reset(crate::settings::Preset::Slop);
                 MenuAction::Reset
             }
             Question::ResetClassic => {
-                s.apply_preset(crate::settings::Preset::Classic);
+                s.reset(crate::settings::Preset::Classic);
                 MenuAction::Reset
             }
         }
@@ -1817,10 +1801,9 @@ impl Menu {
                 MenuAction::Back
             }
             MenuScreen::Video => {
-                // VID_MenuKey K_ESCAPE: menu1, then M_Menu_Options_f (menu2)
-                // — or, opened from the Resolution row, its page again.
+                // VID_MenuKey K_ESCAPE: menu1, then M_Menu_Options_f (menu2).
                 self.snd(MenuSound::Menu1);
-                self.screen = self.video_from;
+                self.screen = MenuScreen::Options;
                 self.snd(MenuSound::Menu2);
                 MenuAction::Back
             }
@@ -2016,8 +1999,7 @@ impl Menu {
         RESOLUTION_PRESETS.get(self.res_preset).copied().unwrap_or(RESOLUTION_PRESETS[0])
     }
 
-    /// The actual current render size ([`Menu::sync_resolution`]): what
-    /// Slop Options' Resolution row shows.
+    /// The actual current render size ([`Menu::sync_resolution`]).
     pub fn actual_size(&self) -> (i32, i32) {
         self.actual_size
     }
@@ -2038,9 +2020,8 @@ impl Menu {
     /// first visit, native rows included — see `Cursors::video`; kept on
     /// later ones, clamped to however many rows the list has now, since the
     /// native rows can appear or disappear between visits), Escape back to
-    /// `from`.
-    fn open_video(&mut self, from: MenuScreen, s: &Settings) {
-        self.video_from = from;
+    /// Options.
+    fn open_video(&mut self, s: &Settings) {
         self.screen = MenuScreen::Video;
         let rows = self.video_rows();
         let line = self.cursors.video.unwrap_or_else(|| self.video_current_row(s.cvars.pixel_size)).min(rows - 1);
@@ -2675,12 +2656,11 @@ const OPTIONS_WIDGET_X: f32 = 220.0;
 
 /// The Options labels, pre-padded to right-justify at x≈184 — copied
 /// verbatim from `M_Options_Draw` so the column lines up with the widgets at
-/// x=220, but for the port's own: row 2's (id's "Reset to defaults") and
-/// the two after Video Options, padded the same way.
+/// x=220 (but for id's "Reset to defaults", gone), and the port's three
+/// after Video Options, padded the same way.
 const OPTIONS_LABELS: [&str; OPTIONS_ITEMS] = [
     "    Customize controls",
     "         Go to console",
-    "         Reset to slop",
     "           Screen size",
     "            Brightness",
     "           Mouse Speed",
@@ -2693,6 +2673,7 @@ const OPTIONS_LABELS: [&str; OPTIONS_ITEMS] = [
     "         Video Options",
     "          Slop Options",
     "      Reset to Classic",
+    "         Reset to slop",
 ];
 
 /// The slider on Options row `row` (`M_Options_Draw`'s `r` for each
@@ -2712,7 +2693,7 @@ fn options_slider(row: usize, c: &crate::cvar::Cvars) -> Option<f32> {
 }
 
 /// Draw the Options submenu, a faithful port of `M_Options_Draw`: the `p_option`
-/// title plaque centered at the top, the 13 right-justified labels at x=16 (8 px
+/// title plaque centered at the top, the right-justified labels at x=16 (8 px
 /// apart from y=32), a [`draw_slider`] at x=220 for the analog rows (Screen size /
 /// Brightness / Mouse Speed / CD Music Volume / Sound Volume), a [`checkbox_text`]
 /// at x=220 for the boolean rows (Always Run / Invert Mouse / Lookspring /
@@ -2768,13 +2749,6 @@ fn draw_options_screen(
             // M_DrawCheckbox: M_Print (x, y, "on" / "off").
             m_print(image, cc, OPTIONS_WIDGET_X, ry, checkbox_text(on), scale, ox, oy);
         }
-        // PORT ROW: where the settings stand, printed as a checkbox's value
-        // is — white when they are no preset (a value that differs from it).
-        let ry = OPTIONS_ROW_Y0 + ROW_SLOP_OPTIONS as f32 * OPTIONS_ROW_STEP;
-        let standing = settings.standing();
-        let print = if standing.is_preset() { m_print } else { draw_string_scaled };
-        print(image, cc, OPTIONS_WIDGET_X, ry, standing.word(), scale, ox, oy);
-
         // The flashing cursor: M_DrawCharacter(200, 32 + cursor*8, 12 + (blink)).
         let cy = OPTIONS_ROW_Y0 + menu.cursor() as f32 * OPTIONS_ROW_STEP;
         draw_char_scaled(image, cc, OPTIONS_CURSOR_X, cy, cursor_glyph, scale, ox, oy);
@@ -2792,17 +2766,13 @@ fn draw_options_screen(
 /// centres its titles and that line ([`centred_x`]). Under the plaque a
 /// centred line never meets it, however wide (up to [`SLOP_NOTE_COLS`]);
 /// and the notes sit in one place on every page, however long its list.
-/// Slop Options itself first says, in white, where the settings stand
-/// ([`crate::settings::Standing::line`]), and its notes follow two lines
-/// lower: its rows' help is two lines, with no console line.
+/// (Slop Options' rows' help is two lines, with no console line.)
 const SLOP_ROW_Y0: f32 = OPTIONS_ROW_Y0;
 /// `qplaque`'s foot: `M_DrawTransPic (16, 4, qplaque)`, 144 lines tall. id
 /// prints "No Communications Available" here (`M_MultiPlayer_Draw`, y=148).
 const PLAQUE_FOOT_Y: f32 = 148.0;
-/// Where the notes start on a page; on Slop Options, two lines lower, under
-/// the standing line.
+/// Where the notes start, on Slop Options and every page.
 const SLOP_HEADER_Y: f32 = PLAQUE_FOOT_Y;
-const SLOP_STANDING_Y: f32 = PLAQUE_FOOT_Y;
 /// The help's first line, two lines under the header.
 const SLOP_HELP_GAP: f32 = 2.0 * OPTIONS_ROW_STEP;
 /// A row's help lines: its two, then its console line.
@@ -2816,8 +2786,7 @@ const SLOP_ROWS_MAX: usize = ((SLOP_HEADER_Y - OPTIONS_ROW_STEP - SLOP_ROW_Y0) /
 /// The header (`M_PrintWhite`): what these rows are.
 const SLOP_HEADER: &str = "Not in id's Quake";
 // Every list ends a blank line above the notes, and the notes end on id's
-// 200-line screen: a page's three help lines, and Slop Options' two under
-// its standing line.
+// 200-line screen: the header and a page's three help lines.
 const _: () = assert!(
     SLOP_OPTIONS_ROWS.len() <= SLOP_ROWS_MAX
         && PICTURE_ROWS.len() <= SLOP_ROWS_MAX
@@ -2826,8 +2795,7 @@ const _: () = assert!(
     "a settings list reaches the notes under the plaque"
 );
 const _: () = assert!(
-    SLOP_HEADER_Y + SLOP_HELP_GAP + SLOP_HELP_LINES as f32 * OPTIONS_ROW_STEP <= 200.0
-        && SLOP_STANDING_Y + 2.0 * SLOP_HELP_GAP + 2.0 * OPTIONS_ROW_STEP <= 200.0,
+    SLOP_HEADER_Y + SLOP_HELP_GAP + SLOP_HELP_LINES as f32 * OPTIONS_ROW_STEP <= 200.0,
     "the notes fit the 200-line menu screen"
 );
 
@@ -2843,15 +2811,11 @@ fn centred_x(text: &str) -> f32 {
 /// of Options), each row an Options row — the right-justified `M_Print`
 /// label at x=16, its value at x=220 (`M_DrawCheckbox`'s "on" / "off" for a
 /// toggle, `M_DrawSlider` for a slider), the 4 Hz flashing cursor at x=200
-/// — and under the plaque, on Slop Options, where the settings stand in
-/// white; then the [`SLOP_HEADER`] in white and the highlighted row's
-/// bronze help lines, centred.
-///
-/// A value that differs from the preset applied last is white
-/// (`M_PrintWhite`), as `VID_MenuDraw` whitens the current mode, so the
-/// rows the standing line counts can be found: a value, or where there is
-/// none to whiten, the label — a slider's (its knob is all it shows), and a
-/// page's row on Slop Options when a row of that page differs.
+/// — and under the plaque the [`SLOP_HEADER`] in white and the highlighted
+/// row's bronze help lines, centred. Every label and value is `M_Print`'s
+/// bronze, as on Options: no value is marked for differing from a preset
+/// (the user's call, 2026-10-04; the console's `preset` says where the
+/// settings stand).
 #[allow(clippy::too_many_arguments)]
 fn draw_slop_screen(
     image: &mut Image,
@@ -2870,30 +2834,17 @@ fn draw_slop_screen(
         blit_qpic_at(image, t, tx, 4.0, scale, ox, oy);
     }
     let Some(cc) = conchars else { return };
-    let standing = settings.standing();
-    let print = |white: bool| if white { draw_string_scaled } else { m_print };
     for (i, row) in rows.iter().enumerate() {
         let y = SLOP_ROW_Y0 + i as f32 * OPTIONS_ROW_STEP;
-        let differs = match row.kind {
-            RowKind::Page(p) => p.rows().iter().any(|r| standing.differs(r.cvar)),
-            _ => standing.differs(row.cvar),
-        };
-        let value = row.value(settings, menu.actual_size());
-        let label_white = differs && value.is_empty();
-        print(label_white)(image, cc, OPTIONS_LABEL_X, y, row.label, scale, ox, oy);
+        m_print(image, cc, OPTIONS_LABEL_X, y, row.label, scale, ox, oy);
         match row.slider(settings) {
             Some(frac) => draw_slider(image, cc, OPTIONS_WIDGET_X, y, frac, scale, ox, oy),
-            None => print(differs)(image, cc, OPTIONS_WIDGET_X, y, &value, scale, ox, oy),
+            None => m_print(image, cc, OPTIONS_WIDGET_X, y, &row.value(settings), scale, ox, oy),
         }
     }
     let cy = SLOP_ROW_Y0 + menu.cursor() as f32 * OPTIONS_ROW_STEP;
     draw_char_scaled(image, cc, OPTIONS_CURSOR_X, cy, cursor_glyph, scale, ox, oy);
-    let mut notes_y = SLOP_HEADER_Y;
-    if menu.screen == MenuScreen::SlopOptions {
-        let line = standing.line();
-        draw_string_scaled(image, cc, centred_x(&line), SLOP_STANDING_Y, &line, scale, ox, oy);
-        notes_y += SLOP_HELP_GAP;
-    }
+    let notes_y = SLOP_HEADER_Y;
     draw_string_scaled(image, cc, centred_x(SLOP_HEADER), notes_y, SLOP_HEADER, scale, ox, oy);
     if let Some(row) = rows.get(menu.cursor()) {
         let lines = slop_help_lines(row);
@@ -3340,8 +3291,6 @@ mod tests {
 
     /// Video Options' native rows with no size: no window known yet.
     const NO_SIZES: NativeSizes = [Some((0, 0)); NATIVE_ROWS];
-    /// The size a test's picture is drawn at (what the Resolution row shows).
-    const PICTURE: (i32, i32) = (960, 600);
 
     /// default.cfg's `sensitivity 3`, `volume 0.7`, `gamma 1.0`.
     const SENS_DEFAULT: f32 = 3.0;
@@ -3406,7 +3355,7 @@ mod tests {
         m.cancel();
         // Slop Options and its pages: each its own cursor, kept like
         // options_cursor; Escape from a page lands on its row.
-        m.move_cursor(-2); // row 0 -> 13, Slop Options
+        m.move_cursor(-3); // row 0 -> 12, Slop Options (the two resets under it)
         m.select(&mut s);
         assert_eq!((m.screen(), m.cursor()), (MenuScreen::SlopOptions, 0));
         m.move_cursor(1);
@@ -3600,15 +3549,15 @@ mod tests {
         m.keydown(K_DOWNARROW, None, &mut s);
         m.keydown(K_ENTER, None, &mut s);
         assert_eq!(m.screen(), MenuScreen::Options);
-        // Options: Right adjusts Screen size.
-        for _ in 0..3 {
+        // Options: Right adjusts Screen size (row 2: id's "Reset to defaults"
+        // above it is gone).
+        for _ in 0..2 {
             m.keydown(K_DOWNARROW, None, &mut s);
         }
         m.keydown(K_RIGHTARROW, None, &mut s);
         assert_eq!(s.cvars.viewsize, Preset::Slop.viewsize() + VIEWSIZE_STEP);
         // Customize controls: Left moves like Up; Del unbinds; during a grab
         // every key is the grab's, Escape included.
-        m.keydown(K_UPARROW, None, &mut s);
         m.keydown(K_UPARROW, None, &mut s);
         m.keydown(K_UPARROW, None, &mut s);
         m.keydown(K_ENTER, None, &mut s);
@@ -4113,7 +4062,7 @@ mod tests {
         assert_eq!(s.cvars.viewsize, 40.0, "adjust is a no-op off the Options screen");
         // Reset to slop: slop's own start, 110; Reset to Classic from slop's
         // unmoved 110: default.cfg's `viewsize 100`, and a moved size kept.
-        s.reset();
+        s.reset(crate::settings::Preset::Slop);
         assert_eq!(s.cvars.viewsize, 110.0);
         s.apply_preset(Preset::Classic);
         assert_eq!(s.cvars.viewsize, VIEWSIZE_DEFAULT, "default.cfg: viewsize 100");
@@ -4126,7 +4075,7 @@ mod tests {
     #[test]
     fn options_screen_size_slider_tracks_viewsize() {
         // M_Options_Draw: r = (scr_viewsize - 30) / (120 - 30); the knob (glyph
-        // 131) sits at 220 + 72*r on the Screen-size row (y = 56).
+        // 131) sits at 220 + 72*r on the Screen-size row (y = 48, row 2).
         let mut data = vec![0u8; 128 * 128];
         for y in 0..8 {
             for x in 0..8 {
@@ -4141,7 +4090,7 @@ mod tests {
         let knob_x = |m: &Menu, s: &Settings| {
             let mut img = Image::new(320, 200, 0);
             draw_menu(&mut img, m, s, &MenuPics::default(), Some(&conchars), clock(0.0, 0.0));
-            (0..320).find(|&x| img.pixels[56 * 320 + x] == 3).expect("knob drawn")
+            (0..320).find(|&x| img.pixels[48 * 320 + x] == 3).expect("knob drawn")
         };
         assert_eq!(knob_x(&m, &s), 284, "viewsize 110, slop's start: r = 80/90 -> 220 + 64");
         s.cvars.set_viewsize(100.0);
@@ -4461,8 +4410,8 @@ mod tests {
         assert!((s.cvars.gamma - GAMMA_DEFAULT).abs() < 1e-6 && s.cvars.always_run() && s.binds.command(b'j').is_none());
         assert_eq!((m.screen(), m.cursor(), m.visible), (MenuScreen::Options, ROW_RESET_SLOP, true), "Options, on its row");
 
-        // Reset to Classic, the 15th row: asks; yes is every slop option
-        // Classic's, the keys and id's Options kept.
+        // Reset to Classic, the row above: asks; yes is everything
+        // Classic's, the keys and id's Options too.
         s.cvars.sensitivity = 7.0;
         s.binds.bind(b'j', BIND_JUMP);
         m.set_cursor(ROW_RESET_CLASSIC);
@@ -4472,11 +4421,9 @@ mod tests {
         assert_eq!((m.asking(), s.preset), (None, Preset::Slop));
         m.select(&mut s);
         assert_eq!(m.modal_key(b'y', &mut s), MenuAction::Reset);
-        let mut want = Settings::new(Preset::Classic, Machine::default());
-        want.cvars.sensitivity = 7.0;
-        want.binds.bind(b'j', BIND_JUMP);
-        assert_eq!(s, want, "Classic, the keys and Mouse Speed as the player left them");
-        assert_eq!(s.standing().word(), "classic");
+        assert_eq!(s, Settings::new(Preset::Classic, Machine::default()), "everything Classic's, Mouse Speed and the keys too");
+        assert!((s.cvars.sensitivity - SENS_DEFAULT).abs() < 1e-6 && s.binds.command(b'j').is_none());
+        assert_eq!((ROW_RESET_CLASSIC, ROW_RESET_SLOP), (OPTIONS_ITEMS - 2, OPTIONS_ITEMS - 1), "the resets are last");
 
         // Customize controls opens the Keys screen (M_Menu_Keys_f); Escape
         // returns to Options (M_Keys_Key K_ESCAPE -> M_Menu_Options_f).
@@ -4527,12 +4474,12 @@ mod tests {
     }
 
     #[test]
-    fn slop_options_shows_the_standing_and_opens_each_page() {
+    fn slop_options_opens_each_page() {
         let (mut m, mut s) = (Menu::new(), Settings::new(Preset::Classic, Machine::default()));
         m.open();
         m.set_cursor(2);
         m.select(&mut s); // -> Options
-        // Options' 14th row: left and right change nothing (menu3, as
+        // Options' Slop Options row: left and right change nothing (menu3, as
         // M_AdjustSliders on an action row); Enter opens Slop Options.
         m.set_cursor(ROW_SLOP_OPTIONS);
         m.take_sounds();
@@ -4590,7 +4537,7 @@ mod tests {
             let base = c.get(&s.cvars);
             let (other, other_word) = if base == "0" { ("1", "on") } else { ("0", "off") };
             m.adjust(1, &mut s);
-            assert_eq!((c.get(&s.cvars).as_str(), row.value(&s, PICTURE).as_str()), (other, other_word), "right flips {}", row.cvar);
+            assert_eq!((c.get(&s.cvars).as_str(), row.value(&s).as_str()), (other, other_word), "right flips {}", row.cvar);
             m.adjust(1, &mut s);
             assert_eq!(c.get(&s.cvars), base, "the direction is ignored");
             m.adjust(-1, &mut s);
@@ -4603,26 +4550,13 @@ mod tests {
         }
         assert_eq!(s, Settings::new(Preset::Classic, Machine::default()));
 
-        // The Resolution row: the size the game draws at; left and right
-        // change nothing; Enter opens Video Options, the one place it is
-        // chosen, and Escape comes back to the row.
-        let res = on_row(&mut m, "vid_native");
-        assert_eq!((row_of("vid_native"), res.kind), ((SlopPage::Picture, 1), RowKind::Resolution));
-        m.sync_resolution(960, 600, false, false, NO_SIZES);
-        assert_eq!(res.value(&s, m.actual_size()), "960x600", "Classic: the mode");
-        m.adjust(-1, &mut s);
-        m.adjust(1, &mut s);
-        assert_eq!((s.clone(), m.take_sounds()), (Settings::new(Preset::Classic, Machine::default()), vec![MenuSound::Menu3; 2]));
-        assert_eq!(m.select(&mut s), MenuAction::None);
-        assert_eq!((m.screen(), m.cursor()), (MenuScreen::Video, 4), "Video Options, on the live mode");
-        assert_eq!(m.cancel(), MenuAction::Back);
-        assert_eq!((m.screen(), m.cursor()), (MenuScreen::SlopPage(SlopPage::Picture), 1), "back on the Resolution row");
-        assert_eq!(res.console_hint(), "console: vid_native, vid_pixelsize");
-        m.take_sounds();
+        // No Resolution row: the picture's size is chosen in Video Options
+        // alone, id's own screen for it.
+        assert!(page_rows().all(|(_, _, r)| r.cvar != "vid_native" && r.cvar != "vid_pixelsize"));
         // The crosshair steps the same way: off, the cross, id's +, wrapping.
         let crosshair = on_row(&mut m, "crosshair");
-        assert_eq!(crosshair.value(&s, PICTURE), "off");
-        let steps: Vec<String> = (0..4).map(|_| { m.adjust(1, &mut s); crosshair.value(&s, PICTURE) }).collect();
+        assert_eq!(crosshair.value(&s), "off");
+        let steps: Vec<String> = (0..4).map(|_| { m.adjust(1, &mut s); crosshair.value(&s) }).collect();
         assert_eq!(steps, ["cross", "id's +", "off", "cross"]);
         m.adjust(-1, &mut s);
         m.adjust(-1, &mut s);
@@ -4633,12 +4567,12 @@ mod tests {
         // 4, exact, right the finer, wrapping; the console reads the span's
         // pixels.
         let span = on_row(&mut m, "r_perspspan");
-        assert_eq!((span.value(&s, PICTURE).as_str(), span.label.trim_start()), ("id's 16", "Perspective span"));
-        assert_eq!(span.value(&Settings::default(), PICTURE), "8", "slop starts at 8: id's portable C loop");
-        let steps: Vec<String> = (0..7).map(|_| { m.adjust(1, &mut s); span.value(&s, PICTURE) }).collect();
+        assert_eq!((span.value(&s).as_str(), span.label.trim_start()), ("id's 16", "Perspective span"));
+        assert_eq!(span.value(&Settings::default()), "8", "slop starts at 8: id's portable C loop");
+        let steps: Vec<String> = (0..7).map(|_| { m.adjust(1, &mut s); span.value(&s) }).collect();
         assert_eq!(steps, ["8", "4", "exact", "64", "32", "id's 16", "8"]);
         m.adjust(-1, &mut s);
-        let steps: Vec<String> = (0..3).map(|_| { m.adjust(-1, &mut s); span.value(&s, PICTURE) }).collect();
+        let steps: Vec<String> = (0..3).map(|_| { m.adjust(-1, &mut s); span.value(&s) }).collect();
         assert_eq!(steps, ["32", "64", "exact"], "left: the longer, and from 64 round to exact");
         let console = cvar::find("r_perspspan").unwrap().get(&s.cvars);
         assert_eq!((s.cvars.persp_span, console.as_str()), (PerspSpan::Exact, "1"));
@@ -4654,21 +4588,21 @@ mod tests {
         // set on the console between the steps steps to its neighbours.
         let cap = on_row(&mut m, "host_maxfps");
         assert_eq!((row_of("host_maxfps"), cap.label.trim_start()), ((SlopPage::Picture, 0), "Frame rate cap"));
-        assert_eq!(cap.value(&s, PICTURE), "id's 72");
-        assert_eq!(cap.value(&Settings::default(), PICTURE), "none");
-        let steps: Vec<String> = (0..6).map(|_| { m.adjust(1, &mut s); cap.value(&s, PICTURE) }).collect();
+        assert_eq!(cap.value(&s), "id's 72");
+        assert_eq!(cap.value(&Settings::default()), "none");
+        let steps: Vec<String> = (0..6).map(|_| { m.adjust(1, &mut s); cap.value(&s) }).collect();
         assert_eq!(steps, ["120", "144", "240", "none", "60", "id's 72"]);
         m.adjust(-1, &mut s);
         assert_eq!((s.cvars.max_fps, cvar::find("host_maxfps").unwrap().get(&s.cvars).as_str()), (FrameCap::new(60), "60"));
         m.adjust(-1, &mut s);
-        assert_eq!(cap.value(&s, PICTURE), "none", "left from 60 wraps to none");
+        assert_eq!(cap.value(&s), "none", "left from 60 wraps to none");
         cvar::find("host_maxfps").unwrap().set(&mut s.cvars, "100");
-        assert_eq!(cap.value(&s, PICTURE), "100");
+        assert_eq!(cap.value(&s), "100");
         m.adjust(1, &mut s);
-        assert_eq!(cap.value(&s, PICTURE), "120", "right of 100: 120");
+        assert_eq!(cap.value(&s), "120", "right of 100: 120");
         cvar::find("host_maxfps").unwrap().set(&mut s.cvars, "100");
         m.adjust(-1, &mut s);
-        assert_eq!(cap.value(&s, PICTURE), "id's 72", "left of 100: 72");
+        assert_eq!(cap.value(&s), "id's 72", "left of 100: 72");
         assert_eq!(cap.console_hint(), "console: host_maxfps 0 or 60-240");
         assert_eq!(m.take_sounds(), vec![MenuSound::Menu3; 10]);
 
@@ -4678,7 +4612,7 @@ mod tests {
         let torch = on_row(&mut m, "r_torchflicker");
         assert_eq!(row_of("r_torchflicker").0, SlopPage::Motion);
         assert_eq!(torch.kind, RowKind::Slider { min: 0.0, max: 2.0, step: 0.2 });
-        assert_eq!((s.cvars.torches, torch.slider(&s), torch.value(&s, PICTURE).as_str()), (TorchFlicker::OFF, Some(0.0), ""));
+        assert_eq!((s.cvars.torches, torch.slider(&s), torch.value(&s).as_str()), (TorchFlicker::OFF, Some(0.0), ""));
         m.adjust(-1, &mut s);
         assert_eq!(s.cvars.torches, TorchFlicker::OFF, "no lower than 0");
         let steps: Vec<f32> = (0..11).map(|_| { m.adjust(1, &mut s); s.cvars.torches.value() }).collect();
@@ -4700,19 +4634,19 @@ mod tests {
         // unbinds it again.
         let wheel = on_row(&mut m, "bind");
         assert_eq!((row_of("bind").0, wheel.kind), (SlopPage::Controls, RowKind::Wheel));
-        assert_eq!(wheel.value(&s, PICTURE), "off");
+        assert_eq!(wheel.value(&s), "off");
         m.adjust(-1, &mut s);
-        assert_eq!((wheel.value(&s, PICTURE).as_str(), &s.binds), ("on", &Settings::new(Preset::Slop, Machine::default()).binds));
+        assert_eq!((wheel.value(&s).as_str(), &s.binds), ("on", &Settings::new(Preset::Slop, Machine::default()).binds));
         m.select(&mut s);
-        assert_eq!((wheel.value(&s, PICTURE).as_str(), &s.binds), ("off", &Settings::new(Preset::Classic, Machine::default()).binds));
+        assert_eq!((wheel.value(&s).as_str(), &s.binds), ("off", &Settings::new(Preset::Classic, Machine::default()).binds));
         // Bound by hand, it reads "custom"; a key puts the cycle back over
         // the player's binding, the next one takes it off.
         s.binds.bind(K_MWHEELUP, BIND_JUMP);
-        assert_eq!(wheel.value(&s, PICTURE), "custom");
+        assert_eq!(wheel.value(&s), "custom");
         m.adjust(1, &mut s);
-        assert_eq!((wheel.value(&s, PICTURE).as_str(), s.binds.wheel()), ("on", Wheel::Cycle));
+        assert_eq!((wheel.value(&s).as_str(), s.binds.wheel()), ("on", Wheel::Cycle));
         m.adjust(1, &mut s);
-        assert_eq!(wheel.value(&s, PICTURE), "off");
+        assert_eq!(wheel.value(&s), "off");
         assert_eq!(wheel.console_hint(), "console: bind MWHEELUP/MWHEELDOWN");
 
         // Escape: back to Slop Options on the page's row, with m_entersound.
@@ -4758,8 +4692,8 @@ mod tests {
             assert!(!row.help[0].is_empty() && !row.help[1].is_empty(), "{}: two lines in plain words", row.label);
         }
         // Every slop option has its row, on one page and once — but the
-        // picture's size (`vid_native` and `vid_pixelsize`: one Resolution
-        // row, whose home is Video Options), the pad's layout under the
+        // picture's size (`vid_native` and `vid_pixelsize`: chosen in Video
+        // Options alone, id's screen for it), the pad's layout under the
         // Gamepad row (id's advanced configuration and the port's stick
         // shaping and menu keys, tuned on the console as id's joy* were),
         // and sv_max_edicts: there is nothing to CHOOSE (raising the edict
@@ -4769,13 +4703,12 @@ mod tests {
         // `sv_gravity`, which also has no menu row) is the whole interface.
         let pad_layout = |n: &str| n.starts_with("joy") && n != "joystick" && n != "joy_rumble";
         let listed = |c: &&cvar::Cvar| {
-            c.departure && !pad_layout(c.name) && !crate::settings::CONSOLE_ONLY.contains(&c.name) && c.name != "vid_pixelsize"
+            c.departure && !pad_layout(c.name) && !matches!(c.name, "sv_max_edicts" | "vid_native" | "vid_pixelsize")
         };
         for c in cvar::CVARS.iter().filter(listed) {
             assert_eq!(page_rows().filter(|(_, _, r)| r.cvar == c.name).count(), 1, "{}: one row", c.name);
         }
         assert_eq!(page_rows().filter(|(_, _, r)| r.kind == RowKind::Wheel).count(), 1, "the wheel's binding: one row");
-        assert_eq!(page_rows().filter(|(_, _, r)| r.kind == RowKind::Resolution).count(), 1, "the picture's size: one row");
         assert_eq!(page_rows().count(), cvar::CVARS.iter().filter(listed).count() + 1, "and nothing else");
         // By kind: the Picture and Motion pages are the engine; Controls the
         // controls, the wheel's binding with them.
@@ -4836,36 +4769,36 @@ mod tests {
             Some((row.iter().position(|&p| p != 0)?, row.iter().rposition(|&p| p != 0)?))
         };
 
-        // Options: the port's rows are the 14th, at y=136 (the C's _WIN32
-        // row), and the 15th, at y=144, right-justified with id's labels
-        // (each ends at x=184), Slop Options' standing at x=220; row 2 is
-        // "Reset to slop".
+        // Options: id's rows from y=32 without "Reset to defaults" (Screen
+        // size on row 2, y=48), then the port's three, right-justified with
+        // id's labels (each ends at x=184): Slop Options at y=128, Reset to
+        // Classic at y=136 (the C's _WIN32 row), Reset to slop at y=144, the
+        // plaque's last. Nothing at x=220 on the three: no value, whatever
+        // the settings.
         let (mut m, mut s) = (Menu::new(), Settings::new(Preset::Classic, Machine::default()));
         m.open();
         m.set_cursor(2);
         m.select(&mut s);
-        let mut img = Image::new(320, 200, 0);
-        draw_menu(&mut img, &m, &s, &pics, Some(&cc), clock(0.0, 0.0));
-        assert_eq!(px(&img, 16 + 10 * 8, 136), 5, "'S' of Slop Options, bronze, y=136");
-        assert_eq!(px(&img, 16 + 21 * 8, 136), 5, "its 's' in the last label column");
-        assert_eq!(px(&img, 220 + 6 * 8, 136), 5, "\"classic\" at x=220, bronze: the preset");
-        assert_eq!(px(&img, 16 + 6 * 8, 144), 5, "'R' of Reset to Classic, y=144");
-        assert_eq!(px(&img, 16 + 21 * 8, 144), 5, "its 'c' in the last label column");
-        assert_eq!(span(&img, 144).map(|(_, b)| b), Some(16 + 22 * 8 - 1), "and nothing at x=220");
-        assert_eq!(px(&img, 16 + 9 * 8, 48), 5, "'R' of Reset to slop, row 2");
-        s.cvars.show_fps = true;
-        let mut img = Image::new(320, 200, 0);
-        draw_menu(&mut img, &m, &s, &pics, Some(&cc), clock(0.0, 0.0));
-        assert_eq!((px(&img, 220, 136), px(&img, 220 + 5 * 8, 136)), (6, 6), "\"custom\", white: a value that differs");
+        for show_fps in [false, true] {
+            s.cvars.show_fps = show_fps;
+            let mut img = Image::new(320, 200, 0);
+            draw_menu(&mut img, &m, &s, &pics, Some(&cc), clock(0.0, 0.0));
+            assert_eq!(px(&img, 16 + 10 * 8, 128), 5, "'S' of Slop Options, bronze, y=128");
+            assert_eq!(px(&img, 16 + 6 * 8, 136), 5, "'R' of Reset to Classic, y=136");
+            assert_eq!(px(&img, 16 + 9 * 8, 144), 5, "'R' of Reset to slop, y=144");
+            for y in [128, 136, 144] {
+                assert_eq!(span(&img, y).map(|(_, b)| b), Some(16 + 22 * 8 - 1), "y={y}: the label's last column, nothing at x=220");
+            }
+            assert_eq!(px(&img, 16 + 11 * 8, 48), 5, "'S' of Screen size, row 2");
+        }
         s.cvars.show_fps = false;
 
         // Slop Options and each page, as M_Options_Draw: plaque + OPTIONS
         // title, the rows from y=32 (bronze labels, values or a slider at
         // x=220), the cursor at x=200 while the 4 Hz blink shows it; under
-        // the plaque on a page the white header at y=148, centred, then
-        // each row's three help lines from y=164, each centred on the
-        // menu's axis; on Slop Options the standing at y=148, white, and the
-        // header and two help lines two lines lower.
+        // the plaque the white header at y=148, centred, then each row's
+        // help lines from y=164 (three on a page, two on Slop Options), each
+        // centred on the menu's axis.
         m.set_cursor(ROW_SLOP_OPTIONS);
         m.select(&mut s);
         let screens = [MenuScreen::SlopOptions].into_iter().chain(SlopPage::ALL.map(MenuScreen::SlopPage));
@@ -4890,14 +4823,7 @@ mod tests {
                     assert_eq!(px(&img, 220, y), at_220, "{screen:?} row {i} at x=220");
                 }
                 assert_eq!(px(&img, 200, 32 + r * 8), 7, "{screen:?}: the cursor on row {r} at x=200");
-                let notes = if screen == MenuScreen::SlopOptions {
-                    // "Your settings are the Classic preset", 36 columns: 16..304.
-                    assert_eq!(span(&img, 148), Some((16, 16 + 36 * 8 - 1)), "the standing, centred");
-                    assert_eq!(px(&img, 16, 148), 6, "the standing is M_PrintWhite");
-                    164
-                } else {
-                    148
-                };
+                let notes = 148;
                 // "Not in id's Quake", 17 columns: (320 - 136)/2 = 92.
                 assert_eq!(span(&img, notes), Some((92, 92 + 17 * 8 - 1)), "{screen:?}: the header, centred");
                 assert_eq!(px(&img, 92, notes), 6, "the header is M_PrintWhite");
@@ -4959,35 +4885,32 @@ mod tests {
         let mut img = Image::new(320, 200, 0);
         draw_menu(&mut img, &m, &s, &pics, Some(&cc), clock(0.0, 0.3));
         assert_eq!(px(&img, 220 + 16, 32 + fov * 8), 0, "\"on\" is two");
-        assert_eq!((px(&img, 220 + 16, 32), px(&img, 220 + 24, 32)), (6, 0), "\"120\" is three");
+        assert_eq!((px(&img, 220 + 16, 32), px(&img, 220 + 24, 32)), (5, 0), "\"120\" is three");
         // Without conchars only the pics draw; nothing panics.
         let mut img = Image::new(320, 200, 0);
         draw_menu(&mut img, &m, &s, &pics, None, clock(0.0, 0.3));
         assert_eq!(img.pixels[4 * 320 + 100], 8);
 
-        // White marks what differs from the preset (here Classic, with the
-        // frame rate cap and Widescreen FOV changed above, and the torches
-        // moved): the value, a slider's label, the page's row on Slop
-        // Options; and the standing counts the rows.
-        assert_eq!(s.standing().rows(), 3);
+        // Nothing is white for differing from the preset (here Classic, with
+        // the frame rate cap and Widescreen FOV changed above, and the
+        // torches moved): the values, the labels, the pages' rows, and no
+        // line under Slop Options' list but the header and the help.
+        assert!(!s.standing().is_preset());
+        let first = |row: &SettingRow| 16 + 8 * row.label.bytes().position(|b| b != b' ').unwrap();
         let mut img = Image::new(320, 200, 0);
         draw_menu(&mut img, &m, &s, &pics, Some(&cc), clock(0.0, 0.3));
-        assert_eq!((px(&img, 220, 32), px(&img, 220, 40)), (6, 5), "\"120\" white, the Resolution row bronze");
-        let first = |row: &SettingRow| 16 + 8 * row.label.bytes().position(|b| b != b' ').unwrap();
-        assert_eq!(px(&img, first(&PICTURE_ROWS[0]), 32), 5, "a value's label stays bronze");
+        assert_eq!((px(&img, 220, 32), px(&img, first(&PICTURE_ROWS[0]), 32)), (5, 5), "\"120\" and its label bronze");
         m.screen = MenuScreen::SlopPage(page);
         let mut img = Image::new(320, 200, 0);
         draw_menu(&mut img, &m, &s, &pics, Some(&cc), clock(0.0, 0.3));
-        assert_eq!(px(&img, first(&MOTION_ROWS[torch]), y), 6, "the slider's label white: its knob has no white");
+        assert_eq!(px(&img, first(&MOTION_ROWS[torch]), y), 5, "the slider's label bronze");
         m.screen = MenuScreen::SlopOptions;
+        m.set_cursor(0);
         let mut img = Image::new(320, 200, 0);
         draw_menu(&mut img, &m, &s, &pics, Some(&cc), clock(0.0, 0.3));
         let pages: Vec<u8> = SLOP_OPTIONS_ROWS.iter().enumerate().map(|(i, r)| px(&img, first(r), 32 + i * 8)).collect();
-        assert_eq!(pages, [6, 6, 5], "Picture and Motion hold a changed row, Controls none");
-        let line = s.standing().line();
-        assert_eq!(line, "Yours differ from Classic in 3 rows");
-        let x = (320 - 8 * line.len()) / 2;
-        assert_eq!(span(&img, 148), Some((x, x + 8 * line.len() - 1)), "{line}, centred");
+        assert_eq!(pages, [5, 5, 5], "every page's row bronze");
+        assert_eq!(span(&img, 148), Some((92, 92 + 17 * 8 - 1)), "the header at y=148, no line above it");
     }
 
     #[test]
@@ -5288,7 +5211,7 @@ mod tests {
         let keys = s.binds.clone();
         s.apply_preset(Preset::Classic);
         assert_eq!(s.binds, keys.without_wheel(), "Reset to Classic: his keys, but the wheel");
-        s.reset();
+        s.reset(crate::settings::Preset::Slop);
         assert_eq!(s.binds.command(b'w'), Some(BIND_FORWARD));
         assert_eq!(s.binds.command(b'x'), None, "custom binds reset too");
     }

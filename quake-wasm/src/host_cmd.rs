@@ -1236,8 +1236,9 @@ mod tests {
         assert!(s.binds.command(b'w').is_none() && !s.cvars.always_run(), "id's keys and Always Run kept");
     }
 
-    /// `preset` alone says where the settings stand: the preset, and the
-    /// rows that differ from it by their settings' names; `version` too.
+    /// `preset` alone says where the settings stand — the preset, and the
+    /// slop options that differ from it by name — the one place that does
+    /// (no menu says it); `version` too.
     #[test]
     fn preset_and_version_say_where_the_settings_stand() {
         let lines = || APP.with(|c| c.borrow().as_ref().unwrap().console.lines().map(str::to_string).collect::<Vec<_>>());
@@ -1248,9 +1249,9 @@ mod tests {
         assert_eq!(lines()[lines().len() - 2..], ["\"preset\" is \"classic\"", "Your settings are the Classic preset"]);
         run_console_line("wasm_showfps 1; crosshair 2");
         run_console_line("preset");
-        assert_eq!(lines()[lines().len() - 3..], ["\"preset\" is \"classic\"", "Yours differ from Classic in 2 rows", "  crosshair wasm_showfps"]);
+        assert_eq!(lines()[lines().len() - 3..], ["\"preset\" is \"classic\"", "Yours differ from Classic in:", "  crosshair wasm_showfps"]);
         run_console_line("version");
-        assert_eq!(lines().last().map(String::as_str), Some("quake-rs, preset classic, custom"), "as the Options row says it");
+        assert_eq!(lines().last().map(String::as_str), Some("quake-rs, preset classic, custom"));
         run_console_line("preset classic");
         run_console_line("version");
         assert_eq!(lines().last().map(String::as_str), Some("quake-rs, preset classic"));

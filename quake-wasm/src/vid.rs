@@ -615,8 +615,7 @@ mod tests {
         menu_down(); // -> 2 (Options)
         menu_select(); // enter Options (cursor on row 0 = Customize controls)
         menu_down(); // -> 1 (Go to console)
-        menu_down(); // -> 2 (Reset to slop)
-        menu_down(); // -> 3 (Screen size)
+        menu_down(); // -> 2 (Screen size)
         assert_eq!(viewsize(), 100.0, "viewsize defaults to 100");
         menu_right();
         assert_eq!(viewsize(), 110.0, "right steps viewsize +10");
