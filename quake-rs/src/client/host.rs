@@ -14,7 +14,7 @@ use crate::QError;
 /// (`CL_Disconnect`'s `S_StopAllSounds`). The walk keeps the message
 /// ([`Walk::host_error`]) for the host, which finishes the job: it drops the
 /// walk and stops the demo loop (`cls.demonum = -1`), and its console comes
-/// down over the disconnected screen. Every profile does this; it is id's.
+/// down over the disconnected screen. Every preset does this; it is id's.
 ///
 /// An error that is not a program error (the port's servers raise none
 /// mid-game) is reported the same way, with its text as the message.

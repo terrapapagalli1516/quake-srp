@@ -21,10 +21,10 @@ use crate::render::Image;
 /// `backtile` border. `VIEWSIZE_DEFAULT` is id's and `default.cfg`'s: what
 /// Classic starts at.
 pub const VIEWSIZE_DEFAULT: f32 = 100.0;
-/// Where the 2026 profile starts `viewsize`, one step past id's: the
+/// Where the slop preset starts `viewsize`, one step past id's: the
 /// inventory strip is gone and the status bar alone is drawn, so the HUD takes
-/// less of a 2026 screen ([`Cvars::modern`](crate::cvar::Cvars::modern)). The
-/// cvar is still id's own, not a `departure`; a profile switch moves it only
+/// less of a slop screen ([`Cvars::modern`](crate::cvar::Cvars::modern)). The
+/// cvar is still id's own, not a `departure`; a preset moves it only
 /// while the player has not (`Settings::set_profile`).
 pub const VIEWSIZE_MODERN: f32 = 110.0;
 pub const VIEWSIZE_MIN: f32 = 30.0;
@@ -72,7 +72,7 @@ pub enum SbarLayout {
     /// it with `backtile`.
     #[default]
     Classic,
-    /// A 2026 extra: everything id draws stays as it is — the view's
+    /// A slop extra: everything id draws stays as it is — the view's
     /// rectangle and projection (its centre, field of view and horizon; the
     /// gun and the crosshair where they were), the bar, its rows — and the
     /// world continues under the view, down to the screen's bottom, wherever
@@ -460,7 +460,7 @@ pub fn draw_centerprint(
 /// (`Con_DrawNotify`'s `(x+1)<<3`) on their first row (`v = 0`).
 const FPS_POS: (i32, i32) = (8, 0);
 
-/// EXTRA, not in id's Quake (Options > Classic / 2026 > Show FPS,
+/// EXTRA, not in id's Quake (Options > Classic / slop > Show FPS,
 /// `wasm_showfps`): the frame rate as QuakeWorld's `SCR_DrawFPS`
 /// (QW/client/screen.c) writes it — `sprintf(st, "%3d FPS", lastfps)` in
 /// white conchars (`Draw_String`) — but in the top-left corner,
@@ -495,23 +495,23 @@ pub fn notify_top(show_fps: bool) -> i32 {
 }
 
 // ---------------------------------------------------------------------------
-// The crosshair: V_RenderView's `+`, and the 2026 cross
+// The crosshair: V_RenderView's `+`, and the slop cross
 // ---------------------------------------------------------------------------
 
 /// The `crosshair` cvar (view.c): what `V_RenderView` draws at the view's
 /// centre. id's draws its conchars `+` for any non-zero value, 1:1, with the
 /// character cell's top-left corner at the centre — at 320x200 a grey `+`
 /// 7 pixels across, its crossing 4 pixels right of and 4.5 below the point
-/// the gun fires at. Blown up by the 2026 2-D layer's scale (5 at 1080p) that
+/// the gun fires at. Blown up by the slop 2-D layer's scale (5 at 1080p) that
 /// is a blocky glyph 35 pixels across, crossing 20 pixels right of the aim
-/// and 22.5 below; so the port's own cross is `1`, the 2026 default, and
+/// and 22.5 below; so the port's own cross is `1`, the slop default, and
 /// id's glyph is kept as `2`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Crosshair {
     /// `0`: none, id's default (Classic).
     #[default]
     Off,
-    /// `1`: the 2026 cross ([`CrossSize`]): four thin arms around an open
+    /// `1`: the slop cross ([`CrossSize`]): four thin arms around an open
     /// centre, [`CROSS_COLOUR`] with a one-pixel [`CROSS_OUTLINE`], sized to
     /// the frame's height.
     Cross,
@@ -546,7 +546,7 @@ impl Crosshair {
     }
 }
 
-/// The 2026 cross's arms: one of id's light colours (palette 253, the cream
+/// The slop cross's arms: one of id's light colours (palette 253, the cream
 /// white of its flames and lamps, 255 247 199). Like every 2-D colour it
 /// goes through the frame's palette, so a damage flash or a powerup tints it
 /// with the rest of the screen.
@@ -555,7 +555,7 @@ pub const CROSS_COLOUR: u8 = 253;
 /// on a bright wall as on a dark one.
 pub const CROSS_OUTLINE: u8 = 0;
 
-/// The 2026 cross's sizes in framebuffer pixels, for a frame `h` rows tall:
+/// The slop cross's sizes in framebuffer pixels, for a frame `h` rows tall:
 /// the arms' thickness, the gap between the open centre square (thickness x
 /// thickness) and each arm, and each arm's length. Each is a whole number of
 /// pixels in proportion to the frame's height — one pixel of thickness and
@@ -1010,7 +1010,7 @@ mod tests {
         for (vs, inter) in [(120.0, false), (100.0, true), (90.0, false), (50.0, false)] {
             assert_eq!(calc_refdef(320, 200, vs, inter, Overlay).below, None, "viewsize {vs}, intermission {inter}");
         }
-        // The 2026 frames: 1920x1080 at pixel size 1 (the 2-D layer at 5x, the
+        // The slop frames: 1920x1080 at pixel size 1 (the 2-D layer at 5x, the
         // bar 240 rows) and a wide frame (1315x535, 2x, 96 rows). The view is
         // id's 1312 columns at x 1 in the wide frame, 438 rows (even): under it the
         // odd row and the bar's 96.
@@ -1212,7 +1212,7 @@ mod tests {
 
     #[test]
     fn the_cross_centres_on_the_view_with_its_arms_outlined() {
-        // 1920x1080 in 2026 (the view above the 240-row bar): 2-pixel arms 8
+        // 1920x1080 in slop (the view above the 240-row bar): 2-pixel arms 8
         // long, 2 from an open 2x2 centre, symmetric about the view's centre
         // (960, 420), a pixel corner.
         let (arms, outline) = cross_pixels(1920, 1080, vr(0, 0, 1920, 840));
@@ -1303,7 +1303,7 @@ mod tests {
         assert_eq!(px(&img, 160, 79), 2, "the shadow");
         assert_eq!(img.pixels.iter().filter(|&&p| p != 0).count(), 22, "the glyph's 22 texels, 1:1");
 
-        // 2026's 2-D layer at 1600x1000 is scale 5: each texel a 5x5 block,
+        // slop's 2-D layer at 1600x1000 is scale 5: each texel a 5x5 block,
         // the upright x 795..805 about the view's centre (800, 380) and the
         // bar rows 378..383 (380.5 from 4.5 texels, rounded).
         let _g = crate::draw::Scaled2dGuard::set(true);

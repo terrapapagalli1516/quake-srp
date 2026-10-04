@@ -1,5 +1,5 @@
 //! `r_lerpmodels`: an alias model's animation blends between its frames —
-//! the port's 2026 extra, after QuakeSpasm's `r_lerpmodels`
+//! the port's slop extra, after QuakeSpasm's `r_lerpmodels`
 //! (`R_SetupAliasFrame`, r_alias.c). No id file ports here: id's client
 //! always draws the pose the entity's `frame` field names, vertex for vertex
 //! ([`LerpModels::Classic`]).

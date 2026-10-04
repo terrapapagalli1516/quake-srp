@@ -23,10 +23,10 @@
 //!   for the first click. With no clock at all (a native run on a pipe) the
 //!   loop's own frame times move it.
 //! - **Which mixer** is [`SoundMode`], the setting `snd_modern`
-//!   ([`Cvars::sound`], on in the 2026 profile), read at every mix: Classic
+//!   ([`Cvars::sound`], on in the slop preset), read at every mix: Classic
 //!   is id's mixer at id's
 //!   11025 Hz, which the worklet reconstructs at the device's rate as a
-//!   sound card's DAC and output filter did; the 2026 mixer runs at the
+//!   sound card's DAC and output filter did; the slop mixer runs at the
 //!   device's rate with [`quake_rs::snd::Fixes::ALL`]. A new mode, or a
 //!   device rate learned late, makes a new mixer; the level's placed sounds
 //!   are registered with it again.
@@ -325,7 +325,7 @@ impl Audio {
         }
         mixer.cvars.volume = volume();
 
-        // 2026 only: id's own `_snd_mixahead` (Classic, [`SoundMode::
+        // slop only: id's own `_snd_mixahead` (Classic, [`SoundMode::
         // mixahead`]) is never touched. A host frame that took
         // `host_elapsed` left the worker unable to mix for that long (it is
         // one thread: busy rendering, it cannot answer the page's AudioWake
@@ -487,7 +487,7 @@ fn print_lines(lines: Vec<String>) {
     }
 }
 
-/// 2026's `_snd_mixahead`, adapted: host plumbing around id's mixer, not a
+/// slop's `_snd_mixahead`, adapted: host plumbing around id's mixer, not a
 /// change to it ([`Mixer::samples_ahead`] is untouched; this only picks the
 /// value [`Audio::mix`] hands it for [`SoundMode::Modern`] — Classic's lead
 /// is id's fixed 0.1 s, always, [`SoundMode::mixahead`]).
@@ -602,7 +602,7 @@ mod tests {
     use crate::menu::menu_down;
     use crate::test_util::{close_menu, walk_mut};
 
-    /// The 2026 mixer (the tests start in the Classic profile).
+    /// The slop mixer (the tests start in the Classic preset).
     fn modern() {
         crate::host_cmd::execute_console_command("snd_modern 1");
     }
@@ -654,7 +654,7 @@ mod tests {
         let pcm = run_frames(&mut audio, 72, 1.0 / 72.0);
         let s = stats(&audio);
         assert_eq!(s["statics"], statics.len().to_string(), "every one registered");
-        assert_eq!(s["rate"], "48000", "the 2026 mixer at an unknown device's 48 kHz");
+        assert_eq!(s["rate"], "48000", "the slop mixer at an unknown device's 48 kHz");
         assert!(pcm.iter().any(|&v| v != 0), "the hums and ambients are painted");
         // The device's second from the first frame on, plus the mix-ahead.
         let want = 48000 * 71 / 72 + (MODERN_MIXAHEAD as f64 * 48000.0) as usize;

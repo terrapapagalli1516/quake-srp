@@ -13,7 +13,7 @@ use quake_rs::client::{cl_demo, host_cmd};
 use quake_rs::pak::Pak;
 use quake_rs::qrand::QRand;
 use quake_rs::render::{self, build_gamma_table, Console, Menu, MenuPics};
-use quake_rs::settings::{Profile, Settings};
+use quake_rs::settings::{Preset, Settings};
 use quake_rs::wad::Qpic;
 
 use crate::common::{pak, registered};
@@ -26,13 +26,13 @@ pub(crate) use quake_rs::client::{DemoPlay, Walk};
 
 const WALK_MAP: &str = "maps/e1m1.bsp";
 
-/// The profile a session starts in, before `config.cfg`: 2026. (The tests
+/// The preset a session starts in, before `config.cfg`: slop. (The tests
 /// start in Classic: most of them pin id's game, and the ones about the
-/// 2026-only engine switch to it — the controls are the shared default in
+/// slop-only engine switch to it — the controls are the shared default in
 /// both now, so a test that specifically wants id's 1996 ones, not just
-/// Classic's engine, names them: `Settings::id(Profile::Classic)`, or the
+/// Classic's engine, names them: `Settings::id(Preset::Classic)`, or the
 /// console's `idcontrols`.)
-pub(crate) const START_PROFILE: Profile = if cfg!(test) { Profile::Classic } else { Profile::Modern };
+pub(crate) const START_PRESET: Preset = if cfg!(test) { Preset::Classic } else { Preset::Slop };
 
 /// quake.rc's `startdemos demo1 demo2 demo3`: the attract loop.
 pub(crate) const QUAKE_RC_DEMOS: [&str; 3] = ["demo1", "demo2", "demo3"];
@@ -61,7 +61,7 @@ pub(crate) struct App {
     /// 0 = walk, 1 = demo.
     pub(crate) mode: u8,
     /// The session's settings: id's cvars and key bindings, with the port's
-    /// departures and the profile they came from (`quake_rs::settings`).
+    /// departures and the preset they came from (`quake_rs::settings`).
     /// The menu, the console, the input and the frame all read and change
     /// this one value; `config.cfg` keeps it.
     pub(crate) settings: Settings,
@@ -171,7 +171,7 @@ pub(crate) struct App {
     /// `std::thread::available_parallelism`; 1 without threads. The
     /// `r_threads` setting resolves against it each frame.
     pub(crate) hw_threads: usize,
-    /// The gamepad: in_win.c's joystick state and the 2026 rumble's
+    /// The gamepad: in_win.c's joystick state and the slop rumble's
     /// ([`crate::input::PadHost`]).
     pub(crate) pad: crate::input::PadHost,
     /// The mouse's records, counts and turn so far, for the page's
@@ -539,7 +539,7 @@ pub(crate) fn build_walk() -> Option<Walk> {
 pub(crate) fn build_walk_map(map: &str) -> Option<Walk> {
     let pak = pak()?;
     let mut sound = Vec::new();
-    // The live sv_max_edicts cvar (id's 600 in Classic, higher in 2026 —
+    // The live sv_max_edicts cvar (id's 600 in Classic, higher in slop —
     // crate::cvar::CVARS' `sv_max_edicts` row), sized onto the new server
     // exactly where SV_SpawnServer would size sv.edicts. ensure_app (not a
     // bare APP.with) because this runs at boot, before anything else has
@@ -590,7 +590,7 @@ pub(crate) fn ensure_app(f: impl FnOnce(&mut App)) {
                 walk: None,
                 demo: None,
                 mode: 0,
-                settings: Settings::new(START_PROFILE),
+                settings: Settings::new(START_PRESET),
                 window: None,
                 dpr: 1.0,
                 menu: Menu::new(),
@@ -813,7 +813,7 @@ mod tests {
         // real export paths the page uses.
         reset_queue();
         assert_eq!(boot(), 1); // opens the menu on Main, cursor 0
-        use_2026(); // Always Run on, WASD
+        use_slop(); // Always Run on, WASD
         menu_down();
         menu_down();
         menu_select(); // Main row 2 -> Options (cursor 0 = Customize controls)

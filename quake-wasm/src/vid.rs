@@ -10,7 +10,7 @@
 //!   `_vid_resolution` (Options > Video Options), at most 1280x800, which the
 //!   page shows in the largest 4:3 box the window fits, as a 1996 monitor
 //!   showed WinQuake's 16:10 modes (so `vid.aspect` folds the stretch in).
-//! - **Native** (`vid_native 1`, 2026): the picture fills the page's box for
+//! - **Native** (`vid_native 1`, slop): the picture fills the page's box for
 //!   it (the `Window` record, in device pixels) at the box's own aspect, with
 //!   square pixels, [`pixel_size`] device pixels to one of the picture's; the
 //!   renderer's `hires` lets it past id's 1280x1024 and Hor+ (`fov_adapt`)
@@ -25,7 +25,7 @@ use quake_rs::cvar::Cvars;
 use quake_rs::render::{self, FovMode, MipCvars, SkyScroll, TorchFlicker, VideoCvars};
 use quake_rs::server::LerpLightStyles;
 
-use crate::app::{ensure_app, App, APP, START_PROFILE};
+use crate::app::{ensure_app, App, APP, START_PRESET};
 
 /// The default (boot) render resolution. A crisp `960x600` (preset index 4 — must
 /// stay a member of [`render::RESOLUTION_PRESETS`] so the Video Options list
@@ -145,13 +145,13 @@ pub(crate) fn native(a: &App) -> bool {
 /// Point Video Options at the live picture (`Menu::sync_resolution`): the
 /// render size, [`native`] (not just `vid_native`'s cvar — a window must be
 /// known too, or there's nothing to fill natively), and whether the
-/// native-resolution rows belong in the list at all (the 2026 profile;
+/// native-resolution rows belong in the list at all (the slop preset;
 /// Classic's list is `RESOLUTION_PRESETS` alone). Every caller that used to
 /// hand `Menu::sync_resolution` the render size alone goes through this now,
 /// so the two new facts can never drift out of sync with it.
 pub(crate) fn sync_menu_resolution(a: &mut App) {
     let native = native(a);
-    let modern = a.settings.profile == quake_rs::settings::Profile::Modern;
+    let modern = a.settings.preset == quake_rs::settings::Preset::Slop;
     let (w, h) = (a.render_w as i32, a.render_h as i32);
     a.menu.sync_resolution(w, h, native, modern);
 }
@@ -167,9 +167,9 @@ pub(crate) fn apply_settings(a: &mut App) {
 }
 
 /// The checks' and the benchmark's shorthand for the picture (the
-/// `set_video` call): `modern` is the 2026 profile's — native resolution at
+/// `set_video` call): `modern` is the slop preset's — native resolution at
 /// one device pixel a pixel, Hor+, the fluid sky, the gliding light styles,
-/// the flickering torches, the profile's perspective span (8):
+/// the flickering torches, the preset's perspective span (8):
 /// `quaketool --video modern` — whose size then follows the window
 /// (`set_window`); `classic` a video mode in the 4:3 box with id's field of
 /// view, sky and light styles. Returns 1 for a known name.
@@ -182,7 +182,7 @@ pub(crate) fn set_video(name: &str) -> i32 {
     ensure_app(|a| {
         let c = &mut a.settings.cvars;
         (c.native, c.fov_adapt) = (modern, modern);
-        c.persp_span = if modern { Cvars::modern().persp_span } else { Cvars::classic().persp_span };
+        c.persp_span = if modern { Cvars::slop().persp_span } else { Cvars::classic().persp_span };
         c.sky = if modern { SkyScroll::Fluid } else { SkyScroll::Classic };
         c.lightstyles = if modern { LerpLightStyles::Smooth } else { LerpLightStyles::Classic };
         c.torches = if modern { TorchFlicker::MODERN } else { TorchFlicker::OFF };
@@ -270,9 +270,9 @@ pub(crate) fn mode_vid(w: usize, h: usize) -> Vid {
 
 /// The `viewsize` cvar (Options "Screen size", `sizeup`/`sizedown`), 30..=120.
 /// Read-only, for the page/verification harness. Before the App exists, the
-/// start profile's ([`START_PROFILE`]: 2026's one step past id's 100).
+/// start preset's ([`START_PRESET`]: slop's one step past id's 100).
 pub(crate) fn viewsize() -> f32 {
-    APP.with(|c| c.borrow().as_ref().map_or_else(|| START_PROFILE.viewsize(), |a| a.settings.cvars.viewsize))
+    APP.with(|c| c.borrow().as_ref().map_or_else(|| START_PRESET.viewsize(), |a| a.settings.cvars.viewsize))
 }
 
 /// Set the `viewsize` cvar, bounded to 30..=120 (the console's `viewsize n`).
@@ -309,7 +309,7 @@ mod tests {
     /// a fixed size is what it says; Classic ignores the window.
     #[test]
     fn native_pictures_are_whole_fractions_of_the_window() {
-        let mut c = quake_rs::cvar::Cvars::modern();
+        let mut c = quake_rs::cvar::Cvars::slop();
         let size = |c: &Cvars, win, threads| (picture_size(c, Some(win), 1.0, threads), pixel_size(c, win, 1.0, threads));
         assert_eq!(size(&c, (1920, 1080), 1), ((1920, 1080), 1));
         assert_eq!(size(&c, (2560, 1440), 1), ((1280, 720), 2), "1440p on one thread: 2x2");
@@ -325,7 +325,7 @@ mod tests {
         assert_eq!((auto_pixel_budget(0), auto_pixel_budget(3), auto_pixel_budget(4)), (AUTO_PIXEL_BUDGET, AUTO_PIXEL_BUDGET, 2 * AUTO_PIXEL_BUDGET));
     }
 
-    /// The renderer's sky follows `r_fluidsky`: off in Classic, on in 2026,
+    /// The renderer's sky follows `r_fluidsky`: off in Classic, on in slop,
     /// and `set_video`'s `modern` is `quaketool --video modern`'s, the fluid
     /// sky with the rest.
     #[test]
@@ -333,7 +333,7 @@ mod tests {
         let sky = || APP.with(|c| vid(c.borrow().as_ref().unwrap()).video.sky);
         assert_eq!(boot(), 1);
         assert_eq!(sky(), SkyScroll::Classic, "the tests start in Classic");
-        use_2026();
+        use_slop();
         assert_eq!(sky(), SkyScroll::Fluid);
         crate::host_cmd::execute_console_command("r_fluidsky 0");
         assert_eq!(sky(), SkyScroll::Classic);
@@ -344,18 +344,18 @@ mod tests {
     }
 
     /// The renderer's perspective follows `r_perspspan`: id's 16-pixel spans
-    /// in Classic, every 8 in 2026 (the user's call: at 1080p and above the
+    /// in Classic, every 8 in slop (the user's call: at 1080p and above the
     /// 16-pixel affine steps show; 8 is id's own portable-C loop), the other
     /// spans and exact when set; the old `wasm_exactpersp` sets its two ends;
     /// and `set_video`'s `modern` is `quaketool --video modern`'s, the
-    /// profile's span with the rest.
+    /// preset's span with the rest.
     #[test]
     fn the_perspective_follows_r_perspspan() {
         let span = || APP.with(|c| vid(c.borrow().as_ref().unwrap()).persp_span);
         assert_eq!(boot(), 1);
         assert_eq!(span(), PerspSpan::Spans16, "the tests start in Classic: id's spans");
-        use_2026();
-        assert_eq!(span(), PerspSpan::Spans8, "2026: id's portable C loop, every 8 pixels");
+        use_slop();
+        assert_eq!(span(), PerspSpan::Spans8, "slop: id's portable C loop, every 8 pixels");
         for (line, want) in [("r_perspspan 4", PerspSpan::Spans4), ("r_perspspan 1", PerspSpan::Exact),
                              ("r_perspspan 64", PerspSpan::Spans64), ("r_perspspan 32", PerspSpan::Spans32),
                              ("wasm_exactpersp 0", PerspSpan::Spans16), ("wasm_exactpersp 1", PerspSpan::Exact),
@@ -371,13 +371,13 @@ mod tests {
     }
 
     /// The light styles the client animates follow `r_lerplightstyles` the
-    /// same way: off in Classic, on in 2026, and in `set_video`'s `modern`.
+    /// same way: off in Classic, on in slop, and in `set_video`'s `modern`.
     #[test]
     fn the_light_styles_follow_r_lerplightstyles() {
         let lerp = || APP.with(|c| vid(c.borrow().as_ref().unwrap()).video.lightstyles);
         assert_eq!(boot(), 1);
         assert_eq!(lerp(), LerpLightStyles::Classic, "the tests start in Classic");
-        use_2026();
+        use_slop();
         assert_eq!(lerp(), LerpLightStyles::Smooth);
         crate::host_cmd::execute_console_command("r_lerplightstyles 0");
         assert_eq!(lerp(), LerpLightStyles::Classic);
@@ -388,14 +388,14 @@ mod tests {
     }
 
     /// The steady torches' flicker follows `r_torchflicker`, a strength: off
-    /// in Classic, on in 2026 and `set_video`'s `modern`, any value between 0
+    /// in Classic, on in slop and `set_video`'s `modern`, any value between 0
     /// and 2 from the console (the user tunes it by eye), read back as set.
     #[test]
     fn the_torches_follow_r_torchflicker() {
         let torches = || APP.with(|c| vid(c.borrow().as_ref().unwrap()).video.torches);
         assert_eq!(boot(), 1);
         assert_eq!(torches(), TorchFlicker::OFF, "the tests start in Classic");
-        use_2026();
+        use_slop();
         assert_eq!(torches(), TorchFlicker::MODERN);
         crate::host_cmd::execute_console_command("r_torchflicker 0.35");
         assert_eq!(torches().value(), 0.35);
@@ -416,7 +416,7 @@ mod tests {
     /// answer; a fixed pixel size is what it says everywhere.
     #[test]
     fn auto_starts_a_phone_at_two_pixels() {
-        let mut c = quake_rs::cvar::Cvars::modern();
+        let mut c = quake_rs::cvar::Cvars::slop();
         // A phone-sized landscape viewport: 880x360 CSS at 3x, 8 threads.
         assert!(phone_sized((2640, 1080), 3.0));
         assert_eq!(pixel_size(&c, (2640, 1080), 3.0, 8), 2);

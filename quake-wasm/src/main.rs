@@ -43,7 +43,7 @@
 //! | `console`   | console.c, keys.c `Key_Console`         | console toggle and typing                        |
 //! | `host_cmd`  | cmd.c `Cmd_ExecuteString`               | the console's command table, `Cvar_Command`, `bind`, `map` (the loads and cheats: `client::host_cmd`) |
 //! | `savegame`  | host_cmd.c `Host_Savegame_f`/`_Loadgame_f`, menu.c `M_ScanSaves` | save/load as `.sav` files |
-//! | `snd_dma`   | snd_win.c                               | the sound device: the client's sound calls into id's mixer (`quake_rs::snd::Mixer`), mixed ahead of the page's audio clock into `Pcm` records for its ring and AudioWorklet; the mixer follows the `snd_modern` setting (Classic: id's at 11025 Hz; 2026: the device's rate) |
+//! | `snd_dma`   | snd_win.c                               | the sound device: the client's sound calls into id's mixer (`quake_rs::snd::Mixer`), mixed ahead of the page's audio clock into `Pcm` records for its ring and AudioWorklet; the mixer follows the `snd_modern` setting (Classic: id's at 11025 Hz; slop: the device's rate) |
 //! | `vid`       | vid_win.c                               | the picture's size (a mode in a 4:3 box, or native), framebuffer, the client frames' `Vid` |
 //! | `bench`     | —                                       | `--features bench` frame-phase timers and workloads |
 //!
@@ -55,12 +55,12 @@
 //! ## Settings
 //!
 //! Every setting is in the App's [`quake_rs::settings::Settings`]: id's cvars
-//! and key bindings, and the port's departures from id's game, which two
-//! profiles switch — **2026**, the default, and **Classic**, WinQuake
-//! exactly (Options > "Classic / 2026", `profile classic|2026` on the
-//! console, `?classic` / `?2026` in the page's address). `config.cfg` in the
-//! game directory keeps the profile and whatever the player changed from
-//! it, the id way (`bind` lines and archived cvars).
+//! and key bindings, and the port's departures from id's game, its slop
+//! options, which two presets set — **slop**, the default, and **Classic**,
+//! WinQuake exactly (`preset slop|classic` on the console, `?classic` /
+//! `?2026` in the page's address). `config.cfg` in the game directory keeps
+//! the preset and whatever the player changed from it, the id way (`bind`
+//! lines and archived cvars).
 
 #![forbid(unsafe_code)]
 

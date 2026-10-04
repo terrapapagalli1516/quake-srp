@@ -58,7 +58,7 @@ const SINGLEPLAYER_ITEMS: usize = 3;
 /// 0 Customize controls, 1 Go to console, 2 Reset to defaults, 3 Screen size,
 /// 4 Brightness, 5 Mouse Speed, 6 CD Music Volume, 7 Sound Volume, 8 Always Run,
 /// 9 Invert Mouse, 10 Lookspring, 11 Lookstrafe, 12 Video Options. Row 13 is
-/// the port's "Classic / 2026" ([`ROW_PROFILE`]), in the slot the C's own
+/// the port's "Classic / slop" ([`ROW_PRESET`]), in the slot the C's own
 /// `_WIN32` build gives its 14th row ("Use Mouse", y=136, `OPTIONS_ITEMS 14`).
 const OPTIONS_ITEMS: usize = 14;
 
@@ -77,21 +77,21 @@ const ROW_INVERTMOUSE: usize = 9;
 const ROW_LOOKSPRING: usize = 10;
 const ROW_LOOKSTRAFE: usize = 11;
 const ROW_VIDEO: usize = 12;
-/// PORT ROW (not in id's Quake): "Classic / 2026", the one switch between
-/// the profiles ([`crate::settings::Profile`]). Left and right flip it, as a
+/// PORT ROW (not in id's Quake): "Classic / slop", the one switch between
+/// the presets ([`crate::settings::Preset`]). Left and right flip it, as a
 /// checkbox; Enter opens [`MenuScreen::Extras`], the hub of the settings
-/// pages: every setting the profiles switch, and the controls.
-const ROW_PROFILE: usize = 13;
+/// pages: every setting the presets switch, and the controls.
+const ROW_PRESET: usize = 13;
 
 // ---------------------------------------------------------------------------
-// The 2026 settings: a hub and three pages, every departure from id's Quake
+// The slop settings: a hub and three pages, every departure from id's Quake
 // a row
 // ---------------------------------------------------------------------------
 //
 // id's own idiom for more settings than a screen holds is a sub-page of
 // Options: Video Options (`M_Menu_Video_f`, back with Escape to Options on
-// its row). The port's settings are the same: Options > "Classic / 2026",
-// Enter, opens a hub ([`MenuScreen::Extras`]) — the profile, and a row for
+// its row). The port's settings are the same: Options > "Classic / slop",
+// Enter, opens a hub ([`MenuScreen::Extras`]) — the preset, and a row for
 // each page ([`ExtrasPage`]) — and Enter on a page's row opens the page
 // ([`MenuScreen::ExtrasPage`]); Escape goes back a screen each time, onto
 // the row it came from (every screen's cursor is kept, like id's statics).
@@ -108,9 +108,9 @@ pub enum ExtrasPage {
     /// poses, the clouds, the flickering lights and the torches
     /// ([`MOTION_ROWS`]).
     Motion,
-    /// The controls ([`CONTROLS_ROWS`]): the player's, so a profile switch
+    /// The controls ([`CONTROLS_ROWS`]): the player's, so a preset
     /// keeps them — except the wheel's weapon cycle and the touch controls,
-    /// which are departures and go with the profile.
+    /// which are departures and go with the preset.
     Controls,
 }
 
@@ -137,13 +137,13 @@ impl ExtrasPage {
 /// change it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum RowKind {
-    /// The profile: `classic` / `2026`; any key flips it.
-    Profile,
+    /// The preset: `classic` / `slop`; any key flips it.
+    Preset,
     /// A cvar that is on or off (`M_DrawCheckbox`); any key flips it.
     Toggle,
     /// `vid_pixelsize`: `auto`, then 1..=4; left and right step it.
     PixelSize,
-    /// `crosshair`: `off`, `cross` (the 2026 one), `id's +`; left and right
+    /// `crosshair`: `off`, `cross` (the slop one), `id's +`; left and right
     /// step it.
     Crosshair,
     /// `r_perspspan`: `64`, `32`, `id's 16`, `8`, `4`, `exact`
@@ -153,7 +153,7 @@ pub enum RowKind {
     /// the cvar by `step` within `min..=max`, as `M_AdjustSliders` steps
     /// Sound Volume.
     Slider { min: f32, max: f32, step: f32 },
-    /// The mouse wheel's weapon cycle, 2026's binding
+    /// The mouse wheel's weapon cycle, slop's binding
     /// ([`crate::keys::Bindings::with_wheel`]): `on`, `off`, or `custom`
     /// when the player has bound the wheel by hand ([`crate::keys::Wheel`]).
     /// Any key turns the cycle on, over a hand-made binding too, and off
@@ -169,7 +169,7 @@ pub enum RowKind {
 pub struct SettingRow {
     /// The console word that sets it: its console variable
     /// ([`crate::cvar::CVARS`]), or for a row that is none, the command —
-    /// `profile`, and `bind` for the wheel's two bindings; empty for a
+    /// `preset`, and `bind` for the wheel's two bindings; empty for a
     /// hub's page row.
     pub cvar: &'static str,
     /// Its label, right-justified to the Options label column like id's,
@@ -182,13 +182,13 @@ pub struct SettingRow {
     pub kind: RowKind,
 }
 
-/// The hub's rows: the profile, then a row for each page.
+/// The hub's rows: the preset, then a row for each page.
 pub const EXTRAS_HUB_ROWS: [SettingRow; 4] = [
     SettingRow {
-        cvar: "profile",
-        label: "               Profile",
-        help: ["Classic: id's WinQuake engine,", "2026: the port's. Controls: both"],
-        kind: RowKind::Profile,
+        cvar: "preset",
+        label: "                Preset",
+        help: ["Classic: id's WinQuake engine,", "slop: the port's. Controls: both"],
+        kind: RowKind::Preset,
     },
     SettingRow {
         cvar: "",
@@ -276,7 +276,7 @@ pub const PICTURE_ROWS: [SettingRow; 10] = [
 
 /// `r_torchflicker`'s slider: 0 (id's steady torches) to
 /// [`crate::render::TorchFlicker::MAX`], a tenth of the range a step as id's
-/// volume sliders step theirs, so 2026's 1 sits in the middle.
+/// volume sliders step theirs, so slop's 1 sits in the middle.
 const TORCH_SLIDER: RowKind = RowKind::Slider { min: 0.0, max: crate::render::TorchFlicker::MAX, step: 0.2 };
 
 /// [`ExtrasPage::Motion`]'s rows: the models, then the sky and the light.
@@ -315,7 +315,7 @@ pub const MOTION_ROWS: [SettingRow; 5] = [
 
 /// [`ExtrasPage::Controls`]'s rows: the mouse and keys, the pad, the touch
 /// screen. Every one but the wheel and the touch controls is a shared
-/// control, on in both profiles by default and kept by a profile switch
+/// control, on in both presets by default and kept by a preset
 /// (`quake_rs::settings`' module docs say why); still switched here like
 /// any other row.
 pub const CONTROLS_ROWS: [SettingRow; 7] = [
@@ -368,7 +368,7 @@ impl SettingRow {
     /// knob there, and for a page row).
     pub fn value(&self, s: &Settings) -> String {
         match self.kind {
-            RowKind::Profile => s.profile.name().to_string(),
+            RowKind::Preset => s.preset.name().to_string(),
             RowKind::PixelSize => match s.cvars.pixel_size {
                 0 => "auto".to_string(),
                 n => n.to_string(),
@@ -407,14 +407,14 @@ impl SettingRow {
     }
 
     /// Left (`step` -1) or right (+1) on it, as `M_AdjustSliders` does a
-    /// checkbox or a slider: a profile, a toggle or the wheel flips whatever
+    /// checkbox or a slider: a preset, a toggle or the wheel flips whatever
     /// the direction, the pixel size steps (auto, 1, 2, 3, 4, wrapping), and
     /// so do the crosshair (off, cross, id's +) and the perspective span
     /// (id's 16, 8, 4, exact); a slider steps, clamped at its ends as id's
     /// are; a page row changes nothing.
     pub fn adjust(&self, s: &mut Settings, step: i32) {
         match self.kind {
-            RowKind::Profile => s.set_profile(s.profile.toggled()),
+            RowKind::Preset => s.apply_preset(s.preset.toggled()),
             RowKind::PixelSize => {
                 let n = i32::from(PIXEL_SIZE_MAX) + 1;
                 s.cvars.pixel_size = (i32::from(s.cvars.pixel_size) + step).rem_euclid(n) as u8;
@@ -451,7 +451,7 @@ impl SettingRow {
     /// Its console line, the third help line (none for a page row).
     pub fn console_hint(&self) -> String {
         match self.kind {
-            RowKind::Profile => "console: profile classic|2026".to_string(),
+            RowKind::Preset => "console: preset slop|classic".to_string(),
             RowKind::PixelSize => format!("console: {} 0-{PIXEL_SIZE_MAX}", self.cvar),
             RowKind::Crosshair => format!("console: {} 0/1/2", self.cvar),
             RowKind::PerspSpan => format!("console: {} 64/32/16/8/4/1", self.cvar),
@@ -538,7 +538,7 @@ pub const RESOLUTION_PRESETS: [(i32, i32); 7] = [
 /// when they show ([`Menu::native_rows_shown`]): Auto, then the whole pixel
 /// sizes 1..=[`PIXEL_SIZE_MAX`] — one row per value `vid_pixelsize` takes,
 /// the row's offset from [`RESOLUTION_PRESETS`]'s end IS the value (0 =
-/// Auto). The 2026 profile's own "native resolution" extra (AUDIT.md), off
+/// Auto). The slop preset's own "native resolution" extra (AUDIT.md), off
 /// in Classic: a departure from id's `VID_MenuDraw`, which has no such rows.
 const NATIVE_ROWS: usize = PIXEL_SIZE_MAX as usize + 1;
 
@@ -677,7 +677,7 @@ pub enum MenuScreen {
     /// The video-modes screen (`m_video`): this port's mode list is
     /// [`RESOLUTION_PRESETS`]; cursor + Enter applies a mode
     /// ([`MenuAction::ResolutionChanged`]), like `VID_MenuKey`'s K_ENTER
-    /// `VID_SetMode` (vid_win.c). In 2026 ([`Menu::native_rows_shown`]) the
+    /// `VID_SetMode` (vid_win.c). In slop ([`Menu::native_rows_shown`]) the
     /// native-resolution rows follow the presets ([`NATIVE_ROWS`]), honestly
     /// marking whichever is actually showing and letting Enter switch
     /// between them; off in Classic, where this screen is `VID_MenuDraw`'s
@@ -688,10 +688,10 @@ pub enum MenuScreen {
     Help,
     /// The Quit confirmation prompt (`m_quit`): "Are you sure you want to quit?".
     Quit,
-    /// PORT SCREEN (not in id's Quake): Options > Classic / 2026, Enter: the
-    /// settings hub ([`EXTRAS_HUB_ROWS`]) — the profile, and a row for each
+    /// PORT SCREEN (not in id's Quake): Options > Classic / slop, Enter: the
+    /// settings hub ([`EXTRAS_HUB_ROWS`]) — the preset, and a row for each
     /// [`ExtrasPage`] — drawn in `M_Options_Draw`'s idiom. Left/right/Enter
-    /// flip the profile; Enter on a page's row opens it, as Options' Video
+    /// flip the preset; Enter on a page's row opens it, as Options' Video
     /// Options row opens its screen; Escape returns to Options on its row.
     Extras,
     /// PORT SCREEN: a settings page, opened from the hub: its rows
@@ -816,7 +816,7 @@ pub enum MenuAction {
     /// Enter on a Video Options row: a fixed mode (`VID_MenuKey` K_ENTER ->
     /// `VID_SetMode`) and the host must reallocate its framebuffer to
     /// [`Menu::resolution`]; one of the port's own native-resolution rows
-    /// (2026 only) and the host must instead recompute the picture from the
+    /// (slop only) and the host must instead recompute the picture from the
     /// window and pixel size (`vid_native`/`vid_pixelsize` are now set, but
     /// there is no stored mode to reallocate to).
     ResolutionChanged,
@@ -925,7 +925,7 @@ pub struct Menu {
     /// Options row (a native one, or the matching fixed mode) is current.
     actual_native: bool,
     /// Whether the native-resolution rows belong in the Video Options list at
-    /// all: the 2026 profile (`sync_resolution`'s `modern`). Off (Classic),
+    /// all: the slop preset (`sync_resolution`'s `modern`). Off (Classic),
     /// the list is [`RESOLUTION_PRESETS`] alone, `VID_MenuDraw` unchanged —
     /// native resolution doesn't exist there to show or pick.
     native_rows: bool,
@@ -1303,12 +1303,12 @@ impl Menu {
     ///   to `M_AdjustSliders(1)`).
     /// * Keys > row: start the bind grab (`bind_grab`), unbinding first when the
     ///   row already shows two keys (`M_Keys_Key` K_ENTER).
-    /// * Video > row: apply the highlighted preset, or (2026 only) turn
+    /// * Video > row: apply the highlighted preset, or (slop only) turn
     ///   native resolution back on at the highlighted pixel size
     ///   ([`MenuAction::ResolutionChanged`]).
-    /// * Options > Classic / 2026 (port row): the settings hub; there, a
+    /// * Options > Classic / slop (port row): the settings hub; there, a
     ///   page's row opens the page (menu2, as Video Options opens), and the
-    ///   profile row or a page's row changes it (menu2 + menu3, like an
+    ///   preset row or a page's row changes it (menu2 + menu3, like an
     ///   Options checkbox).
     /// * Help and the Quit prompt: Enter is inert ([`MenuAction::None`]; only
     ///   y/Y answers the prompt, [`Menu::keydown`]).
@@ -1435,7 +1435,7 @@ impl Menu {
                     // `Cursors::video`; kept on later ones, clamped to
                     // however many rows the list has NOW, since the native
                     // rows can appear or disappear between visits as the
-                    // profile changes).
+                    // preset changes).
                     self.snd(MenuSound::Menu2);
                     self.screen = MenuScreen::Video;
                     let rows = self.video_rows();
@@ -1447,7 +1447,7 @@ impl Menu {
                     self.set_cursor(line);
                     MenuAction::None
                 }
-                ROW_PROFILE => {
+                ROW_PRESET => {
                     // PORT ROW: open the settings hub, entered like
                     // M_Menu_Video_f (m_entersound), on its own kept cursor.
                     self.snd(MenuSound::Menu2);
@@ -1946,8 +1946,8 @@ impl Menu {
             }
             ROW_LOOKSPRING => c.lookspring = !c.lookspring,
             ROW_LOOKSTRAFE => c.lookstrafe = !c.lookstrafe,
-            // PORT ROW: the profile flips, whatever the direction.
-            ROW_PROFILE => s.set_profile(s.profile.toggled()),
+            // PORT ROW: the preset flips, whatever the direction.
+            ROW_PRESET => s.apply_preset(s.preset.toggled()),
             // Action rows (Customize / Console / Defaults / Video): not adjustable.
             _ => {}
         }
@@ -2007,7 +2007,7 @@ impl Menu {
     /// mode marked current); `native` says this frame is genuinely native
     /// resolution (the host's `vid::native`, which also needs a known window
     /// — not just `vid_native`'s cvar: [`Menu::actual_native`]); `modern`
-    /// says the native rows belong in the list at all — the 2026 profile
+    /// says the native rows belong in the list at all — the slop preset
     /// ([`Menu::native_rows_shown`]; Classic's list is `RESOLUTION_PRESETS`
     /// alone, unchanged). The host calls this every frame (`vid::apply_settings`)
     /// and at every reset point, so the list can never desync from reality —
@@ -2603,7 +2603,7 @@ const OPTIONS_LABELS: [&str; OPTIONS_ITEMS] = [
     "            Lookspring",
     "            Lookstrafe",
     "         Video Options",
-    "        Classic / 2026",
+    "        Classic / slop",
 ];
 
 /// The slider on Options row `row` (`M_Options_Draw`'s `r` for each
@@ -2679,9 +2679,9 @@ fn draw_options_screen(
             // M_DrawCheckbox: M_Print (x, y, "on" / "off").
             m_print(image, cc, OPTIONS_WIDGET_X, ry, checkbox_text(on), scale, ox, oy);
         }
-        // PORT ROW: the profile, printed as a checkbox's value is.
-        let ry = OPTIONS_ROW_Y0 + ROW_PROFILE as f32 * OPTIONS_ROW_STEP;
-        m_print(image, cc, OPTIONS_WIDGET_X, ry, settings.profile.name(), scale, ox, oy);
+        // PORT ROW: the preset, printed as a checkbox's value is.
+        let ry = OPTIONS_ROW_Y0 + ROW_PRESET as f32 * OPTIONS_ROW_STEP;
+        m_print(image, cc, OPTIONS_WIDGET_X, ry, settings.preset.name(), scale, ox, oy);
 
         // The flashing cursor: M_DrawCharacter(200, 32 + cursor*8, 12 + (blink)).
         let cy = OPTIONS_ROW_Y0 + menu.cursor() as f32 * OPTIONS_ROW_STEP;
@@ -3014,7 +3014,7 @@ fn draw_keys_screen(
 /// Single column — the C's 3-wide grid exists to fit 15+ DOS modes; 7 presets
 /// fit one column.
 ///
-/// **2026 only** ([`Menu::native_rows_shown`]; off in Classic, where this
+/// **slop only** ([`Menu::native_rows_shown`]; off in Classic, where this
 /// draws exactly as above and nothing else — `VID_MenuDraw` unchanged):
 /// [`NATIVE_ROWS`] more rows follow the presets — Auto, then pixel sizes
 /// 1..=[`PIXEL_SIZE_MAX`] — so the screen can be honest about what native
@@ -3206,7 +3206,7 @@ mod tests {
     use super::*;
     use crate::cvar::Cvars;
     use crate::screen::VIEWSIZE_DEFAULT;
-    use crate::settings::{Profile, Settings};
+    use crate::settings::{Preset, Settings};
 
     /// default.cfg's `sensitivity 3`, `volume 0.7`, `gamma 1.0`.
     const SENS_DEFAULT: f32 = 3.0;
@@ -3271,12 +3271,12 @@ mod tests {
         m.cancel();
         // The settings hub and its pages: each its own cursor, kept like
         // options_cursor; Escape from a page lands on its row of the hub.
-        m.move_cursor(-1); // row 0 -> 13, Classic / 2026
+        m.move_cursor(-1); // row 0 -> 13, Classic / slop
         m.select(&mut s);
         assert_eq!((m.screen(), m.cursor()), (MenuScreen::Extras, 0));
         m.move_cursor(1);
         m.cancel();
-        assert_eq!((m.screen(), m.cursor()), (MenuScreen::Options, ROW_PROFILE));
+        assert_eq!((m.screen(), m.cursor()), (MenuScreen::Options, ROW_PRESET));
         m.select(&mut s);
         assert_eq!(m.cursor(), 1, "the hub's cursor kept");
         m.select(&mut s);
@@ -3470,7 +3470,7 @@ mod tests {
             m.keydown(K_DOWNARROW, None, &mut s);
         }
         m.keydown(K_RIGHTARROW, None, &mut s);
-        assert_eq!(s.cvars.viewsize, Profile::Modern.viewsize() + VIEWSIZE_STEP);
+        assert_eq!(s.cvars.viewsize, Preset::Slop.viewsize() + VIEWSIZE_STEP);
         // Customize controls: Left moves like Up; Del unbinds; during a grab
         // every key is the grab's, Escape included.
         m.keydown(K_UPARROW, None, &mut s);
@@ -3954,7 +3954,7 @@ mod tests {
         m.select(&mut s); // -> Options
         m.set_cursor(ROW_SCREENSIZE);
         assert_eq!(m.screen(), MenuScreen::Options);
-        assert_eq!(s.cvars.viewsize, 110.0, "2026 starts one step past default.cfg's 100");
+        assert_eq!(s.cvars.viewsize, 110.0, "slop starts one step past default.cfg's 100");
         let mode = m.resolution();
         m.adjust(1, &mut s);
         assert_eq!(s.cvars.viewsize, 120.0);
@@ -3976,11 +3976,11 @@ mod tests {
         m.cancel(); // -> Main
         m.adjust(1, &mut s);
         assert_eq!(s.cvars.viewsize, 40.0, "adjust is a no-op off the Options screen");
-        // Reset to defaults: the profile's own start, 2026's here; in
+        // Reset to defaults: the preset's own start, slop's here; in
         // Classic default.cfg's `viewsize 100`.
         s.reset_defaults();
         assert_eq!(s.cvars.viewsize, 110.0);
-        let mut classic = Settings::new(Profile::Classic);
+        let mut classic = Settings::new(Preset::Classic);
         classic.cvars.viewsize = 40.0;
         classic.reset_defaults();
         assert_eq!(classic.cvars.viewsize, VIEWSIZE_DEFAULT, "default.cfg: viewsize 100");
@@ -4006,7 +4006,7 @@ mod tests {
             draw_menu(&mut img, m, s, &MenuPics::default(), Some(&conchars), clock(0.0, 0.0));
             (0..320).find(|&x| img.pixels[56 * 320 + x] == 3).expect("knob drawn")
         };
-        assert_eq!(knob_x(&m, &s), 284, "viewsize 110, 2026's start: r = 80/90 -> 220 + 64");
+        assert_eq!(knob_x(&m, &s), 284, "viewsize 110, slop's start: r = 80/90 -> 220 + 64");
         s.cvars.set_viewsize(100.0);
         assert_eq!(knob_x(&m, &s), 276, "viewsize 100, id's: r = 70/90 -> 220 + 56");
         s.cvars.set_viewsize(30.0);
@@ -4019,7 +4019,7 @@ mod tests {
     fn sizeup_sizedown_and_the_viewsize_cvar_bound_like_scr_calcrefdef() {
         let mut s = Settings::default();
         s.cvars.size_down();
-        assert_eq!(s.cvars.viewsize, 100.0, "one step down from 2026's 110 is id's 100");
+        assert_eq!(s.cvars.viewsize, 100.0, "one step down from slop's 110 is id's 100");
         s.cvars.size_up();
         assert_eq!(s.cvars.viewsize, 110.0);
         s.cvars.size_up();
@@ -4204,7 +4204,7 @@ mod tests {
     #[test]
     fn options_cursor_wraps_over_all_fourteen_rows() {
         // The cursor must visit every one of the 14 OPTIONS_ITEMS rows (id's
-        // 13 + Classic / 2026) and wrap.
+        // 13 + Classic / slop) and wrap.
         let (mut m, mut s) = (Menu::new(), Settings::default());
         m.open();
         m.set_cursor(2);
@@ -4256,7 +4256,7 @@ mod tests {
         assert!((s.cvars.bgmvolume - BGM_MAX).abs() < 1e-6);
 
         // Checkboxes toggle regardless of direction (matches the C). Always Run
-        // starts ON (the 2026 profile's); the rest start off.
+        // starts ON (the slop preset's); the rest start off.
         for (row, getter, initial) in [
             (ROW_ALWAYSRUN, Cvars::always_run as fn(&Cvars) -> bool, true),
             (ROW_INVERTMOUSE, Cvars::invert_mouse, false),
@@ -4342,7 +4342,7 @@ mod tests {
         assert!(s.cvars.volume > before, "Enter on Sound Volume nudges it up");
     }
 
-    // -- the port's settings: Classic / 2026, its hub and pages --------------
+    // -- the port's settings: Classic / slop, its hub and pages --------------
 
     /// Every row of the settings pages: its page, its index there, the row.
     fn page_rows() -> impl Iterator<Item = (ExtrasPage, usize, &'static SettingRow)> {
@@ -4366,32 +4366,32 @@ mod tests {
     }
 
     #[test]
-    fn classic_2026_flips_the_profile_and_its_hub_opens_each_page() {
-        let (mut m, mut s) = (Menu::new(), Settings::new(Profile::Classic));
+    fn classic_slop_applies_the_preset_and_its_hub_opens_each_page() {
+        let (mut m, mut s) = (Menu::new(), Settings::new(Preset::Classic));
         m.open();
         m.set_cursor(2);
         m.select(&mut s); // -> Options
-        // Options' 14th row: left and right flip the profile (menu3), as a
+        // Options' 14th row: left and right flip the preset (menu3), as a
         // checkbox; Enter opens the hub.
-        m.set_cursor(ROW_PROFILE);
+        m.set_cursor(ROW_PRESET);
         m.take_sounds();
         m.adjust(-1, &mut s);
-        assert_eq!(s, Settings::new(Profile::Modern), "every departure and key to 2026's");
+        assert_eq!(s, Settings::new(Preset::Slop), "every slop option and key to slop's");
         m.adjust(1, &mut s);
-        assert_eq!(s, Settings::new(Profile::Classic), "and back: id's");
+        assert_eq!(s, Settings::new(Preset::Classic), "and back: id's");
         assert_eq!(m.take_sounds(), vec![MenuSound::Menu3; 2]);
         assert_eq!(m.select(&mut s), MenuAction::None);
-        assert_eq!((m.screen(), m.cursor()), (MenuScreen::Extras, 0), "the hub, on the profile row");
+        assert_eq!((m.screen(), m.cursor()), (MenuScreen::Extras, 0), "the hub, on the preset row");
         assert_eq!(m.take_sounds(), vec![MenuSound::Menu2], "entered with m_entersound");
 
-        // The hub's profile row is the Options row's switch: any direction,
+        // The hub's preset row is the Options row's switch: any direction,
         // and Enter (menu2 + menu3, an Options checkbox row's).
         m.adjust(1, &mut s);
-        assert_eq!((s.profile, s.cvars.pixel_size), (Profile::Modern, 0), "2026, its pixel size");
+        assert_eq!((s.preset, s.cvars.pixel_size), (Preset::Slop, 0), "slop, its pixel size");
         m.select(&mut s);
-        assert_eq!(s, Settings::new(Profile::Classic));
+        assert_eq!(s, Settings::new(Preset::Classic));
         assert_eq!(m.take_sounds(), vec![MenuSound::Menu3, MenuSound::Menu2, MenuSound::Menu3]);
-        assert_eq!(EXTRAS_HUB_ROWS[0].console_hint(), "console: profile classic|2026");
+        assert_eq!(EXTRAS_HUB_ROWS[0].console_hint(), "console: preset slop|classic");
 
         // A row per page: left and right change nothing (menu3, as on id's
         // Video Options row); Enter opens the page (menu2) on its own
@@ -4402,11 +4402,11 @@ mod tests {
             m.set_cursor(1 + i);
             m.adjust(-1, &mut s);
             m.adjust(1, &mut s);
-            assert_eq!(s, Settings::new(Profile::Classic), "{page:?}: left and right change nothing");
+            assert_eq!(s, Settings::new(Preset::Classic), "{page:?}: left and right change nothing");
             assert_eq!(m.take_sounds(), vec![MenuSound::Menu3; 2]);
             assert_eq!(m.select(&mut s), MenuAction::None);
             assert_eq!((m.screen(), m.cursor()), (MenuScreen::ExtrasPage(page), 0));
-            assert_eq!(s, Settings::new(Profile::Classic), "{page:?}: opening it changes nothing");
+            assert_eq!(s, Settings::new(Preset::Classic), "{page:?}: opening it changes nothing");
             assert_eq!(m.take_sounds(), vec![MenuSound::Menu2]);
             m.move_cursor(-1);
             assert_eq!(m.cursor(), page.rows().len() - 1, "{page:?}: up from the top wraps to the last row");
@@ -4420,12 +4420,12 @@ mod tests {
         m.move_cursor(1);
         assert_eq!(m.cursor(), 0, "the hub wraps too");
         assert_eq!(m.cancel(), MenuAction::Back);
-        assert_eq!((m.screen(), m.cursor()), (MenuScreen::Options, ROW_PROFILE), "Escape: Options, on its row");
+        assert_eq!((m.screen(), m.cursor()), (MenuScreen::Options, ROW_PRESET), "Escape: Options, on its row");
     }
 
     #[test]
     fn each_settings_row_changes_its_setting() {
-        let (mut m, mut s) = (Menu::new(), Settings::new(Profile::Classic));
+        let (mut m, mut s) = (Menu::new(), Settings::new(Preset::Classic));
         m.open();
         // Each toggle row flips its cvar whatever the direction; Enter too,
         // with menu2 + menu3 like an Options checkbox row. Most rows are
@@ -4449,7 +4449,7 @@ mod tests {
             assert_eq!(m.take_sounds(), vec![MenuSound::Menu2, MenuSound::Menu3]);
             assert_eq!(row.console_hint(), format!("console: {} 0/1", row.cvar));
         }
-        assert_eq!(s, Settings::new(Profile::Classic));
+        assert_eq!(s, Settings::new(Preset::Classic));
 
         // The pixel size steps: auto, 1..4, and wraps.
         let pixel = on_row(&mut m, "vid_pixelsize");
@@ -4470,12 +4470,12 @@ mod tests {
         let console = cvar::find("crosshair").unwrap().get(&s.cvars);
         assert_eq!((s.cvars.crosshair, console.as_str()), (Crosshair::Glyph, "2"), "left wraps to id's +");
         assert_eq!(crosshair.console_hint(), "console: crosshair 0/1/2");
-        // And the perspective span: 64, 32, id's 16 (Classic's), 8 (2026's),
+        // And the perspective span: 64, 32, id's 16 (Classic's), 8 (slop's),
         // 4, exact, right the finer, wrapping; the console reads the span's
         // pixels.
         let span = on_row(&mut m, "r_perspspan");
         assert_eq!((span.value(&s).as_str(), span.label.trim_start()), ("id's 16", "Perspective span"));
-        assert_eq!(span.value(&Settings::default()), "8", "2026 starts at 8: id's portable C loop");
+        assert_eq!(span.value(&Settings::default()), "8", "slop starts at 8: id's portable C loop");
         let steps: Vec<String> = (0..7).map(|_| { m.adjust(1, &mut s); span.value(&s) }).collect();
         assert_eq!(steps, ["8", "4", "exact", "64", "32", "id's 16", "8"]);
         m.adjust(-1, &mut s);
@@ -4492,7 +4492,7 @@ mod tests {
 
         // The torch flicker: a slider (M_DrawSlider's knob), 0 to 2 by a
         // tenth of its range, clamped at its ends as id's sliders are;
-        // Classic's 0 at the left, 2026's 1 in the middle.
+        // Classic's 0 at the left, slop's 1 in the middle.
         let torch = on_row(&mut m, "r_torchflicker");
         assert_eq!(row_of("r_torchflicker").0, ExtrasPage::Motion);
         assert_eq!(torch.kind, RowKind::Slider { min: 0.0, max: 2.0, step: 0.2 });
@@ -4503,26 +4503,26 @@ mod tests {
         assert_eq!(steps, [0.2, 0.4, 0.6, 0.8, 1.0, 1.2, 1.4, 1.6, 1.8, 2.0, 2.0], "up to 2, no further");
         assert_eq!(torch.slider(&s), Some(1.0));
         assert_eq!(m.take_sounds(), vec![MenuSound::Menu3; 12]);
-        s.set_profile(Profile::Modern);
-        assert_eq!((s.cvars.torches, torch.slider(&s)), (TorchFlicker::MODERN, Some(0.5)), "2026: the middle");
+        s.apply_preset(Preset::Slop);
+        assert_eq!((s.cvars.torches, torch.slider(&s)), (TorchFlicker::MODERN, Some(0.5)), "slop: the middle");
         m.adjust(-1, &mut s);
         assert_eq!(s.cvars.torches.value(), 0.8);
         m.select(&mut s);
         assert_eq!(s.cvars.torches, TorchFlicker::MODERN, "Enter nudges it right, as on id's sliders");
         assert_eq!(m.take_sounds(), vec![MenuSound::Menu3, MenuSound::Menu2, MenuSound::Menu3]);
         assert_eq!(torch.console_hint(), "console: r_torchflicker 0-2");
-        s.set_profile(Profile::Classic);
+        s.apply_preset(Preset::Classic);
 
-        // Wheel weapons: 2026's binding as a row. Classic leaves the wheel
-        // unbound; any key binds the cycle (2026's bindings exactly) and
+        // Wheel weapons: slop's binding as a row. Classic leaves the wheel
+        // unbound; any key binds the cycle (slop's bindings exactly) and
         // unbinds it again.
         let wheel = on_row(&mut m, "bind");
         assert_eq!((row_of("bind").0, wheel.kind), (ExtrasPage::Controls, RowKind::Wheel));
         assert_eq!(wheel.value(&s), "off");
         m.adjust(-1, &mut s);
-        assert_eq!((wheel.value(&s).as_str(), &s.binds), ("on", &Settings::new(Profile::Modern).binds));
+        assert_eq!((wheel.value(&s).as_str(), &s.binds), ("on", &Settings::new(Preset::Slop).binds));
         m.select(&mut s);
-        assert_eq!((wheel.value(&s).as_str(), &s.binds), ("off", &Settings::new(Profile::Classic).binds));
+        assert_eq!((wheel.value(&s).as_str(), &s.binds), ("off", &Settings::new(Preset::Classic).binds));
         // Bound by hand, it reads "custom"; a key puts the cycle back over
         // the player's binding, the next one takes it off.
         s.binds.bind(K_MWHEELUP, BIND_JUMP);
@@ -4555,12 +4555,12 @@ mod tests {
     fn the_settings_pages_list_every_departure_once_by_kind() {
         // freelook, cl_jumpswim, vid_altenter, joystick and joy_rumble are
         // departures from id, but not from each other — the shared controls
-        // (`quake_rs::settings`' module docs), no longer something `profile`
+        // (`quake_rs::settings`' module docs), no longer something a preset
         // switches, but still worth a row on the Controls page.
         let shared_control = |n: &str| matches!(n, "freelook" | "cl_jumpswim" | "vid_altenter" | "joystick" | "joy_rumble");
         for row in EXTRAS_HUB_ROWS.iter().chain(page_rows().map(|(_, _, r)| r)) {
             match row.kind {
-                RowKind::Profile => assert_eq!(row.cvar, "profile"),
+                RowKind::Preset => assert_eq!(row.cvar, "preset"),
                 RowKind::Wheel => assert_eq!(row.cvar, "bind"),
                 RowKind::Page(_) => assert_eq!((row.cvar, row.console_hint().as_str()), ("", "")),
                 _ => {
@@ -4600,7 +4600,7 @@ mod tests {
         assert_eq!(page_rows().filter(|(_, _, r)| r.kind == RowKind::Wheel).count(), 1, "the wheel's binding: one row");
         assert_eq!(page_rows().count(), cvar::CVARS.iter().filter(listed).count() + 1, "and nothing else");
         // By kind: the Picture and Motion pages are the engine (departures
-        // a profile switch resets); Controls the controls (kept), with the
+        // a preset resets); Controls the controls (kept), with the
         // two that are departures (the wheel's binding, the touch controls).
         for (page, _, row) in page_rows() {
             if page == ExtrasPage::Controls {
@@ -4609,7 +4609,7 @@ mod tests {
                 assert!(cvar::find(row.cvar).is_some_and(|c| c.departure), "{}: the engine, a departure", row.cvar);
             }
         }
-        assert_eq!(MenuScreen::Extras.item_count(), 1 + ExtrasPage::ALL.len(), "the profile, a row per page");
+        assert_eq!(MenuScreen::Extras.item_count(), 1 + ExtrasPage::ALL.len(), "the preset, a row per page");
         for page in ExtrasPage::ALL {
             assert_eq!(MenuScreen::ExtrasPage(page).item_count(), page.rows().len());
             assert!(page.rows().len() <= EXTRAS_ROWS_MAX, "{page:?}: the list ends above the notes");
@@ -4655,17 +4655,17 @@ mod tests {
         };
 
         // Options: the port's row is the 14th, at y=136 (the C's _WIN32 row),
-        // right-justified with id's labels ("Classic / 2026" ends at x=184),
-        // the profile at x=220.
-        let (mut m, mut s) = (Menu::new(), Settings::new(Profile::Classic));
+        // right-justified with id's labels ("Classic / slop" ends at x=184),
+        // the preset at x=220.
+        let (mut m, mut s) = (Menu::new(), Settings::new(Preset::Classic));
         m.open();
         m.set_cursor(2);
         m.select(&mut s);
         let mut img = Image::new(320, 200, 0);
         draw_menu(&mut img, &m, &s, &pics, Some(&cc), clock(0.0, 0.0));
-        assert_eq!(OPTIONS_LABELS[ROW_PROFILE].len(), OPTIONS_LABELS[ROW_VIDEO].len());
-        assert_eq!(px(&img, 16 + 8 * 8, 136), 5, "'C' of Classic / 2026, bronze, y=136");
-        assert_eq!(px(&img, 16 + 21 * 8, 136), 5, "its '6' in the last label column");
+        assert_eq!(OPTIONS_LABELS[ROW_PRESET].len(), OPTIONS_LABELS[ROW_VIDEO].len());
+        assert_eq!(px(&img, 16 + 8 * 8, 136), 5, "'C' of Classic / slop, bronze, y=136");
+        assert_eq!(px(&img, 16 + 21 * 8, 136), 5, "its 'p' in the last label column");
         assert_eq!(px(&img, 220 + 6 * 8, 136), 5, "\"classic\" at x=220");
 
         // The hub and each page, as M_Options_Draw: plaque + OPTIONS title,
@@ -4673,7 +4673,7 @@ mod tests {
         // the cursor at x=200 while the 4 Hz blink shows it; under the
         // plaque the white header at y=148, centred, then each row's three
         // help lines from y=164, each centred on the menu's axis.
-        m.set_cursor(ROW_PROFILE);
+        m.set_cursor(ROW_PRESET);
         m.select(&mut s);
         let screens = [MenuScreen::Extras].into_iter().chain(ExtrasPage::ALL.map(MenuScreen::ExtrasPage));
         for screen in screens {
@@ -4724,7 +4724,7 @@ mod tests {
                 }
             }
         }
-        // The torch slider: 2026's 1 puts the knob in the middle of the
+        // The torch slider: slop's 1 puts the knob in the middle of the
         // trough's ten segments (220 + 72 * 0.5), the caps either side.
         let (page, torch) = row_of("r_torchflicker");
         m.screen = MenuScreen::ExtrasPage(page);
@@ -5099,7 +5099,7 @@ mod tests {
         m.select(&mut s); // Main > Options
         m.set_cursor(ROW_SCREENSIZE);
         m.adjust(-1, &mut s);
-        m.adjust(-1, &mut s); // viewsize 110 (2026's start) -> 90
+        m.adjust(-1, &mut s); // viewsize 110 (slop's start) -> 90
         m.set_cursor(ROW_BRIGHTNESS);
         m.adjust(1, &mut s); // v_gamma 1.0 -> 0.95 (RIGHT brightens: -= 0.05)
         m.set_cursor(ROW_MOUSESPEED);
@@ -5471,7 +5471,7 @@ mod tests {
         assert_eq!(menu_layout_point(1266, 585, 312.0 + 200.0, 100.0), (100.0, 50.0));
     }
 
-    // -- Video Options' native-resolution rows (2026; review: "shows 960x600
+    // -- Video Options' native-resolution rows (slop; review: "shows 960x600
     //    as current, and picking a mode silently turns Native resolution
     //    off") -------------------------------------------------------------
 
@@ -5491,7 +5491,7 @@ mod tests {
 
     #[test]
     fn video_options_opens_honest_when_the_picture_is_native() {
-        // The review's bug: in 2026 (native resolution the default), Video
+        // The review's bug: in slop (native resolution the default), Video
         // Options used to show the fixed-mode default (960x600) as current —
         // a size the screen wasn't — and Enter on a mode silently dropped
         // native resolution with no sign it had. Now: synced to a genuinely
@@ -5499,7 +5499,7 @@ mod tests {
         // 960x600), opening Video Options lands on the native row for the
         // live pixel size (Auto, Settings::default()'s), not a stale preset.
         let (mut m, mut s) = (Menu::new(), Settings::default());
-        assert_eq!(s.cvars.pixel_size, 0, "2026 defaults to Auto");
+        assert_eq!(s.cvars.pixel_size, 0, "slop defaults to Auto");
         m.sync_resolution(960, 540, true, true);
         assert_eq!(m.actual_size(), (960, 540));
         assert!(m.actual_native());
@@ -5573,8 +5573,8 @@ mod tests {
     fn classic_video_options_ignores_native_rows_even_if_native_is_on() {
         // modern=false (Classic: the host never passes it true there) keeps
         // VID_MenuDraw's plain grid even if `native` itself were somehow on —
-        // the native rows are a 2026 extra, not a reaction to the raw cvar.
-        let (mut m, mut s) = (Menu::new(), Settings::new(Profile::Classic));
+        // the native rows are a slop extra, not a reaction to the raw cvar.
+        let (mut m, mut s) = (Menu::new(), Settings::new(Preset::Classic));
         m.sync_resolution(1920, 1080, true, false);
         m.open();
         m.move_cursor(2);

@@ -15,12 +15,12 @@
 //! | [`cl_demo`]  | cl_demo.c, cl_parse.c, view.c     | `CL_PlayDemo_f`'s build, quake.rc's demo loop, [`cl_demo::demo_frame`]: the recorded stream rendered like live play |
 //! | [`cl_tent`]  | cl_tent.c, r_part.c               | temp-entity effects (explosions, impacts, their sounds), the model-flag trails |
 //! | [`cl_input`] | cl_input.c                        | [`cl_input::KeyMove`]: `CL_BaseMove`/`CL_AdjustAngles` over the held keys and bindings, the `cl_*` move cvars |
-//! | [`in_win`]   | in_win.c (the joystick)           | [`in_win::Joystick`]: a pad as winmm's joystick — `IN_Commands`' `JOY`/`AUX` keys, `IN_JoyMove`'s move and turn with the `joy*` cvars — and the 2026 pad's stick shaping, menu keys and rumble |
+//! | [`in_win`]   | in_win.c (the joystick)           | [`in_win::Joystick`]: a pad as winmm's joystick — `IN_Commands`' `JOY`/`AUX` keys, `IN_JoyMove`'s move and turn with the `joy*` cvars — and the slop pad's stick shaping, menu keys and rumble |
 //! | [`view`]     | view.c                            | `V_ParseDamage`, the damage kick, `V_BonusFlash_f`, the item get-times (the renderer's half of view.c is `render`'s) |
 //! | [`host`]     | host.c                            | `Host_FilterTime`: the 72 fps gate and the frame time it hands the game |
 //! | [`host_cmd`] | host_cmd.c                        | the level loads (`map`, changelevel, restart, a savegame's rebuild) and the cheats (god, noclip, fly, kill, give, impulse) |
-//! | [`lerpmove`] | (QuakeSpasm's `r_lerpmove`)       | the 2026 extra: monsters glide between their steps ([`lerpmove::LerpMove`]) |
-//! | [`lerpmodels`] | (QuakeSpasm's `r_lerpmodels`)  | the 2026 extra: an alias model's animation blends between frames ([`lerpmodels::LerpModels`]) |
+//! | [`lerpmove`] | (QuakeSpasm's `r_lerpmove`)       | the slop extra: monsters glide between their steps ([`lerpmove::LerpMove`]) |
+//! | [`lerpmodels`] | (QuakeSpasm's `r_lerpmodels`)  | the slop extra: an alias model's animation blends between frames ([`lerpmodels::LerpModels`]) |
 //!
 //! ## What a frame takes and gives
 //!
@@ -219,7 +219,7 @@ pub struct Walk {
     /// `cl.faceanimtime` (V_ParseDamage: `cl.time + 0.2`, on the server clock
     /// like the HUD's `time`): the status bar shows the pain face until then.
     pub faceanimtime: f32,
-    /// `V_ParseDamage`'s `count`s since the platform last took them: the 2026
+    /// `V_ParseDamage`'s `count`s since the platform last took them: the slop
     /// pad's rumble on damage ([`in_win::Rumble::damage`]). Nothing in the
     /// game reads it.
     pub damage_count: f32,
@@ -701,7 +701,7 @@ pub struct Vid {
     /// How often walls and liquids find their texel exactly
     /// ([`render::PerspSpan`]): id's 16-pixel spans (`D_DrawSpans16`) in id's
     /// Quake and in Classic, 64, 32, 8, 4, or every pixel — `r_perspspan`, exact in
-    /// the 2026 profile.
+    /// the slop preset.
     pub persp_span: render::PerspSpan,
     /// The port's video cvars (Hor+, views past id's largest mode): Classic
     /// in id's Quake.
@@ -745,7 +745,7 @@ pub fn backtile_for(
 }
 
 /// The frame's 3-D view straight into `img` at its place
-/// ([`render::Renderer::render_into`]) and — EXTRA (2026's status bar
+/// ([`render::Renderer::render_into`]) and — EXTRA (slop's status bar
 /// overlay, [`render::SbarLayout::Overlay`]), not id — the world under the
 /// view, beside the status bar: each part of
 /// [`render::Refdef::below_parts`] a window onto `scene`'s view

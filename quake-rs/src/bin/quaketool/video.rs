@@ -5,7 +5,7 @@
 //! size gives `vid.aspect`), and the scaled 2-D layer.
 //!
 //! ```text
-//! --video classic|modern   every cvar at once: id's, or the 2026 profile's: Hor+, hires,
+//! --video classic|modern   every cvar at once: id's, or the slop preset's: Hor+, hires,
 //!                          the fluid sky, the gliding light styles, the flickering
 //!                          torches and the perspective span 8 (default classic)
 //! --fov-mode classic|horplus  how `fov` meets the display's shape
@@ -56,7 +56,7 @@ impl VideoArgs {
             "--video" => {
                 (self.cvars, self.persp_span) = match val {
                     "classic" => (VideoCvars::CLASSIC, PerspSpan::Spans16),
-                    "modern" => (VideoCvars::MODERN, Cvars::modern().persp_span),
+                    "modern" => (VideoCvars::MODERN, Cvars::slop().persp_span),
                     _ => return Err(format!("--video: expected classic or modern, got {val:?}")),
                 }
             }
@@ -149,7 +149,7 @@ impl VideoArgs {
         match self.cvars {
             VideoCvars::CLASSIC => format!("classic{exact}"),
             VideoCvars::MODERN => match self.persp_span {
-                p if p == Cvars::modern().persp_span => "modern".into(),
+                p if p == Cvars::slop().persp_span => "modern".into(),
                 PerspSpan::Spans16 => "modern-spans".into(),
                 _ => format!("modern{exact}"),
             },
@@ -173,7 +173,7 @@ pub fn parse_span(val: &str) -> Result<PerspSpan, String> {
 
 /// The options as `quaketool --help` lists them (the module docs say more).
 pub const HELP: &[(&str, &str)] = &[
-    ("--video classic|modern", "every cvar at once: id's, or the 2026 profile's: Hor+, hires, fluid sky, gliding lights, torches, perspective span 8 (default classic)"),
+    ("--video classic|modern", "every cvar at once: id's, or the slop preset's: Hor+, hires, fluid sky, gliding lights, torches, perspective span 8 (default classic)"),
     ("--fov-mode classic|horplus", "how `fov` meets the display's shape"),
     ("--hires 0|1", "views past 1280x1024, particles and the warp at 320x200 proportions"),
     ("--sky classic|fluid", "the clouds in id's whole-texel steps, or gliding (`r_fluidsky`)"),
@@ -190,7 +190,7 @@ pub const HELP: &[(&str, &str)] = &[
 mod tests {
     use super::*;
 
-    /// `--video modern` is the whole 2026 set, the profile's perspective span
+    /// `--video modern` is the whole slop set, the preset's perspective span
     /// (8) with the rest (it was id's 16 until the user turned exact on,
     /// then exact until they chose 8, 2026-10-03); `--video classic` is id's;
     /// `--perspspan` (or the older `--exactpersp`, its two ends) moves it

@@ -133,7 +133,7 @@ pub struct Hud<'a> {
     pub sb_lines: i32,
     /// How the view meets the bar ([`SbarLayout`], the frame's
     /// [`calc_refdef`](crate::screen::calc_refdef) layout): id's tile-clears
-    /// the bar's sides; the 2026 overlay leaves them to the world drawn
+    /// the bar's sides; the slop overlay leaves them to the world drawn
     /// under the view (or the screen's own backtile, where none is: the same
     /// tile).
     pub sbar_layout: SbarLayout,
@@ -706,7 +706,7 @@ fn draw_sbar_inventory(
 /// The framebuffer rectangle [`draw_hud_into`]'s bar covers on a `vid_w x
 /// vid_h` frame for `sb_lines`: its 320 columns, centred as `Sbar_DrawPic`
 /// centres them, from `sb_lines` 2-D rows above the bottom (scaled with the
-/// 2-D layer) to the frame's bottom — what the 2026 overlay's world under the
+/// 2-D layer) to the frame's bottom — what the slop overlay's world under the
 /// view stays out of ([`crate::screen::Refdef::below_parts`]). `sbar`, `ibar`
 /// and `scorebar` have no transparent texel, so the bar covers all of it.
 /// `None` with no bar (`sb_lines` 0).
@@ -766,7 +766,7 @@ pub fn draw_hud_into(image: &mut Image, hud: &Hud) {
 
     // Sbar_Draw: `if (sb_lines && vid.width > 320) Draw_TileClear (0,
     // vid.height - sb_lines, vid.width, sb_lines);` — the backtile either side
-    // of the bar (and under it, where the bar pics draw over it). With the 2026
+    // of the bar (and under it, where the bar pics draw over it). With the slop
     // overlay the world under the view is there instead, and the bar's opaque
     // pics cover their own 320 columns.
     let sc = screen_2d(image.w, image.h);
@@ -1628,7 +1628,7 @@ mod tests {
     #[test]
     fn intermission_overlay_centres_on_the_scaled_2d_screen_as_the_bar_and_finale_do() {
         // Off, id's absolute coordinates: a 640x400 screen keeps the overlay
-        // in its top-left corner. On (2026), a 2-D screen wider than 320 —
+        // in its top-left corner. On (slop), a 2-D screen wider than 320 —
         // a wide 1315x535 frame at scale 2 (658 wide), and 1920x1080
         // at scale 5 (384 wide) — centres its 320 columns as Sbar_DrawPic
         // centres the bar; a 16:10 frame (320 wide) is id's placement.

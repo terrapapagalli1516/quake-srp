@@ -16,24 +16,24 @@
 //! `Cvar_WriteVariables` go through.
 //!
 //! Two kinds of field. **id's cvars**, with id's defaults (one exception:
-//! `viewsize` starts one step larger in [`Cvars::modern`], so the HUD takes
-//! less of a 2026 screen; it stays id's own cvar, and
-//! [`crate::settings::Settings::set_profile`] moves it with the profile only
+//! `viewsize` starts one step larger in [`Cvars::slop`], so the HUD takes
+//! less of a slop screen; it stays id's own cvar, and
+//! [`crate::settings::Settings::apply_preset`] moves it with the preset only
 //! while the player has not moved it). And **the port's
 //! departures** from id's game, each marked [`Cvar::departure`]
-//! ([`crate::settings::Profile`] switches them: off in [`Cvars::classic`],
-//! on in [`Cvars::modern`]) — `crosshair`, the renderer and stepping
-//! extras, the 2026 mixer, the bigger edict pool.
+//! ([`crate::settings::Preset`] switches them: off in [`Cvars::classic`],
+//! on in [`Cvars::slop`]) — `crosshair`, the renderer and stepping
+//! extras, the slop mixer, the bigger edict pool.
 //!
 //! A departure can still be a *control* rather than the engine: Always Run
 //! (`cl_forwardspeed`/`cl_backspeed`), mouse look (`freelook`), the
-//! gamepad (`joystick` and in_win.c's advanced configuration, the 2026
+//! gamepad (`joystick` and in_win.c's advanced configuration, the slop
 //! pad layout), Space-swims-up (`cl_jumpswim`) and Alt+Enter
 //! (`vid_altenter`) are departures from id's own defaults, but not from
-//! each other's — they are the player's, the same whichever profile is
-//! live, and [`crate::settings::Settings::set_profile`] leaves them alone
-//! on a switch, like id's own settings (Screen size, Mouse Speed). id's
-//! 1996 ones are one explicit step away, never a profile switch:
+//! each other's — they are the player's, the same whichever preset was
+//! applied, and [`crate::settings::Settings::apply_preset`] leaves them
+//! alone, like id's own settings (Screen size, Mouse Speed). id's
+//! 1996 ones are one explicit step away, never a preset:
 //! [`Cvars::with_id_controls`], the console's `idcontrols`.
 
 use crate::client::in_win::JoyCvars;
@@ -83,8 +83,8 @@ pub struct Cvars {
     /// `lookstrafe` (cl_main.c): mouse X strafes while mouse-looking.
     pub lookstrafe: bool,
     /// `crosshair` (view.c): what `V_RenderView` draws at the view's centre
-    /// ([`Crosshair`]: 0 none, 1 the 2026 cross, 2 id's `+`). A departure:
-    /// the cross in the 2026 profile.
+    /// ([`Crosshair`]: 0 none, 1 the slop cross, 2 id's `+`). A departure:
+    /// the cross in the slop preset.
     pub crosshair: Crosshair,
     /// `_cl_name` (cl_main.c): the player's name.
     pub cl_name: String,
@@ -110,7 +110,7 @@ pub struct Cvars {
     /// `r_perspspan`: how often the walls and liquids find their texel
     /// exactly ([`PerspSpan`]): every 16 pixels and affine between, id's
     /// `D_DrawSpans16` (Classic); 64 or 32, longer, about 1996's look on a
-    /// 1080p or a phone's frame; 8, id's portable C `D_DrawSpans8` (2026);
+    /// 1080p or a phone's frame; 8, id's portable C `D_DrawSpans8` (slop);
     /// 4; or 1, exact at every pixel. The retired `wasm_exactpersp` still
     /// sets and reads it ([`RETIRED`]).
     pub persp_span: PerspSpan,
@@ -161,7 +161,7 @@ pub struct Cvars {
     /// ([`SkyScroll::Fluid`], `render::sky`) instead of `R_MakeSky`'s whole
     /// texels, eight jumps a second.
     pub sky: SkyScroll,
-    /// `snd_modern`: which of id's mixers plays ([`SoundMode`]): the 2026 one
+    /// `snd_modern`: which of id's mixers plays ([`SoundMode`]): the slop one
     /// (its faults fixed, `snd::Fixes::ALL`, at the device's rate) instead
     /// of id's as written at 11025 Hz.
     pub sound: SoundMode,
@@ -170,7 +170,7 @@ pub struct Cvars {
     /// no departure.
     pub threads: Threads,
     /// `sv_max_edicts`: the `ED_Alloc` ceiling ([`crate::vm::MAX_EDICTS`] in
-    /// Classic, where id's own 600 is also the port's; higher in 2026). A
+    /// Classic, where id's own 600 is also the port's; higher in slop). A
     /// departure, but an unusual one: it never changes anything *drawn* —
     /// id's `MAX_EDICTS` is an engine limit, not game design — only whether
     /// a map that needs more than 600 edicts can be played at all. No map of
@@ -188,7 +188,7 @@ pub struct Cvars {
     /// Nothing reads it but the touch controls, so it is no departure.
     pub touch_accel: f32,
     /// The joystick's: in_win.c's `joystick` and `joy*`, and the port's
-    /// `joy_*` (2026's pad layout, stick shaping, menu keys, rumble).
+    /// `joy_*` (slop's pad layout, stick shaping, menu keys, rumble).
     pub joy: JoyCvars,
     /// `r_lerplightstyles` (DarkPlaces' name): an animated light's brightness
     /// glides between its pattern's letters ([`LerpLightStyles::Smooth`],
@@ -259,7 +259,7 @@ impl Cvars {
         }
     }
 
-    /// The 2026 profile's: an idealized software-rendered Quake on a 2026
+    /// The slop preset's: an idealized software-rendered Quake on a 2026
     /// machine. A frame every display refresh, the window filled at native
     /// resolution in whole chunky pixels with a Hor+ field of view, the 2-D
     /// layer at id's proportions with the world on beside the status bar,
@@ -272,7 +272,7 @@ impl Cvars {
     /// Classic's because of the resolution: id's 16-pixel affine spans were a
     /// pixel or so off at 320x200, but at 1080p and above they show as a
     /// wobble along a wall seen at a grazing angle; 8 is much nearer exact
-    /// than 16 for +7-11% of the 3-D view's cost (AUDIT.md, "The profiles and
+    /// than 16 for +7-11% of the 3-D view's cost (AUDIT.md, "The presets and
     /// the departures"), and every value up to exact (1) stays one setting
     /// away. Show FPS stays off: the readout is clutter. (Always Run, mouse look, the gamepad and Space-swims-up are
     /// [`Cvars::classic`]'s too now — they are controls, not engine.) The
@@ -280,8 +280,8 @@ impl Cvars {
     /// default) — invisible on every map id or the mission packs shipped,
     /// room for bigger ones. Screen size (`viewsize`, id's own cvar) starts at
     /// [`VIEWSIZE_MODERN`], one step past id's 100: the inventory strip goes
-    /// and the status bar stays, so the HUD takes less of a 2026 screen.
-    pub fn modern() -> Cvars {
+    /// and the status bar stays, so the HUD takes less of a slop screen.
+    pub fn slop() -> Cvars {
         Cvars {
             viewsize: VIEWSIZE_MODERN,
             crosshair: Crosshair::Cross,
@@ -308,7 +308,7 @@ impl Cvars {
     /// (`freelook` off), Space does not swim (`jumpswim` off), no
     /// Alt+Enter, and id's joystick ([`JoyCvars::classic`]: `joystick` off,
     /// no advanced axis layout, id's thresholds, no dead zone, curve, menu
-    /// keys or rumble). Every *engine* field — whatever profile `self` came
+    /// keys or rumble). Every *engine* field — whatever preset `self` came
     /// from — is untouched. The explicit, one console command (`idcontrols`)
     /// back to id's controls, and what the oracle harness pins against
     /// (`quaketool play`/`sound`: [`crate::settings::Settings::id`]) so it
@@ -385,7 +385,7 @@ pub struct Cvar {
     pub name: &'static str,
     /// `config.cfg` keeps it (id's `archive`).
     pub archive: bool,
-    /// A departure from id's game: a profile sets it ([`Cvars::classic`]
+    /// A departure from id's game: a preset sets it ([`Cvars::classic`]
     /// has it off).
     pub departure: bool,
     /// One line for the console's list.
@@ -555,7 +555,7 @@ pub const CVARS: &[Cvar] = &[
     Cvar { name: "r_fluidsky", archive: true, departure: true, help: "sky clouds glide, not texel steps",
         get: |c| flag(c.sky == SkyScroll::Fluid),
         set: |c, v| c.sky = if on(v) { SkyScroll::Fluid } else { SkyScroll::Classic } },
-    Cvar { name: "snd_modern", archive: true, departure: true, help: "2026 mixer: device rate, fixes",
+    Cvar { name: "snd_modern", archive: true, departure: true, help: "slop mixer: device rate, fixes",
         get: |c| flag(c.sound == SoundMode::Modern),
         set: |c, v| c.sound = if on(v) { SoundMode::Modern } else { SoundMode::Classic } },
     Cvar { name: "r_threads", archive: true, departure: false, help: "3-D view threads, 0 auto",
@@ -596,7 +596,7 @@ const OLD_NAMES: &[(&str, &str)] = &[
 /// A cvar replaced by one that does more, kept as a view onto it: a
 /// `config.cfg` saved before the change still sets the setting, and the
 /// console still reads and sets it by the old name; but [`write_changes`],
-/// completion, the lists and the profiles know only [`CVARS`], so the next
+/// completion, the lists and the presets know only [`CVARS`], so the next
 /// save writes the new cvar alone. (A cvar merely renamed, its values as
 /// they were, is [`OLD_NAMES`]'.)
 const RETIRED: &[Cvar] = &[
@@ -604,7 +604,7 @@ const RETIRED: &[Cvar] = &[
     // ends: on is `r_perspspan 1`, off id's 16, and it reads 1 only while
     // the span is 1. A saved `wasm_exactpersp "1"` (written by a Classic
     // player who switched it on) draws exact perspective, as it did; a saved
-    // "0" (a 2026 player who switched it off) draws id's 16-pixel spans.
+    // "0" (a slop player who switched it off) draws id's 16-pixel spans.
     Cvar { name: "wasm_exactpersp", archive: false, departure: true, help: "old: 1 is r_perspspan 1, 0 is 16",
         get: |c| flag(c.persp_span == PerspSpan::Exact),
         set: |c, v| c.persp_span = if on(v) { PerspSpan::Exact } else { PerspSpan::Spans16 } },
@@ -644,59 +644,59 @@ mod tests {
 
     #[test]
     fn every_field_round_trips_through_its_console_name() {
-        let modern = Cvars::modern();
+        let slop = Cvars::slop();
         let mut c = Cvars::classic();
         for v in CVARS {
-            v.set(&mut c, &v.get(&modern));
+            v.set(&mut c, &v.get(&slop));
         }
-        assert_eq!(c, modern, "setting each cvar to the 2026 value's string gives the 2026 cvars");
+        assert_eq!(c, slop, "setting each cvar to the slop value's string gives the slop cvars");
         let names: std::collections::HashSet<_> = CVARS.iter().map(|c| c.name).collect();
         assert_eq!(names.len(), CVARS.len(), "no name twice");
     }
 
     #[test]
     fn the_profiles_differ_only_in_departures_and_the_screen_size() {
-        let (id, modern) = (Cvars::classic(), Cvars::modern());
+        let (id, slop) = (Cvars::classic(), Cvars::slop());
         for c in CVARS {
-            if c.get(&id) != c.get(&modern) {
+            if c.get(&id) != c.get(&slop) {
                 // Screen size is id's own cvar, started one step larger in
-                // 2026: not a departure (a profile switch keeps the
-                // player's own value, `Settings::set_profile`).
-                assert!(c.departure || c.name == "viewsize", "{} differs between the profiles, so it is a departure", c.name);
+                // slop: not a departure (a preset keeps the
+                // player's own value, `Settings::apply_preset`).
+                assert!(c.departure || c.name == "viewsize", "{} differs between the presets, so it is a departure", c.name);
             }
         }
-        assert_eq!((id.viewsize, modern.viewsize), (VIEWSIZE_DEFAULT, VIEWSIZE_DEFAULT + VIEWSIZE_STEP));
-        assert_eq!(modern.viewsize, VIEWSIZE_MODERN);
+        assert_eq!((id.viewsize, slop.viewsize), (VIEWSIZE_DEFAULT, VIEWSIZE_DEFAULT + VIEWSIZE_STEP));
+        assert_eq!(slop.viewsize, VIEWSIZE_MODERN);
         assert!(!find("viewsize").unwrap().departure, "id's own cvar");
         for c in CVARS.iter().filter(|c| c.departure) {
             assert!(c.archive, "{}: a departure is kept in config.cfg", c.name);
         }
-        assert!(id.always_run() && modern.always_run(), "Always Run is a shared control, on by default in both");
+        assert!(id.always_run() && slop.always_run(), "Always Run is a shared control, on by default in both");
     }
 
     /// The controls (module docs): departures from id, but not from each
-    /// other — [`Cvars::classic`] and [`Cvars::modern`] already agree on
-    /// them, so [`crate::settings::Settings::set_profile`] (which resets
-    /// only [`Cvar::departure`] fields to the new profile's) leaves them as
+    /// other — [`Cvars::classic`] and [`Cvars::slop`] already agree on
+    /// them, so [`crate::settings::Settings::apply_preset`] (which resets
+    /// only [`Cvar::departure`] fields to the new preset's) leaves them as
     /// the player set them. [`Cvars::with_id_controls`] is the one way back
     /// to id's own.
     #[test]
-    fn the_controls_are_the_same_in_both_profiles() {
-        let (id, modern) = (Cvars::classic(), Cvars::modern());
+    fn the_controls_are_the_same_in_both_presets() {
+        let (id, slop) = (Cvars::classic(), Cvars::slop());
         for name in [
             "cl_forwardspeed", "cl_backspeed", "freelook", "cl_jumpswim", "vid_altenter", "joystick", "joy_rumble",
         ] {
             let c = find(name).unwrap();
-            assert_eq!(c.get(&id), c.get(&modern), "{name}: the same in both profiles");
+            assert_eq!(c.get(&id), c.get(&slop), "{name}: the same in both presets");
         }
-        assert_eq!(id.joy, modern.joy, "the whole gamepad layout, not just `joystick`");
-        assert_eq!(id.joy, JoyCvars::modern(), "Cvars::classic already has the 2026 pad");
+        assert_eq!(id.joy, slop.joy, "the whole gamepad layout, not just `joystick`");
+        assert_eq!(id.joy, JoyCvars::modern(), "Cvars::classic already has the slop pad");
 
         // with_id_controls touches only the controls: everything else stays
-        // whatever profile it came from.
-        let old = modern.clone().with_id_controls();
+        // whatever preset it came from.
+        let old = slop.clone().with_id_controls();
         assert!(!old.freelook && !old.jumpswim && !old.alt_enter && !old.always_run() && old.joy == JoyCvars::classic());
-        assert_eq!((old.uncapped, old.native, old.crosshair), (modern.uncapped, modern.native, modern.crosshair), "the engine is untouched");
+        assert_eq!((old.uncapped, old.native, old.crosshair), (slop.uncapped, slop.native, slop.crosshair), "the engine is untouched");
     }
 
     #[test]
@@ -731,22 +731,22 @@ mod tests {
         assert_eq!(out, "cl_forwardspeed \"200\"\ncl_backspeed \"200\"\nm_pitch \"-0.022\"\n");
     }
 
-    /// The perspective span is 2026's 8 (id's portable C), Classic's id's 16:
-    /// the departure a player changes in 2026 is the one `config.cfg` then
+    /// The perspective span is slop's 8 (id's portable C), Classic's id's 16:
+    /// the departure a player changes in slop is the one `config.cfg` then
     /// writes — exact (1) included, which is a choice now. Its values are the
     /// six spans; any other number is the longest span not longer than it,
     /// and below 1 (0, a word) id's 16. (Show FPS, the other old "extra", is
-    /// the one 2026 leaves off.)
+    /// the one slop leaves off.)
     #[test]
-    fn the_perspective_span_is_8_in_2026_and_ids_16_in_classic() {
-        let (id, modern) = (Cvars::classic(), Cvars::modern());
+    fn the_perspective_span_is_8_in_slop_and_ids_16_in_classic() {
+        let (id, slop) = (Cvars::classic(), Cvars::slop());
         let c = find("r_perspspan").expect("the cvar");
         assert!(c.departure && c.archive);
-        assert_eq!((c.get(&id), c.get(&modern)), ("16".into(), "8".into()));
-        assert_eq!(modern.persp_span, PerspSpan::Spans8, "id's own D_DrawSpans8");
+        assert_eq!((c.get(&id), c.get(&slop)), ("16".into(), "8".into()));
+        assert_eq!(slop.persp_span, PerspSpan::Spans8, "id's own D_DrawSpans8");
         let fps = find("wasm_showfps").expect("the cvar");
-        assert_eq!((fps.get(&id), fps.get(&modern)), ("0".into(), "0".into()));
-        let mut spans = Cvars::modern();
+        assert_eq!((fps.get(&id), fps.get(&slop)), ("0".into(), "0".into()));
+        let mut spans = Cvars::slop();
         for (set, now) in [("8", "8"), ("4", "4"), ("16", "16"), ("1", "1"), ("32", "32"), ("64", "64"), ("12", "8"),
                            ("40", "32"), ("100", "64"), ("5", "4"), ("2", "1"), ("0", "16"), ("junk", "16"), ("-4", "16")] {
             c.set(&mut spans, set);
@@ -754,16 +754,16 @@ mod tests {
         }
         c.set(&mut spans, "4");
         let mut out = String::new();
-        write_changes(&spans, &Cvars::modern(), &mut out);
+        write_changes(&spans, &Cvars::slop(), &mut out);
         assert_eq!(out, "r_perspspan \"4\"\n");
         c.set(&mut spans, "1");
         out.clear();
-        write_changes(&spans, &Cvars::modern(), &mut out);
-        assert_eq!(out, "r_perspspan \"1\"\n", "exact is a choice in 2026 now: written");
+        write_changes(&spans, &Cvars::slop(), &mut out);
+        assert_eq!(out, "r_perspspan \"1\"\n", "exact is a choice in slop now: written");
         c.set(&mut spans, "8");
         out.clear();
-        write_changes(&spans, &Cvars::modern(), &mut out);
-        assert_eq!(out, "", "2026's own 8 is not written: a player who never touched it gets the profile's");
+        write_changes(&spans, &Cvars::slop(), &mut out);
+        assert_eq!(out, "", "slop's own 8 is not written: a player who never touched it gets the preset's");
         assert_eq!(complete("r_persp"), Some("r_perspspan"));
     }
 
@@ -780,10 +780,10 @@ mod tests {
         let mut out = String::new();
         write_changes(&c, &Cvars::classic(), &mut out);
         assert_eq!(out, "r_perspspan \"1\"\n", "the next save writes the span");
-        let mut c = Cvars::modern();
-        assert_eq!(old.get(&c), "0", "2026's own 8 is not exact");
+        let mut c = Cvars::slop();
+        assert_eq!(old.get(&c), "0", "slop's own 8 is not exact");
         old.set(&mut c, "0");
-        assert_eq!((c.persp_span, old.get(&c).as_str()), (PerspSpan::Spans16, "0"), "a 2026 player's saved 0: id's spans, as before");
+        assert_eq!((c.persp_span, old.get(&c).as_str()), (PerspSpan::Spans16, "0"), "a slop player's saved 0: id's spans, as before");
         old.set(&mut c, "1");
         assert_eq!((c.persp_span, old.get(&c).as_str()), (PerspSpan::Exact, "1"), "a saved 1: exact");
         for (span, reads) in [(PerspSpan::Spans64, "0"), (PerspSpan::Spans32, "0"), (PerspSpan::Spans8, "0"), (PerspSpan::Spans4, "0"), (PerspSpan::Exact, "1")] {
@@ -791,18 +791,18 @@ mod tests {
             assert_eq!(old.get(&c), reads, "{span:?}");
         }
         assert_eq!(complete("wasm_ex"), None, "completion offers only the names in use");
-        assert!(CVARS.iter().all(|v| v.name != "wasm_exactpersp"), "not listed, not written, not a profile's");
+        assert!(CVARS.iter().all(|v| v.name != "wasm_exactpersp"), "not listed, not written, not a preset's");
     }
 
     #[test]
     fn an_old_name_sets_the_renamed_cvar_and_only_the_new_one_is_written() {
         let v = find("VID_FKEY").expect("a config.cfg from before the rename still finds it");
         assert_eq!(v.name, "vid_altenter");
-        let mut c = Cvars::modern();
+        let mut c = Cvars::slop();
         v.set(&mut c, "0");
         assert!(!c.alt_enter);
         let mut out = String::new();
-        write_changes(&c, &Cvars::modern(), &mut out);
+        write_changes(&c, &Cvars::slop(), &mut out);
         assert_eq!(out, "vid_altenter \"0\"\n", "the next save writes the new name");
         assert_eq!(complete("vid_f"), None, "completion offers only the names in use");
         for (old, new) in OLD_NAMES {

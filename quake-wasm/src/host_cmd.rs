@@ -6,7 +6,7 @@
 //! Help/Ordering screen), the key bindings (`bind`, `unbind`, `unbindall`),
 //! the view size, `map`, save/load, `pause`, the demo commands (cl_demo.c's
 //! `playdemo`/`timedemo`, host_cmd.c's demo loop control
-//! `startdemos`/`demos`/`stopdemo`), the port's `profile`, `idcontrols` and
+//! `startdemos`/`demos`/`stopdemo`), the port's `preset`, `idcontrols` and
 //! `wasm_help`,
 //! the cheats god/noclip/fly/kill/give/impulse, which act on the live
 //! [`Walk`](crate::app::Walk) through the client's host_cmd.c
@@ -21,7 +21,7 @@ use quake_rs::client::host_cmd::run_game_command;
 use quake_rs::cmd::{self, Args, Command};
 use quake_rs::cvar::{self, CVARS};
 use quake_rs::keys::{self, Binding};
-use quake_rs::settings::Profile;
+use quake_rs::settings::Preset;
 
 use crate::app::{build_walk_map, ensure_app, App, KeyDest};
 use crate::cl_demo::{
@@ -90,10 +90,26 @@ pub(crate) const COMMANDS: &[ConsoleCommand] = &[
     c("wait", "delay the rest of a bound key's line one frame", cmd_wait),
     c("echo", "echo <text>", cmd_echo),
     c("exec", "exec <file>  run a file's lines", cmd_exec),
-    c("profile", "profile classic|2026", cmd_profile),
+    c("preset", "preset slop|classic", cmd_preset),
     c("idcontrols", "id's 1996 bindings and control cvars", cmd_idcontrols),
     c("wasm_help", "wasm_help [name]  the lists", cmd_wasm_help),
 ];
+
+/// A renamed command's old name, and the name it has now (as
+/// `quake_rs::cvar`'s renamed cvars): a `config.cfg` saved before the rename
+/// and the page's address still run it, but completion and the lists offer
+/// only the new name.
+const OLD_COMMANDS: &[(&str, &str)] = &[
+    // The presets were "profiles" until 2026-10-03.
+    ("profile", "preset"),
+];
+
+/// `Cmd_ExecuteString`'s search: the command called `name`, or called that
+/// before it was renamed ([`OLD_COMMANDS`]).
+fn find_command(name: &str) -> Option<&'static ConsoleCommand> {
+    let name = OLD_COMMANDS.iter().find(|(old, _)| old.eq_ignore_ascii_case(name)).map_or(name, |&(_, new)| new);
+    cmd::find(COMMANDS, name)
+}
 
 /// `Cmd_CompleteCommand` then `Cvar_CompleteVariable` (cmd.c, cvar.c), what
 /// Tab in the console runs: the first command, else the first cvar, whose
@@ -140,7 +156,7 @@ pub(crate) fn execute_console_command(text: &str) {
             }
             return;
         }
-        if let Some(command) = cmd::find(COMMANDS, args.argv(0)) {
+        if let Some(command) = find_command(args.argv(0)) {
             (command.run)(&args);
         } else if !cvar_command(&args) {
             let name = args.argv(0).to_string();
@@ -274,14 +290,14 @@ fn cmd_disconnect(_: &Args) {
 }
 
 /// `Host_Version_f`: id prints `VERSION` then the EXE's build timestamp; this
-/// port has no such timestamp, so its second line names itself and the live
-/// profile instead — the same two facts [`quake_rs::console::CON_VERSION`]
+/// port has no such timestamp, so its second line names itself and the
+/// preset instead — the same two facts [`quake_rs::console::CON_VERSION`]
 /// (the console background's and the DOS end screen's stamp) and the
-/// Options > Classic/2026 page already show.
+/// Options screen already show.
 fn cmd_version(_: &Args) {
     ensure_app(|a| {
         a.console.println(format!("Version {}", quake_rs::console::CON_VERSION));
-        a.console.println(format!("quake-rs, profile {}", a.settings.profile.name()));
+        a.console.println(format!("quake-rs, preset {}", a.settings.preset.name()));
     });
 }
 
@@ -367,18 +383,21 @@ fn cmd_unbindall(_: &Args) {
     ensure_app(|a| a.settings.binds.unbind_all());
 }
 
-/// The port's `profile`: prints the profile, or switches the *engine* to
-/// `classic` (every departure off) or `2026`
-/// ([`quake_rs::settings::Settings::set_profile`]). The controls (WASD,
+/// The port's `preset`: prints the preset, or applies `slop` or `classic`
+/// (every slop option off) to the *engine*
+/// ([`quake_rs::settings::Settings::apply_preset`]). The controls (WASD,
 /// mouse look, the gamepad, Space-swims-up, Alt+Enter, Always Run) are not
 /// among them — they are the player's, the same either way — so this
-/// leaves them as they are; `idcontrols` is the one step to id's own.
-fn cmd_profile(args: &Args) {
+/// leaves them as they are; `idcontrols` is the one step to id's own. Its
+/// old name, `profile`, still runs it ([`OLD_COMMANDS`]), and the old
+/// words for the presets still name them ([`Preset::parse`]): a
+/// `config.cfg` or an address from before the rename keeps working.
+fn cmd_preset(args: &Args) {
     ensure_app(|a| match args.argc() {
-        1 => a.console.println(format!("\"profile\" is \"{}\"", a.settings.profile.name())),
-        _ => match Profile::parse(args.argv(1)) {
-            Some(p) => a.settings.set_profile(p),
-            None => a.console.println("profile classic|2026 : id's engine, or the port's"),
+        1 => a.console.println(format!("\"preset\" is \"{}\"", a.settings.preset.name())),
+        _ => match Preset::parse(args.argv(1)) {
+            Some(p) => a.settings.apply_preset(p),
+            None => a.console.println("preset slop|classic : the port's slop options, or id's engine"),
         },
     });
 }
@@ -386,7 +405,7 @@ fn cmd_profile(args: &Args) {
 /// The port's `idcontrols`: the one explicit step to id's own 1996 controls
 /// (`default.cfg`'s bindings, [`quake_rs::cvar::Cvars::with_id_controls`]
 /// — arrows, no mouse look, no gamepad, Space does not swim, no
-/// Alt+Enter, Always Run off), independent of `profile`: the engine stays
+/// Alt+Enter, Always Run off), independent of `preset`: the engine stays
 /// whatever it was. What `exec default.cfg` would reach if the port shipped
 /// that file; it does not, so this is the console's own small command.
 fn cmd_idcontrols(_: &Args) {
@@ -505,13 +524,13 @@ fn cmd_game(args: &Args) {
 const LIST_WIDTH: usize = 38;
 
 /// Not id's (`help` is id's Help screen): this port's commands and the
-/// settings the profiles switch, from the tables; `wasm_help <name>` says
+/// settings the presets switch, from the tables; `wasm_help <name>` says
 /// what one command or cvar does.
 fn cmd_wasm_help(args: &Args) {
     ensure_app(|a| {
         if args.argc() > 1 {
             let name = args.argv(1);
-            let line = match (cmd::find(COMMANDS, name), cvar::find(name)) {
+            let line = match (find_command(name), cvar::find(name)) {
                 (Some(c), _) => format!("{}: {}", c.name, c.help),
                 (None, Some(v)) => format!("{} \"{}\": {}", v.name, v.get(&a.settings.cvars), v.help),
                 (None, None) => format!("no command or cvar \"{name}\""),
@@ -523,7 +542,7 @@ fn cmd_wasm_help(args: &Args) {
         for line in wrap(COMMANDS.iter().map(|c| c.name), LIST_WIDTH) {
             a.console.println(line);
         }
-        a.console.println(format!("settings, profile {} (classic|2026):", a.settings.profile.name()));
+        a.console.println(format!("slop options, preset {} (slop|classic):", a.settings.preset.name()));
         for v in CVARS.iter().filter(|v| v.departure) {
             a.console.println(format!("  {} {}", v.name, v.get(&a.settings.cvars)));
         }
@@ -782,9 +801,9 @@ mod tests {
         run_console_line("r_lerpmove 0");
         step(0.0);
         assert_eq!(lerpmove(), LerpMove::Classic);
-        run_console_line("profile 2026");
+        run_console_line("preset slop");
         step(0.0);
-        assert_eq!(lerpmove(), LerpMove::Smooth, "on in 2026");
+        assert_eq!(lerpmove(), LerpMove::Smooth, "on in slop");
     }
 
     #[test]
@@ -814,9 +833,9 @@ mod tests {
         run_console_line("r_lerpmodels 0");
         step(0.0);
         assert_eq!(lerpmodels(), LerpModels::Classic);
-        run_console_line("profile 2026");
+        run_console_line("preset slop");
         step(0.0);
-        assert_eq!(lerpmodels(), LerpModels::Smooth, "on in 2026");
+        assert_eq!(lerpmodels(), LerpModels::Smooth, "on in slop");
     }
 
     #[test]
@@ -857,7 +876,7 @@ mod tests {
         });
         assert!(help.iter().any(|l| l == "  wasm_uncapped 0"), "{help:?}");
         assert!(help.iter().any(|l| l == "  r_perspspan 1"), "{help:?}");
-        let listed = help.iter().skip_while(|l| !l.starts_with("settings, profile"));
+        let listed = help.iter().skip_while(|l| !l.starts_with("slop options, preset"));
         assert!(!listed.into_iter().any(|l| l.contains("wasm_exactpersp")), "the retired name is not listed: {help:?}");
         assert!(help.iter().all(|l| l.len() <= LIST_WIDTH), "fits a 320-wide console: {help:?}");
     }
@@ -1128,35 +1147,37 @@ mod tests {
         assert!(console_scrollback() >= 2, "god with no walk prints a guard message");
     }
 
-    /// The controls are the player's, the profile the engine: `profile`
+    /// The controls are the player's, the preset the engine: `preset`
     /// leaves the controls alone (and the wheel, the one control that is a
-    /// departure, follows it), and `idcontrols` is the one step to id's own
-    /// 1996 ones — the engine untouched, whichever profile is live.
+    /// slop option, follows it), and `idcontrols` is the one step to id's
+    /// own 1996 ones — the engine untouched, whichever preset is live.
+    /// `profile`, the command's old name, and `2026`, the slop preset's,
+    /// still work.
     #[test]
-    fn idcontrols_is_ids_1996_controls_and_the_profile_leaves_the_controls_alone() {
+    fn idcontrols_is_ids_1996_controls_and_the_preset_leaves_the_controls_alone() {
         use quake_rs::keys::{BIND_FORWARD, BIND_LOOKUP, K_MWHEELUP};
         let live = || APP.with(|c| c.borrow().as_ref().unwrap().settings.clone());
         assert_eq!(boot(), 1);
         execute_console_command("profile 2026");
         let s = live();
-        assert!(s.binds.get(K_MWHEELUP).is_some() && s.cvars.uncapped && s.cvars.freelook);
+        assert!(s.binds.get(K_MWHEELUP).is_some() && s.cvars.uncapped && s.cvars.freelook && s.preset == Preset::Slop);
 
-        execute_console_command("profile classic"); // the engine: the wheel off, the controls kept
+        execute_console_command("preset classic"); // the engine: the wheel off, the controls kept
         let s = live();
-        assert!(!s.cvars.uncapped && s.binds.get(K_MWHEELUP).is_none(), "the wheel is 2026's alone");
+        assert!(!s.cvars.uncapped && s.binds.get(K_MWHEELUP).is_none(), "the wheel is slop's alone");
         assert!(s.cvars.freelook && s.cvars.always_run() && s.cvars.joy.enabled, "the controls are kept");
         assert_eq!(s.binds.command(b'w'), Some(BIND_FORWARD));
 
-        execute_console_command("profile 2026");
+        execute_console_command("preset slop");
         execute_console_command("idcontrols");
         let s = live();
         assert_eq!(s.binds, quake_rs::keys::Bindings::default_cfg(), "default.cfg's, the wheel unbound too");
         assert_eq!(s.binds.command(b'a'), Some(BIND_LOOKUP));
         assert!(!s.cvars.freelook && !s.cvars.jumpswim && !s.cvars.alt_enter && !s.cvars.always_run());
         assert_eq!(s.cvars.joy, quake_rs::client::in_win::JoyCvars::classic(), "id's joystick: off");
-        assert!(s.cvars.uncapped && s.profile == Profile::Modern, "the engine untouched");
+        assert!(s.cvars.uncapped && s.preset == Preset::Slop, "the engine untouched");
 
-        execute_console_command("profile classic"); // and a switch keeps id's controls as they are
+        execute_console_command("preset classic"); // and a preset keeps id's controls as they are
         let s = live();
         assert!(!s.cvars.freelook && s.binds.command(b'w').is_none() && !s.cvars.uncapped);
     }
@@ -1204,9 +1225,9 @@ mod tests {
     }
 
     /// `Host_Version_f`: id's `Version %4.2f` line, then a second line naming
-    /// the port and the live profile in place of id's EXE build timestamp.
+    /// the port and the preset in place of id's EXE build timestamp.
     #[test]
-    fn version_prints_con_version_and_the_profile() {
+    fn version_prints_con_version_and_the_preset() {
         assert_eq!(boot(), 1);
         close_menu();
         console_toggle();
@@ -1215,7 +1236,7 @@ mod tests {
             APP.with(|c| c.borrow().as_ref().unwrap().console.lines().map(str::to_string).collect());
         assert_eq!(
             lines[lines.len() - 2..],
-            [format!("Version {}", quake_rs::console::CON_VERSION), "quake-rs, profile classic".to_string()]
+            [format!("Version {}", quake_rs::console::CON_VERSION), "quake-rs, preset classic".to_string()]
         );
     }
 

@@ -41,7 +41,7 @@ pub(crate) fn apply_menu_action(a: &mut App, action: MenuAction) -> Option<MenuD
             // Enter on a Video Options row: a fixed mode (VID_MenuKey
             // K_ENTER -> VID_SetMode) set `_vid_resolution` and native
             // resolution off — the framebuffer takes the new (clamped) size
-            // at once. One of the port's own native-resolution rows (2026)
+            // at once. One of the port's own native-resolution rows (slop)
             // turned native back on instead, with no stored mode to
             // reallocate to: recompute the picture from the window and pixel
             // size, same as any other frame (`apply_settings`). Either way
@@ -62,7 +62,7 @@ pub(crate) fn apply_menu_action(a: &mut App, action: MenuAction) -> Option<MenuD
             }
         }
         MenuAction::ResetDefaults => {
-            // Options "Reset to defaults": select() ran the profile's
+            // Options "Reset to defaults": select() ran the preset's
             // default.cfg on the settings (read live each frame); the video
             // mode is not a default.cfg cvar and stays.
             crate::vid::sync_menu_resolution(a);
@@ -263,7 +263,7 @@ pub(crate) fn menu_point(x: f32, y: f32) -> i32 {
 /// record carries it, and the browser checks read it (the screen transitions:
 /// Multiplayer opens, Save gates, Video applies). 0 Main, 1 SinglePlayer,
 /// 2 Load, 3 Save, 4 Multiplayer, 5 Options, 6 Keys, 7 Video, 8 Help, 9 Quit,
-/// 10 the port's settings hub (Options > Classic / 2026), 11 Multiplayer >
+/// 10 the port's settings hub (Options > Classic / slop), 11 Multiplayer >
 /// Setup, then the hub's pages: 12 Picture and sound, 13 Motion and light,
 /// 14 Controls.
 pub(crate) fn menu_screen_id() -> i32 {
@@ -293,7 +293,7 @@ pub(crate) fn menu_screen_id() -> i32 {
 
 /// The highlighted row on the showing screen ([`quake_rs::menu::Menu::cursor`]):
 /// the browser checks' way to see what Video Options (or any list) actually
-/// marks current without having to read conchars pixels — e.g. in 2026, the
+/// marks current without having to read conchars pixels — e.g. in slop, the
 /// native-resolution rows follow `RESOLUTION_PRESETS`, so a native row's
 /// index is `RESOLUTION_PRESETS.len() + pixel_size.min(4)`.
 pub(crate) fn menu_cursor() -> i32 {
@@ -475,21 +475,21 @@ mod tests {
     }
 
     #[test]
-    fn classic_2026_switches_the_profile_and_its_page_each_setting() {
-        use quake_rs::settings::{Profile, Settings};
+    fn classic_slop_applies_the_preset_and_its_page_each_setting() {
+        use quake_rs::settings::{Preset, Settings};
         let settings = || APP.with(|c| c.borrow().as_ref().unwrap().settings.clone());
         assert_eq!(boot(), 1);
-        assert_eq!(settings(), Settings::new(Profile::Classic), "the tests start in Classic");
+        assert_eq!(settings(), Settings::new(Preset::Classic), "the tests start in Classic");
         menu_down();
         menu_down();
         menu_select(); // -> Options
         for _ in 0..13 {
-            menu_down(); // the port's row 13, Classic / 2026
+            menu_down(); // the port's row 13, Classic / slop
         }
         menu_right();
-        assert_eq!(settings(), Settings::new(Profile::Modern), "right: every setting to 2026's");
+        assert_eq!(settings(), Settings::new(Preset::Slop), "right: every setting to slop's");
         menu_left();
-        assert_eq!(settings().profile, Profile::Classic, "left: back");
+        assert_eq!(settings().preset, Preset::Classic, "left: back");
         menu_select();
         assert_eq!(menu_screen_id(), 10, "Enter opens the settings hub");
         menu_down();
@@ -545,7 +545,7 @@ mod tests {
     fn keys_screen_rebinds_forward_through_the_exports() {
         reset_queue();
         assert_eq!(boot(), 1);
-        use_2026(); // WASD, Always Run
+        use_slop(); // WASD, Always Run
         // Navigate: Options -> Customize controls (row 0).
         menu_down();
         menu_down();

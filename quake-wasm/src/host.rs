@@ -18,7 +18,7 @@ use crate::cl_walk::step_walk;
 /// How a host frame is gated and stepped: [`host_filter_time`]'s 72 fps cap
 /// with id's per-frame code (Classic); every call without the cap while a
 /// `timedemo` runs (id's `cls.timedemo`: [`host_filter_time_uncapped`]); or,
-/// with `wasm_uncapped` (the 2026 profile), a frame on every display refresh
+/// with `wasm_uncapped` (the slop preset), a frame on every display refresh
 /// ([`host_filter_time_display`]) stepped as a run of id's 72 Hz frames
 /// ([`Stepping::Uncapped`], `FRAMERATE.md`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,8 +55,8 @@ impl FrameGate {
     }
 }
 
-/// The `wasm_showfps` measurement (a departure on Options > Classic / 2026's
-/// settings page, off in both profiles): QuakeWorld's `SCR_DrawFPS` counter. Every
+/// The `wasm_showfps` measurement (a departure on Options > Classic / slop's
+/// settings page, off in both presets): QuakeWorld's `SCR_DrawFPS` counter. Every
 /// presented frame counts (`fps_count++`); once a second of `realtime` has
 /// passed since the window opened (`lastframetime`), the window's rate
 /// becomes the shown value (`lastfps`) and a new window opens. QW shows the
@@ -306,7 +306,7 @@ pub(crate) fn step(dt: f32) -> i32 {
         // like the Quit menu does.
         finish_menu_credits(a);
 
-        // The wasm_showfps setting (off in both profiles): QuakeWorld draws it with the
+        // The wasm_showfps setting (off in both presets): QuakeWorld draws it with the
         // rest of the play-screen 2-D (SCR_DrawFPS, before Sbar_Draw, the
         // console and M_Draw — so the menu's fade dims it) and not on the
         // intermission/finale screens. The port's sits in the top-left
@@ -552,13 +552,13 @@ mod tests {
         assert_eq!(old, 0.5001);
     }
 
-    /// The 2026 profile in the frame: the game stepped as 72 Hz runs, the
+    /// The slop preset in the frame: the game stepped as 72 Hz runs, the
     /// renderer's Hor+ and hires with native resolution, the 2-D layer at a
-    /// whole scale, and the 2026 cross centred on the view, over the view and
+    /// whole scale, and the slop cross centred on the view, over the view and
     /// under the rest (the fade of the menu dims it); Classic is none of
     /// them.
     #[test]
-    fn the_2026_profile_steps_uncapped_scales_2d_and_draws_the_crosshair() {
+    fn the_slop_preset_steps_uncapped_scales_2d_and_draws_the_crosshair() {
         use quake_rs::render::FovMode;
         let video_cvars = || APP.with(|c| crate::vid::vid(c.borrow().as_ref().unwrap()).video);
         assert_eq!(boot(), 1);
@@ -567,7 +567,7 @@ mod tests {
         let stepping = || APP.with(|c| c.borrow().as_ref().unwrap().walk.as_ref().unwrap().stepping);
         assert_eq!(stepping(), Stepping::Classic);
         assert_eq!((video_cvars().fov_mode, video_cvars().hires, quake_rs::draw::scaled_2d()), (FovMode::Classic, false, false));
-        use_2026();
+        use_slop();
         crate::vid::set_window(1600, 1000, 1.0);
         step(0.0);
         assert_eq!(stepping(), Stepping::Uncapped);
@@ -581,12 +581,12 @@ mod tests {
         crate::host_cmd::execute_console_command("crosshair 0");
         step(0.0);
         let without = APP.with(|c| c.borrow().as_ref().unwrap().present.rgba());
-        // The view above the scaled status bar (the 2026 profile's viewsize
+        // The view above the scaled status bar (the slop preset's viewsize
         // 110: 24 rows x 5), id's in either layout: the world drawn under it
-        // beside the bar (2026's scr_sbaroverlay) leaves its centre where it
+        // beside the bar (slop's scr_sbaroverlay) leaves its centre where it
         // was.
         let viewsize = crate::vid::viewsize();
-        assert_eq!(viewsize, 110.0, "2026's own start");
+        assert_eq!(viewsize, 110.0, "slop's own start");
         let vrect = render::calc_refdef(w, h, viewsize, false, render::SbarLayout::Overlay).vrect;
         assert_eq!(vrect, render::calc_refdef(w, h, viewsize, false, render::SbarLayout::Classic).vrect);
         let (cx, cy) = (vrect.x + vrect.w / 2, vrect.y + vrect.h / 2);
@@ -645,9 +645,9 @@ mod tests {
         assert!(run(100.0, 3, 2)[60..].iter().all(|&f| f == 50), "the cap's 50 at 100 Hz");
     }
 
-    /// 2026's status bar overlay end to end, at 1920x1080 (pixel
+    /// slop's status bar overlay end to end, at 1920x1080 (pixel
     /// size 1, the 2-D layer at 5x, the bar 240 rows at id's viewsize 100 and
-    /// 120 at 2026's own 110) and a wide frame (1315x535, 2x, 96 and 48
+    /// 120 at slop's own 110) and a wide frame (1315x535, 2x, 96 and 48
     /// rows), on frozen frames of e1m1 in turn — id's, the
     /// overlay's twice, id's again: every pixel above the world under the
     /// view (the whole view, id's projection) is byte for byte id's; the bar
@@ -656,10 +656,10 @@ mod tests {
     /// it is id's frame). Then the same under water (the view in a water
     /// leaf, wobbled), where the wobble runs on into the corners.
     #[test]
-    fn the_2026_overlay_draws_the_world_beside_the_bar_and_leaves_every_view_pixel_as_it_was() {
+    fn the_slop_overlay_draws_the_world_beside_the_bar_and_leaves_every_view_pixel_as_it_was() {
         assert_eq!(boot(), 1);
         close_menu();
-        use_2026();
+        use_slop();
         let grab = || APP.with(|c| c.borrow().as_ref().unwrap().present.rgba());
         let frame = |on: bool| {
             crate::host_cmd::execute_console_command(if on { "scr_sbaroverlay 1" } else { "scr_sbaroverlay 0" });
@@ -695,7 +695,7 @@ mod tests {
                 in_water();
             }
             // Each at id's 100 (the bar and its inventory strip) and at the
-            // 2026 profile's own 110 (the bar alone).
+            // slop preset's own 110 (the bar alone).
             for (ww, wh, viewsize) in [(1920, 1080, 100.0), (1920, 1080, 110.0), (1315, 535, 100.0), (1315, 535, 110.0)] {
                 crate::host_cmd::execute_console_command(&format!("viewsize {viewsize}"));
                 crate::vid::set_window(ww, wh, 1.0);

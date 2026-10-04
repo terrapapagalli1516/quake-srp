@@ -139,14 +139,14 @@ with sync_playwright() as p:
     key = lambda k, n=1: [pg.keyboard.press(k) or time.sleep(0.06) for _ in range(n)]
 
     # 1. Options' 14th row switches the profile; Enter opens the page.
-    prof = lambda: pg.evaluate("quake.text('profile')")
+    prof = lambda: pg.evaluate("quake.text('preset')")
     check("?classic: the Classic profile, every setting off", prof() == "classic" and ext() == 0)
     # The page starts 2026 and the address switches to Classic: Screen size,
     # never moved, goes with it to id's 100 (and the inventory bar with it).
     check("?classic: Screen size is id's 100", pg.evaluate("exp.viewsize()") == 100)
     frames(pg)
     check("config.cfg keeps the profile the address chose",
-          cfg_has(pg, 'profile "classic"'), str(pg.evaluate(CFG)))
+          cfg_has(pg, 'preset "classic"'), str(pg.evaluate(CFG)))
     key("Escape")                      # the menu over the attract demo
     key("ArrowDown", 2); key("Enter")
     check("Options opens", scr() == OPTIONS)
@@ -156,7 +156,7 @@ with sync_playwright() as p:
     key("ArrowRight")
     # uncapped 1 + scaled 2-D 8; the span goes to 8, which is not the extras'
     # bit 4 (that one is exact)
-    check("...Classic / 2026: right switches to 2026", prof() == "2026" and ext() == 9
+    check("...Classic / 2026: right switches to 2026", prof() == "slop" and ext() == 9
           and pg.evaluate("quake.text('cvar', 'r_perspspan')") == "8", str(ext()))
     key("ArrowLeft")
     check("left: back to Classic", prof() == "classic" and ext() == 0)
@@ -237,7 +237,7 @@ with sync_playwright() as p:
     check("wasm_exactpersp 0: id's 16", ext() == 2 and cvar("r_perspspan") == "16")
     frames(pg)
     check("config.cfg keeps the change, and only what differs from Classic",
-          cfg_has(pg, 'profile "classic"', 'wasm_showfps "1"')
+          cfg_has(pg, 'preset "classic"', 'wasm_showfps "1"')
           and "wasm_uncapped" not in (pg.evaluate(CFG) or ""), str(pg.evaluate(CFG)))
 
     # 2. wasm_uncapped through the real program, with the page's own ticks

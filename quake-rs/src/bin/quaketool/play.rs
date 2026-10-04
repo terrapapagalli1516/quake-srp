@@ -6,7 +6,7 @@
 //! The same [`quake_rs::client`] frames the page runs (`walk_frame`,
 //! `demo_frame`), driven the way `web/bench.py` drives the page, one host
 //! frame per 1/72 s through `Host_FilterTime`, with the page's screen (its 4:3
-//! display) and the Classic profile's settings (id's bindings and viewsize,
+//! display) and the Classic preset's settings (id's bindings and viewsize,
 //! every departure off, the menu and console closed); each finished frame is presented
 //! as the page presents it — through the `cl.cshifts` + gamma ramps into RGBA
 //! (`VID_ShiftPalette`). Workloads, as in `web/bench.py`:
@@ -46,7 +46,7 @@ use quake_rs::client::{cl_demo, cl_input, cl_main, host_cmd, ClientFrame, DemoPl
 use quake_rs::pak::Pak;
 use quake_rs::qrand::QRand;
 use quake_rs::render;
-use quake_rs::settings::{Profile, Settings};
+use quake_rs::settings::{Preset, Settings};
 
 use super::video::VideoArgs;
 
@@ -257,7 +257,7 @@ pub fn cmd_play(pak_path: &str, workloads: &str, rest: &[String]) -> Result<Stri
     let vid = Vid { width: 0, height: 0, display_aspect: DISPLAY_ASPECT, persp_span: video.persp_span, video: video.cvars, mip: render::MipCvars::DEFAULT };
     let mut host = Host {
         pak,
-        settings: Settings::id(Profile::Classic), // id's controls by name: the oracle pins against them explicitly
+        settings: Settings::id(Preset::Classic), // id's controls by name: the oracle pins against them explicitly
         keys: [false; 256],
         palette,
         gamma: render::build_gamma_table(1.0),

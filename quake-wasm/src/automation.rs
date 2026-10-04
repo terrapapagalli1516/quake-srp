@@ -180,9 +180,9 @@ pub(crate) fn call(line: &str) -> Answer {
         "console_enter" => done(console_enter),
         "console_text" => Answer { value: 0.0, text: console_text() },
         // The settings: a cvar's value (its number, and its text), the
-        // profile, and config.cfg's text for them now.
+        // preset applied last, and config.cfg's text for them now.
         "cvar" => cvar_value(rest.trim()),
-        "profile" => text_answer(|a| a.settings.profile.name().to_string()),
+        "preset" => text_answer(|a| a.settings.preset.name().to_string()),
         // The live game's map (`maps/e1m1.bsp`; empty with none).
         "map_name" => text_answer(|a| a.walk.as_ref().filter(|_| a.mode == 0).map(|w| w.map_name.clone()).unwrap_or_default()),
         "config_text" => text_answer(|a| a.settings.config_text()),
@@ -310,7 +310,7 @@ fn bench_call(name: &str, rest: &str) -> Option<Answer> {
         "bench_start" => crate::bench::bench_start(rest.trim()).into(),
         // A frame late on purpose (`quake-wasm/src/bench.rs::maybe_stall`):
         // CPU throttling cannot reach a Worker, so `verify_*.py` uses this
-        // to prove the 2026 mixer's lead adapts to one.
+        // to prove the slop mixer's lead adapts to one.
         "stall_ms" => done(|| crate::bench::set_stall_ms(rest.trim().parse::<f64>().unwrap_or(0.0).max(0.0) as u64)),
         _ => return None,
     })
@@ -340,7 +340,7 @@ mod tests {
         call("exec vid_pixelsize 3");
         assert_eq!((call("cvar vid_pixelsize").value, call("cvar vid_pixelsize").text.as_str()), (3.0, "3"));
         assert!(call("cvar nosuch").value.is_nan());
-        assert_eq!(call("profile").text, "classic", "the tests start in Classic");
+        assert_eq!(call("preset").text, "classic", "the tests start in Classic");
         assert!(call("config_text").text.contains("vid_pixelsize \"3\"\n"));
         assert!(call("no_such_call").value.is_nan());
         assert_eq!(call("player_field health").value, 100.0, "the booted walk's player");

@@ -751,7 +751,7 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
         // The model header flags (rocket/grenade/gib/tracer trails + EF_ROTATE).
         let cached_mdl = w.model_cache.get(&m).and_then(|o| o.as_ref());
         let mflags = cached_mdl.map(|md| md.header.flags).unwrap_or(0);
-        // r_lerpmodels (the 2026 extra): a group frame (a torch's flicker) is
+        // r_lerpmodels (the slop extra): a group frame (a torch's flicker) is
         // not a motion between two poses — [`lerpmodels::FrameLerps::blend`]
         // snaps instead of blending across one.
         let frame_is_group = cached_mdl.is_some_and(|md| md.frame_is_group(frame as i32));
@@ -779,7 +779,7 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
             trail_spawns.push((ent, origin, ttype));
         }
         let model_index = w.server.vm.ent_float(ent, w.server.vm.fo().modelindex) as usize;
-        // r_lerpmove (the 2026 extra): a monster glides between its steps
+        // r_lerpmove (the slop extra): a monster glides between its steps
         // where it is drawn; its trail and everything else keep the server's
         // origin.
         let (origin, angles) = if smooth && w.server.vm.movetype(ent) == MoveType::Step {
@@ -788,7 +788,7 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
         } else {
             (origin, angles)
         };
-        // r_lerpmodels (the 2026 extra): blend this entity's animation
+        // r_lerpmodels (the slop extra): blend this entity's animation
         // toward `frame` from whatever frame it was at a moment ago.
         let blend = if smooth_frames {
             w.frame_lerps.blend(ent, model_index, frame, frame_is_group, origin, f64::from(w.clock))
@@ -1101,7 +1101,7 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
     // SCR_CalcRefdef / R_SetVrect: the viewsize picks the 3-D view rectangle
     // (the view sits ABOVE the status bar, projected about its own centre)
     // and how much status bar shows; an intermission is always full screen.
-    // With 2026's status bar overlay, also the rows under the view the world
+    // With slop's status bar overlay, also the rows under the view the world
     // goes on into, beside the bar (`refdef.below`).
     lap(Phase::Sim);
     let refdef = render::calc_refdef(render_w, render_h, w.viewsize, intermission, w.sbar_layout);
@@ -1132,7 +1132,7 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
     };
     // The screen: backtile around the view rectangle (SCR_UpdateScreen's
     // Draw_TileClear) and the view drawn straight into it, or, underwater,
-    // into the warp buffer for D_WarpScreen below. With 2026's status bar
+    // into the warp buffer for D_WarpScreen below. With slop's status bar
     // overlay the world goes on under the view, beside the bar (underwater,
     // in the view's buffer, to be wobbled with it). The status bar is drawn
     // over it later.
@@ -1173,7 +1173,7 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
     // not over an intermission or finale, which id's GLQuake leaves it off
     // (gl_screen.c's SCR_UpdateScreen draws it only outside them): WinQuake
     // draws it there too, over the level's stats, with nothing to aim at.
-    // (`crosshair` is a 2026 setting; Classic draws none.)
+    // (`crosshair` is a slop setting; Classic draws none.)
     if w.intermission == 0 {
         render::draw_crosshair(&mut img, w.crosshair, w.conchars.as_ref(), &vrect);
     }

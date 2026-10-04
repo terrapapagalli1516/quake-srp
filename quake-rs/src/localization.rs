@@ -27,7 +27,7 @@
 //! plain shareware/registered game runs through this module with `loc =
 //! None` and gets exactly [`crate::builtins::var_string`]'s old behaviour.
 //!
-//! AUDIT B3 decided this runs on BOTH profiles, not just 2026: a raw `$key`
+//! AUDIT B3 decided this runs in BOTH presets, not just slop: a raw `$key`
 //! is a build artefact, never something a player should read, in Classic or
 //! not — and since id1's own progs never uses one, Classic's identity checks
 //! (`census`, `edicts`, the goldens) do not move either way.

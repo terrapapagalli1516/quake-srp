@@ -9,7 +9,7 @@
 //! [`cl_demo::TimeDemoClock`]), with the page's Classic screen (its 4:3
 //! display, id's video) and id's host defaults (viewsize 100, the menu and console
 //! closed — `key_dest == key_game`, as `quake +timedemo demo1` runs it; the
-//! 2026 profile starts Screen size at 110, but this is id's measure on a
+//! slop preset starts Screen size at 110, but this is id's measure on a
 //! Classic screen).
 //! `realtime` is the wall clock (`Sys_FloatTime`), read at the top of every
 //! host frame. A host frame is what the page's `step` does for a frame: the
@@ -21,7 +21,7 @@
 //! -height H +timedemo demo1`, see PERF_PLAN.md).
 //!
 //! The video options (`video.rs`: `--video modern`, `--hires 1`, `--fov-mode
-//! horplus`, `--display W:H`, `--scaled2d 1`) run it at 2026 sizes; the
+//! horplus`, `--display W:H`, `--scaled2d 1`) run it at slop sizes; the
 //! display defaults to the page's 4:3. `--profile 1` then plays it a second
 //! time with the client's frame timers and the render profiler on, and
 //! prints where the time went, per frame: the host frame's phases (the

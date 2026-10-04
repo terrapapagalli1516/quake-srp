@@ -14,7 +14,7 @@
 //! threads: the 3-D view's time and its serial part where many blocks
 //! rebake; `--paced` keeps the display's real time between frames.
 //! `quaketool framerate <pak>[,<pak>...] --serial [--threads LIST] [--paced]
-//! [the same options]` — the page's 2026 frame (exact perspective, the
+//! [the same options]` — the page's slop frame (exact perspective, the
 //! status bar overlay with the world in its corners, the scaled 2-D layer)
 //! at the same views: the whole frame's time, and what it does on the
 //! calling thread alone, piece by piece (`--overlay 0` after it: id's
@@ -28,7 +28,7 @@
 //! [--view NAME=MAP:X,Y,Z:YAW[:PITCH]]...` — what each perspective span
 //! (`r_perspspan`) costs: the 3-D view's time per frame with the walls and
 //! liquids exact every 16 pixels (id's), 8, 4 or at every pixel, the rest the
-//! 2026 profile's (`--exactpersp`: the same with `--spans 16,1`); with
+//! slop preset's (`--exactpersp`: the same with `--spans 16,1`); with
 //! `--dump DIR [--turn DEG_S] [--strafe UNITS_S] [--crop X,Y,W,H]`, every
 //! frame of each view at each span at the first rate as raw RGB instead, the
 //! camera turning or strafing (a clip of the four side by side).
@@ -1635,7 +1635,7 @@ struct StyleRun {
 /// threads starts cold. Without it the frames run back to back.
 static PACED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// `--serial`: the runs draw the page's 2026 frame — the status bar overlay
+/// `--serial`: the runs draw the page's slop frame — the status bar overlay
 /// with the world in the corners beside it ([`render::SbarLayout::Overlay`]),
 /// over the video settings the caller hands in.
 static OVERLAY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -1704,7 +1704,7 @@ fn style_run(pak: &Pak, view: &StyleView, rate: Rate, vid: Vid, threads: usize, 
 /// drawn, the blocks rebaked and their texels per frame (the renderer's
 /// counters, one run each), and the 3-D view's time per frame (median, mean,
 /// p95 over `reps` runs of each, interleaved, the counters off). The video
-/// cvars are the 2026 profile's but for the light styles.
+/// cvars are the slop preset's but for the light styles.
 fn lightstyles_report(pak: &Pak, rates: &[Rate], views: &[StyleView], res: (usize, usize), threads: usize, reps: usize, secs: f64) -> String {
     use quake_rs::server::LerpLightStyles;
     let modes = [LerpLightStyles::Classic, LerpLightStyles::Smooth]
@@ -1716,7 +1716,7 @@ fn lightstyles_report(pak: &Pak, rates: &[Rate], views: &[StyleView], res: (usiz
 /// `--torchflicker S [--rates LIST] [--res WxH] [--threads N] [--reps N]
 /// [--secs S] [--view NAME=MAP:X,Y,Z:YAW[:PITCH]]...`: as `--lightstyles`,
 /// the steady torches as id's → flickering at strength S (`r_torchflicker`),
-/// the rest of the 2026 profile's video cvars on in both.
+/// the rest of the slop preset's video cvars on in both.
 #[allow(clippy::too_many_arguments)]
 fn torches_report(pak: &Pak, rates: &[Rate], views: &[StyleView], res: (usize, usize), threads: usize, reps: usize, secs: f64, strength: render::TorchFlicker) -> String {
     let modes = [render::TorchFlicker::OFF, strength].map(|torches| render::VideoCvars { torches, ..render::VideoCvars::MODERN });
@@ -1725,7 +1725,7 @@ fn torches_report(pak: &Pak, rates: &[Rate], views: &[StyleView], res: (usize, u
 }
 
 /// `--bake [--rates LIST] [--res WxH] [--threads LIST] [--reps N] [--secs S]
-/// [--view NAME=MAP:X,Y,Z:YAW[:PITCH[:fire]]]...`: the 2026 profile's frame
+/// [--view NAME=MAP:X,Y,Z:YAW[:PITCH[:fire]]]...`: the slop preset's frame
 /// (the torches flickering, the light styles gliding) at each view, rate and
 /// thread count: the blocks rebaked and their texels per frame, the 3-D
 /// view's median and p95 ms (over `reps` runs of each thread count,
@@ -1738,7 +1738,7 @@ fn bake_report(pak: &Pak, rates: &[Rate], views: &[StyleView], res: (usize, usiz
     let mut o = String::new();
     let vid = Vid { width: res.0, height: res.1, display_aspect: res.0 as f64 / res.1 as f64, video: render::VideoCvars::MODERN, ..VID };
     let mean = |xs: &[f64]| xs.iter().sum::<f64>() / xs.len().max(1) as f64;
-    let _ = writeln!(o, "lit-surface bakes at {}x{}, the 2026 frame, {secs} s a run, threads {threads:?}", res.0, res.1);
+    let _ = writeln!(o, "lit-surface bakes at {}x{}, the slop frame, {secs} s a run, threads {threads:?}", res.0, res.1);
     quake_rs::client::set_lap_hook(Some(lap));
     for view in views {
         if pak.read_file(&format!("maps/{}.bsp", view.map)).ok().flatten().is_none() {
@@ -1768,7 +1768,7 @@ fn bake_report(pak: &Pak, rates: &[Rate], views: &[StyleView], res: (usize, usiz
 }
 
 /// `--serial [--rates LIST] [--res WxH] [--threads LIST] [--paced] [--reps N]
-/// [--secs S] [--view ...]`: the page's 2026 frame — the 2026 video
+/// [--secs S] [--view ...]`: the page's slop frame — the slop video
 /// settings with exact perspective, the status bar overlay (the world drawn
 /// on in the corners beside the bar: two more views a frame) and the scaled
 /// 2-D layer — at each view, rate and thread count: the whole client frame's
@@ -1788,7 +1788,7 @@ fn serial_report(pak: &Pak, rates: &[Rate], views: &[StyleView], res: (usize, us
     };
     quake_rs::draw::set_scaled_2d(true);
     let bar = if OVERLAY.load(std::sync::atomic::Ordering::Relaxed) { "the status bar overlay" } else { "id's status bar (--overlay 0)" };
-    let _ = writeln!(o, "the page's 2026 frame at {}x{}, {bar}, {secs} s a run, threads {threads:?}", res.0, res.1);
+    let _ = writeln!(o, "the page's slop frame at {}x{}, {bar}, {secs} s a run, threads {threads:?}", res.0, res.1);
     quake_rs::client::set_lap_hook(Some(lap));
     for view in views {
         if pak.read_file(&format!("maps/{}.bsp", view.map)).ok().flatten().is_none() {
@@ -1981,7 +1981,7 @@ fn persp_run(pak: &Pak, view: &StyleView, rate: Rate, vid: Vid, threads: usize, 
 /// `--perspspan`: per view and rate, the 3-D view's time per frame (median,
 /// mean, p95 over `reps` runs of each, interleaved) at each of `spans`, the
 /// first the reference the others are put against (id's 16 by default),
-/// every other video setting the 2026 profile's (the torches flicker, so the
+/// every other video setting the slop preset's (the torches flicker, so the
 /// numbers are today's).
 #[allow(clippy::too_many_arguments)]
 fn persp_report(pak: &Pak, rates: &[Rate], views: &[StyleView], res: (usize, usize), spans: &[render::PerspSpan], threads: usize, reps: usize, secs: f64) -> String {

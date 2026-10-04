@@ -230,8 +230,8 @@ pub const BIND_STRAFE: usize = 10;
 pub const BIND_LOOKUP: usize = 11;
 pub const BIND_LOOKDOWN: usize = 12;
 pub const BIND_CENTERVIEW: usize = 13;
-/// `+mlook`: mouse look while held (`in_mlook`, cl_input.c); the 2026
-/// profile's `freelook` holds it for good while the pointer is locked.
+/// `+mlook`: mouse look while held (`in_mlook`, cl_input.c); the shared
+/// `freelook` holds it for good while the pointer is locked.
 pub const BIND_MLOOK: usize = 14;
 /// `+klook`: listed and bindable; keyboard look is not modelled, so holding
 /// it does nothing.
@@ -259,14 +259,14 @@ pub const BIND_PAUSE: usize = 30;
 /// menu.
 pub const BIND_TOGGLECONSOLE: usize = 31;
 
-/// The 2026 wheel's notch down (`W_CycleWeaponReverse`, the previous
+/// The slop wheel's notch down (`W_CycleWeaponReverse`, the previous
 /// weapon): [`Bindings::with_wheel`].
 const WHEEL_DOWN_LINE: &str = "impulse 12";
 
 /// What the mouse wheel's two keys are bound to ([`Bindings::wheel`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Wheel {
-    /// 2026's weapon cycle: up `impulse 10`, down `impulse 12`.
+    /// slop's weapon cycle: up `impulse 10`, down `impulse 12`.
     Cycle,
     /// Neither key bound, as `default.cfg` leaves them.
     Unbound,
@@ -395,8 +395,8 @@ impl Bindings {
 
     /// The WASD layout over these bindings: `w`/`s` forward and back, `a`/`d`
     /// step left and right — in place of `default.cfg`'s `a` `+lookup` and
-    /// `d` `+moveup`, which mouse look and Space make unneeded. The 2026
-    /// profile's keys.
+    /// `d` `+moveup`, which mouse look and Space make unneeded. Both
+    /// presets' keys.
     pub fn with_wasd(mut self) -> Bindings {
         self.bind(b'w', BIND_FORWARD);
         self.bind(b's', BIND_BACK);
@@ -405,7 +405,7 @@ impl Bindings {
         self
     }
 
-    /// The 2026 profile's gamepad layout, as `bind` lines over id's joystick
+    /// The slop preset's gamepad layout, as `bind` lines over id's joystick
     /// keys (a standard pad's buttons are `IN_Commands`' keys:
     /// [`crate::client::in_win`] has the mapping). The sticks are axes, not
     /// keys (`joyadvanced` and its axis maps: left moves, right looks):
@@ -449,7 +449,7 @@ impl Bindings {
         self
     }
 
-    /// The 2026 profile's mouse wheel: a notch switches weapons, as id's own
+    /// The slop preset's mouse wheel: a notch switches weapons, as id's own
     /// wheel support does once a player binds it ("What id does" in the
     /// wheel's brief — `default.cfg` predates `in_win.c`'s `WM_MOUSEWHEEL`
     /// handling, so it ships unbound and players bound it themselves: `bind
@@ -465,7 +465,7 @@ impl Bindings {
         self
     }
 
-    /// What the wheel's two keys do now: 2026's weapon cycle (exactly
+    /// What the wheel's two keys do now: slop's weapon cycle (exactly
     /// [`Bindings::with_wheel`]'s pair), nothing (`default.cfg`, or
     /// [`Bindings::without_wheel`]), or whatever else the player bound them
     /// to by hand — the settings page's "Wheel weapons" row reads it.
@@ -482,7 +482,7 @@ impl Bindings {
     /// The wheel unbound, as `default.cfg` leaves it — over whatever these
     /// two keys were bound to, like [`Bindings::with_wheel`] the other way.
     /// Unlike WASD and the gamepad, the wheel's weapon cycle is not a
-    /// shared control (the user's call): [`crate::settings::Settings::set_profile`]
+    /// shared control (the user's call): [`crate::settings::Settings::apply_preset`]
     /// uses this to turn it off again on a switch back to Classic.
     pub fn without_wheel(mut self) -> Bindings {
         self.set(K_MWHEELUP, None);
@@ -626,7 +626,7 @@ mod tests {
     }
 
     #[test]
-    fn default_cfg_is_ids_and_wasd_is_the_2026_layout() {
+    fn default_cfg_is_ids_and_wasd_is_the_shared_layout() {
         let id = Bindings::default_cfg();
         assert_eq!((id.command(b'a'), id.command(b'd'), id.command(b'c')), (Some(BIND_LOOKUP), Some(BIND_MOVEUP), Some(BIND_MOVEDOWN)));
         assert_eq!((id.get(b'w'), id.get(b's')), (None, None), "default.cfg leaves w and s unbound");
@@ -647,9 +647,9 @@ mod tests {
     }
 
     /// default.cfg binds no joystick key (id's joystick users bound their
-    /// own); the 2026 pad layout binds them by the modern twin-stick habit.
+    /// own); the slop pad layout binds them by the modern twin-stick habit.
     #[test]
-    fn the_2026_pad_layout_binds_joy_and_aux_keys() {
+    fn the_slop_pad_layout_binds_joy_and_aux_keys() {
         let id = Bindings::default_cfg();
         assert!((K_JOY1..=K_AUX32).all(|k| id.get(k).is_none()));
         let pad = id.with_gamepad();
@@ -662,12 +662,12 @@ mod tests {
     }
 
     /// default.cfg leaves the wheel unbound (it predates `in_win.c`'s
-    /// `WM_MOUSEWHEEL` handling); the 2026 profile binds a notch to the
+    /// `WM_MOUSEWHEEL` handling); the slop preset binds a notch to the
     /// weapon cycle, up for next ([`BIND_CHANGEWEAPON`], QuakeSpasm's own
     /// default) and down for previous (a console Line: no bindnames row of
     /// its own, like the gamepad's left bumper).
     #[test]
-    fn the_wheel_switches_weapons_only_in_the_2026_profile() {
+    fn the_wheel_switches_weapons_only_in_the_slop_preset() {
         let id = Bindings::default_cfg();
         assert_eq!((id.get(K_MWHEELUP), id.get(K_MWHEELDOWN)), (None, None));
         let wheel = id.clone().with_wheel();
