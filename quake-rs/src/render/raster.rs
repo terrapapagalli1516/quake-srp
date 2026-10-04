@@ -683,7 +683,7 @@ fn c_step(x: i64, d: usize) -> i64 {
 /// The exact perspective's texel at every pixel of one span of a
 /// surface-cache block: `D_DrawSpans8`'s 16.16 arithmetic with the divide at
 /// every pixel, clamped into the block.
-fn span_exact_cached(crow: &mut [u8], sp: &Span, fx: &BlockFixed, block: &[u8], bw: usize, bh: usize) {
+fn span_exact_reference(crow: &mut [u8], sp: &Span, fx: &BlockFixed, block: &[u8], bw: usize, bh: usize) {
     let (bw_i, bh_i) = (bw as i64, bh as i64);
     let (mut zi, mut sz, mut tz) = (sp.zi, sp.sz, sp.tz);
     for c in crow.iter_mut() {
@@ -705,6 +705,245 @@ fn span_exact_cached(crow: &mut [u8], sp: &Span, fx: &BlockFixed, block: &[u8], 
         sz += sp.dsz;
         tz += sp.dtz;
     }
+}
+
+// Cheap exact: the exact perspective with a divide every 16 pixels, the
+// same pixels as a divide at every pixel ([`span_exact_reference`]).
+//
+// Along a span a texel coordinate is `x(k) = 65536 (sz + k dsz) / (zi + k
+// dzi)` (16.16, `sadjust` aside), a hyperbola. Through three of its points 16
+// pixels apart (the knots, by the divide) a parabola stays within a bound
+// worked out from the hyperbola's third derivative. The parabola is stepped
+// by forward differences in fixed point, s and t side by side in one `u64`,
+// and a pixel whose parabola position is further than that bound (and the
+// arithmetic's own errors: the guard) from both its texel's edges reads the
+// divide's texel; the others, near an edge, are drawn by the divide, and
+// the few the divide's rounding could tip by the reference's own
+// accumulators ([`ExactReplay`]). A span or segment the bound cannot vouch
+// for (short, grazing, off the block) is drawn by the divide.
+
+/// Pixels between two knots of [`span_exact_cached`]'s parabolas.
+const EXACT_KNOT: usize = 16;
+/// A parabola's pixels: two knot intervals.
+const EXACT_SEG: usize = 2 * EXACT_KNOT;
+/// The widest and tallest block a parabola's 32-bit lanes hold: 9 bits of
+/// texel over [`LANE_FRAC`] of fraction.
+const LANE_TEXELS: usize = 512;
+/// A lane's fraction bits: 16.16 with 7 more for the forward differences.
+const LANE_FRAC: u32 = 23;
+/// Both lanes' fractions.
+const LANE_FRAC_MASK: u64 = ((1 << LANE_FRAC) - 1) | (((1 << LANE_FRAC) - 1) << 32);
+/// The carry of each lane's guard test: set when the pixel is clear of its
+/// texel's edges.
+const LANE_CLEAR: u64 = (1 << LANE_FRAC) | (1 << (LANE_FRAC + 32));
+/// The widest guard (16.16 units) a segment is drawn by parabola with: past
+/// it too many pixels would need the divide.
+const GUARD_MAX: f64 = 6000.0;
+/// What the guard adds to the parabola's bound, in 16.16 units: the knots'
+/// truncation and rounding (1.25 each, at most 1.57 through the parabola),
+/// the forward differences' flooring (under 3.9 by a segment's last pixel),
+/// the reference's own truncation and rounding (1.25), and the bound's
+/// truncation to whole units (1): 7.7, and some room.
+const GUARD_SLACK: i64 = 9;
+
+/// What [`span_exact_cached`] needs of a span to draw it by parabolas: the
+/// guards' scale for s and t (times the fourth power of a segment's largest
+/// `z`, the bound on a parabola's distance from the divide in 16.16 units).
+/// `None` when the span must be drawn by the reference loop.
+fn exact_plan(n: usize, sp: &Span, bw: usize, bh: usize, len: usize) -> Option<(f64, f64)> {
+    if n <= EXACT_SEG || bw == 0 || bh == 0 || bw > LANE_TEXELS || bh > LANE_TEXELS || len < bw * bh {
+        return None;
+    }
+    let last = (n - 1) as f64;
+    let zi_end = sp.zi + last * sp.dzi;
+    // (Compared by hand: `f64::min` and `max` are calls in a wasm build.)
+    let (lo, hi) = if sp.zi < zi_end { (sp.zi, zi_end) } else { (zi_end, sp.zi) };
+    if !(sp.zi > 0.0 && zi_end > 0.0 && hi.is_finite()) {
+        return None;
+    }
+    // The rounding noise of the reference's accumulators and of the knots'
+    // products, in 16.16 units: under a quarter, or no parabolas.
+    let larger = |a: f64, b: f64| if a > b { a } else { b };
+    let ends = |a: f64, d: f64| larger(a.abs(), (a + last * d).abs());
+    let reach = 65536.0 * larger(ends(sp.sz, sp.dsz), ends(sp.tz, sp.dtz)) / lo;
+    let noise = f64::EPSILON * ((2 * n + 4) as f64 * (hi / lo) + 4.0) * reach;
+    if noise.is_nan() || noise > 0.25 {
+        return None;
+    }
+    // The third derivative of x = 65536 sz/zi along the span is
+    // 6 |W| dzi^2 z^4 / 65536^3 with W = sz*dzi - dsz*zi, constant along the
+    // span; a parabola through knots H apart is within 0.06415 H^3 times it.
+    let w = |a: f64, d: f64| (a * sp.dzi - d * sp.zi).abs() + 4.0 * f64::EPSILON * ((a * sp.dzi).abs() + (d * sp.zi).abs());
+    let h = EXACT_KNOT as f64;
+    let c = 6.0 * 0.0642 * h * h * h * sp.dzi * sp.dzi / (65536.0 * 65536.0 * 65536.0);
+    Some((c * w(sp.sz, sp.dsz), c * w(sp.tz, sp.dtz)))
+}
+
+/// A knot: the block coordinates in 16.16 at pixel `k` of the span, by the
+/// divide, and `z` there.
+#[inline]
+fn exact_knot(sp: &Span, k: usize, fx: &BlockFixed) -> (i64, i64, f64) {
+    let kf = k as f64;
+    let z = 65536.0 / (sp.zi + kf * sp.dzi);
+    (
+        (((sp.sz + kf * sp.dsz) * z) as i64).wrapping_add(fx.sadjust),
+        (((sp.tz + kf * sp.dtz) * z) as i64).wrapping_add(fx.tadjust),
+        z,
+    )
+}
+
+/// One coordinate's parabola through the knot values `x0`, `xh`, `x2h` as a
+/// lane: its start and first and second differences in [`LANE_FRAC`] fixed
+/// point (the differences floored: under 3.9 units of 16.16 by a segment's
+/// last pixel), when every pixel of it is at least `g` inside `0..=max`.
+#[inline]
+fn exact_lane(x0: i64, xh: i64, x2h: i64, g: i64, max: i64) -> Option<(i64, i64, i64)> {
+    let dd = x2h - 2 * xh + x0;
+    let bulge = (dd.abs() + 1) / 2;
+    if x0.min(x2h) - bulge < g || x0.max(x2h) + bulge > max - g {
+        return None;
+    }
+    // p(k) = x0 + k A + k^2 B, B = dd / (2 H^2), A = (4 xh - 3 x0 - x2h) / (2 H);
+    // d1 = A + B and d2 = 2 B, times 128.
+    let h = EXACT_KNOT as i64;
+    Some((x0 << 7, (64 * h * (4 * xh - 3 * x0 - x2h) + 64 * dd).div_euclid(h * h), (128 * dd).div_euclid(h * h)))
+}
+
+/// The reference's accumulators at a pixel of the span, stepped to it on
+/// demand: the pixels the parabolas and the direct divide cannot vouch for.
+struct ExactReplay {
+    k: usize,
+    zi: f64,
+    sz: f64,
+    tz: f64,
+}
+
+impl ExactReplay {
+    /// The exact texel of pixel `k`.
+    #[inline]
+    fn texel(&mut self, k: usize, sp: &Span, fx: &BlockFixed, block: &[u8], bw: usize, bh: usize) -> u8 {
+        let (mut s, mut t, _) = exact_knot(sp, k, fx);
+        // Within one unit of the reference's, so the same texel unless a
+        // texel's edge is that near: then the reference's own arithmetic.
+        let near = |v: i64| !(2..=0xFFFD).contains(&(v & 0xFFFF));
+        if near(s) || near(t) {
+            if k < self.k {
+                // (Not as [`span_exact_cached`] asks: its pixels come in order.)
+                *self = ExactReplay { k: 0, zi: sp.zi, sz: sp.sz, tz: sp.tz };
+            }
+            while self.k < k {
+                self.zi += sp.dzi;
+                self.sz += sp.dsz;
+                self.tz += sp.dtz;
+                self.k += 1;
+            }
+            let z = 65536.0 / self.zi;
+            s = ((self.sz * z) as i64).wrapping_add(fx.sadjust);
+            t = ((self.tz * z) as i64).wrapping_add(fx.tadjust);
+        }
+        let bx = (s >> 16).clamp(0, bw as i64 - 1) as usize;
+        let by = (t >> 16).clamp(0, bh as i64 - 1) as usize;
+        block[by * bw + bx]
+    }
+}
+
+/// The exact perspective's texel at every pixel of one span of a
+/// surface-cache block — what [`span_exact_reference`] draws with a divide
+/// at every pixel — from a divide every sixteen.
+fn span_exact_cached(crow: &mut [u8], sp: &Span, fx: &BlockFixed, block: &[u8], bw: usize, bh: usize) {
+    let n = crow.len();
+    let Some((ks, kt)) = exact_plan(n, sp, bw, bh, block.len()) else {
+        return span_exact_reference(crow, sp, fx, block, bw, bh);
+    };
+    let (smax, tmax) = (((bw as i64) << 16) - 1, ((bh as i64) << 16) - 1);
+    let mut replay = ExactReplay { k: 0, zi: sp.zi, sz: sp.sz, tz: sp.tz };
+    // The segments: 32 pixels from every 32nd, and a last one ending a pixel
+    // short of the span's end (over pixels already drawn, if it must). Each
+    // segment's two further knots are asked for a segment ahead, so their
+    // divides run while the one before is drawn.
+    let last = n - 1 - EXACT_SEG;
+    let knots = |k0: usize| (exact_knot(sp, k0 + EXACT_KNOT, fx), exact_knot(sp, k0 + EXACT_SEG, fx));
+    let mut done = 0;
+    let mut k0 = 0;
+    let mut a = exact_knot(sp, 0, fx);
+    let mut ahead = knots(0);
+    loop {
+        let (m, b) = ahead;
+        let next = if k0 == last { None } else { Some((k0 + EXACT_SEG).min(last)) };
+        let next_a = match next {
+            Some(k) if k == k0 + EXACT_SEG => b,
+            Some(k) => exact_knot(sp, k, fx),
+            None => b,
+        };
+        if let Some(k) = next {
+            ahead = knots(k);
+        }
+        // The guards: how far the divide's coordinate can be from the
+        // parabola's, in 16.16.
+        let z = if a.2 > b.2 { a.2 } else { b.2 };
+        let z4 = (z * z) * (z * z);
+        let (es, et) = (ks * z4, kt * z4);
+        let mut lanes = None;
+        if es <= GUARD_MAX && et <= GUARD_MAX {
+            let (gs, gt) = (es as i64 + GUARD_SLACK, et as i64 + GUARD_SLACK);
+            if let (Some(s), Some(t)) = (exact_lane(a.0, m.0, b.0, gs, smax), exact_lane(a.1, m.1, b.1, gt, tmax)) {
+                let pack = |t: i64, s: i64| ((t as u64) << 32).wrapping_add(s as u64);
+                lanes = Some((
+                    pack(t.0, s.0),
+                    pack(t.1, s.1),
+                    pack(t.2, s.2),
+                    pack(gt << 7, gs << 7),
+                    pack((1 << LANE_FRAC) - (gt << 8), (1 << LANE_FRAC) - (gs << 8)),
+                ));
+            }
+        }
+        let texel = |q: u64| block.get((q >> (LANE_FRAC + 32)) as usize * bw + ((q as u32) >> LANE_FRAC) as usize).copied().unwrap_or(0);
+        match lanes {
+            Some((q0, d10, d2, guard, room)) => {
+                // The parabola's pixels, and whether each is clear of its
+                // texel's edges by the guard. `q` carries the guard: a
+                // clear pixel's texel is still its own. The last segment,
+                // where it overlaps the one before, is drawn aside and only
+                // its new pixels kept: the ones before are done, and the
+                // replay never has to go back for one.
+                let mut aside = [0u8; EXACT_SEG];
+                let seg: &mut [u8; EXACT_SEG] =
+                    if k0 < done { &mut aside } else { (&mut crow[k0..k0 + EXACT_SEG]).try_into().expect("a segment") };
+                let (mut q, mut d1, mut acc) = (q0.wrapping_add(guard), d10, LANE_CLEAR);
+                for c in seg.iter_mut() {
+                    acc &= (q & LANE_FRAC_MASK).wrapping_add(room);
+                    *c = texel(q);
+                    q = q.wrapping_add(d1);
+                    d1 = d1.wrapping_add(d2);
+                }
+                if k0 < done {
+                    crow[done..k0 + EXACT_SEG].copy_from_slice(&aside[done - k0..]);
+                }
+                if acc & LANE_CLEAR != LANE_CLEAR {
+                    // The pixels near an edge again, by the divide.
+                    let (mut q, mut d1) = (q0.wrapping_add(guard), d10);
+                    for (k, c) in (k0..).zip(&mut crow[k0..k0 + EXACT_SEG]) {
+                        if k >= done && (q & LANE_FRAC_MASK).wrapping_add(room) & LANE_CLEAR != LANE_CLEAR {
+                            *c = replay.texel(k, sp, fx, block, bw, bh);
+                        }
+                        q = q.wrapping_add(d1);
+                        d1 = d1.wrapping_add(d2);
+                    }
+                }
+            }
+            None => {
+                let from = done.max(k0);
+                for (k, c) in (from..).zip(&mut crow[from..k0 + EXACT_SEG]) {
+                    *c = replay.texel(k, sp, fx, block, bw, bh);
+                }
+            }
+        }
+        done = k0 + EXACT_SEG;
+        let Some(k) = next else { break };
+        (a, k0) = (next_a, k);
+    }
+    // The span's last pixel.
+    crow[n - 1] = replay.texel(n - 1, sp, fx, block, bw, bh);
 }
 
 /// Below this |2 x area| (in square pixels) even the best vertex triple of a
@@ -1183,6 +1422,65 @@ mod tests {
         assert_eq!(((16 * s + 15 * ds) >> 20, (s + 15 * (ds >> 4)) >> 16), (1, 0));
     }
 
+    /// The exact spans by parabolas against the divide at every pixel, over
+    /// random spans: level floors, oblique and grazing walls, spans hanging
+    /// off the block, and spans steered so that a pixel lands on a texel's
+    /// edge to within a unit.
+    #[test]
+    fn exact_by_parabolas_is_the_divide_at_every_pixel() {
+        let mut seed = 0x243F_6A88_85A3_08D3u64;
+        let mut next = move || {
+            seed ^= seed >> 12;
+            seed ^= seed << 25;
+            seed ^= seed >> 27;
+            seed.wrapping_mul(0x2545_f491_4f6c_dd1d)
+        };
+        let mut range = |lo: f64, hi: f64| lo + (next() >> 11) as f64 / (1u64 << 53) as f64 * (hi - lo);
+        let spans: usize = std::env::var("QUAKE_FUZZ_SPANS").ok().and_then(|v| v.parse().ok()).unwrap_or(30_000);
+        let (mut fast, mut steered_hits) = (0usize, 0usize);
+        for i in 0..spans {
+            let len = 1 + range(0.0, if i % 5 == 0 { 1400.0 } else { 300.0 }) as usize;
+            let (bw, bh) = (4 + range(0.0, 508.0) as usize, 4 + range(0.0, 508.0) as usize);
+            let block: Vec<u8> = (0..bw * bh).map(|j| (j * 13 + j / bw) as u8).collect();
+            // 1/z at the span's ends (a ratio up to 30, or level), the
+            // texels a pixel (0.02 to 3), where the span starts in the block.
+            let zi0 = range(1e-4, 0.05);
+            let ratio = match i % 4 {
+                0 => 1.0,
+                1 => 1.0 + range(-1e-3, 1e-3),
+                2 => range(0.5, 2.0),
+                _ => range(1.0 / 30.0, 30.0),
+            };
+            let dzi = zi0 * (ratio - 1.0) / len as f64;
+            let zi1 = zi0 + dzi * (len - 1).max(1) as f64;
+            let (rs, rt) = (range(-3.0, 3.0), range(-3.0, 3.0));
+            let (s0, t0) = (range(-2.0, bw as f64 + 2.0), range(-2.0, bh as f64 + 2.0));
+            let (s1, t1) = (s0 + rs * len as f64, t0 + rt * len as f64);
+            // s/z linear from s0*zi0 to s1*zi1 (the eye at texel 0: sadjust
+            // carries nothing but the steering below).
+            let lin = |a: f64, b: f64| (a * zi0, (b * zi1 - a * zi0) / (len - 1).max(1) as f64);
+            let ((sz, dsz), (tz, dtz)) = (lin(s0, s1), lin(t0, t1));
+            let sp = Span { zi: zi0, sz, tz, dzi, dsz, dtz };
+            let mut fx = BlockFixed { sadjust: 0, tadjust: 0, bbextents: ((bw as i64) << 16) - 1, bbextentt: ((bh as i64) << 16) - 1 };
+            // Steer: a pixel's s (or t) to within two units of a texel edge.
+            if i % 3 == 0 {
+                let k = range(0.0, len as f64) as usize;
+                let (s, t) = sp.st_at(k, 0, 0);
+                let off = range(-2.0, 3.0) as i64;
+                if i % 2 == 0 { fx.sadjust = off - (s & 0xFFFF) } else { fx.tadjust = off - (t & 0xFFFF) }
+            }
+            let (mut new, mut old) = (vec![0u8; len], vec![0u8; len]);
+            span_exact_cached(&mut new, &sp, &fx, &block, bw, bh);
+            span_exact_reference(&mut old, &sp, &fx, &block, bw, bh);
+            assert!(new == old, "span {i}: {len} pixels on {bw}x{bh}, {sp:?}, sadjust {} tadjust {}: first difference at {:?}",
+                fx.sadjust, fx.tadjust, new.iter().zip(&old).position(|(a, b)| a != b));
+            fast += usize::from(exact_plan(len, &sp, bw, bh, block.len()).is_some());
+            steered_hits += usize::from(i % 3 == 0);
+        }
+        assert!(fast * 2 > spans, "most spans take the parabolas: {fast} of {spans}");
+        assert!(steered_hits > 0);
+    }
+
     #[test]
     fn a_span_at_zero_1_over_z_wraps_like_the_c_int() {
         // zi exactly 0 at a near-clipped edge: z = 0x10000 / 0 is infinite,
@@ -1473,8 +1771,8 @@ mod tests {
     }
 
     /// The exact span with each coordinate clamped at every pixel, as
-    /// [`span_exact_cached`] was before it tested "inside the block" first:
-    /// the fuzz's reference for it.
+    /// [`span_exact_reference`] was before it tested "inside the block"
+    /// first: the fuzz's reference for it and for [`span_exact_cached`].
     fn exact_clamped_every_pixel(crow: &mut [u8], sp: &Span, fx: &BlockFixed, block: &[u8], bw: usize, bh: usize) {
         let (mut zi, mut sz, mut tz) = (sp.zi, sp.sz, sp.tz);
         for c in crow.iter_mut() {
@@ -1498,7 +1796,8 @@ mod tests {
     /// And `D_DrawSpans16` against its arithmetic in the asm's order: the
     /// span loops ask for each segment's end a segment ahead
     /// ([`segments_ahead`]), the references on reaching it. And the exact
-    /// span against its two clamps at every pixel.
+    /// span, both ways (by parabolas and by the divide), against its two
+    /// clamps at every pixel.
     #[test]
     fn the_c_spans_at_every_length_are_ids_c_and_stay_in_the_block() {
         let mut r = Rng(0x9e37_79b9_7f4a_7c15);
@@ -1532,6 +1831,8 @@ mod tests {
             span_cached(&mut port, &sp, &fx, &block, bw, bh, PerspSpan::Exact);
             exact_clamped_every_pixel(&mut c, &sp, &fx, &block, bw, bh);
             assert_eq!(port, c, "exact, {len} pixels on {bw}x{bh}, {sp:?}");
+            span_exact_reference(&mut port, &sp, &fx, &block, bw, bh);
+            assert_eq!(port, c, "exact (the reference), {len} pixels on {bw}x{bh}, {sp:?}");
             // A span whose texels vary: it ran through the block, not only
             // along one clamped edge.
             in_block += usize::from(port.iter().any(|&p| p != port[0]));

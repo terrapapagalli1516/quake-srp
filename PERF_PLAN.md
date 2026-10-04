@@ -1721,3 +1721,67 @@ natively: demo1 at 2640×1080 +8 / +6 / +5% on one thread (span 8 / 16 / exact),
 (The page's crate already builds with one unit; this is `quaketool` only.)
 
 **Not measured:** a phone (none connected this round); Safari (no local WebKit).
+
+### Cheap exact: the divide every 16 pixels, the same pixels (`raster::span_exact_cached`)
+
+Exact perspective divides at every pixel. Along a span a texel coordinate is a
+hyperbola in the pixel, `65536 (sz + k dsz) / (zi + k dzi)`; through three of its points
+16 pixels apart (the knots, by the divide) a parabola stays within a bound that follows
+from the hyperbola's third derivative, `6 |sz dzi − dsz zi| dzi² z⁴ / 65536³`, times
+0.0642 × 16³. So a span is drawn in 32-pixel segments: two divides a segment, asked for
+a segment ahead; the parabola stepped by forward differences in fixed point (16.16 with
+7 more bits), s and t side by side in one `u64`; and every pixel tested, one AND a
+pixel, for being further from both its texel's edges than the bound plus the
+arithmetic's own errors (the guard: `GUARD_SLACK` lists them). A pixel that is, reads
+the divide's texel. The few that are not are drawn again by the divide, and of those
+the ones the divide's own rounding could tip (within 2 units of an edge) by replaying
+the reference's accumulators (`zi += dzi` …) up to them. A span of 32 pixels or fewer,
+a grazing one (rounding noise over a quarter unit, a guard over 6000), a block wider
+than 512 texels, or a segment that would leave the block, is drawn by the divide.
+
+In demo1 at 2640×1080 (counted): 93% of the segments clear, 5% with a pixel near an
+edge, 2% at the block's edge; 1.6% of the exact pixels in spans too short.
+
+**Size:** 160 lines of code and 70 of comments in `raster.rs`, and a 60-line fuzz.
+
+**Proof.** The fuzz holds it to the divide at every pixel over random spans (level,
+near-level, oblique, grazing; blocks 4 to 512 texels; spans off the block; one in three
+steered so a pixel lands within 2 units of a texel's edge): 2,000,000 spans pass
+(`QUAKE_FUZZ_SPANS=2000000`; 30,000 by default). Mutations fail it: a guard slack of 1
+instead of 9, the last segment's pixels copied one off, the near pixels' second pass
+starting one late. (A slack of 4 and a 1-unit "near the edge" window pass 300,000
+spans: the fuzz does not reach the worst case the bound allows for; the slack is the
+bound's.) Against the branch without it: the view sweep at exact (nine maps, every
+size, 1 and 8 threads: 1,242 `view`s and `shot`s), the all-spans sweep (540) and
+`play` hashes at exact (16 runs), no difference; the wasm build's `play` hashes equal
+the native ones.
+
+**Speed** (demo1, exact, the frame-time change; as in the tables above):
+
+| | 2640×1080 | 1920×1080 |
+|---|---|---|
+| native, 1 thread | 7.81 → 6.96 ms (−11%) | 5.92 → 5.42 (−8%) |
+| native, 8 threads | 1.95 → 1.84 (−5%) | 1.54 → 1.48 (−4%) |
+| V8, 1 thread | 9.74 → 8.26 (−15%) | −14% |
+| page, 1 thread | 10.08 → 8.50 (−16%) | not measured |
+| page, 8 threads | 2.84 → 2.60 (−9%) | −7% |
+
+Spans 8 and 16 do not move (±0.5% in the page).
+
+The renderer's own views at exact, 2640×1080, one thread: e1m6's walls −13% natively,
+−22% in V8; e1m3 −3% / −9%; e1m4's lake −3% / −3%; e1m1's start 0% / −8%, and at
+1920×1080 natively +8%. That one is the first prototype's "13% slower": e1m1's start is
+an eye on the 16-unit grid looking straight along an axis, and there many pixel centres
+fall exactly on texel edges. 19% of its segments have a near pixel (demo1: 5%), 87% of
+those pixels need the replay, 1.2 million accumulator steps a frame (demo1: 84,000),
+about 0.8 ms natively, where the divide it saves is cheap. The same view from 0.4 unit
+and 0.3° away: −17% natively (−12% at 1920×1080), −24% in V8. Play rarely stands on
+the grid; the demos do not. (The prototype also redrew the overlapping last segment's
+near pixels; that segment is now drawn aside and only its new pixels kept: 4–10 points
+faster in V8, a point slower natively. Why V8 gained that much I did not pin down.)
+
+**Exact against the spans, with it** (demo1 at 2640×1080): in the page on one thread
+8.50 ms against 6.23 at span 8 and 5.74 at 16 (1.36x and 1.48x), on 8 threads 2.60
+against 2.21 and 2.14 (1.18x, 1.21x); in V8 on one thread 8.26 against 5.99 and 5.45
+(1.38x, 1.52x); natively 6.96 against 5.02 and 4.60 (1.39x, 1.51x). Without it exact
+was 1.3–1.8x span 16; with it 1.2–1.5x: better, still the dearest.
