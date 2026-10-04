@@ -204,6 +204,12 @@ pub(super) struct Target<'a> {
 }
 
 impl Target<'_> {
+    /// Whether the view lies within rows `stride` pixels wide and `height`
+    /// rows tall, and has the `1/z` for it. One that does not is not drawn.
+    fn fits(&self, stride: usize, height: usize) -> bool {
+        self.w > 0 && self.x0 + self.w <= stride && self.y0 + self.h <= height && self.z.len() >= self.w * self.h
+    }
+
     /// Whether this view and `other` can be drawn in one round: they share
     /// no pixel. (Views that overlap are drawn one after the other, the
     /// later over the earlier, in rounds of their own.)
@@ -241,10 +247,9 @@ struct Part<'a> {
 fn strips<'a>(mut rows: &'a mut [u8], stride: usize, targets: Vec<Target<'a>>, band_rows: usize) -> Vec<Strip<'a>> {
     let (stride, band_rows) = (stride.max(1), band_rows.max(1));
     let height = rows.len() / stride;
-    let fits = |t: &Target| t.w > 0 && t.x0 + t.w <= stride && t.y0 + t.h <= height && t.z.len() >= t.w * t.h;
     // Each target with its place in the list and the `1/z` of its rows not
     // yet handed out.
-    let mut left: Vec<(usize, Target)> = targets.into_iter().enumerate().filter(|(_, t)| fits(t)).collect();
+    let mut left: Vec<(usize, Target)> = targets.into_iter().enumerate().filter(|(_, t)| t.fits(stride, height)).collect();
     let mut cuts: Vec<usize> = left.iter().flat_map(|(_, t)| [t.y0, t.y0 + t.h]).collect();
     cuts.sort_unstable();
     cuts.dedup();
@@ -313,9 +318,11 @@ impl Workers {
         let threads = self.threads.min(total.max(1));
         if threads <= 1 {
             let mut t = start();
-            for (view, Target { w, h, x0, y0, z }) in targets.into_iter().enumerate() {
-                let Some(view_rows) = rows.get_mut(y0 * stride..(y0 + h) * stride) else { continue };
-                draw(view, &mut Band::placed(w, view_rows, stride, x0, z), &mut t);
+            let height = rows.len() / stride.max(1);
+            // (A view that does not fit is left out, as `strips` leaves it.)
+            for (view, target) in targets.into_iter().enumerate().filter(|(_, t)| t.fits(stride, height)) {
+                let Target { w, h, x0, y0, z } = target;
+                draw(view, &mut Band::placed(w, &mut rows[y0 * stride..(y0 + h) * stride], stride, x0, z), &mut t);
             }
             return vec![t];
         }

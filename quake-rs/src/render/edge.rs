@@ -1613,12 +1613,25 @@ impl EdgeState {
     /// (step each to the next scanline and move back any that passed the
     /// one before it). Here it is one walk: an edge is removed or stepped
     /// ([`EdgeState::step_edge`]) as soon as its spans are generated. The
-    /// table comes out the same. Stepping an edge only looks at, and moves
-    /// it among, the edges before it, which id's third walk had stepped by
+    /// spans come out the same: an edge's spans read its own `u` and the
+    /// surfaces, never another edge's `u`, and the walk goes on from the
+    /// edge that followed this one before it was stepped. The table comes
+    /// out the same too. Stepping an edge only looks at, and moves it
+    /// among, the edges before it, which id's third walk had stepped by
     /// then and this one has too; the edges before it that end here are
-    /// already out, as id's second walk had them; and what is left of the
-    /// scanline's own walk lies after it, untouched. (The scan is the
-    /// largest thing a frame does on one thread: PERF_PLAN.md §14.)
+    /// already out, as id's second walk had them (taking a set of edges out
+    /// of a list leaves the same list in any order); and what is left of
+    /// the scanline's own walk lies after it, untouched.
+    ///
+    /// One thing id's third walk does and this one does not: it steps
+    /// `edge_tail` as well, and would move the tail back before an edge
+    /// that had run past it. None does. `R_EmitEdge`'s clamps start every
+    /// edge half a pixel or more left of the tail — 2^19 of `u`'s units —
+    /// and an edge's steps carry it a few thousand units past its clamp at
+    /// the most, so the tail stays last in id's walk as it does here. (The
+    /// tests hold this walk to id's three, written out, line by line over
+    /// random tables and the maps' own; the scan is the largest thing a
+    /// frame does on one thread: PERF_PLAN.md §14.)
     fn scan_edges(&mut self) {
         self.begin_scan();
         let bottom = self.h as i32 - 1;
@@ -2531,3 +2544,8 @@ mod tests {
         assert_eq!(c_ftoi(f64::NAN), i32::MIN);
     }
 }
+
+// The scan held to a transcription of id's three walks, table by table.
+#[cfg(test)]
+#[path = "edge_scan_tests.rs"]
+mod scan_tests;

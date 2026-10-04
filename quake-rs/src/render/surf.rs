@@ -417,6 +417,18 @@ impl BakeJob<'_> {
 /// whichever thread bakes it and whenever: the frame and the cache are the
 /// same for any thread count. One thread bakes them all before its one band.
 ///
+/// Nothing here depends on which thread came first, and no thread can wait
+/// for ever. The count of jobs taken only hands each job to one thread and
+/// carries nothing else (so `Relaxed` will do); a block reaches the other
+/// threads through its `OnceLock`, whole or not at all. A bake takes no
+/// lock and asks for no other block, and a thread waits only for the one
+/// thread baking the block it asked for, so no wait can close a circle. A
+/// bake that panics leaves its block unbaked — the next to ask bakes it —
+/// and the panic comes back on the calling thread at the round's end
+/// ([`super::band::Workers::run`]). The cache is not written during the
+/// round: the blocks go into it afterwards, in the jobs' order
+/// ([`Bakes::finish`], [`SurfaceCaches::baked`]).
+///
 /// (A round of threads — spawn, run, join — costs 30–80 µs natively when
 /// threads ran a moment before and 150–400 µs after an idle gap; on a phone
 /// each one wakes workers that slept since the last frame. A round for the
