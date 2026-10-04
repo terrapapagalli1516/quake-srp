@@ -304,7 +304,15 @@ class Target:
         return self.pg.evaluate("n => quake.callLine('cvar ' + n).then(r => r.text)", name)
 
     def tap(self, x, y):
-        """A finger's tap (Playwright's touchscreen refuses on a connected browser)."""
+        """A finger's tap at (x, y) CSS px of the page. Where the page is the
+        phone's whole screen, a tap from Android (`input tap`: DevTools' own
+        touch events never come back from a fullscreen page there); else
+        DevTools' (Playwright's touchscreen refuses on a connected browser)."""
+        if self.phone and self.pg.evaluate("innerWidth === screen.width && innerHeight === screen.height"):
+            dpr = self.pg.evaluate("devicePixelRatio")
+            if CHROME in adb("shell", "dumpsys activity activities | grep topResumedActivity"):
+                adb("shell", "input", "tap", str(round(x * dpr)), str(round(y * dpr)))
+            return
         for kind, points in (("touchStart", [{"x": x, "y": y}]), ("touchEnd", [])):
             self.cdp.send("Input.dispatchTouchEvent", {"type": kind, "touchPoints": points})
             time.sleep(0.06)
@@ -319,6 +327,8 @@ class Target:
             self.tap(w / 2, h / 2)
             time.sleep(1.5)
             self.pg.evaluate("() => { delete wrap.requestFullscreen; }")
+            if self.pg.evaluate("getComputedStyle(document.getElementById('overlay')).display") != "none":
+                print("  (the tap did not start the page: \"tap to start\" is still up)", flush=True)
 
     def cool(self, secs):
         """Rest the phone, the page's ticks paused, until no core is capped and the
@@ -487,6 +497,11 @@ def main():
             adb("forward", f"tcp:{DEVTOOLS_PORT}", "localabstract:chrome_devtools_remote")
             if a.deploy:
                 adb("reverse", f"tcp:{a.port}", f"tcp:{a.port}")
+                # A tab of the kit's own left by a stopped run goes first.
+                stale = p.chromium.connect_over_cdp(f"http://127.0.0.1:{DEVTOOLS_PORT}")
+                for old in [pg for ctx in stale.contexts for pg in ctx.pages if pg.url.startswith(f"http://localhost:{a.port}/")]:
+                    old.close()
+                stale.close()
                 adb("shell", "am", "start", "-n", CHROME_MAIN, "-a", "android.intent.action.VIEW", "-d", url)
                 time.sleep(3.0)
             br, pg = find_page(p, a.port, a.deploy)

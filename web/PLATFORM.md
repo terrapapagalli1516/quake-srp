@@ -81,25 +81,29 @@ AudioWorklet (audio thread): plays the sound ring, moves its clock
   back while it is behind (`index.html`'s `pacing`). What "slow" is depends
   on the device, because the wait's two costs do:
   - *To the screen.* From the tick to the display compositor's swap
-    (a trace of headless Chromium on a desktop GPU at 60 Hz, the frames
-    held with `stall_ms`; median ms):
+    (`web/swap_trace.py`, below: a trace of headless Chromium on a desktop's
+    GPU at 60 Hz, the frames held with `stall_ms`; median ms):
 
     | the frame, in refreshes | waited for | not waited for |
     |---|---|---|
-    | 0.6 | 17.1 | 17.1 |
-    | 0.85 | 15.5–17.1 | 18.0 |
-    | 1.1 | 18.8 | 28.7 |
-    | 1.4 | 24.0 | 33.7 |
-    | 2.2 (past the wait's 30 ms) | 81.5 | 46.7 |
+    | 0.6 | 10.7–17.2 | the same (it is waited for everywhere) |
+    | 0.85 | 17.0 | 17.9 |
+    | 1.1 | 18.8 | 28.6 |
+    | 1.4 | 23.9 | 33.2 |
+    | 2.0 (33 ms: past the wait's 30) | 64.7 | 41.3 |
 
-    Under a refresh it is the same swap either way (at 0.85 the wait's
-    frame made the earlier one in one run of four). Past a refresh the
+    Under a refresh it is the same swap either way (which swap a frame of
+    0.6 makes is the display's own phase, run by run; at 0.85 the wait's
+    frame made the earlier one in one run of six). Past a refresh the
     wait's frame is committed the moment it is done and swapped at once,
     and the other is drawn at the next refresh's callback: 10 ms later at
     60 Hz, a refresh later on the glass more often than not. Past the
     wait's limit it is the wait that loses, and badly: the refresh gives up
     at 30 ms, and the frame that arrives after is drawn only at the end of
-    the *next* wait.
+    the *next* wait (which is also where the page's old latency probe
+    credited a key to the frame before its own: a key to the draw call at
+    2.0 refreshes is 81 ms waited for and 57–59 not, where that probe said
+    47).
   - *To the game.* The wait is a spin: a core busy for the whole frame. On
     a desktop that is one core of many. On a phone it was the fastest core,
     with the game's threads on the others ("On an Android phone", below: at
@@ -125,6 +129,19 @@ AudioWorklet (audio thread): plays the sound ring, moves its clock
   kinds of device, both ways and the switches, with frames made slow on
   purpose (`stall_ms`, a bench build).
 
+  *Measure to the swap, not to the draw call.* The page's latency probe
+  (`quake.latency`, `latency.py`) stops at its own draw call, and a draw
+  call can be early without the picture being: `web/swap_trace.py DEPLOY
+  [--touch] [--stalls ...]` (a bench build; `QUAKE_GPU=1` for WebGL2)
+  marks each tick and each draw from outside the page (`performance.mark`
+  around its `sendTick` and `present`), takes a Chromium trace of the same
+  seconds, and follows every draw to the main frame that commits it
+  (`ProxyMain::BeginMainFrame`), the renderer compositor's draw after it,
+  and the display compositor's `Display::DrawAndSwap` after that; it
+  prints tick → draw call and tick → swap side by side. Headless, so the
+  browser's own scheduler at 60 Hz with no display behind it: a real one
+  shows a swap at its next refresh.
+
   *Not built: drawing the frame the moment it comes.* The continuation
   that posts the next tick could also draw (the review's prototype). To
   the draw call it looks like the wait (a key to the draw, frames of 1.1
@@ -133,10 +150,18 @@ AudioWorklet (audio thread): plays the sound ring, moves its clock
   with the next refresh's main frame all the same: its swap came no sooner
   (28.0 ms against 25.8 at 1.1 refreshes, 32.5 against 32.9 at 1.4), so
   the screen would not show it, and the probe that measures to the draw
-  call would say it did. What would give the wait's timing without its
-  spin is a presenter that may sleep: a worker's `OffscreenCanvas`, whose
-  wait is `Atomics.wait` (the parked `fleet/present120` branch's shape,
-  with its spin made a sleep).
+  call would say it did.
+
+  *Open: a presenter that may sleep.* What a touch screen pays for not
+  waiting — the 10 ms at the swap past a refresh, above — is the price of
+  a main thread that can only wait by spinning. A worker may sleep
+  (`Atomics.wait`): a presenter worker on an `OffscreenCanvas` could wait
+  for every frame, draw it the moment it is done and hand it to the
+  compositor itself, with no core kept busy: the wait's column of the
+  table with the phone's gain from not spinning (2640x1080 in touch play,
+  58 → 67 frames shown a second). It is the parked `fleet/present120`
+  branch's shape with its spin made a sleep; that branch is some 1000
+  lines against a page that has since changed under it. Not built.
 - **The 72 fps gate stays in the program.** A tick is the display's refresh
   and `dt` is the raw time since the last one, exactly the old `step(dt)`
   export's argument; `Host_FilterTime` decides whether a host frame runs.
