@@ -28,6 +28,7 @@ use super::host::host_error;
 use super::host_cmd::{try_changelevel, try_restart, IT_INVISIBILITY};
 use super::lerpmodels::{self, LerpModels};
 use super::lerpmove::LerpMove;
+use super::nailbarrels::{self, GunPose, NailBarrels};
 use super::view::{
     cshift_add, fade_cshifts, parse_damage, stamp_item_gettime, stufftext_bonus_flash, BONUS_COLOR,
     BONUS_PERCENT, FACE_ANIM_TIME, V_KICKTIME,
@@ -683,6 +684,11 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
             .retain(|&e, _| !vm.is_free_edict(e));
     }
     let smooth = w.lerpmove == LerpMove::Smooth;
+    // r_nailbarrels (the 2026 extra): the player's own nails, as (index in
+    // `descs`, edict), drawn leaving the nailgun's barrels once the camera
+    // and the gun are placed (below).
+    let barrel_nails = w.nailbarrels == NailBarrels::Barrels;
+    let mut player_nails: Vec<(usize, i32)> = Vec::new();
     for e in 0..n {
         let ent = e as i32;
         if ent == w.player || w.server.vm.is_free_edict(ent) {
@@ -795,6 +801,9 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
         } else {
             None
         };
+        if barrel_nails && m == nailbarrels::NAIL && w.server.vm.ent_int(ent, w.server.vm.fo().owner) == w.player {
+            player_nails.push((descs.len(), ent));
+        }
         descs.push((m, origin, angles, frame, color, skin, blend));
     }
     if smooth {
@@ -935,6 +944,34 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
             fov_deg: 90.0,
         }
     };
+    // R_DrawViewModel (r_main.c ~622) returns early — drawing NO gun — when the
+    // player is dead (STAT_HEALTH <= 0) or carrying the Ring of Shadows
+    // (IT_INVISIBILITY). Without this the gun hovers, frozen, on the rolled
+    // death-cam, and stays visible while invisible. The intermission camera also
+    // hides it (V_CalcIntermissionRefdef: `view->model = NULL`).
+    let hide_gun = intermission
+        || w.server.vm.ent_float(w.player, w.server.vm.fo().health) <= 0.0
+        || (w.server.vm.ent_float(w.player, w.server.vm.fo().items) as i32) & IT_INVISIBILITY != 0;
+    // r_nailbarrels (the 2026 extra): each of the player's nails drawn
+    // leaving the barrel it fires from, while the nailgun is drawn where
+    // V_CalcRefdef puts it this frame (`client::nailbarrels`); the world
+    // stops the offset short of its surfaces.
+    if barrel_nails {
+        let gun = (!hide_gun && weapon_name == nailbarrels::NAILGUN).then(|| {
+            let angles = render::viewmodel_angles(&cam, client_punchangle(w), ang[2]);
+            let ofs = render::viewmodel_origin_ofs(angles, bob, w.viewsize);
+            GunPose::new(crate::math::add(cam.pos, ofs), angles)
+        });
+        let clip = |from, to| crate::world::trace_world(&w.bsp, from, to, [0.0; 3], [0.0; 3]).endpos;
+        for &(i, ent) in &player_nails {
+            let vm = &w.server.vm;
+            let (id, velocity) = (vm.ent_float(ent, vm.fo().nextthink), vm.ent_vec(ent, vm.fo().velocity));
+            descs[i].1 = w.nail_launches.draw(ent, id, descs[i].1, velocity, gun.as_ref(), clip);
+        }
+        w.nail_launches.end_frame();
+    } else {
+        w.nail_launches.clear();
+    }
     // R_MarkLeaves / R_StoreEfrags: the statics whose leaves the view's PVS
     // (from the leaf holding r_refdef.vieworg, not fattened) reaches join the
     // frame after the relinked entities, as they join cl_visedicts in the C.
@@ -1029,15 +1066,8 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
             _ => None,
         })
         .collect();
-    // Anchor the weapon viewmodel to the camera (drawn last, on top of the world).
-    // R_DrawViewModel (r_main.c ~622) returns early — drawing NO gun — when the
-    // player is dead (STAT_HEALTH <= 0) or carrying the Ring of Shadows
-    // (IT_INVISIBILITY). Without this the gun hovers, frozen, on the rolled
-    // death-cam, and stays visible while invisible. The intermission camera also
-    // hides it (V_CalcIntermissionRefdef: `view->model = NULL`).
-    let hide_gun = intermission
-        || w.server.vm.ent_float(w.player, w.server.vm.fo().health) <= 0.0
-        || (w.server.vm.ent_float(w.player, w.server.vm.fo().items) as i32) & IT_INVISIBILITY != 0;
+    // Anchor the weapon viewmodel to the camera (drawn last, on top of the
+    // world), unless `hide_gun` (above).
     let viewmodel = if hide_gun {
         None
     } else {

@@ -51,6 +51,7 @@ pub mod host_cmd;
 pub mod in_win;
 pub mod lerpmodels;
 pub mod lerpmove;
+pub mod nailbarrels;
 pub mod view;
 
 use std::cell::Cell;
@@ -72,6 +73,7 @@ use crate::wad::Qpic;
 use cl_input::{clamp_pitch, KeyMove};
 use lerpmodels::{FrameLerps, LerpModels};
 use lerpmove::{LerpMove, StepGlides};
+use nailbarrels::{NailBarrels, NailLaunches};
 
 // ---------------------------------------------------------------------------
 // The client state
@@ -184,6 +186,12 @@ pub struct Walk {
     /// Every drawn alias entity's (and the view weapon's) animation blend
     /// while [`LerpModels::Smooth`] is on.
     pub frame_lerps: FrameLerps,
+    /// Whether the player's nails are drawn leaving the nailgun's barrels
+    /// ([`NailBarrels`], `r_nailbarrels`): Classic unless the host turns the
+    /// extra on. Set by the host each frame, like `lerpmove`.
+    pub nailbarrels: NailBarrels,
+    /// The player's nails in flight while [`NailBarrels::Barrels`] is on.
+    pub nail_launches: NailLaunches,
     /// Accumulated mouse-strafe sidemove units (in_win.c IN_MouseMove's
     /// `cmd->sidemove += m_side.value * mouse_x` when lookstrafe / +strafe route
     /// mouse X away from yaw). Drained into the next UserCmd then cleared.
@@ -661,6 +669,8 @@ pub fn assemble_walk(
         glides: StepGlides::default(),
         lerpmodels: LerpModels::Classic,
         frame_lerps: FrameLerps::default(),
+        nailbarrels: NailBarrels::Classic,
+        nail_launches: NailLaunches::default(),
         clock,
         host_time: 0.0,
         host_clock: 0.0,

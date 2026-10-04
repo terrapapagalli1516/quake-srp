@@ -506,7 +506,7 @@ mod tests {
         menu_down();
         menu_select();
         assert_eq!(menu_screen_id(), 13, "Motion and light");
-        for _ in 0..4 {
+        for _ in 0..5 {
             menu_down(); // Torch flicker, a slider
         }
         menu_right();
