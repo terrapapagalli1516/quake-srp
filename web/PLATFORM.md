@@ -239,7 +239,10 @@ shown through each frame (the cshifts, then gamma: the renderer's
   to 0.13 at 1320x540, every frame under 1 ms (one page, 15 s each way;
   64 `Free`s in 3 s). The old order was sometimes quick too — the state is
   sticky either way — which is how the same frame measured 2.6 ms in one
-  minute and 0.3 in the next.
+  minute and 0.3 in the next. On a desktop (headless Chromium on the GPU,
+  the page's own loop at 60 Hz, main's page and this one twice each): 0.55
+  → 0.15 ms at 2.6 megapixels and 1.12 → 0.57 at 3806×2076, 120 `Free`s a second
+  → none.
 - **2-D canvas** (no WebGL2 — a headless Firefox with no display to ask —, a WebGL2 drawn by the CPU,
   or `?canvas2d`): the page asks for `RGBA8`; the program packs its frame
   through the palette on the renderer's threads (`render::pack_rgba`, one
