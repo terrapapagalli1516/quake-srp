@@ -15,13 +15,13 @@
 //
 // What shows depends on the game's state (the State record):
 //
-//   the game, with in_touch (2026)  a stick under the left thumb wherever it
+//   the game, with in_touch (on)    a stick under the left thumb wherever it
 //                                   lands, look by dragging on the right,
 //                                   FIRE (hold; drag it to aim too), JUMP,
 //                                   next weapon, MENU
-//   the game, in_touch off          MENU only (Classic: id's game has no
-//                                   touch controls, but a phone must never be
-//                                   left without a way to the menu)
+//   the game, in_touch off          MENU only (id's game had no touch
+//                                   controls, but a phone must never be left
+//                                   without a way to the menu)
 //   a demo (the attract loop)       MENU; a tap anywhere is Escape, as any
 //                                   key is in id's demo playback
 //   the menu                        taps and drags on the menu; a pad
@@ -42,7 +42,7 @@
 // no frames, until the phone is turned back) — fullscreen and a landscape
 // lock where the browser allows (Android), the screen kept awake in a game
 // (Screen Wake Lock), audio resumed by any touch (iOS suspends it), and
-// (2026) a live game paused under its menu when the page is hidden, until
+// (in_touch) a live game paused under its menu when the page is hidden, until
 // the player is back in the game. Haptics: rumble(), a hook for the
 // gamepad's rumble events.
 (function () {
@@ -444,10 +444,10 @@
   }
 
   // The page hidden (another app, the lock button): with the touch
-  // controls (2026) a live game pauses (id's `pause`, its plaque) under its
-  // menu, and going back to the game resumes it. (In Classic the game only
-  // stops getting ticks, as on a desktop.) The sound stops until the page
-  // is back.
+  // controls (in_touch, on in both presets) a live game pauses (id's
+  // `pause`, its plaque) under its menu, and going back to the game resumes
+  // it. (With them off the game only stops getting ticks, as on a desktop.)
+  // The sound stops until the page is back.
   function onVisibility() {
     const ctx = host.audio();
     if (document.hidden) {

@@ -9,7 +9,7 @@ through the page's own keyboard path:
      "%i frames %5.1f seconds %5.1f fps": well formed, 969 frames (id's C
      draws 969 for demo1), a plausible rate that agrees with frames/seconds.
      The attract loop's next demo plays afterwards, under the 72 fps cap
-     again. Run in the Classic profile (`?classic`), at 960x600 (its mode) and 640x400 (or the modes in
+     again. Run in the Classic preset (`?classic`), at 960x600 (its mode) and 640x400 (or the modes in
      QUAKE_TIMEDEMO_RES, e.g. "320x200,640x400,960x600"); the lines are
      printed (PERF_PLAN.md's browser numbers). Screenshot:
      verify_timedemo.png (mid-run).

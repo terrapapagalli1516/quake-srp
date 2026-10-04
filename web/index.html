@@ -85,7 +85,7 @@
      frame is presented exactly as Quake was meant to be seen. */
   #wrap:fullscreen { width:100vw; height:100vh; display:flex; align-items:center; justify-content:center; background:#000; }
   #wrap:fullscreen canvas { height:100vh; width:auto; aspect-ratio:4 / 3; border:0; }
-  /* Native resolution (the 2026 profile, vid_native): the picture fills the
+  /* Native resolution (the slop preset's, vid_native): the picture fills the
      page's box for it at the box's own aspect — the window less the same
      chrome, or the whole screen in fullscreen — and fitCanvas() sizes the
      canvas to whole device pixels per picture pixel (see there). */
@@ -256,7 +256,7 @@
           <span class="k">click</span><span>fire</span>
           <span class="k"><kbd>Ctrl</kbd></span><span>fire (DOS-style — arrows + <kbd>Ctrl</kbd> play fine without capturing the mouse)</span>
           <span class="k"><kbd>1</kbd>–<kbd>8</kbd></span><span>select weapon (1 axe · 2 shotgun · 4 nailgun, once owned)</span>
-          <span class="k">wheel</span><span>2026: switch weapon — up next, down previous (Classic: id's, unbound)</span>
+          <span class="k">wheel</span><span>switch weapon — up next, down previous (the slop preset's; Classic: id's, unbound)</span>
         </div>
       </div>
       <div class="col">
@@ -266,7 +266,7 @@
           <span class="k"><kbd>Esc</kbd></span><span>menu / back — with the mouse captured, <kbd>Esc</kbd> releases it and opens the menu. In fullscreen on Chrome/Edge <kbd>Esc</kbd> just toggles the menu (hold it to leave fullscreen); elsewhere a <em>second</em> <kbd>Esc</kbd> leaves fullscreen (browser rule)</span>
           <span class="k"><kbd>Tab</kbd></span><span>hold for the scoreboard (monsters, secrets, time)</span>
           <span class="k"><kbd>↑</kbd><kbd>↓</kbd></span><span>menu: navigate · <kbd>←</kbd><kbd>→</kbd> adjust · <kbd>Enter</kbd> select</span>
-          <span class="k">Options</span><span>screen size, brightness, mouse, always run — Customize controls to rebind keys, Video Options for id's 4:3 modes, and <em>Classic / 2026</em>: ←/→ switches between id's WinQuake exactly and this port's 2026 settings (the engine: the controls stay), Enter lists each one (or open the page as <code>?classic</code> / <code>?2026</code>)</span>
+          <span class="k">Options</span><span>screen size, brightness, mouse, always run — Customize controls to rebind keys, Video Options for the picture's size, <em>Slop Options</em> for this port's own settings (each row white where it differs from the preset), <em>Reset to Classic</em> for id's WinQuake engine exactly (your keys and Options stay) and <em>Reset to slop</em> for everything as it starts. Open the page as <code>?classic</code> or <code>?slop</code> to start in that preset</span>
           <span class="k"><kbd>-</kbd><kbd>=</kbd></span><span>screen size down / up</span>
           <span class="k"><kbd>Alt</kbd>+<kbd>Enter</kbd></span><span>fullscreen on and off, whatever has the keyboard: the game, the menu, the console (Option+Return on a Mac). With id's own controls (<code>idcontrols</code>) the chord is id's strafe and jump: use the <em>fullscreen</em> button. <kbd>F11</kbd> is the browser's own, the whole window</span>
           <span class="k"><kbd>F6</kbd> / <kbd>F9</kbd></span><span>quicksave / quickload (id's own binds — also <kbd>F1</kbd> help, <kbd>F2</kbd>/<kbd>F3</kbd> the Save/Load screen, <kbd>F4</kbd> Options, <kbd>F10</kbd> quit, <kbd>F12</kbd> a screenshot — a <code>.pcx</code> file in this page's storage, not a download yet; F12 only reaches the game in fullscreen, where the browser keeps it for devtools otherwise)</span>
@@ -286,7 +286,7 @@
         <code>impulse 9</code><span>all weapons + ammo</span>
         <code>map e1m2</code><span>jump to a level (<code>start</code>, <code>e1m1</code>…<code>e1m8</code>)</span>
         <code>kill</code><span>respawn</span>
-        <code>profile classic</code><span>id's WinQuake engine exactly (every departure off); <code>profile 2026</code> the port's settings, each also a variable (<code>wasm_showfps 1</code>, <code>vid_pixelsize 2</code>, …; Options &gt; Classic / 2026). The controls (WASD, mouse look, gamepad, Always Run) are the same in both</span>
+        <code>preset classic</code><span>id's WinQuake engine exactly (every slop option off); <code>preset slop</code> the port's settings, each also a variable (<code>wasm_showfps 1</code>, <code>host_maxfps 60</code>, …; Options &gt; Slop Options); <code>preset</code> alone says where yours stand. Your keys stay, and the controls (WASD, mouse look, gamepad, Always Run) are the same in both</span>
         <code>idcontrols</code><span>id's own 1996 controls: the arrows, no mouse look, no gamepad, Always Run off</span>
         <code>help</code><span>id's Help/Ordering screen</span>
         <code>wasm_help</code><span>this port's list of console commands (<code>echo</code>, <code>clear</code>, the demo commands, …)</span>
@@ -323,8 +323,10 @@ const statusPlaying = () => touch ? 'playing — the MENU button for the menu'
 const canvas = document.getElementById('c');
 const wrap = document.getElementById('wrap');
 // A touch screen: a coarse primary pointer (a phone, a tablet), or `?touch`
-// in the address. The touch controls go up there (startTouch), and such a
-// device is one whose few fast cores the game needs (`pacing`).
+// in the address. The one place this is decided: the touch controls go up
+// there (startTouch), such a device is one whose few fast cores the game
+// needs (`pacing`), and the program hears it at start (`-touch`,
+// commandLine) for its presets' numbers.
 const touchScreen = new URLSearchParams(location.search).has('touch') || matchMedia('(pointer: coarse)').matches;
 const overlay = document.getElementById('overlay');
 const fsBtn = document.getElementById('fs');
@@ -373,8 +375,8 @@ function gameParam() {
 const GAME_PARAM = gameParam();
 const GAME_DIR = GAME_PARAM || 'id1';
 // The address with `game` set to switch to (or removed, for id1), keeping
-// every other query param as it was, spelling included: `?2026&touch`
-// stays that, where URLSearchParams would write `?2026=&touch=` — the
+// every other query param as it was, spelling included: `?slop&touch`
+// stays that, where URLSearchParams would write `?slop=&touch=` — the
 // address is the choice, and the player may read or bookmark it.
 function gameHref(g) {
   const keep = location.search.slice(1).split('&').filter(p => p && p.split('=')[0] !== 'game');
@@ -506,7 +508,7 @@ function bindGrabbing() { return !!(gameState.flags & ST.BIND_GRAB); }
 // Native resolution (vid_native): device pixels per picture pixel, 0 when the
 // picture is a video mode shown in the 4:3 box.
 function nativePixel() { return (gameState.flags & ST.NATIVE) ? gameState.pixelSize : 0; }
-// Is Alt+Enter the page's fullscreen key (vid_altenter, on in both profiles; off
+// Is Alt+Enter the page's fullscreen key (vid_altenter, on in both presets; off
 // with id's own controls, `idcontrols`, the chord is the game's, id's ALT +strafe
 // and ENTER +jump)? See "Fullscreen",
 // below.
@@ -736,7 +738,7 @@ function syncStatus() {
 // scantokey, a US table): a key is its place on the keyboard, whatever the
 // layout types there, and its release always matches its press. So on AZERTY
 // the key where a US keyboard has W (labelled Z) is keynum 'w' and walks
-// forward in the 2026 WASD layout, and the digit row is 1..0 though it types
+// forward in the shared WASD layout, and the digit row is 1..0 though it types
 // &é"'( unshifted; what the layout typed still goes with the key (typedChar),
 // for the console and the name fields. e.key instead follows the layout and
 // shifts punctuation ('<' for Shift+','), which (a) put WASD all over the
@@ -898,7 +900,7 @@ function pageWillDropLock() {
 }
 
 // --- Fullscreen (web/PLATFORM.md, "Fullscreen") --------------------------------
-// The way in and out is the bar's button, in every profile, and the
+// The way in and out is the bar's button, in every preset, and the
 // fullscreen key: Alt+Enter, whatever has the keyboard — the game, the menu,
 // the console, a demo, the mouse captured or not. A shortcut has to work in
 // every state or the player stops trusting it: F used to be the key, in the
@@ -910,7 +912,7 @@ function pageWillDropLock() {
 // the capture phase, before any other listener: the game never sees the
 // Enter (the Alt reaches it, +strafe for a moment), and what it toggles is
 // the browser's own state, document.fullscreenElement, never a copy.
-// vid_altenter switches it (on in both profiles). Off, the chord stays the game's:
+// vid_altenter switches it (on in both presets). Off, the chord stays the game's:
 // default.cfg binds ALT +strafe and ENTER +jump, a strafe-jump, as in
 // WinQuake. The browser's own F11 fills the screen with the whole window.
 addEventListener('keydown', e => {
@@ -946,7 +948,7 @@ function fullscreenRefused(what, err) {
   showFsHint(`the browser refused fullscreen &nbsp;·&nbsp; ${err ? 'the console says why' : 'not allowed here'}`);
 }
 fsBtn.addEventListener('click', toggleFullscreen);
-// The button's tooltip names the key while there is one (2026).
+// The button's tooltip names the key while there is one (vid_altenter).
 let fsTitleKey = null;
 function syncFullscreenTitle() {
   const key = altEnterFullscreen();
@@ -1018,7 +1020,7 @@ function unlockEscape() {
   try { navigator.keyboard?.unlock?.(); } catch (e) { /* not supported */ }
 }
 // The ways out of fullscreen, as the hint on entering says them: a held Esc
-// where Esc is locked, Alt+Enter where it is the fullscreen key (2026),
+// where Esc is locked, Alt+Enter where it is the fullscreen key (vid_altenter),
 // else the browser's second Esc.
 function fsHintHtml(locked) {
   const out = [locked && 'hold Esc', altEnterFullscreen() && 'Alt+Enter'].filter(Boolean);
@@ -1241,7 +1243,7 @@ function mouseLook(dx, dy, at) {
   if (locked() || dragging) mouseMove(dx, dy, at);
 }
 
-// --- The mouse wheel (2026's weapon cycle; `web/PLATFORM.md` "Input") ----------
+// --- The mouse wheel (the slop preset's weapon cycle; `web/PLATFORM.md` "Input") ----------
 // vid_win.c's WM_MOUSEWHEEL turns every message into one press+release of
 // K_MWHEELUP (239) or K_MWHEELDOWN (240), whatever the message's own delta —
 // Windows already chunks a wheel's spin into one message per notch. A
@@ -1280,7 +1282,7 @@ function mouseLook(dx, dy, at) {
 // K_MWHEELUP/DOWN, consolekey() keeps them for it; Customize controls' bind
 // grab takes one like any key, M_Keys_Key); id's menu has no other use for
 // the wheel, so nothing here checks menuVisible()/consoleVisible() first.
-// Bound only in 2026 (Bindings::with_wheel) — id's default.cfg predates the
+// Bound only in the slop preset (Bindings::with_wheel) — id's default.cfg predates the
 // wheel, so Classic leaves it unbound and this KEY record just finds nothing
 // to run.
 const WHEEL_NOTCH_PX = 100, WHEEL_LINE_PX = WHEEL_NOTCH_PX / 3, WHEEL_MAX_NOTCHES = 3, WHEEL_ALONE_MS = 100;
@@ -1386,7 +1388,7 @@ function pollGamepad() {
   const anyButton = (rec[4] | rec[5] | rec[6] | rec[7]) !== 0;
   if (anyButton && !firstGestureDone && readyToPlay) startFromOverlay();
 }
-// The 2026 rumble (joy_rumble): the program says how strong and for how long,
+// The pad's rumble (joy_rumble, a slop option): the program says how strong and for how long,
 // on damage and on heavy-weapon fire, and whether the pad is read (`joystick`).
 // The pad plays it where the browser can (Chromium's vibrationActuator
 // "dual-rumble"; Firefox's hapticActuators pulse, where enabled) — unless the
@@ -1530,7 +1532,7 @@ let audioReadySent = '';                 // the running state and rate the progr
 // (Classic mixes at id's 11025 Hz) is reconstructed band-limited — a
 // windowed sinc, 16 input samples wide, tabulated at 256 phases — as a
 // sound card's DAC and output filter reconstructed id's 11025 Hz; the ring
-// at the device's own rate (the 2026 mixer) plays sample for sample. Missing
+// at the device's own rate (the slop preset's mixer) plays sample for sample. Missing
 // samples (the program late: a level load, a stall) play as silence and
 // count as an underrun once the program has written anything.
 const WORKLET = `
@@ -1658,8 +1660,8 @@ sndBtn.addEventListener('click', () => {
 // context actually reports 'running', 🔊 after. Cheap (touches the DOM only on
 // a state flip) so the render loop can poll it every frame, which also catches
 // resume paths outside our handlers (e.g. headless test harnesses). The
-// program hears the state and the device's rate (AUDIO_READY): the 2026
-// mixer runs at that rate.
+// program hears the state and the device's rate (AUDIO_READY): the slop
+// preset's mixer runs at that rate.
 let sndShown = null;
 function updateSndUI() {
   ensureAudioGraph();
@@ -2516,15 +2518,18 @@ let windowSent = '';
 function sendWindow() {
   if (portraitNow()) return;   // the game waits for the screen to be turned (holdGame); releaseGame sends it
   const dpr = window.devicePixelRatio || 1, b = pictureBox();
-  const w = Math.floor(b.w * dpr), h = Math.floor(b.h * dpr), key = w + 'x' + h + '@' + dpr;
+  const w = Math.floor(b.w * dpr), h = Math.floor(b.h * dpr), key = w + 'x' + h;
   if (key === windowSent) return;
-  // The ratio too: Auto's pixel size starts a phone's small, dense screen at
-  // 2x2 (quake-wasm's vid::phone_sized).
-  if (sendRecord(IN.WINDOW, fields(12, d => { d.setUint32(0, w, true); d.setUint32(4, h, true); d.setFloat32(8, dpr, true); }))) windowSent = key;
+  if (sendRecord(IN.WINDOW, fields(8, d => { d.setUint32(0, w, true); d.setUint32(4, h, true); }))) windowSent = key;
 }
-// `?classic` / `?2026` in the address: the profile to switch to, as the
-// command line's `+profile` (run after config.cfg, like the menu's switch,
-// so it sticks).
+// The machine, for the program's presets (quake_rs::settings::Machine): a
+// touch screen (`touchScreen`, the one test the touch controls and the
+// pacing use too) is `-touch` — 2x, four threads, a 60 fps cap — and the
+// threads offered are wasi.js's `-hwthreads`.
+// `?classic` / `?slop` (or the older `?2026`) in the address: the preset,
+// as `-preset`, which the program applies after config.cfg only when it is
+// not the one the stored settings were last set to — so a bookmarked
+// `?classic` stays Classic with the player's own changes on top.
 // `?game=hipnotic` / `?game=rogue` (COM_InitFilesystem's `-hipnotic`/
 // `-rogue`, GAME_PARAM above): layers that mission pack's own game
 // directory over `id1`'s — `hipnotic/pak0.pak` or `rogue/pak0.pak` beside
@@ -2540,7 +2545,8 @@ function commandLine(tracks) {
   const q = new URLSearchParams(location.search);
   const cdtracks = tracks && tracks.length ? ['-cdtracks', tracks.join(',')] : [];
   const mod = GAME_PARAM === 'hipnotic' ? ['-hipnotic'] : GAME_PARAM === 'rogue' ? ['-rogue'] : [];
-  return [...cdtracks, ...mod, ...(q.has('classic') ? ['+profile', 'classic'] : q.has('2026') ? ['+profile', '2026'] : [])];
+  const preset = q.has('classic') ? ['-preset', 'classic'] : q.has('slop') || q.has('2026') ? ['-preset', 'slop'] : [];
+  return [...cdtracks, ...mod, ...(touchScreen ? ['-touch'] : []), ...preset];
 }
 // The box is reported from the frame loop, a refresh after the resize, not
 // from the event: Firefox evaluates a media query at layout, after the

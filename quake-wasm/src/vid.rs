@@ -90,19 +90,25 @@ pub(crate) fn clamp_resolution(w: i32, h: i32) -> (usize, usize) {
 /// the setting (`vid_pixelsize`), or the next size up whose frame fits the
 /// memory ([`MAX_FRAME_PIXELS`]) when a `win_w x win_h` box at the setting
 /// would not — the player's own pick included, so a forced 1x on an 8K
-/// screen draws at 2x instead of stopping the game. 4 at most.
+/// screen draws at 2x instead of stopping the game. 4 at most. And the next
+/// size down when the box at the setting is smaller than id's smallest mode,
+/// 320x200, and a smaller size is not: the frame would be held to 320x200
+/// and the picture drawn larger than its box (a touch screen's 2x in a box
+/// under 640x400 draws at 1x).
 pub(crate) fn pixel_size(cvars: &Cvars, window: (u32, u32)) -> u32 {
     pixel_size_for(cvars.pixel_size, window)
 }
 
 /// [`pixel_size`] for the setting `asked`.
-fn pixel_size_for(asked: u8, window: (u32, u32)) -> u32 {
+fn pixel_size_for(asked: u8, (win_w, win_h): (u32, u32)) -> u32 {
     let max = u32::from(quake_rs::cvar::PIXEL_SIZE_MAX);
     let fits = |&p: &u32| {
-        let (w, h) = frame_size(window, p);
+        let (w, h) = frame_size((win_w, win_h), p);
         w * h <= MAX_FRAME_PIXELS
     };
-    (u32::from(asked).clamp(1, max)..=max).find(fits).unwrap_or(max)
+    let whole = |&p: &u32| win_w / p >= MIN_W as u32 && win_h / p >= MIN_H as u32;
+    let p = (u32::from(asked).clamp(1, max)..=max).find(fits).unwrap_or(max);
+    (1..=p).rev().find(whole).unwrap_or(1)
 }
 
 /// The native picture's size for a `win_w x win_h` box at pixel size `p`:
@@ -431,6 +437,30 @@ mod tests {
                 let (fw, fh) = picture_size(&c, Some((w, h)));
                 assert!(fw * fh <= MAX_FRAME_PIXELS, "{w}x{h} at {p}x: {fw}x{fh}");
                 assert!(pixel_size(&c, (w, h)) >= u32::from(p), "never finer than asked");
+            }
+        }
+    }
+
+    /// No frame is smaller than id's smallest mode, 320x200, where a smaller
+    /// pixel size gives one: the picture would be held to it and drawn larger
+    /// than its box. A box too small for 1x stays at 1x.
+    #[test]
+    fn no_frame_is_held_to_320x200_when_a_smaller_pixel_size_fills_the_box() {
+        let mut c = quake_rs::cvar::Cvars::slop();
+        c.pixel_size = 2;
+        assert_eq!(pixel_size(&c, (844, 390)), 1, "a touch screen's 2x in a box under 400 rows: 1x");
+        assert_eq!(picture_size(&c, Some((844, 390))), (844, 390));
+        assert_eq!(pixel_size(&c, (1320, 540)), 2, "a 1320x540 box at 2x: 660x270");
+        c.pixel_size = 4;
+        assert_eq!(pixel_size(&c, (1280, 720)), 3, "4x: 320x180; 3x: 426x240");
+        assert_eq!(pixel_size(&c, (2640, 1080)), 4, "the phone at 4x: 660x270");
+        assert_eq!(pixel_size(&c, (300, 180)), 1, "too small for 1x: 1x");
+        for (w, h) in [(640, 400), (700, 420), (1280, 720), (1920, 1080), (2640, 1080)] {
+            for p in 1..=quake_rs::cvar::PIXEL_SIZE_MAX {
+                c.pixel_size = p;
+                let s = pixel_size(&c, (w, h));
+                assert!(w / s >= 320 && h / s >= 200, "{w}x{h} at {p}x: {s}x");
+                assert!(s <= u32::from(p), "never coarser than asked in a small box");
             }
         }
     }
