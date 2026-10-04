@@ -480,19 +480,19 @@ lines surviving a console toggle; the console lingering after `map`/`load`.
   cursor (`m_singleplayer_cursor`, `m_main_cursor`, `options_cursor`, ...:
   Escape from Options lands on "Options"); the port's one cursor started every
   screen at its first row. Per-menu cursors since `quake/polish2`: 100%.
-- *Options* (1473 px since 2026-10-03; 531 while its port row read "Classic /
-  2026", 291 while it read "Web extras"): the user's two rows, the
-  `fleet/slopoptions` design. Row 2 reads "Reset to slop" where id's reads
-  "Reset to defaults" (it resets to the slop preset); the 14th row, "Slop
-  Options" with where the settings stand printed at x=220 ("custom", white:
-  the harness runs Classic with id's own 1996 controls, and the controls are
-  slop options, so its settings differ from the Classic preset), sits in
-  the slot of the `_WIN32` build's "Use Mouse"; a 15th, "Reset to Classic", is
-  under it at y=144. id's DOS/Linux list has neither. The `menu_options`
-  scenario reaches Video Options with twelve DOWNs, not one UP, since UP from
-  row 0 wraps to the port's last row (it had been comparing id's Video Modes
-  with the port's Web extras page since the extras merge). The disconnected
-  console's Options: 1854 / 3015 px at 320x200 / 640x400 (919 / 2108 before).
+- *Options* (6398 px since 2026-10-04; 1473 with the port's rows of 2026-10-03,
+  531 while its port row read "Classic / 2026", 291 while it read "Web
+  extras"): the user's order. id's "Reset to defaults" (row 2) is gone, so
+  id's rows from Screen size on sit one higher than id's own, and the port's
+  three come last: "Slop Options" (no value at x=220: the menus do not say
+  where the settings stand) in the slot of the `_WIN32` build's "Use Mouse",
+  "Reset to Classic" under it and "Reset to slop" at y=144. id's DOS/Linux
+  list has none of them. The `menu_options` scenario reaches Video Options
+  with eleven DOWNs on the port's side and id's twelve on the C's
+  (`screen2d.py`'s `id_key` step: a key id's side alone is sent), not with
+  an UP, since UP from row 0 wraps to the port's last row. The disconnected
+  console's Options: 6699 / 7820 px at 320x200 / 640x400 (1854 / 3015 before,
+  919 / 2108 before that).
 - Not in the matrix: the loading plaque (the port loads within a frame and draws
   none; the pause plaque is in it since `quake/timedemo`, the `pause` row above), `SCR_ModalMessage`'s New
   Game question (it blocks in a key loop the null input driver never ends; its

@@ -149,7 +149,8 @@ AudioWorklet (audio thread): plays the sound ring, moves its clock
   the display's rate in every case. A tick the relaxed pacing posts between
   refreshes draws no sooner. 72 is id's own gate (`Host_FilterTime`,
   Classic's: the game's frames held with the pictures), none draws every
-  frame. A touch screen starts at 60, anywhere else at none. `quaketool
+  frame. Slop starts at none on every machine (a touch screen too, since
+  2026-10-04: the user's call). `quaketool
   framerate --cap 60 --check` runs every scenario's capped twin at 60, 72,
   90, 105, 110, 120, 144 and 240 Hz: each value is the uncapped one at its
   rate exactly. `verify_pacing.py` counts the drawn gaps and the game's
@@ -765,8 +766,9 @@ bindings, and the port's slop options, which the presets **Classic** and
 **slop** set; the controls are the same in both, and `idcontrols` is the
 console's one step to id's own). A few are numbers the machine picks once, at
 start, from the command line (`settings::Machine`): `-touch`, a coarse pointer
-(a phone or a tablet: 2x, at most four threads, a 60 fps cap in slop), and
-`-hwthreads N`, the threads offered (all of them elsewhere, at 1x and no cap).
+(a phone or a tablet: 2x, at most four threads), and `-hwthreads N`, the
+threads offered (all of them elsewhere, at 1x). No machine caps the frame
+rate: slop's cap is none everywhere, Classic's id's 72.
 The page passes `-touch` from `touchScreen` (`commandLine`), the one test the
 touch controls and the pacing's lines (`pacing.scarceCores`) use too, so the
 three never disagree about a device. The page needs three settings, and
@@ -1922,7 +1924,7 @@ y or n (STATE 256) and while Customize controls waits for a key to bind
 (STATE 8, `BIND_GRAB`) — every other mode, and Classic too (a phone still
 has no keys). Help pages already take ◀▶ (id's `M_Help_Key`); the pad's
 presses reach them the same way, and Slop Options and its pages
-(Options' 14th row) take OK, ▲▼ and ◀▶ as Options does — ◀▶ step
+(Options' row 12) take OK, ▲▼ and ◀▶ as Options does — ◀▶ step
 Torch flicker's slider — and BACK backs out a screen at a time; so does a
 gamepad's A, B and D-pad (`joy_menukeys`). Taps and drags on the menu are unchanged;
 the pad is in addition.
@@ -2080,13 +2082,15 @@ frame at a pixel size of 1, 1320×540 at Auto's 2. `hardwareConcurrency` is
   phone's 120 Hz: its 1/72 s lands between refreshes, and the panel's
   refreshes and the relaxed pacing's back-to-back asks come unevenly, so
   in touch play it showed about 270 gaps of more than 20 ms in 45 s, the fast
-  core 3–5% busy (2026-10-04). Since then a touch screen starts at the
-  frame-rate cap's 60 (`host_maxfps`, a slop option: "A frame"), a picture
-  on the first refresh at least 1/60 s after the last — every second refresh
-  of a 120 Hz panel, evenly — while the game still runs every refresh. Whether a held 60 at 2640×1080 (1x) is a better
-  touch default than 2x is for a phone run to say: `with.sh phone NAME --
-  uv run --with playwright web/phone.py DEPLOY --fullscreen --touch --px
-  2,1 --threads 4 --cvar host_maxfps=60,0 --secs 45 --cool 120`.
+  core 3–5% busy (2026-10-04). The frame-rate cap's 60 (`host_maxfps`, a
+  slop option: "A frame") draws a picture on the first refresh at least
+  1/60 s after the last — every second refresh of a 120 Hz panel, evenly —
+  while the game still runs every refresh. A touch screen started at it for
+  a day; since the user tried it (2026-10-04) slop starts with no cap on
+  every machine, and 60 is a player's pick. What it does on the phone is for
+  a phone run to say: `with.sh phone NAME -- uv run --with playwright
+  web/phone.py DEPLOY --fullscreen --touch --px 2,1 --threads 4 --cvar
+  host_maxfps=60,0 --secs 45 --cool 120`.
 
 Back to back (`timedemo demo1`), cool, 8 / 6 / 4 threads: 323 / 375 / 367
 fps at 1320×540; 148 / 162 / 155 at 2640×1080 with exact perspective; 182 /

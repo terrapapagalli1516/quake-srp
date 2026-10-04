@@ -163,21 +163,23 @@ turns most of them on; **Classic** turns them off. The controls are the same in 
 | perspective | id's spans: exact every 16 pixels, affine in between | exact every 8 pixels along walls and liquids, id's own portable-C loop (Perspective span, `r_perspspan`: 64, 32, 16, 8, 4 or exact at every pixel; 32 on a phone and 64 at 1080p are about what 1996 looked like) |
 
 The numbers the machine decides are picked once, at start, and shown as numbers, never
-"auto": on a touch screen the game starts at 2x on four threads and at most 60 frames a
-second; elsewhere at 1x on every thread and no cap. A frame never gets bigger than the
+"auto": on a touch screen the game starts at 2x on four threads; elsewhere at 1x on every
+thread. Neither caps the frame rate. A frame never gets bigger than the
 browser build's memory holds: past it, the next pixel size (5K and 8K screens draw at 2x).
 In both presets the renderer splits each frame across the CPU cores (`r_threads`), and the
 picture is the same on any number of them.
 
-**Options** (id's screen, two rows the port's): **Slop Options** opens the settings, one page
-each for **Picture and sound**, **Motion and light** (the torches' flicker is there) and
-**Controls**, where every setting can be changed alone; it says whether yours are a preset's
-or how many rows differ, and a value that differs is white. **Reset to slop** (id's "Reset to
-defaults" row) sets everything to the slop preset, keys and Options included; **Reset to
-Classic** sets every slop option to Classic's and keeps your keys and Options. Both ask
-first; your saved games stay. The console's `preset slop` or `preset classic` applies a
-preset as Reset to Classic does; the address's `?classic` or `?slop` does too, at a load, when
-your settings were last set to the other one, so a bookmarked `?classic` keeps what you
+**Options** (id's screen; the port's three rows last, after Video Options, where id's
+"Reset to defaults" row is gone): **Slop Options** opens the settings, one page each for
+**Picture and sound**, **Motion and light** (the torches' flicker is there) and **Controls**,
+where every setting can be changed alone; the picture's size is chosen in Video Options.
+**Reset to Classic** and **Reset to slop** set everything to that preset — keys, Options
+(Screen size, Brightness, the volumes, the mouse), the video mode, every setting — after
+asking; your saved games stay. The menus do not say where your settings stand or mark what
+differs from a preset; the console's `preset` does, by name. The console's `preset slop` or
+`preset classic` is the gentler switch: it sets the port's settings to the preset's and
+keeps your keys and Options; the address's `?classic` or `?slop` does the same at a load,
+when your settings were last set to the other one, so a bookmarked `?classic` keeps what you
 change on top of it. `config.cfg`, in the browser's storage, keeps the preset and only what
 you changed from it.
 [AUDIT.md](AUDIT.md) ("The slop options and the presets") lists every setting and why it
