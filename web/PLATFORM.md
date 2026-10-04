@@ -1932,12 +1932,13 @@ run here.
 ## Browser support
 
 The design needs cross-origin isolation (below) for `SharedArrayBuffer`, and
-`Atomics.wait` in a worker. Checked here (2026-10-03): headless Chromium 146
-and headless Firefox 155, each all 18 `verify_*.py` (Firefox:
+`Atomics.wait` in a worker. Checked here (2026-10-03): headless Chromium 153
+(Playwright's) and headless Firefox 155, each all 19 `verify_*.py` (Firefox:
 `QUAKE_BROWSER=firefox`; "Build, serve, deploy" lists what differs and why),
-`verify_threads.py` in both, the benchmark in Chromium; Firefox's 16
-deploy-dir checks on the threads build with a display for its WebGL2 and
-without, and on `wasm32-wasip1` with one. Headed, on the desktop's Wayland compositor's virtual output with real input
+`verify_threads.py` in both, the benchmark in Chromium; Firefox's 17
+deploy-dir checks on the threads build, and 16 of them (all but
+`verify_crash.py`, which is about the threads build's own refusals) with a
+display for its WebGL2 too, and on `wasm32-wasip1` with one. Headed, on the Wayland compositor's virtual output with real input
 through XTEST: Chromium 146 (2026-10-02) and Firefox 155 ("Fullscreen",
 "Input"); in Firefox also the wheel, a save across a reload, and the sound's
 start: under
@@ -2055,11 +2056,11 @@ assembles one under `quake-wasm/target/bench-web`.
 
 **Firefox.** `QUAKE_BROWSER=firefox` runs any `verify_*.py` in Playwright's
 Firefox (`isolated.launch`, which also gives it the autoplay preferences
-Chromium takes as a flag; `webkit` does not start here). All 18 pass
+Chromium takes as a flag; `webkit` does not start here). All 19 pass
 (Firefox 155, 2026-10-03). What differs, each said by the script that
 differs:
 
-- `verify_extras` skips the Keyboard Lock checks, 17 of Chromium's 56: Firefox
+- `verify_extras` skips the Keyboard Lock checks, 17 of Chromium's 70: Firefox
   has no such API (its own no-API half runs).
 - `verify_present` tests WebGL2 only where Firefox has one, and a headless
   Firefox has one only with a display to ask: set `DISPLAY` (here
@@ -2070,7 +2071,7 @@ differs:
 - `verify_settings` skips its devicePixelRatio 2 section (3 checks): Playwright's
   Firefox loses a context's `device_scale_factor` on a cross-origin isolated
   page (a plain page keeps it), which is every page served here.
-- `verify_touch` runs on taps only: 95 checks pass and 7 are skipped, each saying
+- `verify_touch` runs on taps only: 137 checks pass and 8 are skipped, each saying
   why (the stick, the look drag, two thumbs, FIRE, JUMP, a held menu-pad
   arrow: Playwright's Firefox touchscreen taps and does nothing else, and has
   no `isMobile`), at devicePixelRatio 1 (so its "@3" and "@2.6" checks are
