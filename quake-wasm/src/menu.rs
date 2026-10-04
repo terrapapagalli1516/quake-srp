@@ -5,12 +5,10 @@
 //! ([`crate::input::key_event`]).
 
 use quake_rs::client::host::FrameCap;
-use quake_rs::keys::{
-    K_BACKSPACE, K_DOWNARROW, K_ENTER, K_ESCAPE, K_LEFTARROW, K_RIGHTARROW, K_UPARROW,
-};
+use quake_rs::keys::{K_BACKSPACE, K_DOWNARROW, K_ENTER, K_ESCAPE, K_LEFTARROW, K_RIGHTARROW, K_UPARROW};
 use quake_rs::render::{self, MenuAction};
 
-use crate::app::{build_walk_map, ensure_app, App, APP};
+use crate::app::{APP, App, build_walk_map, ensure_app};
 use crate::input::press;
 use crate::savegame::{do_load_command, do_save_command};
 use crate::vid::clamp_resolution;
@@ -203,12 +201,7 @@ pub(crate) fn menu_backspace() {
 /// menu.c). The page hears it in the `State` record: a mouse click is then
 /// the key to bind (K_MOUSE1..3), even with the pointer free.
 pub(crate) fn menu_bind_grabbing() -> i32 {
-    APP.with(|c| {
-        c.borrow()
-            .as_ref()
-            .map(|a| (a.menu.visible && a.menu.bind_grabbing()) as i32)
-            .unwrap_or(0)
-    })
+    APP.with(|c| c.borrow().as_ref().map(|a| (a.menu.visible && a.menu.bind_grabbing()) as i32).unwrap_or(0))
 }
 
 /// A key press while the Keys screen waits for one (`M_Keys_Key`, the
@@ -351,12 +344,7 @@ pub(crate) fn set_extras(bits: i32) {
 /// 1 when the menu is currently visible (capturing input), else 0. The page
 /// hears it in the `State` record, for what its own keys and clicks do.
 pub(crate) fn menu_visible() -> i32 {
-    APP.with(|c| {
-        c.borrow()
-            .as_ref()
-            .map(|a| a.menu.visible as i32)
-            .unwrap_or(0)
-    })
+    APP.with(|c| c.borrow().as_ref().map(|a| a.menu.visible as i32).unwrap_or(0))
 }
 
 #[cfg(test)]
@@ -511,7 +499,10 @@ mod tests {
         menu_select();
         menu_quit_yes(); // the y key, as the page's YES button presses it
         assert_eq!(settings(), Settings::new(Preset::Classic, Machine::default()), "everything Classic's");
-        assert!(settings().binds.command(b'j') != Some(BIND_JUMP) && settings().cvars.sensitivity != 7.0, "his key and Mouse Speed too");
+        assert!(
+            settings().binds.command(b'j') != Some(BIND_JUMP) && settings().cvars.sensitivity != 7.0,
+            "his key and Mouse Speed too"
+        );
         assert_eq!((menu_screen_id(), menu_cursor()), (5, 13), "Options, on its row");
 
         menu_up(); // row 12, Slop Options
@@ -548,7 +539,9 @@ mod tests {
         assert_eq!(extras(), 0);
         // Bit 4 is exact perspective; clearing it keeps any other span, so a
         // read-and-write-back keeps 8 (or 64) as it is.
-        let cvar_text = |name: &str| APP.with(|c| quake_rs::cvar::find(name).unwrap().get(&c.borrow().as_ref().unwrap().settings.cvars));
+        let cvar_text = |name: &str| {
+            APP.with(|c| quake_rs::cvar::find(name).unwrap().get(&c.borrow().as_ref().unwrap().settings.cvars))
+        };
         crate::host_cmd::execute_console_command("r_perspspan 8");
         set_extras(extras() | 1);
         assert_eq!((extras(), cvar_text("r_perspspan")), (1, "8".to_string()), "the span kept");

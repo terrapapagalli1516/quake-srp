@@ -13,10 +13,10 @@
 //! Source: `WinQuake/cl_demo.c`.
 
 use crate::bsp::Bsp;
-use crate::demo::{parse_demo, EntSnapshot};
+use crate::cd_audio::CdCall;
+use crate::demo::{EntSnapshot, parse_demo};
 use crate::dlight::{DynamicLight, DynamicLights};
 use crate::mdl::Mdl;
-use crate::cd_audio::CdCall;
 use crate::pak::Pak;
 use crate::particles::{ParticleSystem, TrailHead, TrailStep};
 use crate::render::{self, Camera, ModelInstance, Viewmodel};
@@ -24,17 +24,17 @@ use crate::server::EF_MUZZLEFLASH;
 use crate::tent::BeamModel;
 use crate::wad::Qpic;
 
-use super::cl_tent::{rocket_trail_type, spawn_temp_entity, TRAIL_ROCKET};
+use super::cl_tent::{TRAIL_ROCKET, rocket_trail_type, spawn_temp_entity};
 use super::host_cmd::IT_INVISIBILITY;
 use super::lerpmodels::{self, LerpModels};
 use super::lerpmove::LerpMove;
 use super::view::{
-    cshift_add, fade_cshifts, parse_damage, stamp_item_gettime, stufftext_bonus_flash, BONUS_COLOR,
-    BONUS_PERCENT, FACE_ANIM_TIME, V_KICKTIME,
+    BONUS_COLOR, BONUS_PERCENT, FACE_ANIM_TIME, V_KICKTIME, cshift_add, fade_cshifts, parse_damage, stamp_item_gettime,
+    stufftext_bonus_flash,
 };
 use super::{
-    backtile_for, color_for_name, draw_view, lap, render_options, s_update, warp_below, ClientFrame, DemoPlay, Listener,
-    Phase, SoundCall, Vid,
+    ClientFrame, DemoPlay, Listener, Phase, SoundCall, Vid, backtile_for, color_for_name, draw_view, lap,
+    render_options, s_update, warp_below,
 };
 
 /// quake.rc's `startdemos demo1 demo2 demo3`: the attract loop's demos, played
@@ -108,8 +108,7 @@ fn build_demo_with(
 
     // Load a model (alias or sprite) + colour per precache index.
     let mut models = Vec::with_capacity(demo.model_precache.len());
-    let mut sprites: Vec<Option<crate::spr::Sprite>> =
-        Vec::with_capacity(demo.model_precache.len());
+    let mut sprites: Vec<Option<crate::spr::Sprite>> = Vec::with_capacity(demo.model_precache.len());
     let mut colors = Vec::with_capacity(demo.model_precache.len());
     for name in &demo.model_precache {
         if name.ends_with(".mdl") {
@@ -168,11 +167,7 @@ fn build_demo_with(
 /// `svc_cdtrack` of `track` while a demo plays: `(byte)cls.forcetrack` when
 /// the demo forces one (id's demo1: track 2), else the recorded track.
 fn demo_cd_track(demo: &crate::demo::Demo, track: u8) -> u8 {
-    if demo.forcetrack == -1 {
-        track
-    } else {
-        demo.forcetrack as u8
-    }
+    if demo.forcetrack == -1 { track } else { demo.forcetrack as u8 }
 }
 
 /// `CL_ParseServerMessage`'s client-side effects of recorded message `idx`,
@@ -217,8 +212,7 @@ fn spawn_demo_frame_effects(d: &mut DemoPlay, idx: usize, time: f64, sound: &mut
         // CL_ParseParticleEffect — the net count==255 sentinel just means 1024
         // particles (the demo parser already maps it), NOT the rocket
         // R_ParticleExplosion. Route every burst through spawn_burst.
-        d.particles
-            .spawn_burst(b.org, b.dir, b.color, b.count, now, &mut d.prng);
+        d.particles.spawn_burst(b.org, b.dir, b.color, b.count, now, &mut d.prng);
     }
     // CLIENT-SIDE temp-entity impact sounds (CL_ParseTEnt: tink/ric for
     // spikes, wizard/hit, hknight/hit, r_exp3 for explosions) — the C plays
@@ -759,13 +753,7 @@ fn render_demo_frame(
     // demo's PRECACHE table (the .dem signon lists progs/bolt*.mdl); a beam
     // owned by the recorded view entity tracks its per-frame origin.
     if d.beams.any_live(v.time) {
-        d.beams.update(
-            v.time,
-            d.demo.viewentity as i32,
-            v.view_entity_origin,
-            &mut d.prng,
-            &mut d.beam_scratch,
-        );
+        d.beams.update(v.time, d.demo.viewentity as i32, v.view_entity_origin, &mut d.prng, &mut d.beam_scratch);
         for seg in &d.beam_scratch {
             let name = seg.model.model_name();
             let Some(idx) = d.demo.model_precache.iter().position(|n| n == name) else {
@@ -842,8 +830,7 @@ fn render_demo_frame(
         // lean/kick are wiped — the C assigns viewangles[ROLL] = 80). The
         // punchangle adds AFTER, per the C's VectorAdd ordering.
         let basis = [-v.view_angles[0], v.view_angles[1], 0.0];
-        let mut roll_angle =
-            v.view_angles[2] + crate::server::v_calc_roll(basis, vel);
+        let mut roll_angle = v.view_angles[2] + crate::server::v_calc_roll(basis, vel);
         let mut dmg_pitch = 0.0;
         if d.v_dmg_time > 0.0 {
             roll_angle += d.v_dmg_time / V_KICKTIME * d.v_dmg_roll;
@@ -869,11 +856,7 @@ fn render_demo_frame(
     {
         let yaw_rad = (v.view_angles[1] as f64).to_radians();
         let (sy, cy) = (yaw_rad.sin() as f32, yaw_rad.cos() as f32);
-        let listener = Listener {
-            pos: v.view_origin,
-            forward: [cy, sy, 0.0],
-            right: [sy, -cy, 0.0],
-        };
+        let listener = Listener { pos: v.view_origin, forward: [cy, sy, 0.0], right: [sy, -cy, 0.0] };
         sound.push(s_update(&d.bsp, listener, dt));
     }
     // The recorded server time animates the demo's liquids/sky too. The live
@@ -889,8 +872,7 @@ fn render_demo_frame(
     // R_DrawParticles' order, as in walk_frame: retire (`die < cl.time`), draw,
     // then move and ramp.
     d.particles.retire(v.time);
-    let parts: Vec<([f32; 3], u8)> =
-        d.particles.particles().iter().map(|p| (p.origin, p.color)).collect();
+    let parts: Vec<([f32; 3], u8)> = d.particles.particles().iter().map(|p| (p.origin, p.color)).collect();
     // `grav = frametime * sv_gravity.value * 0.05`: R_DrawParticles reads the
     // client's own sv_gravity cvar in playback too — 800, or what the last map
     // played set it to (e1m8's worldspawn: 100), not the recording's.
@@ -919,9 +901,7 @@ fn render_demo_frame(
     // SU_WEAPONFRAME its animation frame. Hidden exactly like R_DrawViewModel
     // (r_main.c ~606): invisible POV (Ring of Shadows), dead POV, or an
     // intermission (V_CalcIntermissionRefdef sets `view->model = NULL`).
-    let hide_gun = f.intermission != 0
-        || client.health <= 0
-        || client.items & IT_INVISIBILITY != 0;
+    let hide_gun = f.intermission != 0 || client.health <= 0 || client.items & IT_INVISIBILITY != 0;
     let viewmodel = if hide_gun {
         None
     } else {
@@ -1169,7 +1149,6 @@ fn render_demo_frame(
     ClientFrame { image: img, cshifts: shifts, sound }
 }
 
-
 /// `cls.timedemo`'s bookkeeping (client.h `td_startframe`, `td_starttime`;
 /// `td_lastframe`'s one message a frame is [`timedemo_frame`]'s): where the
 /// measurement starts, and `CL_FinishTimeDemo`'s line. The host owns it, as
@@ -1247,7 +1226,14 @@ mod tests {
         DemoPlay::new(pak, bsp, palette, demo)
     }
 
-    const VID: Vid = Vid { width: 64, height: 40, display_aspect: 4.0 / 3.0, persp_span: render::PerspSpan::Spans16, video: render::VideoCvars::CLASSIC, mip: render::MipCvars::DEFAULT };
+    const VID: Vid = Vid {
+        width: 64,
+        height: 40,
+        display_aspect: 4.0 / 3.0,
+        persp_span: render::PerspSpan::Spans16,
+        video: render::VideoCvars::CLASSIC,
+        mip: render::MipCvars::DEFAULT,
+    };
 
     /// Entity `num` moved from `from` to `to` (x) this message.
     fn moved(num: i32, from: f32, to: f32) -> EntSnapshot {
@@ -1361,7 +1347,10 @@ mod tests {
         let mut d = playback_in(room, render::fixtures::ramp_palette(), (10..14).map(msg).collect());
         d.viewsize = 120.0; // no status bar: the whole 64x40 is the view
         let smooth = Vid {
-            video: render::VideoCvars { lightstyles: crate::server::LerpLightStyles::Smooth, ..render::VideoCvars::CLASSIC },
+            video: render::VideoCvars {
+                lightstyles: crate::server::LerpLightStyles::Smooth,
+                ..render::VideoCvars::CLASSIC
+            },
             ..VID
         };
         // The first frame pulls the clock to 0.1 s before the first message:
@@ -1391,10 +1380,15 @@ mod tests {
             ..Default::default()
         };
         let mut room = render::fixtures::lightmapped_demo_room(120, 0);
-        room.entities = "{ \"classname\" \"worldspawn\" }\n{ \"classname\" \"light_flame_large_yellow\" \"origin\" \"64 0 -64\" }".into();
+        room.entities =
+            "{ \"classname\" \"worldspawn\" }\n{ \"classname\" \"light_flame_large_yellow\" \"origin\" \"64 0 -64\" }"
+                .into();
         let mut d = playback_in(room, render::fixtures::ramp_palette(), (10..40).map(msg).collect());
         d.viewsize = 120.0;
-        let lit = Vid { video: render::VideoCvars { torches: render::TorchFlicker::STYLE, ..render::VideoCvars::CLASSIC }, ..VID };
+        let lit = Vid {
+            video: render::VideoCvars { torches: render::TorchFlicker::STYLE, ..render::VideoCvars::CLASSIC },
+            ..VID
+        };
         let mut moved = 0;
         for f in 0..30 {
             let flicker = demo_frame(&mut d, if f == 0 { 1.0 / 72.0 } else { 0.05 }, false, &lit).image;
@@ -1436,7 +1430,8 @@ mod tests {
             entities: vec![EntSnapshot { forcelink: true, step: true, ..moved(5, prev_x, x) }],
             ..Default::default()
         };
-        let mut d = playback(vec![step(1.0, 0.0, 0.0), step(1.1, 8.0, 0.0), step(1.2, 16.0, 8.0), step(1.3, 24.0, 16.0)]);
+        let mut d =
+            playback(vec![step(1.0, 0.0, 0.0), step(1.1, 8.0, 0.0), step(1.2, 16.0, 8.0), step(1.3, 24.0, 16.0)]);
         d.lerpmove = LerpMove::Smooth;
         let mut xs = Vec::new();
         // (Frame 29 would pass the last message: the port's loop wrap.)
@@ -1597,7 +1592,8 @@ mod tests {
     /// is drawn at, and the same draw of `rand()` for its radius.
     #[test]
     fn a_recorded_muzzle_flash_lights_the_world_like_a_live_one() {
-        let mut d = lit_playback(vec![message(0, vec![lit(5, [100.0, 200.0, 50.0], [0.0, 90.0, 0.0], EF_MUZZLEFLASH)])]);
+        let mut d =
+            lit_playback(vec![message(0, vec![lit(5, [100.0, 200.0, 50.0], [0.0, 90.0, 0.0], EF_MUZZLEFLASH)])]);
         let mut seed = d.prng;
         draw(&mut d);
         let now = d.time; // cl.time, the double
@@ -1666,7 +1662,8 @@ mod tests {
     /// entity not updated) lights nothing.
     #[test]
     fn only_relinked_entities_with_effects_make_lights() {
-        let mut m = message(0, vec![lit(4, [0.0; 3], [0.0; 3], 0), lit(-1, [0.0; 3], [0.0; 3], EF_BRIGHTLIGHT | EF_DIMLIGHT)]);
+        let mut m =
+            message(0, vec![lit(4, [0.0; 3], [0.0; 3], 0), lit(-1, [0.0; 3], [0.0; 3], EF_BRIGHTLIGHT | EF_DIMLIGHT)]);
         m.view_effects = 0;
         let mut d = lit_playback(vec![m]);
         draw(&mut d);
@@ -1697,7 +1694,11 @@ mod tests {
         // The first frame of message 1: still lit by what the frame before made.
         assert!(lit_frames.iter().any(|&(t, lit)| lit && t > made_until), "the 0.1 s tail: {lit_frames:?}");
         for &(t, lit) in &lit_frames {
-            assert_eq!(lit, t <= made_until + 0.1, "lit exactly while die >= cl.time, at {t} (made until {made_until})");
+            assert_eq!(
+                lit,
+                t <= made_until + 0.1,
+                "lit exactly while die >= cl.time, at {t} (made until {made_until})"
+            );
         }
     }
 
@@ -1732,7 +1733,7 @@ mod tests {
     /// draw), gone 0.5 s on; the tarbaby's blob has none.
     #[test]
     fn an_explosion_lights_up_and_fades_over_half_a_second() {
-        use crate::server::{te_consts::*, TempEntityEvent};
+        use crate::server::{TempEntityEvent, te_consts::*};
         let boom = |te_type| TempEntityEvent {
             te_type,
             pos: [5.0, 6.0, 7.0],
@@ -1777,7 +1778,7 @@ mod tests {
     /// threads share them.
     #[test]
     fn a_recorded_explosion_changes_the_frame_the_same_on_any_thread_count() {
-        use crate::server::{te_consts::TE_EXPLOSION, TempEntityEvent};
+        use crate::server::{TempEntityEvent, te_consts::TE_EXPLOSION};
         let first_lit_frame = |boom: bool, threads: usize| {
             let msgs = (0..3)
                 .map(|n| {
@@ -1797,7 +1798,8 @@ mod tests {
                     m
                 })
                 .collect();
-            let mut d = playback_in(render::fixtures::lightmapped_demo_room(120, 0), render::fixtures::ramp_palette(), msgs);
+            let mut d =
+                playback_in(render::fixtures::lightmapped_demo_room(120, 0), render::fixtures::ramp_palette(), msgs);
             d.viewsize = 120.0;
             d.renderer.set_threads(threads);
             // The frame that reads message 1 (the same frame with and without its explosion).
@@ -1822,7 +1824,7 @@ mod tests {
     /// `CL_ClearState` does.
     #[test]
     fn timedemo_and_the_loop_wrap_light_and_clear_the_same_pool() {
-        use crate::server::{te_consts::*, TempEntityEvent};
+        use crate::server::{TempEntityEvent, te_consts::*};
         let mut m = message(1, Vec::new());
         m.temp_entities.push(TempEntityEvent {
             te_type: TE_EXPLOSION,
@@ -1870,7 +1872,14 @@ mod tests {
         })
         .unwrap();
         let mut d = DemoPlay::new(pak, render::demo_room(), [[0u8; 3]; 256], demo);
-        let vid = Vid { width: 64, height: 40, display_aspect: 4.0 / 3.0, persp_span: render::PerspSpan::Spans16, video: render::VideoCvars::CLASSIC, mip: render::MipCvars::DEFAULT };
+        let vid = Vid {
+            width: 64,
+            height: 40,
+            display_aspect: 4.0 / 3.0,
+            persp_span: render::PerspSpan::Spans16,
+            video: render::VideoCvars::CLASSIC,
+            mip: render::MipCvars::DEFAULT,
+        };
         // The first frame (CL_TimeDemo_f's) reads through the second message;
         // the time between messages is not what moves playback on.
         let mut shown = Vec::new();

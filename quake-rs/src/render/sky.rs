@@ -23,9 +23,9 @@
 //! `newsky` texel for texel. That makes the fluid front layer free: the offset
 //! is added to the 16.16 coordinate before its texel is taken instead of after.
 
+use super::surf::{SurfKind, classify_surface};
 use crate::bsp::Bsp;
 use crate::math::Vec3;
-use super::surf::{classify_surface, SurfKind};
 
 /// `SKYSIZE` (d_iface.h): each sky layer is 128x128 texels.
 const SKYSIZE: i32 = 128;
@@ -128,16 +128,7 @@ impl SkyView {
             // f32's last bit.
             SkyScroll::Fluid => (scroll * 65536.0) as i32,
         };
-        SkyView {
-            forward,
-            right,
-            up,
-            half_w: centre.0,
-            half_h: centre.1,
-            longest,
-            scroll,
-            front,
-        }
+        SkyView { forward, right, up, half_w: centre.0, half_h: centre.1, longest, scroll, front }
     }
 }
 
@@ -210,15 +201,7 @@ const SKY_SPAN_MAX: i32 = 1 << SKY_SPAN_SHIFT;
 /// coordinates are exact at the span start and every 32 pixels, stepped by
 /// `(next - cur) >> 5` between; the last segment steps by an integer division
 /// over its `count - 1` so it ends exactly on the span's last pixel.
-pub(super) fn draw_sky_span(
-    out: &mut [u8],
-    u: i32,
-    v: i32,
-    count: i32,
-    pixels: &[u8],
-    tw: usize,
-    view: &SkyView,
-) {
+pub(super) fn draw_sky_span(out: &mut [u8], u: i32, v: i32, count: i32, pixels: &[u8], tw: usize, view: &SkyView) {
     // id's 256x128 sky reads its two layers with no bounds check
     // ([`sky_layers_sample`]); any other texture, never id's, the guarded way.
     match sky_layers(pixels, tw) {
@@ -316,11 +299,7 @@ fn sky_span(out: &mut [u8], u: i32, v: i32, count: i32, view: &SkyView, sample: 
 /// `r_skysource`'s miptexture: `R_InitSky` runs for every `sky*` miptexture
 /// `Mod_LoadTextures` loads, so the map's last one wins.
 pub(super) fn sky_texture(bsp: &Bsp) -> Option<&crate::bsp::MipTex> {
-    bsp.textures
-        .iter()
-        .rev()
-        .flatten()
-        .find(|mt| classify_surface(&mt.name) == SurfKind::Sky && !mt.pixels.is_empty())
+    bsp.textures.iter().rev().flatten().find(|mt| classify_surface(&mt.name) == SurfKind::Sky && !mt.pixels.is_empty())
 }
 
 #[cfg(test)]
@@ -424,10 +403,12 @@ mod tests {
         let (mut clouds, mut backs) = (0, 0);
         for i in 0..200_000 {
             // Whole-range values, and small ones around the texel edges.
-            let (s, t, front) = if i % 2 == 0 { (next(), next(), next()) } else { (next() >> 9, next() >> 9, next() >> 12) };
+            let (s, t, front) =
+                if i % 2 == 0 { (next(), next(), next()) } else { (next() >> 9, next() >> 9, next() >> 12) };
             let want = sky_sample(&pixels, 256, s, t, front);
             assert_eq!(sky_layers_sample(layers, s, t, front), want, "s {s} t {t} front {front}");
-            let cloud = pixels[(((t.wrapping_add(front)) >> 16) & 127) as usize * 256 + ((s.wrapping_add(front) >> 16) & 127) as usize];
+            let cloud = pixels[(((t.wrapping_add(front)) >> 16) & 127) as usize * 256
+                + ((s.wrapping_add(front) >> 16) & 127) as usize];
             if cloud != 0 { clouds += 1 } else { backs += 1 }
         }
         assert!(clouds > 50_000 && backs > 50_000, "both layers read: {clouds} cloud, {backs} back");
@@ -438,7 +419,8 @@ mod tests {
         // Not id's shape: no layers, and the span is still drawn, guarded.
         assert!(sky_layers(&pixels, 128).is_none() && sky_layers(&pixels[..256 * 127], 256).is_none());
         assert!(sky_layers(&[0u8; 4], 2).is_none());
-        let v = SkyView::new([1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, 1.0], 320.0, (160, 100), 3.3, SkyScroll::Fluid);
+        let v =
+            SkyView::new([1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, 1.0], 320.0, (160, 100), 3.3, SkyScroll::Fluid);
         let mut out = vec![9u8; 40];
         draw_sky_span(&mut out, 0, 60, 40, &[0u8; 4], 2, &v);
         assert!(out.iter().all(|&p| p == 0), "a degenerate sky draws index 0");
@@ -454,7 +436,9 @@ mod tests {
         // R_SetSkyFrame + R_MakeSky: the whole sky scrolls skytime*8 texels
         // (D_Sky_uv_To_st) and the front layer another (int)(skytime*8) on top,
         // or in the fluid sky skytime*8 itself.
-        let at = |time: f32, mode| SkyView::new([1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, 1.0], 320.0, (160, 100), time, mode);
+        let at = |time: f32, mode| {
+            SkyView::new([1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, 1.0], 320.0, (160, 100), time, mode)
+        };
         let v = at(1.6, SkyScroll::Classic);
         assert_eq!((v.scroll, v.front), (12.8, 12 << 16));
         assert_eq!(at(1.6, SkyScroll::Fluid).front, (12.8f32 * 65536.0) as i32);
@@ -474,7 +458,15 @@ mod tests {
         // A 40-pixel span: exact at u0 and u0+32, stepped by (next-cur)>>5 in
         // between, then the 8-pixel tail stepped by division over 7.
         let pixels = synthetic_sky_pixels();
-        let v = SkyView::new([0.6, 0.8, 0.0], [0.8, -0.6, 0.0], [0.0, 0.0, 1.0], 320.0, (160, 100), 3.3, SkyScroll::Classic);
+        let v = SkyView::new(
+            [0.6, 0.8, 0.0],
+            [0.8, -0.6, 0.0],
+            [0.0, 0.0, 1.0],
+            320.0,
+            (160, 100),
+            3.3,
+            SkyScroll::Classic,
+        );
         let (u0, row, n) = (17, 60, 40);
         let mut out = vec![0u8; n as usize];
         draw_sky_span(&mut out, u0, row, n, &pixels, 256, &v);
@@ -553,7 +545,8 @@ mod tests {
             let up = [-spi * cy, -spi * sy, cp];
             let (w, h) = [(320, 200), (1920, 1080), (2640, 1080)][case % 3];
             let scroll = if case % 2 == 0 { SkyScroll::Classic } else { SkyScroll::Fluid };
-            let view = SkyView::new(forward, right, up, w as f32, (w / 2, h / 2), (next() % 600_000) as f32 / 1000.0, scroll);
+            let view =
+                SkyView::new(forward, right, up, w as f32, (w / 2, h / 2), (next() % 600_000) as f32 / 1000.0, scroll);
             for count in 0..=300 {
                 let (u, v) = ((next() % w as u32) as i32 - 40, (next() % h as u32) as i32);
                 let walk = std::cell::RefCell::new(Vec::new());
@@ -562,7 +555,11 @@ mod tests {
                     walk.borrow_mut().push((s, t));
                     0
                 });
-                assert_eq!(walk.into_inner(), d_draw_sky_scans8_in_order(u, v, count, &view), "case {case}, {count} pixels at ({u}, {v})");
+                assert_eq!(
+                    walk.into_inner(),
+                    d_draw_sky_scans8_in_order(u, v, count, &view),
+                    "case {case}, {count} pixels at ({u}, {v})"
+                );
             }
         }
     }
@@ -635,7 +632,14 @@ mod tests {
     }
 
     /// A `w x h` view's sky, looking along `forward`, every row one span.
-    fn sky_frame(forward: Vec3, w: usize, h: usize, sample: impl Fn(&mut [u8], i32, &SkyView), time: f32, mode: SkyScroll) -> Vec<u8> {
+    fn sky_frame(
+        forward: Vec3,
+        w: usize,
+        h: usize,
+        sample: impl Fn(&mut [u8], i32, &SkyView),
+        time: f32,
+        mode: SkyScroll,
+    ) -> Vec<u8> {
         let (f, _) = normalize(forward);
         let side = if f[2].abs() > 0.99 { [1.0, 0.0, 0.0] } else { [0.0, 0.0, 1.0] };
         let (right, _) = normalize(cross(f, side));
@@ -662,13 +666,40 @@ mod tests {
         for base in [1.0f32, 300.0, 600.0] {
             for j in 0..8 {
                 let time = base + j as f32 / 64.0;
-                let scroll = SkyView::new([1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, 1.0], 1.0, (0, 0), time, SkyScroll::Fluid).scroll;
+                let scroll = SkyView::new(
+                    [1.0, 0.0, 0.0],
+                    [0.0, -1.0, 0.0],
+                    [0.0, 0.0, 1.0],
+                    1.0,
+                    (0, 0),
+                    time,
+                    SkyScroll::Fluid,
+                )
+                .scroll;
                 assert_eq!((scroll * 8.0).fract(), 0.0, "{time}: a whole number of eighths");
                 let classic_ref = id_newsky(&pixels, 1, scroll as usize);
                 let fluid_ref = id_newsky(&pixels, 8, (scroll * 8.0) as usize);
                 for look in looks {
-                    let draw = |mode| sky_frame(look, w, h, |row, v, view| draw_sky_span(row, 0, v, w as i32, &pixels, 256, view), time, mode);
-                    let walk = |id: &dyn Fn(i32, i32) -> u8| sky_frame(look, w, h, |row, v, view| sky_span(row, 0, v, w as i32, view, id), time, SkyScroll::Classic);
+                    let draw = |mode| {
+                        sky_frame(
+                            look,
+                            w,
+                            h,
+                            |row, v, view| draw_sky_span(row, 0, v, w as i32, &pixels, 256, view),
+                            time,
+                            mode,
+                        )
+                    };
+                    let walk = |id: &dyn Fn(i32, i32) -> u8| {
+                        sky_frame(
+                            look,
+                            w,
+                            h,
+                            |row, v, view| sky_span(row, 0, v, w as i32, view, id),
+                            time,
+                            SkyScroll::Classic,
+                        )
+                    };
                     let (classic, fluid) = (draw(SkyScroll::Classic), draw(SkyScroll::Fluid));
                     assert!(classic == walk(&classic_ref), "{time} {look:?}: Classic is id's newsky");
                     assert!(fluid == walk(&fluid_ref), "{time} {look:?}: Fluid is id's newsky at the exact offset");
@@ -692,7 +723,14 @@ mod tests {
         let pixels = patterned_sky();
         let (w, h) = (160usize, 100usize);
         let frame = |time: f32, mode| {
-            sky_frame([0.0, 0.0, 1.0], w, h, |row, v, view| draw_sky_span(row, 0, v, w as i32, &pixels, 256, view), time, mode)
+            sky_frame(
+                [0.0, 0.0, 1.0],
+                w,
+                h,
+                |row, v, view| draw_sky_span(row, 0, v, w as i32, &pixels, 256, view),
+                time,
+                mode,
+            )
         };
         let changed = |mode| -> Vec<usize> {
             let frames: Vec<Vec<u8>> = (0..=60).map(|k| frame(10.0 + k as f32 / 240.0, mode)).collect();

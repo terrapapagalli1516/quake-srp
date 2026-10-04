@@ -10,7 +10,7 @@
 //! rather than a panic.
 
 use crate::bsp::Bsp;
-use crate::math::{dot, Vec3};
+use crate::math::{Vec3, dot};
 
 /// Walk the worldmodel's BSP node tree to find which leaf the world-space point
 /// `p` falls in, porting `Mod_PointInLeaf`.
@@ -58,11 +58,7 @@ pub fn point_in_leaf(bsp: &Bsp, p: Vec3) -> Option<usize> {
         // front (child[0]) only when strictly in front; the exactly-on-plane case
         // (d == 0) goes to the back child, matching C `Mod_PointInLeaf` (`if (d > 0)`)
         // and the sibling recursive_light_point descent.
-        let child = if d > 0.0 {
-            *node.children.first()?
-        } else {
-            *node.children.get(1)?
-        };
+        let child = if d > 0.0 { *node.children.first()? } else { *node.children.get(1)? };
         node_index = child as i32;
     }
 
@@ -146,11 +142,7 @@ mod tests {
     fn two_leaf_bsp() -> Bsp {
         use crate::bsp::{DLeaf, DNode, DPlane};
         let mut bsp = demo_room();
-        bsp.planes = vec![DPlane {
-            normal: [1.0, 0.0, 0.0],
-            dist: 0.0,
-            ptype: crate::bsp::PLANE_X,
-        }];
+        bsp.planes = vec![DPlane { normal: [1.0, 0.0, 0.0], dist: 0.0, ptype: crate::bsp::PLANE_X }];
         // children: front (x>=0) -> leaf index 1 => -(1)-1 = -2;
         //           back  (x<0)  -> leaf index 2 => -(2)-1 = -3.
         bsp.nodes = vec![DNode {

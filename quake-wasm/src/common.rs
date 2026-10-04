@@ -12,7 +12,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use quake_rs::common::{check_progs, init_filesystem, Filesystem};
+use quake_rs::common::{Filesystem, check_progs, init_filesystem};
 use quake_rs::pak::Pak;
 
 /// `GAMENAME` (quakedef.h): the game directory under the base directory.
@@ -73,7 +73,13 @@ fn files() -> Option<&'static Filesystem> {
 fn default_files() -> Option<Filesystem> {
     let pak = Pak::open(concat!(env!("CARGO_MANIFEST_DIR"), "/../quake-data/ID1/PAK0.PAK")).ok()?;
     // (The tests' game directory is each thread's own: `gamedir`.)
-    Some(Filesystem { files: pak, gamedir: PathBuf::from(GAMENAME), registered: false, modified: false, log: Vec::new() })
+    Some(Filesystem {
+        files: pak,
+        gamedir: PathBuf::from(GAMENAME),
+        registered: false,
+        modified: false,
+        log: Vec::new(),
+    })
 }
 
 #[cfg(not(test))]

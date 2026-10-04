@@ -16,20 +16,19 @@
 //! `changelevel` / `localcmd` in `host.rs`, `walkmove` / `movetogoal` /
 //! `checkbottom` in `sv_move.rs`.
 
-use super::host::{bi_changelevel, bi_localcmd, ServerCvars};
+use super::host::{ServerCvars, bi_changelevel, bi_localcmd};
 use super::lightstyle::bi_lightstyle;
 use super::msg::{
-    bi_ambientsound, bi_bprint, bi_centerprint, bi_particle, bi_sound, bi_sprint, bi_stuffcmd,
-    bi_writeangle, bi_writebyte, bi_writechar, bi_writecoord, bi_writeentity, bi_writelong,
-    bi_writeshort, bi_writestring,
+    bi_ambientsound, bi_bprint, bi_centerprint, bi_particle, bi_sound, bi_sprint, bi_stuffcmd, bi_writeangle,
+    bi_writebyte, bi_writechar, bi_writecoord, bi_writeentity, bi_writelong, bi_writeshort, bi_writestring,
 };
 use super::pr_edict::parse_float;
 use super::sv_move::{bi_checkbottom, bi_movetogoal, bi_walkmove};
 use super::sv_world::{link_edict, sv_move};
-use super::{EntFlags, Solid, StaticEntity, SV_MAXVELOCITY};
-use crate::math::{add as v_add, angle_vectors, sub as v_sub, Vec3};
-use crate::vm::{Builtin, Vm};
+use super::{EntFlags, SV_MAXVELOCITY, Solid, StaticEntity};
 use crate::Result;
+use crate::math::{Vec3, add as v_add, angle_vectors, sub as v_sub};
+use crate::vm::{Builtin, Vm};
 
 // ---------------------------------------------------------------------------
 // Engine builtins. Each is an `fn(&mut Vm) -> Result<()>`.
@@ -371,11 +370,7 @@ fn bi_aim(vm: &mut Vm) -> Result<()> {
     start[2] += 20.0;
 
     // Try a straight trace first; a direct DAMAGE_AIM hit needs no assist.
-    let end = [
-        start[0] + 2048.0 * v_forward[0],
-        start[1] + 2048.0 * v_forward[1],
-        start[2] + 2048.0 * v_forward[2],
-    ];
+    let end = [start[0] + 2048.0 * v_forward[0], start[1] + 2048.0 * v_forward[1], start[2] + 2048.0 * v_forward[2]];
     let tr = sv_move(vm, start, end, [0.0; 3], [0.0; 3], ent, false, false);
     if tr.ent > 0 && vm.ent_float(tr.ent, vm.fo().takedamage) == DAMAGE_AIM {
         vm.ret_vector(v_forward);
@@ -456,9 +451,7 @@ fn bi_checkclient(vm: &mut Vm) -> Result<()> {
         if vm.is_free_edict(ent) {
             continue;
         }
-        if vm.flags(ent).contains(EntFlags::CLIENT)
-            && vm.ent_float(ent, vm.fo().health) > 0.0
-        {
+        if vm.flags(ent).contains(EntFlags::CLIENT) && vm.ent_float(ent, vm.fo().health) > 0.0 {
             player = ent;
             break;
         }
@@ -599,7 +592,7 @@ pub fn install_engine_builtins(vm: &mut Vm) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::progs::{Op, Progs, Statement, OFS_RETURN};
+    use crate::progs::{OFS_RETURN, Op, Progs, Statement};
     use crate::server::testutil::*;
     use crate::server::{Server, WorldModel};
 
@@ -659,9 +652,7 @@ mod tests {
         server.vm.gset_int("self", e);
         let text = server.vm.intern("couldn't find target");
         server.vm.set_gi(crate::progs::OFS_PARM0, text);
-        let Err(crate::QError::Program(err)) = server.vm.call_builtin(11, 1) else {
-            panic!("objerror is Host_Error")
-        };
+        let Err(crate::QError::Program(err)) = server.vm.call_builtin(11, 1) else { panic!("objerror is Host_Error") };
         assert_eq!(
             err.console,
             format!(
@@ -752,15 +743,7 @@ mod tests {
     fn install_engine_builtins_overwrites_world_keeps_pure() {
         // Build a trivial progs just to get a Vm.
         let mut b = Builder::new();
-        let _ = b.add_function(
-            "main",
-            vec![Statement {
-                op: Op::Done,
-                a: 0,
-                b: 0,
-                c: 0,
-            }],
-        );
+        let _ = b.add_function("main", vec![Statement { op: Op::Done, a: 0, b: 0, c: 0 }]);
         let img = b.build();
         let mut vm = Vm::load(&img).expect("load");
         let len_before = vm.builtins().len();
@@ -783,15 +766,7 @@ mod tests {
         b.add_global("trace_fraction", EV_FLOAT, 50);
         b.add_global("trace_allsolid", EV_FLOAT, 51);
         b.add_global("trace_endpos", 3, 52);
-        let _ = b.add_function(
-            "main",
-            vec![Statement {
-                op: Op::Done,
-                a: 0,
-                b: 0,
-                c: 0,
-            }],
-        );
+        let _ = b.add_function("main", vec![Statement { op: Op::Done, a: 0, b: 0, c: 0 }]);
         let img = b.build();
         let mut vm = Vm::load(&img).expect("load");
         install_engine_builtins(&mut vm);
@@ -887,10 +862,7 @@ mod tests {
 
         // The map's one info_startendtext: its `.use` is info_startendtext_use.
         let starter = (0..server.vm.num_edicts() as i32)
-            .find(|&e| {
-                !server.vm.is_free_edict(e)
-                    && server.vm.ent_get_string(e, "classname") == "info_startendtext"
-            })
+            .find(|&e| !server.vm.is_free_edict(e) && server.vm.ent_get_string(e, "classname") == "info_startendtext")
             .expect("hipend has an info_startendtext");
 
         server.vm.gset_int("self", starter);

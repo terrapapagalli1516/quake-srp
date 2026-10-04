@@ -66,9 +66,9 @@ use std::cell::RefCell;
 use std::fmt::Write as _;
 use std::time::Instant;
 
-use quake_rs::client::host::{host_filter_time_display, host_filter_time_uncapped, FrameCap};
+use quake_rs::client::host::{FrameCap, host_filter_time_display, host_filter_time_uncapped};
 use quake_rs::client::lerpmove::LerpMove;
-use quake_rs::client::{cl_demo, cl_main, host_cmd, DemoPlay, Phase, SoundCall, Vid, Walk};
+use quake_rs::client::{DemoPlay, Phase, SoundCall, Vid, Walk, cl_demo, cl_main, host_cmd};
 use quake_rs::pak::Pak;
 use quake_rs::particles::ParticleKind;
 use quake_rs::progs::OFS_PARM0;
@@ -78,7 +78,14 @@ use quake_rs::vm::Vm;
 use quake_rs::world;
 
 /// The screen the scenarios draw (small: they measure the game, not pixels).
-const VID: Vid = Vid { width: 320, height: 200, display_aspect: 4.0 / 3.0, persp_span: render::PerspSpan::Spans16, video: render::VideoCvars::CLASSIC, mip: render::MipCvars::DEFAULT };
+const VID: Vid = Vid {
+    width: 320,
+    height: 200,
+    display_aspect: 4.0 / 3.0,
+    persp_span: render::PerspSpan::Spans16,
+    video: render::VideoCvars::CLASSIC,
+    mip: render::MipCvars::DEFAULT,
+};
 
 // QuakeC constants (defs.qc).
 const FL_GODMODE: i32 = 64;
@@ -150,7 +157,16 @@ static PICTURE_CAP: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32:
 impl FrameClock {
     fn new(rate: Rate, stepping: Stepping) -> FrameClock {
         let cap = FrameCap::new(PICTURE_CAP.load(std::sync::atomic::Ordering::Relaxed));
-        FrameClock { rate, stepping, realtime: 0.0, oldrealtime: 0.0, frames: 0, seed: 0x5eed, cap, last_picture: f64::MIN }
+        FrameClock {
+            rate,
+            stepping,
+            realtime: 0.0,
+            oldrealtime: 0.0,
+            frames: 0,
+            seed: 0x5eed,
+            cap,
+            last_picture: f64::MIN,
+        }
     }
 
     /// Whether the frame [`FrameClock::next`] just gave draws its picture.
@@ -306,7 +322,8 @@ impl Sim {
     /// inputs let go. The spot must fit the player's box: `SV_CheckStuck`
     /// would send a stuck player back to where it last stood.
     fn teleport(&mut self, origin: [f32; 3], yaw: f32) {
-        let fits = !world::trace_world(&self.w.bsp, origin, origin, [-16.0, -16.0, -24.0], [16.0, 16.0, 32.0]).startsolid;
+        let fits =
+            !world::trace_world(&self.w.bsp, origin, origin, [-16.0, -16.0, -24.0], [16.0, 16.0, 32.0]).startsolid;
         assert!(fits, "{origin:?} does not fit the player's box");
         let p = self.player();
         set_origin(self.vm(), p, origin);
@@ -398,7 +415,9 @@ fn stuffcmd(vm: &mut Vm, e: i32, text: &str) {
 fn door_trigger(s: &Sim, door: i32) -> i32 {
     let vm = &s.w.server.vm;
     (0..vm.num_edicts() as i32)
-        .find(|&e| !vm.is_free_edict(e) && vm.ent_get_int(e, "owner") == door && vm.ent_string_ref(e, "classname") != "door")
+        .find(|&e| {
+            !vm.is_free_edict(e) && vm.ent_get_int(e, "owner") == door && vm.ent_string_ref(e, "classname") != "door"
+        })
         .expect("the door has its trigger field")
 }
 
@@ -430,7 +449,15 @@ fn call_qc_with(vm: &mut Vm, name: &str, self_e: i32, other: i32, activator: i32
 /// A spawned edict of `movetype` and `solid`, box `mins`..`maxs`, at
 /// `origin` moving at `velocity`: a test body for the toss and step
 /// integrators.
-fn spawn_mover(s: &mut Sim, movetype: f32, solid: f32, mins: [f32; 3], maxs: [f32; 3], origin: [f32; 3], velocity: [f32; 3]) -> i32 {
+fn spawn_mover(
+    s: &mut Sim,
+    movetype: f32,
+    solid: f32,
+    mins: [f32; 3],
+    maxs: [f32; 3],
+    origin: [f32; 3],
+    velocity: [f32; 3],
+) -> i32 {
     let vm = s.vm();
     let e = vm.spawn();
     let cn = vm.intern("framerate_mover");
@@ -545,24 +572,56 @@ const SCENARIOS: &[Scenario] = &[
     Scenario { name: "runjump", what: "a running jump (full speed) on e1m1's flat floor", run: run_jump },
     Scenario { name: "accel", what: "from rest, forward held, on flat floor; the view bob while running", run: accel },
     Scenario { name: "friction", what: "at full speed, forward let go: the slide to a stop", run: friction },
-    Scenario { name: "stairs", what: "running up and down e1m1's first stairs (6 steps of 8 units, then 16)", run: stairs },
-    Scenario { name: "step", what: "the view over a 16-unit step: running up it (id's stair smoothing, 80 u/s) and off it", run: step },
-    Scenario { name: "fall", what: "the drop height (feet above floor) that makes the landing sound, and fall damage", run: fall },
+    Scenario {
+        name: "stairs",
+        what: "running up and down e1m1's first stairs (6 steps of 8 units, then 16)",
+        run: stairs,
+    },
+    Scenario {
+        name: "step",
+        what: "the view over a 16-unit step: running up it (id's stair smoothing, 80 u/s) and off it",
+        run: step,
+    },
+    Scenario {
+        name: "fall",
+        what: "the drop height (feet above floor) that makes the landing sound, and fall damage",
+        run: fall,
+    },
     Scenario { name: "swim", what: "e1m4's deep water: sinking idle, swimming down, swimming up", run: swim },
     Scenario { name: "lava", what: "standing waist-deep in e1m7's lava for 5 s", run: lava },
     Scenario { name: "plat", what: "riding e1m1's lift up (func_plat, 150 u/s)", run: plat },
     Scenario { name: "door", what: "e1m1's first door: opens, waits 3 s, closes", run: door },
-    Scenario { name: "toss", what: "a bouncing projectile (MOVETYPE_BOUNCE, the grenade's) thrown up the runway", run: toss },
+    Scenario {
+        name: "toss",
+        what: "a bouncing projectile (MOVETYPE_BOUNCE, the grenade's) thrown up the runway",
+        run: toss,
+    },
     Scenario { name: "leap", what: "a monster-sized MOVETYPE_STEP leap (a dog's jump)", run: leap },
     Scenario { name: "grenade", what: "a grenade fired level up the runway", run: grenade },
-    Scenario { name: "rocket", what: "a rocket fired into the wall at the runway's end: flight, explosion, light, particles", run: rocket },
+    Scenario {
+        name: "rocket",
+        what: "a rocket fired into the wall at the runway's end: flight, explosion, light, particles",
+        run: rocket,
+    },
     Scenario { name: "rocketjump", what: "a rocket at the feet (pitch 80) fired with a jump", run: rocket_jump },
     Scenario { name: "weapons", what: "fire held: shotgun for 3 s, nailgun for 2 s", run: weapons },
-    Scenario { name: "trails", what: "trail particles per 100 units behind a gib, a grenade and a rocket", run: trails },
-    Scenario { name: "grunt", what: "an e1m1 grunt woken 192 units away: its first shot, shots and damage in 8 s", run: grunt },
+    Scenario {
+        name: "trails",
+        what: "trail particles per 100 units behind a gib, a grenade and a rocket",
+        run: trails,
+    },
+    Scenario {
+        name: "grunt",
+        what: "an e1m1 grunt woken 192 units away: its first shot, shots and damage in 8 s",
+        run: grunt,
+    },
     Scenario { name: "quad", what: "impulse 255: how long the Quad Damage lasts", run: quad },
     Scenario { name: "flash", what: "a hit's damage flash and view kick, and a pickup's bonus flash", run: flash },
-    Scenario { name: "clocks", what: "long sessions: the client's host clock and a door's ltime, one hour in", run: clocks },
+    Scenario {
+        name: "clocks",
+        what: "long sessions: the client's host clock and a door's ltime, one hour in",
+        run: clocks,
+    },
     Scenario { name: "demo", what: "demo1's first 20 s: how often the recorded view moves on screen", run: demo },
 ];
 
@@ -926,7 +985,15 @@ fn door(c: &Ctx) -> Vec<Measure> {
 fn toss(c: &Ctx) -> Vec<Measure> {
     let mut s = c.sim("e1m1");
     s.place([RUNWAY[0], 0.0, RUNWAY[2]], 90.0);
-    let e = spawn_mover(&mut s, MOVETYPE_BOUNCE, SOLID_NOT, [0.0; 3], [0.0; 3], [RUNWAY[0], 20.0, 40.0], [0.0, 150.0, 350.0]);
+    let e = spawn_mover(
+        &mut s,
+        MOVETYPE_BOUNCE,
+        SOLID_NOT,
+        [0.0; 3],
+        [0.0; 3],
+        [RUNWAY[0], 20.0, 40.0],
+        [0.0, 150.0, 350.0],
+    );
     let t0 = s.t;
     let (mut z, mut y) = (Series::default(), Series::default());
     let (mut rest, mut bounces, mut vz_prev) = (f64::NAN, 0, 350.0f32);
@@ -957,7 +1024,15 @@ fn leap(c: &Ctx) -> Vec<Measure> {
     let mut s = c.sim("e1m1");
     s.place([RUNWAY[0], 0.0, RUNWAY[2]], 90.0);
     // A dog-sized box launched as dog_leap does: `v_forward * 300 + '0 0 200'`.
-    let e = spawn_mover(&mut s, MOVETYPE_STEP, SOLID_SLIDEBOX, [-16.0, -16.0, -24.0], [16.0, 16.0, 40.0], [RUNWAY[0], 150.0, 25.0], [0.0, 300.0, 200.0]);
+    let e = spawn_mover(
+        &mut s,
+        MOVETYPE_STEP,
+        SOLID_SLIDEBOX,
+        [-16.0, -16.0, -24.0],
+        [16.0, 16.0, 40.0],
+        [RUNWAY[0], 150.0, 25.0],
+        [0.0, 300.0, 200.0],
+    );
     let t0 = s.t;
     let (mut z, mut land) = (Series::default(), (f64::NAN, 0.0));
     s.run_until(2.0, |s| {
@@ -1018,7 +1093,14 @@ fn explosion_cloud(w: &Walk, center: [f32; 3]) -> (f64, f64) {
         .collect();
     let r: f64 = ps
         .iter()
-        .map(|p| f64::from(((p.origin[0] - center[0]).powi(2) + (p.origin[1] - center[1]).powi(2) + (p.origin[2] - center[2]).powi(2)).sqrt()))
+        .map(|p| {
+            f64::from(
+                ((p.origin[0] - center[0]).powi(2)
+                    + (p.origin[1] - center[1]).powi(2)
+                    + (p.origin[2] - center[2]).powi(2))
+                .sqrt(),
+            )
+        })
         .sum();
     (ps.len() as f64, r / ps.len().max(1) as f64)
 }
@@ -1125,7 +1207,8 @@ fn trails(c: &Ctx) -> Vec<Measure> {
     // from its previous origin every frame (CL_RelinkEntities). Counts the
     // particles each frame spawned (a fresh trail particle dies 2 s on).
     let per_100 = |s: &mut Sim, model: &str, speed: f32, kind: fn(&ParticleKind) -> bool| -> f64 {
-        let e = spawn_mover(s, MOVETYPE_NOCLIP, SOLID_NOT, [0.0; 3], [0.0; 3], [RUNWAY[0], 40.0, 40.0], [0.0, speed, 0.0]);
+        let e =
+            spawn_mover(s, MOVETYPE_NOCLIP, SOLID_NOT, [0.0; 3], [0.0; 3], [RUNWAY[0], 40.0, 40.0], [0.0, speed, 0.0]);
         set_model(s.vm(), e, model);
         let (mut spawned, mut dist) = (0usize, 0.0f64);
         s.run(0.4, |s| {
@@ -1183,7 +1266,8 @@ fn grunt(c: &Ctx) -> Vec<Measure> {
             }
             last = f;
         });
-        let fired: Vec<f64> = s.sounds.iter().filter(|(t, n)| *t > t0 && n == "soldier/sattck1.wav").map(|(t, _)| t - t0).collect();
+        let fired: Vec<f64> =
+            s.sounds.iter().filter(|(t, n)| *t > t0 && n == "soldier/sattck1.wav").map(|(t, _)| t - t0).collect();
         first += fired.first().copied().unwrap_or(8.0);
         shots += fired.len() as f64;
         damage += f64::from(h0 - s.vm().ent_get_float(p, "health"));
@@ -1360,7 +1444,15 @@ fn motion(tracks: &[StepTrack], hz: f64) -> Motion {
 /// `lerpmove`, each frame's server origin and drawn origin of every step
 /// mover drawn (with the extra off, the two are the same). `each` sees
 /// every frame's image (the strip).
-fn live_steps(pak: &Pak, rate: Rate, workload: &str, secs: f64, vid: Vid, lerpmove: LerpMove, mut each: impl FnMut(&render::Image)) -> Vec<StepTrack> {
+fn live_steps(
+    pak: &Pak,
+    rate: Rate,
+    workload: &str,
+    secs: f64,
+    vid: Vid,
+    lerpmove: LerpMove,
+    mut each: impl FnMut(&render::Image),
+) -> Vec<StepTrack> {
     let stepping = if rate == Rate::Hz(72) { Stepping::Classic } else { Stepping::Uncapped };
     let mut s = Sim::new(pak, "e1m1", rate, stepping);
     s.w.lerpmove = lerpmove;
@@ -1490,12 +1582,17 @@ fn lerpmove_report(pak: &Pak, rates: &[Rate], strip: Option<&str>) -> Result<Str
             .iter()
             .map(|&r| {
                 if w == "demo1" {
-                    (motion(&demo_steps(pak, r, LerpMove::Classic, 20.0), hz(r)), motion(&demo_steps(pak, r, LerpMove::Smooth, 20.0), hz(r)))
+                    (
+                        motion(&demo_steps(pak, r, LerpMove::Classic, 20.0), hz(r)),
+                        motion(&demo_steps(pak, r, LerpMove::Smooth, 20.0), hz(r)),
+                    )
                 } else {
                     let secs = if w == "knock" { 1.5 } else { 6.0 };
                     let tracks = live_steps(pak, r, w, secs, VID, LerpMove::Smooth, |_| {});
-                    let classic: Vec<StepTrack> =
-                        tracks.iter().map(|t| StepTrack { server: t.server.clone(), drawn: t.server.clone() }).collect();
+                    let classic: Vec<StepTrack> = tracks
+                        .iter()
+                        .map(|t| StepTrack { server: t.server.clone(), drawn: t.server.clone() })
+                        .collect();
                     (motion(&classic, hz(r)), motion(&tracks, hz(r)))
                 }
             })
@@ -1676,7 +1773,9 @@ static OVERLAY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::n
 fn style_run(pak: &Pak, view: &StyleView, rate: Rate, vid: Vid, threads: usize, secs: f64, counters: bool) -> StyleRun {
     let stepping = if rate == Rate::Hz(72) { Stepping::Classic } else { Stepping::Uncapped };
     let tick = match rate {
-        Rate::Hz(hz) if PACED.load(std::sync::atomic::Ordering::Relaxed) => Some(std::time::Duration::from_secs_f64(1.0 / f64::from(hz))),
+        Rate::Hz(hz) if PACED.load(std::sync::atomic::Ordering::Relaxed) => {
+            Some(std::time::Duration::from_secs_f64(1.0 / f64::from(hz)))
+        }
         _ => None,
     };
     let mut next = Instant::now();
@@ -1738,11 +1837,20 @@ fn style_run(pak: &Pak, view: &StyleView, rate: Rate, vid: Vid, threads: usize, 
 /// counters, one run each), and the 3-D view's time per frame (median, mean,
 /// p95 over `reps` runs of each, interleaved, the counters off). The video
 /// cvars are the slop preset's but for the light styles.
-fn lightstyles_report(pak: &Pak, rates: &[Rate], views: &[StyleView], res: (usize, usize), threads: usize, reps: usize, secs: f64) -> String {
+fn lightstyles_report(
+    pak: &Pak,
+    rates: &[Rate],
+    views: &[StyleView],
+    res: (usize, usize),
+    threads: usize,
+    reps: usize,
+    secs: f64,
+) -> String {
     use quake_rs::server::LerpLightStyles;
     let modes = [LerpLightStyles::Classic, LerpLightStyles::Smooth]
         .map(|lightstyles| render::VideoCvars { lightstyles, ..render::VideoCvars::MODERN });
-    let title = format!("r_lerplightstyles at {}x{}, {threads} thread(s), {secs} s a run; Classic → Smooth", res.0, res.1);
+    let title =
+        format!("r_lerplightstyles at {}x{}, {threads} thread(s), {secs} s a run; Classic → Smooth", res.0, res.1);
     ab_report(pak, &title, modes, rates, views, res, threads, reps, secs)
 }
 
@@ -1751,9 +1859,20 @@ fn lightstyles_report(pak: &Pak, rates: &[Rate], views: &[StyleView], res: (usiz
 /// the steady torches as id's → flickering at strength S (`r_torchflicker`),
 /// the rest of the slop preset's video cvars on in both.
 #[allow(clippy::too_many_arguments)]
-fn torches_report(pak: &Pak, rates: &[Rate], views: &[StyleView], res: (usize, usize), threads: usize, reps: usize, secs: f64, strength: render::TorchFlicker) -> String {
-    let modes = [render::TorchFlicker::OFF, strength].map(|torches| render::VideoCvars { torches, ..render::VideoCvars::MODERN });
-    let title = format!("r_torchflicker at {}x{}, {threads} thread(s), {secs} s a run; 0 → {}", res.0, res.1, strength.value());
+fn torches_report(
+    pak: &Pak,
+    rates: &[Rate],
+    views: &[StyleView],
+    res: (usize, usize),
+    threads: usize,
+    reps: usize,
+    secs: f64,
+    strength: render::TorchFlicker,
+) -> String {
+    let modes = [render::TorchFlicker::OFF, strength]
+        .map(|torches| render::VideoCvars { torches, ..render::VideoCvars::MODERN });
+    let title =
+        format!("r_torchflicker at {}x{}, {threads} thread(s), {secs} s a run; 0 → {}", res.0, res.1, strength.value());
     ab_report(pak, &title, modes, rates, views, res, threads, reps, secs)
 }
 
@@ -1767,32 +1886,66 @@ fn torches_report(pak: &Pak, rates: &[Rate], views: &[StyleView], res: (usize, u
 /// as a share of the view. What the lit-surface bakes cost on 1 to 16
 /// threads.
 #[allow(clippy::too_many_arguments)]
-fn bake_report(pak: &Pak, rates: &[Rate], views: &[StyleView], res: (usize, usize), threads: &[usize], reps: usize, secs: f64) -> String {
+fn bake_report(
+    pak: &Pak,
+    rates: &[Rate],
+    views: &[StyleView],
+    res: (usize, usize),
+    threads: &[usize],
+    reps: usize,
+    secs: f64,
+) -> String {
     let mut o = String::new();
-    let vid = Vid { width: res.0, height: res.1, display_aspect: res.0 as f64 / res.1 as f64, video: render::VideoCvars::MODERN, ..VID };
+    let vid = Vid {
+        width: res.0,
+        height: res.1,
+        display_aspect: res.0 as f64 / res.1 as f64,
+        video: render::VideoCvars::MODERN,
+        ..VID
+    };
     let mean = |xs: &[f64]| xs.iter().sum::<f64>() / xs.len().max(1) as f64;
-    let _ = writeln!(o, "lit-surface bakes at {}x{}, the slop frame, {secs} s a run, threads {threads:?}", res.0, res.1);
+    let _ =
+        writeln!(o, "lit-surface bakes at {}x{}, the slop frame, {secs} s a run, threads {threads:?}", res.0, res.1);
     quake_rs::client::set_lap_hook(Some(lap));
     for view in views {
         if pak.read_file(&format!("maps/{}.bsp", view.map)).ok().flatten().is_none() {
             let _ = writeln!(o, "{}: maps/{}.bsp is not in the pak (skipped)", view.name, view.map);
             continue;
         }
-        let _ = writeln!(o, "{} — maps/{}.bsp at {:?} looking {}{}", view.name, view.map, view.origin, view.yaw, if view.fire { ", firing rockets" } else { "" });
+        let _ = writeln!(
+            o,
+            "{} — maps/{}.bsp at {:?} looking {}{}",
+            view.name,
+            view.map,
+            view.origin,
+            view.yaw,
+            if view.fire { ", firing rockets" } else { "" }
+        );
         for &rate in rates {
-            let counts: Vec<StyleRun> = threads.iter().map(|&t| style_run(pak, view, rate, vid, t, secs, true)).collect();
+            let counts: Vec<StyleRun> =
+                threads.iter().map(|&t| style_run(pak, view, rate, vid, t, secs, true)).collect();
             let mut times: Vec<Vec<f64>> = vec![Vec::new(); threads.len()];
             for _ in 0..reps {
                 for (k, &t) in threads.iter().enumerate() {
                     times[k].extend(style_run(pak, view, rate, vid, t, secs, false).view_s);
                 }
             }
-            let _ = writeln!(o, "  {:>6} Hz: blocks rebaked/frame {}; texels baked/frame {}", rate.label(), fmt(mean(&counts[0].baked)), fmt(mean(&counts[0].texels)));
+            let _ = writeln!(
+                o,
+                "  {:>6} Hz: blocks rebaked/frame {}; texels baked/frame {}",
+                rate.label(),
+                fmt(mean(&counts[0].baked)),
+                fmt(mean(&counts[0].texels))
+            );
             for (k, &t) in threads.iter().enumerate() {
                 let (med, p95) = median_p95(&mut times[k]);
                 let (serial, _) = median_p95(&mut counts[k].serial_s.clone());
-                let _ = writeln!(o, "    {t:>2} threads: 3-D view ms/frame median {med:.3}, p95 {p95:.3}; serial {serial:.3} ms ({:.0}%)  ({} frames)",
-                    100.0 * serial / med.max(1e-9), times[k].len());
+                let _ = writeln!(
+                    o,
+                    "    {t:>2} threads: 3-D view ms/frame median {med:.3}, p95 {p95:.3}; serial {serial:.3} ms ({:.0}%)  ({} frames)",
+                    100.0 * serial / med.max(1e-9),
+                    times[k].len()
+                );
             }
         }
     }
@@ -1809,7 +1962,15 @@ fn bake_report(pak: &Pak, rates: &[Rate], views: &[StyleView], res: (usize, usiz
 /// interleaved, the counters off), and from a run with the counters on the
 /// mean ms a frame of each piece the calling thread does alone, beside the
 /// bands' wall time. Where a native-resolution frame's serial time goes.
-fn serial_report(pak: &Pak, rates: &[Rate], views: &[StyleView], res: (usize, usize), threads: &[usize], reps: usize, secs: f64) -> String {
+fn serial_report(
+    pak: &Pak,
+    rates: &[Rate],
+    views: &[StyleView],
+    res: (usize, usize),
+    threads: &[usize],
+    reps: usize,
+    secs: f64,
+) -> String {
     let mut o = String::new();
     let vid = Vid {
         width: res.0,
@@ -1820,7 +1981,11 @@ fn serial_report(pak: &Pak, rates: &[Rate], views: &[StyleView], res: (usize, us
         ..VID
     };
     quake_rs::draw::set_scaled_2d(true);
-    let bar = if OVERLAY.load(std::sync::atomic::Ordering::Relaxed) { "the status bar overlay" } else { "id's status bar (--overlay 0)" };
+    let bar = if OVERLAY.load(std::sync::atomic::Ordering::Relaxed) {
+        "the status bar overlay"
+    } else {
+        "id's status bar (--overlay 0)"
+    };
     let _ = writeln!(o, "the page's slop frame at {}x{}, {bar}, {secs} s a run, threads {threads:?}", res.0, res.1);
     quake_rs::client::set_lap_hook(Some(lap));
     for view in views {
@@ -1828,9 +1993,18 @@ fn serial_report(pak: &Pak, rates: &[Rate], views: &[StyleView], res: (usize, us
             let _ = writeln!(o, "{}: maps/{}.bsp is not in the pak (skipped)", view.name, view.map);
             continue;
         }
-        let _ = writeln!(o, "{} — maps/{}.bsp at {:?} looking {}{}", view.name, view.map, view.origin, view.yaw, if view.fire { ", firing rockets" } else { "" });
+        let _ = writeln!(
+            o,
+            "{} — maps/{}.bsp at {:?} looking {}{}",
+            view.name,
+            view.map,
+            view.origin,
+            view.yaw,
+            if view.fire { ", firing rockets" } else { "" }
+        );
         for &rate in rates {
-            let counts: Vec<StyleRun> = threads.iter().map(|&t| style_run(pak, view, rate, vid, t, secs, true)).collect();
+            let counts: Vec<StyleRun> =
+                threads.iter().map(|&t| style_run(pak, view, rate, vid, t, secs, true)).collect();
             let mut times: Vec<[Vec<f64>; 4]> = vec![Default::default(); threads.len()];
             for _ in 0..reps {
                 for (k, &t) in threads.iter().enumerate() {
@@ -1842,9 +2016,12 @@ fn serial_report(pak: &Pak, rates: &[Rate], views: &[StyleView], res: (usize, us
             }
             let _ = writeln!(o, "  {:>6} Hz", rate.label());
             for (k, &t) in threads.iter().enumerate() {
-                let [(frame, frame95), (view3d, _), (game, _), (layer2d, _)] = [0, 1, 2, 3].map(|i| median_p95(&mut times[k][i]));
+                let [(frame, frame95), (view3d, _), (game, _), (layer2d, _)] =
+                    [0, 1, 2, 3].map(|i| median_p95(&mut times[k][i]));
                 let st = &counts[k].stats;
-                let ms = |f: &dyn Fn(&render::RenderStats) -> u64| st.iter().map(|s| f(s) as f64).sum::<f64>() / 1e6 / st.len().max(1) as f64;
+                let ms = |f: &dyn Fn(&render::RenderStats) -> u64| {
+                    st.iter().map(|s| f(s) as f64).sum::<f64>() / 1e6 / st.len().max(1) as f64
+                };
                 let _ = writeln!(
                     o,
                     "    {t:>2} threads: frame {frame:.3} ms (p95 {frame95:.3}) = game {game:.3} + 3-D {view3d:.3} + 2-D {layer2d:.3}; counted: {:.1} views in {:.1} rounds of threads, {:.3} ms, alone {:.3} = setup {:.3} + walk {:.3} + brush {:.3} + scan {:.3} + lookups {:.3} + entities {:.3}; bands {:.3} (their bakes {:.3}, every thread's)",
@@ -1874,9 +2051,20 @@ fn serial_report(pak: &Pak, rates: &[Rate], views: &[StyleView], res: (usize, us
 /// frame (median, mean, p95 over `reps` runs of each, interleaved, the
 /// counters off).
 #[allow(clippy::too_many_arguments)]
-fn ab_report(pak: &Pak, title: &str, modes: [render::VideoCvars; 2], rates: &[Rate], views: &[StyleView], res: (usize, usize), threads: usize, reps: usize, secs: f64) -> String {
+fn ab_report(
+    pak: &Pak,
+    title: &str,
+    modes: [render::VideoCvars; 2],
+    rates: &[Rate],
+    views: &[StyleView],
+    res: (usize, usize),
+    threads: usize,
+    reps: usize,
+    secs: f64,
+) -> String {
     let mut o = String::new();
-    let vid_for = |video| Vid { width: res.0, height: res.1, display_aspect: res.0 as f64 / res.1 as f64, video, ..VID };
+    let vid_for =
+        |video| Vid { width: res.0, height: res.1, display_aspect: res.0 as f64 / res.1 as f64, video, ..VID };
     let mean = |xs: &[f64]| xs.iter().sum::<f64>() / xs.len().max(1) as f64;
     let _ = writeln!(o, "{title}");
     quake_rs::client::set_lap_hook(Some(lap));
@@ -1895,8 +2083,15 @@ fn ab_report(pak: &Pak, title: &str, modes: [render::VideoCvars; 2], rates: &[Ra
                 }
             }
             let cell = |f: &dyn Fn(&StyleRun) -> f64| format!("{} → {}", fmt(f(&counts[0])), fmt(f(&counts[1])));
-            let _ = writeln!(o, "  {:>6} Hz: styled surfaces/frame {}; torch-lit {}; blocks rebaked/frame {}; texels baked/frame {}",
-                rate.label(), cell(&|r| mean(&r.styled)), cell(&|r| mean(&r.torchlit)), cell(&|r| mean(&r.baked)), cell(&|r| mean(&r.texels)));
+            let _ = writeln!(
+                o,
+                "  {:>6} Hz: styled surfaces/frame {}; torch-lit {}; blocks rebaked/frame {}; texels baked/frame {}",
+                rate.label(),
+                cell(&|r| mean(&r.styled)),
+                cell(&|r| mean(&r.torchlit)),
+                cell(&|r| mean(&r.baked)),
+                cell(&|r| mean(&r.texels))
+            );
             // (median, mean, p95) in ms.
             let stat = |xs: &mut Vec<f64>| {
                 let m = mean(xs) * 1000.0;
@@ -1907,7 +2102,14 @@ fn ab_report(pak: &Pak, title: &str, modes: [render::VideoCvars; 2], rates: &[Ra
             let _ = writeln!(
                 o,
                 "          3-D view ms/frame median {:.3} → {:.3}, mean {:.3} → {:.3} ({:+.1}%), p95 {:.3} → {:.3}  ({} frames each)",
-                a.0, b.0, a.1, b.1, (b.1 / a.1 - 1.0) * 100.0, a.2, b.2, times[0].len()
+                a.0,
+                b.0,
+                a.1,
+                b.1,
+                (b.1 / a.1 - 1.0) * 100.0,
+                a.2,
+                b.2,
+                times[0].len()
             );
         }
     }
@@ -1921,7 +2123,15 @@ fn ab_report(pak: &Pak, title: &str, modes: [render::VideoCvars; 2], rates: &[Ra
 /// as `DIR/<view>-<strength>.rgb`, the frames' RGB one after another, and
 /// `DIR/<view>.txt` saying `W H RATE FRAMES`: what the strips, the stills
 /// and the side-by-side clip are cut from.
-fn torches_dump(pak: &Pak, views: &[StyleView], rate: Rate, res: (usize, usize), secs: f64, strengths: &[f32], dir: &str) -> Result<String, String> {
+fn torches_dump(
+    pak: &Pak,
+    views: &[StyleView],
+    rate: Rate,
+    res: (usize, usize),
+    secs: f64,
+    strengths: &[f32],
+    dir: &str,
+) -> Result<String, String> {
     use std::io::Write as _;
     let palette = pak
         .read_file("gfx/palette.lmp")
@@ -1961,7 +2171,8 @@ fn torches_dump(pak: &Pak, views: &[StyleView], rate: Rate, res: (usize, usize),
             let _ = writeln!(o, "{path}: {frames} frames");
         }
         let meta = format!("{dir}/{}.txt", view.name);
-        std::fs::write(&meta, format!("{} {} {} {frames}\n", res.0, res.1, rate.label())).map_err(|e| format!("{meta}: {e}"))?;
+        std::fs::write(&meta, format!("{} {} {} {frames}\n", res.0, res.1, rate.label()))
+            .map_err(|e| format!("{meta}: {e}"))?;
     }
     Ok(o)
 }
@@ -2017,18 +2228,44 @@ fn persp_run(pak: &Pak, view: &StyleView, rate: Rate, vid: Vid, threads: usize, 
 /// every other video setting the slop preset's (the torches flicker, so the
 /// numbers are today's).
 #[allow(clippy::too_many_arguments)]
-fn persp_report(pak: &Pak, rates: &[Rate], views: &[StyleView], res: (usize, usize), spans: &[render::PerspSpan], threads: usize, reps: usize, secs: f64) -> String {
+fn persp_report(
+    pak: &Pak,
+    rates: &[Rate],
+    views: &[StyleView],
+    res: (usize, usize),
+    spans: &[render::PerspSpan],
+    threads: usize,
+    reps: usize,
+    secs: f64,
+) -> String {
     let mut o = String::new();
-    let vid_for = |persp_span| Vid { width: res.0, height: res.1, display_aspect: res.0 as f64 / res.1 as f64, persp_span, video: render::VideoCvars::MODERN, ..VID };
+    let vid_for = |persp_span| Vid {
+        width: res.0,
+        height: res.1,
+        display_aspect: res.0 as f64 / res.1 as f64,
+        persp_span,
+        video: render::VideoCvars::MODERN,
+        ..VID
+    };
     let names: Vec<String> = spans.iter().map(|p| p.pixels().to_string()).collect();
-    let _ = writeln!(o, "r_perspspan at {}x{}, {threads} thread(s), {secs} s a run; spans {}", res.0, res.1, names.join(" → "));
+    let _ = writeln!(
+        o,
+        "r_perspspan at {}x{}, {threads} thread(s), {secs} s a run; spans {}",
+        res.0,
+        res.1,
+        names.join(" → ")
+    );
     quake_rs::client::set_lap_hook(Some(lap));
     for view in views {
         if pak.read_file(&format!("maps/{}.bsp", view.map)).ok().flatten().is_none() {
             let _ = writeln!(o, "{}: maps/{}.bsp is not in the pak (skipped)", view.name, view.map);
             continue;
         }
-        let _ = writeln!(o, "{} — maps/{}.bsp at {:?} looking {} pitch {}", view.name, view.map, view.origin, view.yaw, view.pitch);
+        let _ = writeln!(
+            o,
+            "{} — maps/{}.bsp at {:?} looking {} pitch {}",
+            view.name, view.map, view.origin, view.yaw, view.pitch
+        );
         for &rate in rates {
             let mut times: Vec<Vec<f64>> = vec![Vec::new(); spans.len()];
             for _ in 0..reps {
@@ -2045,11 +2282,26 @@ fn persp_report(pak: &Pak, rates: &[Rate], views: &[StyleView], res: (usize, usi
             let st: Vec<(f64, f64, f64)> = times.iter_mut().map(stat).collect();
             let pct = |b: f64, a: f64| (b / a - 1.0) * 100.0;
             let cells = |f: &dyn Fn(&(f64, f64, f64)) -> f64| {
-                st.iter().zip(&names).enumerate().map(|(k, (x, n))| {
-                    if k == 0 { format!("{n}: {:.3}", f(x)) } else { format!("{n}: {:.3} ({:+.1}%)", f(x), pct(f(x), f(&st[0]))) }
-                }).collect::<Vec<_>>().join(", ")
+                st.iter()
+                    .zip(&names)
+                    .enumerate()
+                    .map(|(k, (x, n))| {
+                        if k == 0 {
+                            format!("{n}: {:.3}", f(x))
+                        } else {
+                            format!("{n}: {:.3} ({:+.1}%)", f(x), pct(f(x), f(&st[0])))
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
             };
-            let _ = writeln!(o, "  {:>6} Hz: 3-D view ms/frame median {}  ({} frames each)", rate.label(), cells(&|x| x.0), times[0].len());
+            let _ = writeln!(
+                o,
+                "  {:>6} Hz: 3-D view ms/frame median {}  ({} frames each)",
+                rate.label(),
+                cells(&|x| x.0),
+                times[0].len()
+            );
             let _ = writeln!(o, "  {:>6}     mean {}", "", cells(&|x| x.1));
             let _ = writeln!(o, "  {:>6}     p95 {}", "", cells(&|x| x.2));
         }
@@ -2103,7 +2355,14 @@ fn persp_dump(
     for view in views {
         let mut frames = 0;
         for &span in spans {
-            let vid = Vid { width: res.0, height: res.1, display_aspect: res.0 as f64 / res.1 as f64, persp_span: span, video: render::VideoCvars::MODERN, ..VID };
+            let vid = Vid {
+                width: res.0,
+                height: res.1,
+                display_aspect: res.0 as f64 / res.1 as f64,
+                persp_span: span,
+                video: render::VideoCvars::MODERN,
+                ..VID
+            };
             let mut s = Sim::new(pak, &view.map, rate, stepping);
             s.teleport(view.origin, view.yaw);
             let player = s.player();
@@ -2203,7 +2462,10 @@ pub fn cmd_framerate(pak_path: &str, rest: &[String]) -> Result<String, String> 
             "--cap" => {
                 let v = rest.get(i + 1).ok_or("--cap needs a number")?;
                 let n: u32 = v.parse().map_err(|_| format!("--cap: bad number {v:?}"))?;
-                if FrameCap::new(n) == FrameCap::NONE || FrameCap::new(n) == FrameCap::ID || FrameCap::new(n).cvar() != n {
+                if FrameCap::new(n) == FrameCap::NONE
+                    || FrameCap::new(n) == FrameCap::ID
+                    || FrameCap::new(n).cvar() != n
+                {
                     return Err(format!("--cap: {n} is not a cap the picture is held to (60..=240 but id's 72)"));
                 }
                 cap = Some(FrameCap::new(n));
@@ -2230,12 +2492,20 @@ pub fn cmd_framerate(pak_path: &str, rest: &[String]) -> Result<String, String> 
             "--turn" | "--strafe" => {
                 let v = rest.get(i + 1).ok_or_else(|| format!("{} needs a speed", rest[i]))?;
                 let speed: f32 = v.parse().map_err(|_| format!("{}: bad speed {v:?}", rest[i]))?;
-                if rest[i] == "--turn" { motion.turn = speed } else { motion.strafe = speed }
+                if rest[i] == "--turn" {
+                    motion.turn = speed
+                } else {
+                    motion.strafe = speed
+                }
                 i += 1;
             }
             "--crop" => {
                 let v = rest.get(i + 1).ok_or("--crop needs X,Y,W,H")?;
-                let n: Vec<usize> = v.split(',').map(|x| x.trim().parse()).collect::<Result<_, _>>().map_err(|_| format!("--crop: bad X,Y,W,H {v:?}"))?;
+                let n: Vec<usize> = v
+                    .split(',')
+                    .map(|x| x.trim().parse())
+                    .collect::<Result<_, _>>()
+                    .map_err(|_| format!("--crop: bad X,Y,W,H {v:?}"))?;
                 let [x, y, w, h] = n[..] else { return Err(format!("--crop: expected X,Y,W,H, got {v:?}")) };
                 crop = Some((x, y, w, h));
                 i += 1;
@@ -2262,7 +2532,10 @@ pub fn cmd_framerate(pak_path: &str, rest: &[String]) -> Result<String, String> 
             }
             "--strengths" => {
                 let v = rest.get(i + 1).ok_or("--strengths needs a list")?;
-                strengths = v.split(',').map(|x| x.parse().map_err(|_| format!("--strengths: bad strength {x:?}"))).collect::<Result<_, _>>()?;
+                strengths = v
+                    .split(',')
+                    .map(|x| x.parse().map_err(|_| format!("--strengths: bad strength {x:?}")))
+                    .collect::<Result<_, _>>()?;
                 i += 1;
             }
             "--view" => {
@@ -2274,7 +2547,10 @@ pub fn cmd_framerate(pak_path: &str, rest: &[String]) -> Result<String, String> 
                 let bad = || format!("{}: bad number {v:?}", rest[i]);
                 match rest[i].as_str() {
                     "--threads" => {
-                        thread_list = v.split(',').map(|t| t.parse().ok().filter(|&n| n > 0).ok_or_else(bad)).collect::<Result<_, _>>()?;
+                        thread_list = v
+                            .split(',')
+                            .map(|t| t.parse().ok().filter(|&n| n > 0).ok_or_else(bad))
+                            .collect::<Result<_, _>>()?;
                         threads = thread_list[0];
                     }
                     "--reps" => reps = v.parse().ok().filter(|&n| n > 0).ok_or_else(bad)?,
@@ -2291,7 +2567,8 @@ pub fn cmd_framerate(pak_path: &str, rest: &[String]) -> Result<String, String> 
     let mut pak: Option<Pak> = None;
     for path in pak_path.split(',') {
         let bytes = std::fs::read(path).map_err(|e| format!("cannot read {path}: {e}"))?;
-        let name = std::path::Path::new(path).file_name().map_or("pak0.pak".into(), |n| n.to_string_lossy().to_lowercase());
+        let name =
+            std::path::Path::new(path).file_name().map_or("pak0.pak".into(), |n| n.to_string_lossy().to_lowercase());
         let over = Pak::from_bytes(name, bytes).map_err(|e| e.to_string())?;
         pak = Some(match pak {
             Some(under) => over.over(under),
@@ -2341,7 +2618,16 @@ pub fn cmd_framerate(pak_path: &str, rest: &[String]) -> Result<String, String> 
             let rate = style_rates.first().copied().unwrap_or(Rate::Hz(240));
             return torches_dump(&pak, &views, rate, size, secs, &strengths, &dir);
         }
-        return Ok(torches_report(&pak, &style_rates, &views, size, threads, reps, secs, render::TorchFlicker::from_value(strength)));
+        return Ok(torches_report(
+            &pak,
+            &style_rates,
+            &views,
+            size,
+            threads,
+            reps,
+            secs,
+            render::TorchFlicker::from_value(strength),
+        ));
     }
     if lightstyles {
         style_rates.retain(|r| matches!(r, Rate::Hz(_)));
@@ -2352,7 +2638,8 @@ pub fn cmd_framerate(pak_path: &str, rest: &[String]) -> Result<String, String> 
         return Ok(lightstyles_report(&pak, &style_rates, &views, size, threads, reps, secs));
     }
     if budget {
-        let sizes = res.split(',').map(|r| super::parse_res(r, render::VideoCvars::CLASSIC)).collect::<Result<Vec<_>, _>>()?;
+        let sizes =
+            res.split(',').map(|r| super::parse_res(r, render::VideoCvars::CLASSIC)).collect::<Result<Vec<_>, _>>()?;
         return Ok(frame_budget(&pak, &sizes));
     }
     if lerpmove {
@@ -2415,8 +2702,18 @@ pub fn cmd_framerate(pak_path: &str, rest: &[String]) -> Result<String, String> 
 /// `cap`, every frame still run. A capped value must be the uncapped one
 /// exactly — what a frame draws never moves the game — and, with `check`,
 /// within the scenario's tolerance of the reference.
-fn capped_twin(pak: &Pak, cap: FrameCap, rates: &[Rate], only: Option<&[String]>, markdown: bool, check: bool) -> Result<String, String> {
-    let mut o = format!("the capped twin: host_maxfps {}, the picture held to it, the game a frame every refresh\n", cap.cvar());
+fn capped_twin(
+    pak: &Pak,
+    cap: FrameCap,
+    rates: &[Rate],
+    only: Option<&[String]>,
+    markdown: bool,
+    check: bool,
+) -> Result<String, String> {
+    let mut o = format!(
+        "the capped twin: host_maxfps {}, the picture held to it, the game a frame every refresh\n",
+        cap.cvar()
+    );
     let mut failures = Vec::new();
     for sc in SCENARIOS {
         if only.is_some_and(|names| !names.iter().any(|n| n == sc.name)) {
@@ -2440,7 +2737,14 @@ fn capped_twin(pak: &Pak, cap: FrameCap, rates: &[Rate], only: Option<&[String]>
                 row.cells.push((a.value, b.value));
                 let same = a.value == b.value || (a.value.is_nan() && b.value.is_nan());
                 if !same {
-                    failures.push(format!("{} / {} at {}: capped {} vs uncapped {}", sc.name, row.name, rate.label(), fmt(b.value), fmt(a.value)));
+                    failures.push(format!(
+                        "{} / {} at {}: capped {} vs uncapped {}",
+                        sc.name,
+                        row.name,
+                        rate.label(),
+                        fmt(b.value),
+                        fmt(a.value)
+                    ));
                 }
                 let within = (b.value - row.reference).abs() <= row.tolerance + 1e-9;
                 if check && !row.tolerance.is_nan() && !within {
@@ -2482,7 +2786,8 @@ fn report(o: &mut String, sc: &Scenario, rates: &[Rate], rows: &[Row], markdown:
                 d if d.abs() < 5e-4 => " (0)".into(),
                 d => format!(" ({}{})", if d > 0.0 { "+" } else { "−" }, fmt(d.abs())),
             };
-            let cells: Vec<String> = r.cells.iter().map(|&(a, b)| format!("{} → {}{}", fmt(a), fmt(b), delta(b))).collect();
+            let cells: Vec<String> =
+                r.cells.iter().map(|&(a, b)| format!("{} → {}{}", fmt(a), fmt(b), delta(b))).collect();
             let tol = if r.tolerance.is_nan() { "—".into() } else { format!("±{}", fmt(r.tolerance)) };
             let _ = writeln!(o, "| {}{unit} | {} | {} | {tol} |", r.name, fmt(r.reference), cells.join(" | "));
         }
@@ -2493,7 +2798,8 @@ fn report(o: &mut String, sc: &Scenario, rates: &[Rate], rows: &[Row], markdown:
         let _ = writeln!(o, "  {:<34} {:>9}{head}", format!("quantity ({pair})"), "72 (id)");
         for r in rows {
             let name = if r.unit.is_empty() { r.name.to_string() } else { format!("{} ({})", r.name, r.unit) };
-            let cells: String = r.cells.iter().map(|&(a, b)| format!(" {:>17}", format!("{} → {}", fmt(a), fmt(b)))).collect();
+            let cells: String =
+                r.cells.iter().map(|&(a, b)| format!(" {:>17}", format!("{} → {}", fmt(a), fmt(b)))).collect();
             let _ = writeln!(o, "  {name:<34} {:>9}{cells}", fmt(r.reference));
         }
     }
@@ -2554,7 +2860,11 @@ fn frame_budget(pak: &Pak, sizes: &[(usize, usize)]) -> String {
     const FRAMES: usize = 2400;
     let mut o = String::new();
     let _ = writeln!(o, "per-frame cost at 480 Hz (Stepping::Uncapped), median / p95 ms over {FRAMES} frames");
-    let _ = writeln!(o, "  {:<22} {:>13} {:>13} {:>13} {:>13}   headroom at 480 / 240 / 144 Hz", "", "sim", "3-D view", "post + 2-D", "total");
+    let _ = writeln!(
+        o,
+        "  {:<22} {:>13} {:>13} {:>13} {:>13}   headroom at 480 / 240 / 144 Hz",
+        "", "sim", "3-D view", "post + 2-D", "total"
+    );
     quake_rs::client::set_lap_hook(Some(lap));
     for &(w, h) in sizes {
         let vid = Vid { width: w, height: h, ..VID };
@@ -2619,4 +2929,3 @@ fn frame_budget(pak: &Pak, sizes: &[(usize, usize)]) -> String {
     quake_rs::client::set_lap_hook(None);
     o
 }
-

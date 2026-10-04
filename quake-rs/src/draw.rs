@@ -111,22 +111,14 @@ pub fn screen_2d(vid_w: usize, vid_h: usize) -> Screen2d {
 /// the screen. Like the rest of the 2-D layer the tile is drawn at the
 /// [`screen_2d`] scale (1 unless the "scaled 2-D" extra is on). A missing or
 /// malformed `backtile` fills black; every write is clipped.
-pub fn draw_tile_clear(
-    image: &mut Image,
-    backtile: Option<&crate::wad::Qpic>,
-    x: usize,
-    y: usize,
-    w: usize,
-    h: usize,
-) {
+pub fn draw_tile_clear(image: &mut Image, backtile: Option<&crate::wad::Qpic>, x: usize, y: usize, w: usize, h: usize) {
     let x1 = x.saturating_add(w).min(image.w);
     let y1 = y.saturating_add(h).min(image.h);
     if x >= x1 || y >= y1 {
         return;
     }
-    let tile = backtile.filter(|t| {
-        t.width > 0 && t.height > 0 && t.data.len() >= (t.width as usize) * (t.height as usize)
-    });
+    let tile =
+        backtile.filter(|t| t.width > 0 && t.height > 0 && t.data.len() >= (t.width as usize) * (t.height as usize));
     let w = image.w;
     let Some(t) = tile else {
         for py in y..y1 {
@@ -203,10 +195,8 @@ pub(crate) fn blit_scaled(
     // inside the rectangle (the map never decreases, so that is a prefix).
     let dx_lo = (-dst_x0).clamp(0, dst_w.max(0));
     let dx_hi = (iw - dst_x0).clamp(dx_lo, dst_w.max(0));
-    let cols: Vec<usize> = (dx_lo..dx_hi)
-        .map(|dx| (dx as f32 * inv_scale) as usize)
-        .take_while(|&sx| sx < sw)
-        .collect();
+    let cols: Vec<usize> =
+        (dx_lo..dx_hi).map(|dx| (dx as f32 * inv_scale) as usize).take_while(|&sx| sx < sw).collect();
     if cols.is_empty() {
         return;
     }
@@ -258,11 +248,7 @@ pub fn conchars_pic(wad: &crate::wad::Wad2) -> Option<crate::wad::Qpic> {
     if data.len() < 128 * 128 {
         return None;
     }
-    Some(crate::wad::Qpic {
-        width: 128,
-        height: 128,
-        data: data[..128 * 128].to_vec(),
-    })
+    Some(crate::wad::Qpic { width: 128, height: 128, data: data[..128 * 128].to_vec() })
 }
 
 /// The virtual screen width/height the menu is authored against (Quake's fixed
@@ -281,15 +267,7 @@ pub(crate) const MENU_VIRT_H: f32 = 200.0;
 /// framebuffer pixel `(vx, vy)` — the case the 320x200 wasm framebuffer uses, so
 /// the menu coordinates from menu.c are used directly with no transform.
 // Mirrors Draw_Pic (draw.c); the C reads vid/draw globals passed explicitly here.
-pub(crate) fn blit_qpic_at(
-    image: &mut Image,
-    pic: &crate::wad::Qpic,
-    vx: f32,
-    vy: f32,
-    scale: f32,
-    ox: f32,
-    oy: f32,
-) {
+pub(crate) fn blit_qpic_at(image: &mut Image, pic: &crate::wad::Qpic, vx: f32, vy: f32, scale: f32, ox: f32, oy: f32) {
     if pic.width <= 0 || pic.height <= 0 || scale <= 0.0 {
         return;
     }
@@ -304,15 +282,7 @@ pub(crate) fn blit_qpic_at(
     let dst_w = (pw as f32 * scale).round().max(1.0) as i64;
     let dst_h = (ph as f32 * scale).round().max(1.0) as i64;
     let inv_scale = 1.0 / scale;
-    blit_scaled(
-        image,
-        &pic.data,
-        pw,
-        (0, 0, pw, ph),
-        (dst_x0, dst_y0, dst_w, dst_h),
-        inv_scale,
-        HUD_TRANSPARENT,
-    );
+    blit_scaled(image, &pic.data, pw, (0, 0, pw, ph), (dst_x0, dst_y0, dst_w, dst_h), inv_scale, HUD_TRANSPARENT);
 }
 
 /// Draw a string of console characters using the 128x128 `conchars` font atlas, a
@@ -334,13 +304,7 @@ pub(crate) fn blit_qpic_at(
 /// The conchars lump in `gfx.wad` is a raw 128x128 byte block (no QPIC header);
 /// callers wrap it as a [`crate::wad::Qpic`] with `width = height = 128` and the
 /// 16384 lump bytes as `data`.
-pub fn draw_string(
-    image: &mut Image,
-    conchars: &crate::wad::Qpic,
-    x: i32,
-    y: i32,
-    text: &str,
-) {
+pub fn draw_string(image: &mut Image, conchars: &crate::wad::Qpic, x: i32, y: i32, text: &str) {
     draw_string_scaled(image, conchars, x as f32, y as f32, text, 1.0, 0.0, 0.0);
 }
 
@@ -675,7 +639,10 @@ mod tests {
                     let y0 = (oy + vy * scale).floor() as i64;
                     ref_blit(&mut want, &pic, x0, y0, scale, HUD_TRANSPARENT);
                     blit_qpic_at(&mut got, &pic, vx, vy, scale, ox, oy);
-                    assert!(got.pixels == want.pixels, "{pw}x{ph} holes {holes} scale {scale} at ({vx},{vy})+({ox},{oy})");
+                    assert!(
+                        got.pixels == want.pixels,
+                        "{pw}x{ph} holes {holes} scale {scale} at ({vx},{vy})+({ox},{oy})"
+                    );
                 }
             }
         }
@@ -688,7 +655,9 @@ mod tests {
         let conchars =
             crate::wad::Qpic { width: 128, height: 128, data: bytes(7, 128 * 128).iter().map(|b| b % 3).collect() };
         for &scale in &SCALES {
-            for &(vx, vy, ox, oy) in &[(0.0, 0.0, 0.0, 0.0), (3.5, 2.25, 1.5, 0.5), (-12.0, -3.0, 0.0, 0.0), (70.0, 30.0, 2.0, 1.0)] {
+            for &(vx, vy, ox, oy) in
+                &[(0.0, 0.0, 0.0, 0.0), (3.5, 2.25, 1.5, 0.5), (-12.0, -3.0, 0.0, 0.0), (70.0, 30.0, 2.0, 1.0)]
+            {
                 let text = "Az 09~\x7f\u{1}";
                 let mut want = Image::new(120, 50, 9);
                 let mut got = Image::new(120, 50, 9);
@@ -729,13 +698,15 @@ mod tests {
 
     #[test]
     fn fade_screen_matches_the_per_pixel_dither_at_any_scale() {
-        for (scaled, &(w, h)) in [false, true]
-            .into_iter()
-            .flat_map(|e| [(320, 200), (333, 211), (400, 300), (960, 600), (1120, 700), (1280, 800), (7, 3)].iter().map(move |r| (e, r)))
-        {
+        for (scaled, &(w, h)) in [false, true].into_iter().flat_map(|e| {
+            [(320, 200), (333, 211), (400, 300), (960, 600), (1120, 700), (1280, 800), (7, 3)]
+                .iter()
+                .map(move |r| (e, r))
+        }) {
             let _extra = Scaled2dGuard::set(scaled);
             let under = bytes(w as u32, w * h);
-            let scale = if scaled { (w as f32 / MENU_VIRT_W).min(h as f32 / MENU_VIRT_H).floor().max(1.0) } else { 1.0 };
+            let scale =
+                if scaled { (w as f32 / MENU_VIRT_W).min(h as f32 / MENU_VIRT_H).floor().max(1.0) } else { 1.0 };
             let inv = 1.0 / scale;
             let mut want = under.clone();
             for y in 0..h {
@@ -773,7 +744,12 @@ mod tests {
                     }
                     let mut got = Image::new(w, h, 7);
                     draw_tile_clear(&mut got, Some(t), x, y, rw, rh);
-                    assert!(got.pixels == want.pixels, "{w}x{h} rect ({x},{y},{rw},{rh}) tile {}x{}", t.width, t.height);
+                    assert!(
+                        got.pixels == want.pixels,
+                        "{w}x{h} rect ({x},{y},{rw},{rh}) tile {}x{}",
+                        t.width,
+                        t.height
+                    );
                 }
             }
         }
@@ -781,8 +757,7 @@ mod tests {
 
     #[test]
     fn draw_tile_clear_tiles_from_the_screen_origin() {
-        let tile
- = test_backtile();
+        let tile = test_backtile();
         let at = |x: usize, y: usize| tile.data[(y % 64) * 64 + x % 64];
         // Scale 1 (320 wide): texel (x mod 64, y mod 64) — anchored at the
         // SCREEN origin, not the rectangle's corner (Draw_TileClear's offsets).

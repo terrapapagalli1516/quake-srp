@@ -29,9 +29,10 @@
 //! * The recursion in [`recursive_hull_check`] is bounded by an explicit depth
 //!   guard so a malformed (cyclic) tree cannot recurse forever.
 
-use crate::bsp::{Bsp, DPlane, CONTENTS_CURRENT_0, CONTENTS_CURRENT_DOWN, CONTENTS_EMPTY,
-                 CONTENTS_SOLID, CONTENTS_WATER};
-use crate::math::{dot, Vec3};
+use crate::bsp::{
+    Bsp, CONTENTS_CURRENT_0, CONTENTS_CURRENT_DOWN, CONTENTS_EMPTY, CONTENTS_SOLID, CONTENTS_WATER, DPlane,
+};
+use crate::math::{Vec3, dot};
 use crate::vm::HostTrace;
 
 /// Re-export the VM's trace struct as the world-collision result type
@@ -208,11 +209,7 @@ fn cached_clipnodes(bsp: &Bsp, which: usize) -> std::rc::Rc<Vec<ClipNode>> {
             });
         }
         let t = slot.as_ref().expect("just initialised");
-        if which == 0 {
-            t.hull0.clone()
-        } else {
-            t.brush.clone()
-        }
+        if which == 0 { t.hull0.clone() } else { t.brush.clone() }
     })
 }
 
@@ -236,11 +233,7 @@ pub fn build_hull<'a>(bsp: &'a Bsp, which: usize) -> Hull<'a> {
     let which = if which <= 2 { which } else { 0 };
 
     // headnode comes from model 0 (the worldspawn); default to 0 when absent.
-    let headnode = bsp
-        .models
-        .first()
-        .and_then(|m| m.headnode.get(which).copied())
-        .unwrap_or(0);
+    let headnode = bsp.models.first().and_then(|m| m.headnode.get(which).copied()).unwrap_or(0);
 
     // (clip box + node synthesis are handled by build_hull_for_model)
     build_hull_for_model(bsp, which, headnode)
@@ -267,13 +260,7 @@ fn build_hull_for_model<'a>(bsp: &'a Bsp, which: usize, headnode: i32) -> Hull<'
     // is an O(1) refcount bump after the first build, not a full rebuild.
     let clipnodes = cached_clipnodes(bsp, which);
 
-    Hull {
-        clipnodes,
-        planes: &bsp.planes,
-        headnode,
-        clip_mins,
-        clip_maxs,
-    }
+    Hull { clipnodes, planes: &bsp.planes, headnode, clip_mins, clip_maxs }
 }
 
 /// Synthesize hull-0 clip nodes from `bsp.nodes`. Each `i16` child that names a
@@ -283,11 +270,7 @@ fn build_hull_for_model<'a>(bsp: &'a Bsp, which: usize, headnode: i32) -> Hull<'
 fn build_hull0_clipnodes(bsp: &Bsp) -> Vec<ClipNode> {
     let mut out = Vec::with_capacity(bsp.nodes.len());
     for node in &bsp.nodes {
-        let planenum = if node.planenum >= 0 {
-            node.planenum as u32
-        } else {
-            0
-        };
+        let planenum = if node.planenum >= 0 { node.planenum as u32 } else { 0 };
         let mut children = [CONTENTS_SOLID; 2];
         for (k, slot) in children.iter_mut().enumerate() {
             // node.children is [i16; 2]; index k in 0..2 is always in range.
@@ -298,10 +281,7 @@ fn build_hull0_clipnodes(bsp: &Bsp) -> Vec<ClipNode> {
             } else {
                 // A leaf: leaf index = -(c) - 1; child becomes its contents.
                 let leafidx = (-i32::from(c) - 1) as usize;
-                bsp.leafs
-                    .get(leafidx)
-                    .map(|l| l.contents)
-                    .unwrap_or(CONTENTS_SOLID)
+                bsp.leafs.get(leafidx).map(|l| l.contents).unwrap_or(CONTENTS_SOLID)
             };
         }
         out.push(ClipNode { planenum, children });
@@ -315,11 +295,7 @@ fn build_hull0_clipnodes(bsp: &Bsp) -> Vec<ClipNode> {
 fn build_brush_clipnodes(bsp: &Bsp) -> Vec<ClipNode> {
     let mut out = Vec::with_capacity(bsp.clipnodes.len());
     for cn in &bsp.clipnodes {
-        let planenum = if cn.planenum >= 0 {
-            cn.planenum as u32
-        } else {
-            0
-        };
+        let planenum = if cn.planenum >= 0 { cn.planenum as u32 } else { 0 };
         let children = [i32::from(cn.children[0]), i32::from(cn.children[1])];
         out.push(ClipNode { planenum, children });
     }
@@ -361,11 +337,7 @@ pub fn hull_point_contents(hull: &Hull, num: i32, p: Vec3) -> i32 {
         };
 
         let d = hull.plane_distance(plane, p);
-        num = if d < 0.0 {
-            node.children[1]
-        } else {
-            node.children[0]
-        };
+        num = if d < 0.0 { node.children[1] } else { node.children[0] };
     }
     num
 }
@@ -380,15 +352,7 @@ pub fn hull_point_contents(hull: &Hull, num: i32, p: Vec3) -> i32 {
 /// the `DIST_EPSILON` near-side bias and the "backup past solid" fixup loop.
 /// The C recursion is mirrored, with an explicit depth guard against malformed
 /// (cyclic) trees.
-pub fn recursive_hull_check(
-    hull: &Hull,
-    num: i32,
-    p1f: f32,
-    p2f: f32,
-    p1: Vec3,
-    p2: Vec3,
-    trace: &mut Trace,
-) -> bool {
+pub fn recursive_hull_check(hull: &Hull, num: i32, p1f: f32, p2f: f32, p1: Vec3, p2: Vec3, trace: &mut Trace) -> bool {
     recursive_hull_check_depth(hull, num, p1f, p2f, p1, p2, trace, 0)
 }
 
@@ -439,40 +403,18 @@ fn recursive_hull_check_depth(
 
     // Both endpoints on the front side -> recurse child 0.
     if t1 >= 0.0 && t2 >= 0.0 {
-        return recursive_hull_check_depth(
-            hull,
-            children[0],
-            p1f,
-            p2f,
-            p1,
-            p2,
-            trace,
-            depth + 1,
-        );
+        return recursive_hull_check_depth(hull, children[0], p1f, p2f, p1, p2, trace, depth + 1);
     }
     // Both endpoints on the back side -> recurse child 1.
     if t1 < 0.0 && t2 < 0.0 {
-        return recursive_hull_check_depth(
-            hull,
-            children[1],
-            p1f,
-            p2f,
-            p1,
-            p2,
-            trace,
-            depth + 1,
-        );
+        return recursive_hull_check_depth(hull, children[1], p1f, p2f, p1, p2, trace, depth + 1);
     }
 
     // ---- the segment crosses the plane: split it ----
     // Put the crosspoint DIST_EPSILON on the near side.
     let denom = t1 - t2;
     let mut frac = if denom != 0.0 {
-        if t1 < 0.0 {
-            (t1 + DIST_EPSILON) / denom
-        } else {
-            (t1 - DIST_EPSILON) / denom
-        }
+        if t1 < 0.0 { (t1 + DIST_EPSILON) / denom } else { (t1 - DIST_EPSILON) / denom }
     } else {
         // t1 == t2 cannot reach here (signs would match), but stay total.
         0.0
@@ -482,11 +424,8 @@ fn recursive_hull_check_depth(
     frac = frac.clamp(0.0, 1.0);
 
     let mut midf = p1f + (p2f - p1f) * frac;
-    let mut mid: Vec3 = [
-        p1[0] + frac * (p2[0] - p1[0]),
-        p1[1] + frac * (p2[1] - p1[1]),
-        p1[2] + frac * (p2[2] - p1[2]),
-    ];
+    let mut mid: Vec3 =
+        [p1[0] + frac * (p2[0] - p1[0]), p1[1] + frac * (p2[1] - p1[1]), p1[2] + frac * (p2[2] - p1[2])];
 
     // side = (t1 < 0): the side p1 is on. We descend the near side first.
     let side = (t1 < 0.0) as usize;
@@ -528,11 +467,7 @@ fn recursive_hull_check_depth(
             return false;
         }
         midf = p1f + (p2f - p1f) * frac;
-        mid = [
-            p1[0] + frac * (p2[0] - p1[0]),
-            p1[1] + frac * (p2[1] - p1[1]),
-            p1[2] + frac * (p2[2] - p1[2]),
-        ];
+        mid = [p1[0] + frac * (p2[0] - p1[0]), p1[1] + frac * (p2[1] - p1[1]), p1[2] + frac * (p2[2] - p1[2])];
     }
 
     trace.fraction = midf;
@@ -548,11 +483,7 @@ fn recursive_hull_check_depth(
 pub fn point_contents(bsp: &Bsp, p: Vec3) -> i32 {
     let hull = build_hull(bsp, 0);
     let cont = hull_point_contents(&hull, hull.headnode, p);
-    if (CONTENTS_CURRENT_DOWN..=CONTENTS_CURRENT_0).contains(&cont) {
-        CONTENTS_WATER
-    } else {
-        cont
-    }
+    if (CONTENTS_CURRENT_DOWN..=CONTENTS_CURRENT_0).contains(&cont) { CONTENTS_WATER } else { cont }
 }
 
 /// Initialize a trace prior to walking the hull, matching the
@@ -599,17 +530,9 @@ pub fn trace_world(bsp: &Bsp, start: Vec3, end: Vec3, mins: Vec3, maxs: Vec3) ->
     let hull = build_hull(bsp, which);
 
     // offset = hull.clip_mins - mins (world origin is (0,0,0) for the world).
-    let offset: Vec3 = [
-        hull.clip_mins[0] - mins[0],
-        hull.clip_mins[1] - mins[1],
-        hull.clip_mins[2] - mins[2],
-    ];
+    let offset: Vec3 = [hull.clip_mins[0] - mins[0], hull.clip_mins[1] - mins[1], hull.clip_mins[2] - mins[2]];
 
-    let start_l: Vec3 = [
-        start[0] - offset[0],
-        start[1] - offset[1],
-        start[2] - offset[2],
-    ];
+    let start_l: Vec3 = [start[0] - offset[0], start[1] - offset[1], start[2] - offset[2]];
     let end_l: Vec3 = [end[0] - offset[0], end[1] - offset[1], end[2] - offset[2]];
 
     // Default trace: fraction 1, allsolid true, endpos = end (local frame).
@@ -619,11 +542,7 @@ pub fn trace_world(bsp: &Bsp, start: Vec3, end: Vec3, mins: Vec3, maxs: Vec3) ->
 
     // Fix the endpoint up by the offset when the move was clipped.
     if trace.fraction != 1.0 {
-        trace.endpos = [
-            trace.endpos[0] + offset[0],
-            trace.endpos[1] + offset[1],
-            trace.endpos[2] + offset[2],
-        ];
+        trace.endpos = [trace.endpos[0] + offset[0], trace.endpos[1] + offset[1], trace.endpos[2] + offset[2]];
     } else {
         // fraction == 1: the C leaves endpos as the (already world-space) end.
         trace.endpos = end;
@@ -794,11 +713,7 @@ pub fn clip_box(
     frac = frac.clamp(0.0, 1.0);
 
     tr.fraction = frac;
-    tr.endpos = [
-        start[0] + frac * d[0],
-        start[1] + frac * d[1],
-        start[2] + frac * d[2],
-    ];
+    tr.endpos = [start[0] + frac * d[0], start[1] + frac * d[1], start[2] + frac * d[2]];
     let mut normal: Vec3 = [0.0, 0.0, 0.0];
     if let Some(slot) = normal.get_mut(enter_axis as usize) {
         *slot = enter_sign;
@@ -872,22 +787,14 @@ pub fn trace_submodel(
         hull.clip_mins[2] - move_mins[2] + ent_origin[2],
     ];
 
-    let start_l: Vec3 = [
-        start[0] - offset[0],
-        start[1] - offset[1],
-        start[2] - offset[2],
-    ];
+    let start_l: Vec3 = [start[0] - offset[0], start[1] - offset[1], start[2] - offset[2]];
     let end_l: Vec3 = [end[0] - offset[0], end[1] - offset[1], end[2] - offset[2]];
 
     let mut trace = init_trace(end_l);
     recursive_hull_check(&hull, hull.headnode, 0.0, 1.0, start_l, end_l, &mut trace);
 
     if trace.fraction != 1.0 {
-        trace.endpos = [
-            trace.endpos[0] + offset[0],
-            trace.endpos[1] + offset[1],
-            trace.endpos[2] + offset[2],
-        ];
+        trace.endpos = [trace.endpos[0] + offset[0], trace.endpos[1] + offset[1], trace.endpos[2] + offset[2]];
     } else {
         trace.endpos = end;
     }
@@ -939,14 +846,7 @@ pub struct MoveResult {
 /// sliding along up to `MAX_CLIP_PLANES` surfaces (so the mover follows walls
 /// and creases instead of stopping dead). Entity-vs-entity collision and touch
 /// impacts are out of scope — the only solid is the map.
-pub fn fly_move(
-    bsp: &Bsp,
-    origin: Vec3,
-    mins: Vec3,
-    maxs: Vec3,
-    velocity: Vec3,
-    dt: f32,
-) -> MoveResult {
+pub fn fly_move(bsp: &Bsp, origin: Vec3, mins: Vec3, maxs: Vec3, velocity: Vec3, dt: f32) -> MoveResult {
     const MAX_CLIP_PLANES: usize = 5;
     let mut origin = origin;
     let mut velocity = velocity;
@@ -1001,10 +901,7 @@ pub fn fly_move(
         let mut chosen: Option<Vec3> = None;
         for i in 0..planes.len() {
             let (nv, _b) = clip_velocity(original, planes[i], 1.0);
-            let ok = planes
-                .iter()
-                .enumerate()
-                .all(|(j, p)| j == i || dot(nv, *p) >= 0.0);
+            let ok = planes.iter().enumerate().all(|(j, p)| j == i || dot(nv, *p) >= 0.0);
             if ok {
                 chosen = Some(nv);
                 break;
@@ -1054,18 +951,8 @@ pub fn walk_move(bsp: &Bsp, origin: Vec3, mins: Vec3, maxs: Vec3, wishvel: Vec3,
     let up = trace_world(bsp, origin, [origin[0], origin[1], origin[2] + STEPSIZE], mins, maxs);
     let stepped: Option<Vec3> = {
         let s = fly_move(bsp, up.endpos, mins, maxs, wishvel, dt);
-        let down = trace_world(
-            bsp,
-            s.origin,
-            [s.origin[0], s.origin[1], s.origin[2] - STEPSIZE],
-            mins,
-            maxs,
-        );
-        if down.fraction < 1.0 && down.plane_normal[2] >= 0.7 {
-            Some(down.endpos)
-        } else {
-            None
-        }
+        let down = trace_world(bsp, s.origin, [s.origin[0], s.origin[1], s.origin[2] - STEPSIZE], mins, maxs);
+        if down.fraction < 1.0 && down.plane_normal[2] >= 0.7 { Some(down.endpos) } else { None }
     };
 
     // 3) Keep whichever advanced farther horizontally.
@@ -1075,13 +962,7 @@ pub fn walk_move(bsp: &Bsp, origin: Vec3, mins: Vec3, maxs: Vec3, wishvel: Vec3,
     };
 
     // 4) Ground snap: drop onto the floor within STEPSIZE so the box stays put.
-    let snap = trace_world(
-        bsp,
-        result,
-        [result[0], result[1], result[2] - (STEPSIZE + 1.0)],
-        mins,
-        maxs,
-    );
+    let snap = trace_world(bsp, result, [result[0], result[1], result[2] - (STEPSIZE + 1.0)], mins, maxs);
     if snap.fraction < 1.0 && snap.plane_normal[2] >= 0.7 {
         result = snap.endpos;
     }
@@ -1103,10 +984,7 @@ mod tests {
     /// by the caller (so the borrow outlives the hull).
     fn one_plane_hull(planes: &[DPlane]) -> Hull<'_> {
         Hull {
-            clipnodes: std::rc::Rc::new(vec![ClipNode {
-                planenum: 0,
-                children: [CONTENTS_EMPTY, CONTENTS_SOLID],
-            }]),
+            clipnodes: std::rc::Rc::new(vec![ClipNode { planenum: 0, children: [CONTENTS_EMPTY, CONTENTS_SOLID] }]),
             planes,
             headnode: 0,
             clip_mins: [0.0, 0.0, 0.0],
@@ -1115,11 +993,7 @@ mod tests {
     }
 
     fn x_plane(dist: f32) -> Vec<DPlane> {
-        vec![DPlane {
-            normal: [1.0, 0.0, 0.0],
-            dist,
-            ptype: PLANE_X,
-        }]
+        vec![DPlane { normal: [1.0, 0.0, 0.0], dist, ptype: PLANE_X }]
     }
 
     /// Two clip planes of Scourge of Armagon's maps that pass exactly
@@ -1136,7 +1010,7 @@ mod tests {
         let s = std::f32::consts::FRAC_1_SQRT_2; // 0.70710677, as the bsp stores it
         for (normal, dist, p) in [
             ([s, -s, 0.0], 950.3515_f32, [1200.0, -144.0, -146.0]), // hip1m1 plane 1204
-            ([s, s, 0.0], -124.45079_f32, [-208.0, 32.0, -418.0]), // hip3m1 plane 1526
+            ([s, s, 0.0], -124.45079_f32, [-208.0, 32.0, -418.0]),  // hip3m1 plane 1526
         ] {
             let f32_sum = dot(normal, p) - dist;
             assert!(f32_sum >= 0.0, "f32 puts {p:?} in front ({f32_sum})");
@@ -1153,15 +1027,9 @@ mod tests {
         let hull = one_plane_hull(&planes);
 
         // x > 0 => front side => EMPTY.
-        assert_eq!(
-            hull_point_contents(&hull, 0, [10.0, 0.0, 0.0]),
-            CONTENTS_EMPTY
-        );
+        assert_eq!(hull_point_contents(&hull, 0, [10.0, 0.0, 0.0]), CONTENTS_EMPTY);
         // x < 0 => back side => SOLID.
-        assert_eq!(
-            hull_point_contents(&hull, 0, [-10.0, 0.0, 0.0]),
-            CONTENTS_SOLID
-        );
+        assert_eq!(hull_point_contents(&hull, 0, [-10.0, 0.0, 0.0]), CONTENTS_SOLID);
         // Exactly on the plane (d == 0, not < 0) => front => EMPTY.
         assert_eq!(hull_point_contents(&hull, 0, [0.0, 0.0, 0.0]), CONTENTS_EMPTY);
     }
@@ -1173,15 +1041,8 @@ mod tests {
 
         // Start in empty (x=10) heading into solid (x=-10).
         let mut trace = init_trace([-10.0, 0.0, 0.0]);
-        let blocked = recursive_hull_check(
-            &hull,
-            hull.headnode,
-            0.0,
-            1.0,
-            [10.0, 0.0, 0.0],
-            [-10.0, 0.0, 0.0],
-            &mut trace,
-        );
+        let blocked =
+            recursive_hull_check(&hull, hull.headnode, 0.0, 1.0, [10.0, 0.0, 0.0], [-10.0, 0.0, 0.0], &mut trace);
 
         // The move was clipped (returns false once blocked).
         assert!(!blocked);
@@ -1205,15 +1066,8 @@ mod tests {
 
         // Whole move stays on the empty (front) side: x from 50 to 10.
         let mut trace = init_trace([10.0, 0.0, 0.0]);
-        let blocked = recursive_hull_check(
-            &hull,
-            hull.headnode,
-            0.0,
-            1.0,
-            [50.0, 0.0, 0.0],
-            [10.0, 0.0, 0.0],
-            &mut trace,
-        );
+        let blocked =
+            recursive_hull_check(&hull, hull.headnode, 0.0, 1.0, [50.0, 0.0, 0.0], [10.0, 0.0, 0.0], &mut trace);
 
         // Reached the end: fraction stays 1.0, never blocked.
         assert!(blocked);
@@ -1230,15 +1084,7 @@ mod tests {
 
         // Whole move stays in solid (back side): x from -50 to -10.
         let mut trace = init_trace([-10.0, 0.0, 0.0]);
-        recursive_hull_check(
-            &hull,
-            hull.headnode,
-            0.0,
-            1.0,
-            [-50.0, 0.0, 0.0],
-            [-10.0, 0.0, 0.0],
-            &mut trace,
-        );
+        recursive_hull_check(&hull, hull.headnode, 0.0, 1.0, [-50.0, 0.0, 0.0], [-10.0, 0.0, 0.0], &mut trace);
         assert!(trace.startsolid);
         // allsolid stays true: never left the solid region.
         assert!(trace.allsolid);
@@ -1249,20 +1095,14 @@ mod tests {
         let planes = x_plane(0.0);
         // Clipnode 0 points at a non-existent node index 5 on its front side.
         let hull = Hull {
-            clipnodes: std::rc::Rc::new(vec![ClipNode {
-                planenum: 0,
-                children: [5, CONTENTS_SOLID],
-            }]),
+            clipnodes: std::rc::Rc::new(vec![ClipNode { planenum: 0, children: [5, CONTENTS_SOLID] }]),
             planes: &planes,
             headnode: 0,
             clip_mins: [0.0, 0.0, 0.0],
             clip_maxs: [0.0, 0.0, 0.0],
         };
         // Walking onto the out-of-range index must not panic; it reports SOLID.
-        assert_eq!(
-            hull_point_contents(&hull, 0, [10.0, 0.0, 0.0]),
-            CONTENTS_SOLID
-        );
+        assert_eq!(hull_point_contents(&hull, 0, [10.0, 0.0, 0.0]), CONTENTS_SOLID);
     }
 
     #[test]
@@ -1296,13 +1136,7 @@ mod tests {
         // world (which yields a SOLID/blocked trace) and assert no panic and a
         // sane fraction. The empty-world headnode 0 is out of range -> blocked.
         let bsp = empty_bsp();
-        let tr = trace_world(
-            &bsp,
-            [0.0, 0.0, 0.0],
-            [100.0, 0.0, 0.0],
-            [-16.0, -16.0, -24.0],
-            [16.0, 16.0, 32.0],
-        );
+        let tr = trace_world(&bsp, [0.0, 0.0, 0.0], [100.0, 0.0, 0.0], [-16.0, -16.0, -24.0], [16.0, 16.0, 32.0]);
         assert!(tr.fraction >= 0.0 && tr.fraction <= 1.0);
     }
 
@@ -1334,16 +1168,9 @@ mod tests {
     fn wall_bsp() -> Bsp {
         use crate::bsp::{DClipNode, DModel, DPlane};
         let mut b = empty_bsp();
-        b.planes = vec![DPlane {
-            normal: [1.0, 0.0, 0.0],
-            dist: 0.0,
-            ptype: 0,
-        }];
+        b.planes = vec![DPlane { normal: [1.0, 0.0, 0.0], dist: 0.0, ptype: 0 }];
         // clipnode 0: front (x >= 0) EMPTY, back (x < 0) SOLID.
-        b.clipnodes = vec![DClipNode {
-            planenum: 0,
-            children: [CONTENTS_EMPTY as i16, CONTENTS_SOLID as i16],
-        }];
+        b.clipnodes = vec![DClipNode { planenum: 0, children: [CONTENTS_EMPTY as i16, CONTENTS_SOLID as i16] }];
         b.models = vec![DModel {
             mins: [-256.0; 3],
             maxs: [256.0; 3],
@@ -1390,22 +1217,11 @@ mod tests {
         let mover_maxs = [0.0, 0.0, 0.0];
         let ent_mins = [-16.0, -16.0, -16.0];
         let ent_maxs = [16.0, 16.0, 16.0];
-        let tr = clip_box(
-            [0.0, 0.0, 0.0],
-            [200.0, 0.0, 0.0],
-            mover_mins,
-            mover_maxs,
-            ent_mins,
-            ent_maxs,
-            [100.0, 0.0, 0.0],
-        );
+        let tr =
+            clip_box([0.0, 0.0, 0.0], [200.0, 0.0, 0.0], mover_mins, mover_maxs, ent_mins, ent_maxs, [100.0, 0.0, 0.0]);
         assert!(!tr.startsolid, "did not start inside");
         assert!(!tr.allsolid);
-        assert!(
-            tr.fraction > 0.0 && tr.fraction < 1.0,
-            "stopped partway, got fraction {}",
-            tr.fraction
-        );
+        assert!(tr.fraction > 0.0 && tr.fraction < 1.0, "stopped partway, got fraction {}", tr.fraction);
         assert_eq!(tr.plane_normal, [-1.0, 0.0, 0.0], "entry face is -X");
         // Stopped just shy of x = 84 (the near face), backed off by epsilon.
         assert!(tr.endpos[0] < 84.0, "stopped before the box face: {}", tr.endpos[0]);
@@ -1490,15 +1306,7 @@ mod tests {
         assert!(tr.startsolid, "touching the min face: inside");
         // Starting exactly on a max face and moving in stops at once (the C
         // crosses the max plane at fraction 0), rather than passing through.
-        let tr = clip_box(
-            [16.0, 0.0, 0.0],
-            [-100.0, 0.0, 0.0],
-            [0.0; 3],
-            [0.0; 3],
-            [-16.0; 3],
-            [16.0; 3],
-            [0.0; 3],
-        );
+        let tr = clip_box([16.0, 0.0, 0.0], [-100.0, 0.0, 0.0], [0.0; 3], [0.0; 3], [-16.0; 3], [16.0; 3], [0.0; 3]);
         assert!(!tr.startsolid, "on the max face is outside");
         assert_eq!((tr.fraction, tr.plane_normal), (0.0, [1.0, 0.0, 0.0]));
     }
@@ -1567,15 +1375,8 @@ mod tests {
     fn submodel_wall_bsp() -> Bsp {
         use crate::bsp::{DClipNode, DModel};
         let mut b = empty_bsp();
-        b.planes = vec![DPlane {
-            normal: [1.0, 0.0, 0.0],
-            dist: 0.0,
-            ptype: 0,
-        }];
-        b.clipnodes = vec![DClipNode {
-            planenum: 0,
-            children: [CONTENTS_EMPTY as i16, CONTENTS_SOLID as i16],
-        }];
+        b.planes = vec![DPlane { normal: [1.0, 0.0, 0.0], dist: 0.0, ptype: 0 }];
+        b.clipnodes = vec![DClipNode { planenum: 0, children: [CONTENTS_EMPTY as i16, CONTENTS_SOLID as i16] }];
         let model = DModel {
             mins: [-256.0; 3],
             maxs: [256.0; 3],

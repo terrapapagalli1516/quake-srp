@@ -5,14 +5,11 @@
 //! (the lit surface cache, `D_CacheSurface`); the port adds the static-geometry
 //! and lightmap caches the world pass reuses between frames.
 
-use crate::bsp::Bsp;
-use crate::math::Vec3;
-use super::light::{
-    any_dlight_reaches, face_lightmap_with, LightMap, Luxels, COLORMAP_LEN,
-    LIGHTSTYLES, STYLE_NONE,
-};
+use super::light::{COLORMAP_LEN, LIGHTSTYLES, LightMap, Luxels, STYLE_NONE, any_dlight_reaches, face_lightmap_with};
 use super::stats::Profiler;
 use super::torch::FaceTorches;
+use crate::bsp::Bsp;
+use crate::math::Vec3;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 
@@ -399,7 +396,19 @@ impl BakeJob<'_> {
         let mut light = Vec::new();
         lm.blocklights_into(&mut light);
         let mut block = vec![0u8; self.texels()];
-        draw_surface_block(self.tex, self.smax, self.tmax, self.texmins, self.mip, &light, lm.lmw, self.colormap, &mut block, self.bw, self.bh);
+        draw_surface_block(
+            self.tex,
+            self.smax,
+            self.tmax,
+            self.texmins,
+            self.mip,
+            &light,
+            lm.lmw,
+            self.colormap,
+            &mut block,
+            self.bw,
+            self.bh,
+        );
         Arc::new(block)
     }
 }
@@ -563,7 +572,12 @@ impl SurfaceCaches {
     /// side (`surfwidth`), made of one `16 >> miplevel` square per pair of
     /// lightmap columns and rows, each lit by `R_DrawSurfaceBlock8_mip0..3`'s
     /// integer interpolation ([`draw_surface_block`]).
-    pub(super) fn surface<'a>(&mut self, req: SurfaceRequest<'_, 'a>, jobs: &mut Vec<BakeJob<'a>>, prof: &mut Profiler) -> Surface<'a> {
+    pub(super) fn surface<'a>(
+        &mut self,
+        req: SurfaceRequest<'_, 'a>,
+        jobs: &mut Vec<BakeJob<'a>>,
+        prof: &mut Profiler,
+    ) -> Surface<'a> {
         let mt = req.mt;
         let lm = req.lightmap;
         if req.colormap.len() < COLORMAP_LEN {
@@ -582,7 +596,9 @@ impl SurfaceCaches {
         let (scales, n_styles) = style_scales(req.face, req.light_styles);
         // A style past 0: an animated (or switched) light, which rebakes the
         // block whenever its value changes.
-        prof.add(|s| s.surf_styled += u64::from(req.face.styles.iter().take_while(|&&st| st != STYLE_NONE).any(|&st| st != 0)));
+        prof.add(|s| {
+            s.surf_styled += u64::from(req.face.styles.iter().take_while(|&&st| st != STYLE_NONE).any(|&st| st != 0))
+        });
         // A steady torch flickers on it (`r_torchflicker`): the same.
         prof.add(|s| s.surf_torchlit += u64::from(!req.torches.is_empty()));
         // texturemins are whole multiples of 16, so `>> mip` is exact.
@@ -594,7 +610,17 @@ impl SurfaceCaches {
         let unbaked = &self.unbaked;
         let bake = |prof: &mut Profiler| -> usize {
             prof.add(|s| s.surf_texels_baked += total as u64);
-            jobs.push(BakeJob { lightmap: lm, tex, smax, tmax, texmins: texmins_i, mip, bw, bh, colormap: req.colormap });
+            jobs.push(BakeJob {
+                lightmap: lm,
+                tex,
+                smax,
+                tmax,
+                texmins: texmins_i,
+                mip,
+                bw,
+                bh,
+                colormap: req.colormap,
+            });
             jobs.len() - 1
         };
 
@@ -758,7 +784,9 @@ pub(super) fn draw_surface_block(
     bw: usize,
     bh: usize,
 ) {
-    let Some(colormap) = colormap.get(..COLORMAP_LEN).and_then(|c| <&[u8; COLORMAP_LEN]>::try_from(c).ok()) else { return };
+    let Some(colormap) = colormap.get(..COLORMAP_LEN).and_then(|c| <&[u8; COLORMAP_LEN]>::try_from(c).ok()) else {
+        return;
+    };
     if smax == 0 || tmax == 0 || tex.len() < smax * tmax || out.len() < bw * bh {
         return;
     }
@@ -816,7 +844,9 @@ impl Level<'_> {
                     let y = v * N + i;
                     let src = &tex[trow..trow + smax];
                     let at = y * bw + u * N;
-                    let Some(dst) = out.get_mut(at..at + N).and_then(|o| <&mut [u8; N]>::try_from(o).ok()) else { return };
+                    let Some(dst) = out.get_mut(at..at + N).and_then(|o| <&mut [u8; N]>::try_from(o).ok()) else {
+                        return;
+                    };
                     let lightstep = (lightleft - lightright) >> shift;
                     let mut l = lightright;
                     // 0 < l <= 16320: the luxels are clamped to 64..=16320 and the
@@ -906,7 +936,9 @@ impl SurfaceCaches {
         // No dlight: try the cache.
         let entry = match entry {
             Some(Some(e))
-                if e.n_styles == n_styles && e.style_scales[..n_styles] == scales[..n_styles] && torches.key_is(&e.torches) =>
+                if e.n_styles == n_styles
+                    && e.style_scales[..n_styles] == scales[..n_styles]
+                    && torches.key_is(&e.torches) =>
             {
                 // HIT: clone the stored combined luxels (deterministic build ->
                 // bit-identical to rebuilding).
@@ -939,14 +971,14 @@ impl SurfaceCaches {
 
 #[cfg(test)]
 mod tests {
+    use super::super::light::face_lightmap_dyn;
     use super::*;
     use crate::dlight::DynamicLight;
-    use crate::render::{demo_room, Camera, Palette, Renderer, Scene};
-    use super::super::light::face_lightmap_dyn;
     use crate::render::fixtures::render_once;
     use crate::render::fixtures::{lightmapped_demo_room, one_face_bsp_zplane, two_style_face_bsp};
     use crate::render::light::{ALL_DLIGHT_BITS, NEUTRAL_LIGHTSTYLE_SCALES};
     use crate::render::world::ExternalBModel;
+    use crate::render::{Camera, Palette, Renderer, Scene, demo_room};
 
     /// Caches for `bsp` whose face 0 has the polygon `poly`: the fixtures'
     /// faces are lit by a literal polygon, not their bsp's edges.
@@ -1161,12 +1193,24 @@ mod tests {
         let mut caches = caches_with_poly(&bsp, &poly);
         let _ = caches.world_lightmap(&bsp, 0, &face, &NEUTRAL_LIGHTSTYLE_SCALES, FaceTorches::NONE, &[], 0);
         let lit = caches
-            .world_lightmap(&bsp, 0, &face, &NEUTRAL_LIGHTSTYLE_SCALES, FaceTorches::NONE, std::slice::from_ref(&dl), ALL_DLIGHT_BITS)
+            .world_lightmap(
+                &bsp,
+                0,
+                &face,
+                &NEUTRAL_LIGHTSTYLE_SCALES,
+                FaceTorches::NONE,
+                std::slice::from_ref(&dl),
+                ALL_DLIGHT_BITS,
+            )
             .expect("present");
         assert!(matches!(lit.luxels, Luxels::Owned(_)), "a dlit face must own the dlit buffer");
         // Must match the direct (cache-free) dlit build exactly.
         let fresh = face_lightmap_dyn(
-            &bsp, &face, &poly, &NEUTRAL_LIGHTSTYLE_SCALES, std::slice::from_ref(&dl),
+            &bsp,
+            &face,
+            &poly,
+            &NEUTRAL_LIGHTSTYLE_SCALES,
+            std::slice::from_ref(&dl),
             ALL_DLIGHT_BITS,
         )
         .expect("present");
@@ -1206,10 +1250,7 @@ mod tests {
         // A change in the style scale must change the cache key AND the pixels
         // (proving the cache is keyed on the scale, not stale).
         let frame_b = render(&styles_b);
-        assert_ne!(
-            frame1.pixels, frame_b.pixels,
-            "a different style scale must rebuild and produce different pixels"
-        );
+        assert_ne!(frame1.pixels, frame_b.pixels, "a different style scale must rebuild and produce different pixels");
 
         // Re-render at the ORIGINAL scale: must again equal frame1 (the cache
         // correctly rebuilt back to the 0.5 key).
@@ -1241,7 +1282,13 @@ mod tests {
 
     /// The bake test's scene at frame `k` of a run: the lightmapped room seen
     /// from a corner, its second style stepping, a light moving across it.
-    fn baking_scene<'a>(world: &'a Bsp, pal: &'a Palette, cm: &'a [u8], styles: &'a [f32; LIGHTSTYLES], dls: &'a [DynamicLight]) -> Scene<'a> {
+    fn baking_scene<'a>(
+        world: &'a Bsp,
+        pal: &'a Palette,
+        cm: &'a [u8],
+        styles: &'a [f32; LIGHTSTYLES],
+        dls: &'a [DynamicLight],
+    ) -> Scene<'a> {
         let cam = Camera::looking_at([-200.0, -200.0, 40.0], [0.0, 0.0, 0.0], 90.0);
         Scene { light_styles: styles, dlights: dls, colormap: Some(cm), ..Scene::new(world, cam, 211, 157, pal) }
     }
@@ -1333,10 +1380,16 @@ mod tests {
         let pal = crate::render::parse_palette(&read("gfx/palette.lmp")).expect("palette");
         let cm = read("gfx/colormap.lmp");
         let cam = Camera { pos: [1496.0, 1664.0, 288.0], yaw: 270.0, pitch: 0.0, roll: 0.0, fov_deg: 90.0 };
-        let at = |z: f32| crate::render::BModelInstance { model_index: 52, origin: [0.0, -200.0, z], frame: 0, angles: [0.0; 3] };
+        let at = |z: f32| crate::render::BModelInstance {
+            model_index: 52,
+            origin: [0.0, -200.0, z],
+            frame: 0,
+            angles: [0.0; 3],
+        };
         let (one, two) = ([at(40.0)], [at(40.0), at(-40.0)]);
         // Every surface at mip 0, so the copies ask for the same blocks.
-        let options = crate::render::RenderOptions { mip: MipCvars { mipscale: 0.0, mipcap: 0.0 }, ..Default::default() };
+        let options =
+            crate::render::RenderOptions { mip: MipCvars { mipscale: 0.0, mipcap: 0.0 }, ..Default::default() };
         let mut styles = NEUTRAL_LIGHTSTYLE_SCALES;
         styles[0] = 264.0 / 256.0;
         for dls in [Vec::new(), vec![DynamicLight::new([1496.0, 1464.0, 288.0], 300.0, f32::MAX, 0.0, 0.0, 0)]] {
@@ -1344,7 +1397,14 @@ mod tests {
                 let mut r = Renderer::new();
                 r.set_threads(threads);
                 r.stats_begin();
-                let scene = Scene { bmodels: bm, light_styles: &styles, dlights: &dls, colormap: Some(&cm), options, ..Scene::new(&world, cam, 320, 200, &pal) };
+                let scene = Scene {
+                    bmodels: bm,
+                    light_styles: &styles,
+                    dlights: &dls,
+                    colormap: Some(&cm),
+                    options,
+                    ..Scene::new(&world, cam, 320, 200, &pal)
+                };
                 let img = r.render(&scene).pixels;
                 (img, r.stats_end(), r.surfaces.block_entries().len())
             };
@@ -1384,7 +1444,14 @@ mod tests {
             let mut most = 0u64;
             for k in 0..12 {
                 let dl = [DynamicLight::new([-1352.0, -600.0 + 40.0 * k as f32, -40.0], 250.0, f32::MAX, 0.0, 0.0, 0)];
-                let scene = Scene { time: 3.0 + k as f32 / 144.0, light_styles: &styles, dlights: &dl, colormap: Some(&cm), options, ..Scene::new(&world, cam, 480, 270, &pal) };
+                let scene = Scene {
+                    time: 3.0 + k as f32 / 144.0,
+                    light_styles: &styles,
+                    dlights: &dl,
+                    colormap: Some(&cm),
+                    options,
+                    ..Scene::new(&world, cam, 480, 270, &pal)
+                };
                 r.stats_begin();
                 frames.push(r.render(&scene).pixels);
                 most = most.max(r.stats_end().surf_texels_baked);
@@ -1427,7 +1494,12 @@ mod tests {
         let jobs = || -> Vec<BakeJob> {
             (1..=8usize)
                 .map(|k| BakeJob {
-                    lightmap: LightMap { luxels: Luxels::Static(&luxels), lmw: k + 1, lmh: 9 - k + 1, texmins: [0.0; 2] },
+                    lightmap: LightMap {
+                        luxels: Luxels::Static(&luxels),
+                        lmw: k + 1,
+                        lmh: 9 - k + 1,
+                        texmins: [0.0; 2],
+                    },
                     tex: &tex,
                     smax: 64,
                     tmax: 64,
@@ -1483,9 +1555,8 @@ mod tests {
         // standing 2 units toward the camera's corner and 2 up from the world's
         // origin, so their inward floor and far walls are just in front of the
         // world's and are drawn (the edge renderer draws only the nearest).
-        let ext_bsps: Vec<Bsp> = (0..26)
-            .map(|k| demo_room_with_walls(lightmapped_demo_room(40 + k as u8, 220)))
-            .collect();
+        let ext_bsps: Vec<Bsp> =
+            (0..26).map(|k| demo_room_with_walls(lightmapped_demo_room(40 + k as u8, 220))).collect();
         let externals: Vec<ExternalBModel> =
             ext_bsps.iter().map(|b| ExternalBModel { bsp: b, origin: [-2.0, -2.0, 2.0] }).collect();
 
@@ -1497,7 +1568,12 @@ mod tests {
         let mut r = Renderer::new();
         let mut render = |ext: &[ExternalBModel]| {
             r.stats_begin();
-            let scene = Scene { external: ext, light_styles: &styles, colormap: Some(&colormap), ..Scene::new(&world, cam, 160, 120, &pal) };
+            let scene = Scene {
+                external: ext,
+                light_styles: &styles,
+                colormap: Some(&colormap),
+                ..Scene::new(&world, cam, 160, 120, &pal)
+            };
             let _ = r.render(&scene);
             r.stats_end()
         };
@@ -1509,7 +1585,8 @@ mod tests {
         assert!(
             warm.surf_cache_hits > 0 && warm.surf_baked == 0,
             "world scene must hit the warm surf cache (got {} hits, {} bakes)",
-            warm.surf_cache_hits, warm.surf_baked
+            warm.surf_cache_hits,
+            warm.surf_baked
         );
         let world_hits = warm.surf_cache_hits;
 
@@ -1522,7 +1599,8 @@ mod tests {
         assert!(
             with_ext.surf_cache_hits > 0 && with_ext.surf_cache_hits <= world_hits,
             "the world's drawn faces must still hit while externals draw (got {} of {})",
-            with_ext.surf_cache_hits, world_hits
+            with_ext.surf_cache_hits,
+            world_hits
         );
         assert_eq!(
             with_ext.surf_baked, 0,
@@ -1572,7 +1650,13 @@ mod tests {
         let (cm, pal) = ramp_colormap();
         let cam = Camera::looking_at([-200.0, -200.0, 40.0], [0.0, 0.0, 0.0], 90.0);
         let dl = DynamicLight::new([0.0, 0.0, 0.0], 300.0, f32::MAX, 0.0, 0.0, 0);
-        fn scene<'a>(world: &'a Bsp, cam: Camera, pal: &'a Palette, cm: &'a [u8], dls: &'a [DynamicLight]) -> Scene<'a> {
+        fn scene<'a>(
+            world: &'a Bsp,
+            cam: Camera,
+            pal: &'a Palette,
+            cm: &'a [u8],
+            dls: &'a [DynamicLight],
+        ) -> Scene<'a> {
             Scene { dlights: dls, colormap: Some(cm), ..Scene::new(world, cam, 160, 120, pal) }
         }
         let mut r = Renderer::new();
@@ -1651,7 +1735,8 @@ mod tests {
             [5.0, 1.0, 0.999, 0.4, 0.399, 0.2, 0.199, 0.0].iter().map(|&s| mv.level_for_scale(s)).collect();
         assert_eq!(levels, [0, 0, 1, 1, 2, 2, 3, 3]);
         // d_mipscale 0: every scale (>= 0) is mip 0.
-        let level = |mipscale, mipcap, scale| MipView::new(160.0, 160.0, MipCvars { mipscale, mipcap }).level_for_scale(scale);
+        let level =
+            |mipscale, mipcap, scale| MipView::new(160.0, 160.0, MipCvars { mipscale, mipcap }).level_for_scale(scale);
         assert_eq!(level(0.0, 0.0, 0.0), 0);
         // d_mipcap 2 (and 9, clamped to 3): never finer than that.
         assert_eq!(level(1.0, 2.0, 5.0), 2);
@@ -1661,11 +1746,8 @@ mod tests {
     /// `Mod_LoadTexinfo`'s `mipadjust` from the mean texture-axis length.
     #[test]
     fn mipadjust_follows_the_texture_scale() {
-        let ti = |len: f32| crate::bsp::TexInfo {
-            vecs: [[len, 0.0, 0.0, 7.0], [0.0, 0.0, len, 0.0]],
-            miptex: 0,
-            flags: 0,
-        };
+        let ti =
+            |len: f32| crate::bsp::TexInfo { vecs: [[len, 0.0, 0.0, 7.0], [0.0, 0.0, len, 0.0]], miptex: 0, flags: 0 };
         assert_eq!(mipadjust(&ti(1.0)), 1.0);
         assert_eq!(mipadjust(&ti(2.0)), 1.0);
         assert_eq!(mipadjust(&ti(0.5)), 2.0);
@@ -1858,7 +1940,9 @@ mod tests {
                         let light: Vec<i32> = (0..lmw * lmh).map(|_| 64 + (next() % (16320 - 64 + 1)) as i32).collect();
                         let (bw, bh) = (((lmw - 1) * 16) >> mip, ((lmh - 1) * 16) >> mip);
                         let (mut want, mut got) = (vec![7u8; bw * bh], vec![7u8; bw * bh]);
-                        draw_surface_block_as_written(&tex, smax, tmax, texmins, mip, &light, lmw, &cm, &mut want, bw, bh);
+                        draw_surface_block_as_written(
+                            &tex, smax, tmax, texmins, mip, &light, lmw, &cm, &mut want, bw, bh,
+                        );
                         draw_surface_block(&tex, smax, tmax, texmins, mip, &light, lmw, &cm, &mut got, bw, bh);
                         assert!(got == want, "{smax}x{tmax} mip {mip}, lightmap {lmw}x{lmh}, texturemins {texmins:?}");
                         compared += bw * bh;
@@ -2008,4 +2092,3 @@ mod tests {
         assert_eq!(caches.geom(&bsp_b, 0, &face_b), Some(&direct_b[..]));
     }
 }
-

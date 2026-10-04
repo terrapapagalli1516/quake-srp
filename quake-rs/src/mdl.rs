@@ -76,10 +76,7 @@ pub enum Skin {
     Single(Vec<u8>),
     /// `ALIAS_SKIN_GROUP`: per-frame intervals plus a stack of images, each
     /// `skinwidth * skinheight` palette indices.
-    Group {
-        intervals: Vec<f32>,
-        frames: Vec<Vec<u8>>,
-    },
+    Group { intervals: Vec<f32>, frames: Vec<Vec<u8>> },
 }
 
 /// `daliasframe_t` header plus the frame's `numverts` vertices. The bounding
@@ -101,12 +98,7 @@ pub enum Frame {
     Single(AliasFrame),
     /// `ALIAS_GROUP`: per-frame intervals plus a sequence of poses. The group's
     /// own `bboxmin`/`bboxmax` are kept alongside the per-frame ones.
-    Group {
-        bboxmin: TriVertex,
-        bboxmax: TriVertex,
-        intervals: Vec<f32>,
-        frames: Vec<AliasFrame>,
-    },
+    Group { bboxmin: TriVertex, bboxmax: TriVertex, intervals: Vec<f32>, frames: Vec<AliasFrame> },
 }
 
 /// The 84-byte on-disk `mdl_t` header, decoded in C field order.
@@ -206,10 +198,7 @@ fn capacity_hint(count: usize, remaining: usize) -> usize {
 fn read_trivertex(r: &mut Reader) -> Result<TriVertex> {
     let v = r.bytes::<3>()?;
     let lightnormalindex = r.u8()?;
-    Ok(TriVertex {
-        v,
-        lightnormalindex,
-    })
+    Ok(TriVertex { v, lightnormalindex })
 }
 
 /// Read a single `stvert_t` (12 bytes).
@@ -224,10 +213,7 @@ fn read_stvert(r: &mut Reader) -> Result<StVert> {
 fn read_triangle(r: &mut Reader) -> Result<Triangle> {
     let facesfront = r.i32()?;
     let vertindex = [r.i32()?, r.i32()?, r.i32()?];
-    Ok(Triangle {
-        facesfront,
-        vertindex,
-    })
+    Ok(Triangle { facesfront, vertindex })
 }
 
 /// Read a `daliasframe_t` header (`bboxmin`, `bboxmax`, `name[16]`) plus `numverts`
@@ -240,12 +226,7 @@ fn read_alias_frame(r: &mut Reader, numverts: usize) -> Result<AliasFrame> {
     for _ in 0..numverts {
         verts.push(read_trivertex(r)?);
     }
-    Ok(AliasFrame {
-        name,
-        bboxmin,
-        bboxmax,
-        verts,
-    })
+    Ok(AliasFrame { name, bboxmin, bboxmax, verts })
 }
 
 impl Mdl {
@@ -263,11 +244,7 @@ impl Mdl {
         // IDPOLYHEADER; here we compare the raw 4-byte tag for a clearer error.
         let ident_bytes = header.ident.to_le_bytes();
         if &ident_bytes != IDPOLYHEADER {
-            return Err(QError::BadMagic {
-                context: "mdl ident",
-                found: ident_bytes,
-                expected: "IDPO",
-            });
+            return Err(QError::BadMagic { context: "mdl ident", found: ident_bytes, expected: "IDPO" });
         }
 
         if header.version != ALIAS_VERSION {
@@ -287,28 +264,16 @@ impl Mdl {
         }
         // numskins < 1 and numframes < 1 are explicit Sys_Errors in the C.
         if header.numskins < 1 {
-            return Err(QError::invalid(format!(
-                "mdl has invalid # of skins: {}",
-                header.numskins
-            )));
+            return Err(QError::invalid(format!("mdl has invalid # of skins: {}", header.numskins)));
         }
         if header.numframes < 1 {
-            return Err(QError::invalid(format!(
-                "mdl has invalid # of frames: {}",
-                header.numframes
-            )));
+            return Err(QError::invalid(format!("mdl has invalid # of frames: {}", header.numframes)));
         }
         if header.skinwidth < 0 {
-            return Err(QError::invalid(format!(
-                "mdl has negative skinwidth: {}",
-                header.skinwidth
-            )));
+            return Err(QError::invalid(format!("mdl has negative skinwidth: {}", header.skinwidth)));
         }
         if header.skinheight < 0 {
-            return Err(QError::invalid(format!(
-                "mdl has negative skinheight: {}",
-                header.skinheight
-            )));
+            return Err(QError::invalid(format!("mdl has negative skinheight: {}", header.skinheight)));
         }
         // NOTE (deliberate deviation): the C `Mod_LoadAliasModel` aborts when
         // `skinwidth & 0x03` (the software rasteriser wants 4-byte-aligned skin
@@ -324,9 +289,7 @@ impl Mdl {
         let skinheight = header.skinheight as usize;
 
         // skinsize = skinheight * skinwidth (C: pmodel->skinheight * skinwidth).
-        let skinsize = skinheight
-            .checked_mul(skinwidth)
-            .ok_or_else(|| QError::invalid("mdl skin size overflow"))?;
+        let skinsize = skinheight.checked_mul(skinwidth).ok_or_else(|| QError::invalid("mdl skin size overflow"))?;
 
         //
         // load the skins
@@ -360,13 +323,7 @@ impl Mdl {
             frames.push(read_frame(&mut r, numverts)?);
         }
 
-        Ok(Mdl {
-            header,
-            skins,
-            stverts,
-            triangles,
-            frames,
-        })
+        Ok(Mdl { header, skins, stverts, triangles, frames })
     }
 }
 
@@ -393,19 +350,12 @@ fn read_skin(r: &mut Reader, skinsize: usize) -> Result<Skin> {
             intervals.push(interval);
         }
         // numskins images of skinsize bytes.
-        let cap = if skinsize == 0 {
-            0
-        } else {
-            capacity_hint(groupcount, r.remaining() / skinsize)
-        };
+        let cap = if skinsize == 0 { 0 } else { capacity_hint(groupcount, r.remaining() / skinsize) };
         let mut group_frames = Vec::with_capacity(cap);
         for _ in 0..groupcount {
             group_frames.push(r.take(skinsize)?.to_vec());
         }
-        Ok(Skin::Group {
-            intervals,
-            frames: group_frames,
-        })
+        Ok(Skin::Group { intervals, frames: group_frames })
     }
 }
 
@@ -439,12 +389,7 @@ fn read_frame(r: &mut Reader, numverts: usize) -> Result<Frame> {
         for _ in 0..groupcount {
             group_frames.push(read_alias_frame(r, numverts)?);
         }
-        Ok(Frame::Group {
-            bboxmin,
-            bboxmax,
-            intervals,
-            frames: group_frames,
-        })
+        Ok(Frame::Group { bboxmin, bboxmax, intervals, frames: group_frames })
     }
 }
 
@@ -465,11 +410,7 @@ impl Mdl {
     ///
     /// Returns `None` only for a frameless model (or an empty group).
     pub fn frame_pose(&self, frame: i32, time: f32) -> Option<&[TriVertex]> {
-        let idx = if frame < 0 || (frame as usize) >= self.frames.len() {
-            0
-        } else {
-            frame as usize
-        };
+        let idx = if frame < 0 || (frame as usize) >= self.frames.len() { 0 } else { frame as usize };
         match self.frames.get(idx)? {
             Frame::Single(af) => Some(&af.verts),
             Frame::Group { intervals, frames, .. } => {
@@ -485,11 +426,7 @@ impl Mdl {
     /// field stepped to. The smooth-animations extra
     /// ([`crate::client::lerpmodels`]) never blends across one.
     pub fn frame_is_group(&self, frame: i32) -> bool {
-        let idx = if frame < 0 || (frame as usize) >= self.frames.len() {
-            0
-        } else {
-            frame as usize
-        };
+        let idx = if frame < 0 || (frame as usize) >= self.frames.len() { 0 } else { frame as usize };
         matches!(self.frames.get(idx), Some(Frame::Group { .. }))
     }
 
@@ -502,11 +439,7 @@ impl Mdl {
     ///
     /// Returns `None` only for a model with no skins (or an empty skin group).
     pub fn skin_image(&self, skinnum: i32, time: f32) -> Option<&[u8]> {
-        let idx = if skinnum < 0 || (skinnum as usize) >= self.skins.len() {
-            0
-        } else {
-            skinnum as usize
-        };
+        let idx = if skinnum < 0 || (skinnum as usize) >= self.skins.len() { 0 } else { skinnum as usize };
         match self.skins.get(idx)? {
             Skin::Single(px) => Some(px),
             Skin::Group { intervals, frames } => {
@@ -677,10 +610,7 @@ mod tests {
 
         // triangles
         assert_eq!(mdl.triangles.len(), 1);
-        assert_eq!(
-            mdl.triangles[0],
-            Triangle { facesfront: 1, vertindex: [0, 1, 2] }
-        );
+        assert_eq!(mdl.triangles[0], Triangle { facesfront: 1, vertindex: [0, 1, 2] });
 
         // frames[0] is a single frame with 3 verts
         assert_eq!(mdl.frames.len(), 1);
@@ -689,10 +619,7 @@ mod tests {
                 assert_eq!(f.name, "frame1");
                 assert_eq!(f.verts.len(), 3);
                 assert_eq!(f.bboxmin, TriVertex { v: [0, 0, 0], lightnormalindex: 0 });
-                assert_eq!(
-                    f.bboxmax,
-                    TriVertex { v: [255, 255, 255], lightnormalindex: 0 }
-                );
+                assert_eq!(f.bboxmax, TriVertex { v: [255, 255, 255], lightnormalindex: 0 });
                 assert_eq!(f.verts[0], TriVertex { v: [0, 1, 2], lightnormalindex: 3 });
                 assert_eq!(f.verts[2], TriVertex { v: [2, 3, 4], lightnormalindex: 5 });
             }
@@ -777,12 +704,7 @@ mod tests {
         assert_eq!(mdl.triangles.len(), 1);
 
         match &mdl.frames[0] {
-            Frame::Group {
-                bboxmin,
-                bboxmax,
-                intervals,
-                frames,
-            } => {
+            Frame::Group { bboxmin, bboxmax, intervals, frames } => {
                 assert_eq!(*bboxmin, TriVertex { v: [1, 1, 1], lightnormalindex: 9 });
                 assert_eq!(*bboxmax, TriVertex { v: [2, 2, 2], lightnormalindex: 9 });
                 assert_eq!(intervals, &vec![0.5f32, 0.75]);

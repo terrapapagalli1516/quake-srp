@@ -8,11 +8,11 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use quake_rs::client::cl_demo::{TimeDemoClock, MAX_DEMOS};
+use quake_rs::client::cl_demo::{MAX_DEMOS, TimeDemoClock};
 use quake_rs::client::{cl_demo, host_cmd};
 use quake_rs::pak::Pak;
 use quake_rs::qrand::QRand;
-use quake_rs::render::{self, build_gamma_table, Console, Menu, MenuPics};
+use quake_rs::render::{self, Console, Menu, MenuPics, build_gamma_table};
 use quake_rs::settings::{Machine, Preset, Settings};
 use quake_rs::wad::Qpic;
 
@@ -222,23 +222,14 @@ impl App {
         }
         self.menu_loaded = true;
         if let Some(pak) = pak() {
-            let gfx_wad = pak
-                .read_file("gfx.wad")
-                .ok()
-                .flatten()
-                .and_then(|b| quake_rs::wad::Wad2::parse(b).ok());
+            let gfx_wad = pak.read_file("gfx.wad").ok().flatten().and_then(|b| quake_rs::wad::Wad2::parse(b).ok());
             let (pics, conchars) = load_menu_pics(&pak, gfx_wad.as_ref());
             self.menu_pics = pics;
             self.conchars = conchars;
             // The console background (gfx/conback.lmp): a raw 320x200 QPIC.
             // Optional — a pak missing it leaves draw_console's dark-fill fallback.
-            self.conback = pak
-                .read_file("gfx/conback.lmp")
-                .ok()
-                .flatten()
-                .and_then(|b| Qpic::parse(&b).ok());
-            self.palette =
-                pak.read_file("gfx/palette.lmp").ok().flatten().and_then(|b| render::parse_palette(&b));
+            self.conback = pak.read_file("gfx/conback.lmp").ok().flatten().and_then(|b| Qpic::parse(&b).ok());
+            self.palette = pak.read_file("gfx/palette.lmp").ok().flatten().and_then(|b| render::parse_palette(&b));
         }
     }
 
@@ -445,8 +436,7 @@ pub(crate) fn player_start(ents: &str) -> Option<([f32; 3], f32)> {
             match toks[i] {
                 "classname" => classname = toks[i + 2],
                 "origin" => {
-                    let n: Vec<f32> =
-                        toks[i + 2].split_whitespace().filter_map(|s| s.parse().ok()).collect();
+                    let n: Vec<f32> = toks[i + 2].split_whitespace().filter_map(|s| s.parse().ok()).collect();
                     if n.len() == 3 {
                         origin = Some([n[0], n[1], n[2]]);
                     }
@@ -465,17 +455,11 @@ pub(crate) fn player_start(ents: &str) -> Option<([f32; 3], f32)> {
     None
 }
 
-
 /// Load the main-menu pics from the pak's `.lmp` files (`Qpic::parse` on each)
 /// plus the `conchars` font atlas from `gfx.wad`. Every pic is optional: a pak
 /// missing any one leaves that slot `None` and the menu still draws the rest.
-fn load_menu_pics(
-    pak: &Pak,
-    gfx_wad: Option<&quake_rs::wad::Wad2>,
-) -> (MenuPics, Option<Qpic>) {
-    let lmp = |n: &str| -> Option<Qpic> {
-        pak.read_file(n).ok().flatten().and_then(|b| Qpic::parse(&b).ok())
-    };
+fn load_menu_pics(pak: &Pak, gfx_wad: Option<&quake_rs::wad::Wad2>) -> (MenuPics, Option<Qpic>) {
+    let lmp = |n: &str| -> Option<Qpic> { pak.read_file(n).ok().flatten().and_then(|b| Qpic::parse(&b).ok()) };
     let mut menudot: [Option<Qpic>; 6] = Default::default();
     for (i, slot) in menudot.iter_mut().enumerate() {
         *slot = lmp(&format!("gfx/menudot{}.lmp", i + 1));
@@ -513,11 +497,7 @@ fn load_menu_pics(
         if data.len() < 128 * 128 {
             return None;
         }
-        Some(Qpic {
-            width: 128,
-            height: 128,
-            data: data[..128 * 128].to_vec(),
-        })
+        Some(Qpic { width: 128, height: 128, data: data[..128 * 128].to_vec() })
     });
 
     (pics, conchars)
@@ -730,12 +710,7 @@ pub(crate) fn boot_attract() -> i32 {
 /// canvas click should capture it. Covers every walk-building path (boot /
 /// New Game / `map` console command), since each sets `mode = 0` with the walk.
 pub(crate) fn in_walk_mode() -> i32 {
-    APP.with(|c| {
-        c.borrow()
-            .as_ref()
-            .map(|a| (a.mode == 0 && a.walk.is_some()) as i32)
-            .unwrap_or(0)
-    })
+    APP.with(|c| c.borrow().as_ref().map(|a| (a.mode == 0 && a.walk.is_some()) as i32).unwrap_or(0))
 }
 
 /// Take the pending quit ([`App::request_quit`]), if any, this turn: whether
@@ -760,9 +735,7 @@ mod tests {
     use crate::cl_demo::step_demo;
     use crate::host::step;
     use crate::input::{key_down, key_up};
-    use crate::menu::{
-        menu_bind_key, menu_cancel, menu_down, menu_right, menu_select, menu_up, menu_visible,
-    };
+    use crate::menu::{menu_bind_key, menu_cancel, menu_down, menu_right, menu_select, menu_up, menu_visible};
     use crate::test_util::*;
 
     /// menu.c's cursors are statics: `map`, New Game, a load and a demo keep
@@ -846,11 +819,7 @@ mod tests {
             assert_eq!(menu.cursor(), 0, "cursor reset");
             assert!((m.cvars.gamma - 0.95).abs() < 1e-6, "Brightness survives re-boot");
             assert!(!m.cvars.always_run(), "Always Run (toggled off) survives re-boot");
-            assert_eq!(
-                m.binds.command(b'j'),
-                Some(render::BIND_JUMP),
-                "key rebind survives re-boot"
-            );
+            assert_eq!(m.binds.command(b'j'), Some(render::BIND_JUMP), "key rebind survives re-boot");
         });
 
         // The flagship flow: Single Player > New Game keeps them too.
@@ -862,22 +831,14 @@ mod tests {
             let m = &b.as_ref().unwrap().settings;
             assert!((m.cvars.gamma - 0.95).abs() < 1e-6, "Brightness survives New Game");
             assert!(!m.cvars.always_run(), "Always Run (toggled off) survives New Game");
-            assert_eq!(
-                m.binds.command(b'j'),
-                Some(render::BIND_JUMP),
-                "key rebind survives New Game"
-            );
+            assert_eq!(m.binds.command(b'j'), Some(render::BIND_JUMP), "key rebind survives New Game");
         });
         // And the surviving choice is LIVE in the fresh walk: with Always Run
         // toggled off, +forward walks at cl_forwardspeed 200 (the 200<->400
         // swap), not the on-by-default 400.
         key_down(i32::from(b'w'));
         step(0.05);
-        assert_eq!(
-            walk_mut(|w| w.key_move.fwd),
-            200.0,
-            "Always Run off drives the new walk at 200"
-        );
+        assert_eq!(walk_mut(|w| w.key_move.fwd), 200.0, "Always Run off drives the new walk at 200");
         key_up(i32::from(b'w'));
     }
 

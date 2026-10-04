@@ -6,7 +6,7 @@
 
 use quake_rs::keys::{K_BACKSPACE, K_ENTER};
 
-use crate::app::{ensure_app, App, APP};
+use crate::app::{APP, App, ensure_app};
 use crate::host_cmd::execute_console_command;
 
 /// `Key_Console`: a key the console has the keyboard for (Shift applied),
@@ -74,12 +74,8 @@ pub(crate) fn console_backspace() {
 pub(crate) fn console_enter() {
     // Take the line under the borrow, then execute it (execute_console_command
     // borrows the App again to touch the walk / open-state).
-    let line = APP.with(|c| {
-        c.borrow_mut()
-            .as_mut()
-            .filter(|a| a.console_has_keys())
-            .and_then(|a| key_console(a, K_ENTER, None))
-    });
+    let line = APP
+        .with(|c| c.borrow_mut().as_mut().filter(|a| a.console_has_keys()).and_then(|a| key_console(a, K_ENTER, None)));
     if let Some(line) = line {
         execute_console_command(&line);
     }
@@ -140,11 +136,8 @@ mod tests {
         });
         step(0.05);
         step(0.05);
-        let console = || {
-            APP.with(|c| {
-                c.borrow().as_ref().unwrap().console.lines().map(str::to_string).collect::<Vec<_>>()
-            })
-        };
+        let console =
+            || APP.with(|c| c.borrow().as_ref().unwrap().console.lines().map(str::to_string).collect::<Vec<_>>());
         assert!(console().iter().any(|l| l == "You got the shells"), "{:?}", console());
         assert!(walk_mut(|w| w.notify.visible(w.host_time).contains(&"You got the shells")));
         // Fragments join and long text wraps at the console width.
@@ -155,10 +148,7 @@ mod tests {
         });
         step(0.05);
         let lines = console();
-        assert_eq!(
-            &lines[lines.len() - 2..],
-            ["You got the Grenade Launcher and a ", "very long tail to wrap"]
-        );
+        assert_eq!(&lines[lines.len() - 2..], ["You got the Grenade Launcher and a ", "very long tail to wrap"]);
     }
 
     /// Second review: Con_Print stamps con_times for every line it lays into
@@ -340,7 +330,6 @@ mod tests {
 
     #[test]
     fn console_toggle_flips_visibility_and_gates_typing() {
-
         // ensure_app exists; start closed.
         ensure_app(|_| {});
         assert_eq!(console_visible(), 0, "console starts closed");

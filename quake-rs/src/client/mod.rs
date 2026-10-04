@@ -58,19 +58,19 @@ use std::cell::Cell;
 use std::collections::HashMap;
 
 use crate::bsp::{Bsp, NUM_AMBIENTS};
+use crate::cd_audio::CdCall;
 use crate::console::ConNotify;
 use crate::demo::Demo;
 use crate::dlight::DynamicLights;
 use crate::mdl::Mdl;
-use crate::cd_audio::CdCall;
 use crate::pak::Pak;
 use crate::particles::{Lcg, ParticleSystem, TrailHead};
 use crate::render;
-use crate::server::{wire_angle, Server, SoundEvent, StaticSound};
+use crate::server::{Server, SoundEvent, StaticSound, wire_angle};
 use crate::stepping::{Stepping, Tick72};
 use crate::tent::{BeamSegment, Beams};
 use crate::wad::Qpic;
-use cl_input::{clamp_pitch, KeyMove};
+use cl_input::{KeyMove, clamp_pitch};
 use lerpmodels::{FrameLerps, LerpModels};
 use lerpmove::{LerpMove, StepGlides};
 use nailbarrels::{NailBarrels, NailLaunches};
@@ -562,8 +562,13 @@ pub fn color_for_name(name: &str) -> [u8; 3] {
         h = (h ^ b as u32).wrapping_mul(16777619);
     }
     let table = [
-        [220, 80, 80], [80, 200, 120], [90, 130, 230], [220, 200, 90],
-        [200, 110, 210], [110, 210, 210], [230, 150, 80],
+        [220, 80, 80],
+        [80, 200, 120],
+        [90, 130, 230],
+        [220, 200, 90],
+        [200, 110, 210],
+        [110, 210, 210],
+        [230, 150, 80],
     ];
     table[(h % table.len() as u32) as usize]
 }
@@ -763,7 +768,12 @@ pub fn backtile_for(
 /// none without [`render::Refdef::below`]. The view and its windows are
 /// drawn in one pass: one round of the renderer's threads a frame, where
 /// the view and then each window were three. The same pixels.
-pub fn draw_view(renderer: &mut render::Renderer, scene: &render::Scene, refdef: &render::Refdef, img: &mut render::Image) {
+pub fn draw_view(
+    renderer: &mut render::Renderer,
+    scene: &render::Scene,
+    refdef: &render::Refdef,
+    img: &mut render::Image,
+) {
     let bar = render::status_bar_rect(img.w, img.h, refdef.sb_lines);
     // (At most three parts: no list on the heap.)
     let mut windows = [render::ViewRect { x: 0, y: 0, w: 0, h: 0 }; 3];
@@ -810,9 +820,8 @@ pub struct ClientFrame {
 /// `S_Update` in play and demo playback alike.
 pub fn s_update(bsp: &Bsp, listener: Listener, dt: f32) -> SoundCall {
     let frametime = if dt.is_finite() && dt > 0.0 { dt } else { 0.0 };
-    let leaf_ambient = render::point_in_leaf(bsp, listener.pos)
-        .and_then(|li| bsp.leafs.get(li))
-        .map(|l| l.ambient_level);
+    let leaf_ambient =
+        render::point_in_leaf(bsp, listener.pos).and_then(|li| bsp.leafs.get(li)).map(|l| l.ambient_level);
     SoundCall::Update { listener, leaf_ambient, frametime }
 }
 

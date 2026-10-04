@@ -56,11 +56,11 @@
 //! fastest moves take tens of milliseconds, cannot show it, so it is not
 //! worth a second clock in the [`Scene`](super::Scene).
 
-use crate::bsp::{Bsp, DFace, CONTENTS_SOLID, TEX_SPECIAL};
-use crate::math::{add, cross, dot, mul_add, normalize, scale, sub, Vec3};
-use crate::server::{lightstyle_value_at, LerpLightStyles, Tokenizer};
+use crate::bsp::{Bsp, CONTENTS_SOLID, DFace, TEX_SPECIAL};
+use crate::math::{Vec3, add, cross, dot, mul_add, normalize, scale, sub};
+use crate::server::{LerpLightStyles, Tokenizer, lightstyle_value_at};
 
-use super::light::{surface_extents, STYLE_NONE};
+use super::light::{STYLE_NONE, surface_extents};
 use super::surf::face_world_poly;
 
 /// `r_torchflicker`: how much the steady torches flicker, in hundredths of
@@ -85,11 +85,7 @@ impl TorchFlicker {
     /// number is off.
     #[must_use]
     pub fn from_value(v: f32) -> TorchFlicker {
-        if v > 0.0 {
-            TorchFlicker((v.min(Self::MAX) * 100.0).round() as u8)
-        } else {
-            TorchFlicker::OFF
-        }
+        if v > 0.0 { TorchFlicker((v.min(Self::MAX) * 100.0).round() as u8) } else { TorchFlicker::OFF }
     }
 
     /// The strength as the cvar reads it (1.0 the flicker style's swing).
@@ -494,7 +490,11 @@ fn unbounded_shares<'a>(bsp: &'a Bsp, face: &DFace, torches: &[Torch], poly: &mu
             let luxel = |j: usize| {
                 let (s, t) = (j % lmw, j / lmw);
                 let at = |k: usize| sub[k];
-                (at(t * 2 * w + s * 2) + at(t * 2 * w + s * 2 + 1) + at((t * 2 + 1) * w + s * 2) + at((t * 2 + 1) * w + s * 2 + 1)) * 0.25
+                (at(t * 2 * w + s * 2)
+                    + at(t * 2 * w + s * 2 + 1)
+                    + at((t * 2 + 1) * w + s * 2)
+                    + at((t * 2 + 1) * w + s * 2 + 1))
+                    * 0.25
             };
             (i, (0..n).map(luxel).collect())
         })
@@ -705,8 +705,8 @@ impl FaceTorches<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::render::light::{face_lightmap_with, LightMap};
-    use crate::render::{demo_room, Camera, Renderer, RenderOptions, Scene, VideoCvars};
+    use crate::render::light::{LightMap, face_lightmap_with};
+    use crate::render::{Camera, RenderOptions, Renderer, Scene, VideoCvars, demo_room};
     use LerpLightStyles::{Classic, Smooth};
 
     const KINDS: [TorchKind; 3] = [TorchKind::WallTorch, TorchKind::SmallFlame, TorchKind::LargeFlame];
@@ -794,7 +794,10 @@ mod tests {
         );
         // The tool lights every entity with a light: a plain `light` too.
         let all = light_entities(&e);
-        assert_eq!(all.iter().filter(|l| l.class == "light" || l.class == "light_fluoro").map(|l| l.light).collect::<Vec<_>>(), [300.0, 300.0]);
+        assert_eq!(
+            all.iter().filter(|l| l.class == "light" || l.class == "light_fluoro").map(|l| l.light).collect::<Vec<_>>(),
+            [300.0, 300.0]
+        );
         assert_eq!(all[0].light, 0.0, "worldspawn has no light");
         assert!(steady_torches("").is_empty() && steady_torches("garbage { \"").is_empty());
     }
@@ -814,7 +817,8 @@ mod tests {
         let slant = share([60.0, 0.0, 80.0], 300.0, [0.0; 3], up); // dist 100, cos 0.8
         assert!((slant - 200.0 * 0.9 * 0.5).abs() < 1e-3, "{slant}");
         // Linear in the distance.
-        let s: Vec<f32> = [50.0, 100.0, 150.0, 200.0].iter().map(|&z| share([0.0, 0.0, z], 300.0, [0.0; 3], up)).collect();
+        let s: Vec<f32> =
+            [50.0, 100.0, 150.0, 200.0].iter().map(|&z| share([0.0, 0.0, z], 300.0, [0.0; 3], up)).collect();
         assert_eq!(s, [125.0, 100.0, 75.0, 50.0]);
     }
 
@@ -868,7 +872,10 @@ mod tests {
             let t = torch(flame, [0.0; 3]);
             (0..24_000).map(|f| t.scale(f as f32 / 120.0, Smooth, TorchFlicker::STYLE).powi(2)).sum::<f32>()
         };
-        assert!(swing(TorchKind::LargeFlame) > swing(TorchKind::SmallFlame) && swing(TorchKind::SmallFlame) > swing(TorchKind::WallTorch));
+        assert!(
+            swing(TorchKind::LargeFlame) > swing(TorchKind::SmallFlame)
+                && swing(TorchKind::SmallFlame) > swing(TorchKind::WallTorch)
+        );
     }
 
     /// The strength scales the swing exactly and 0 is still; the scale is a
@@ -899,7 +906,10 @@ mod tests {
         assert_eq!(set.counts().0, 1);
         let floor = set.face(0);
         assert!(!floor.is_empty(), "the floor is lit");
-        assert!(set.face(1).is_empty() || set.face(1).lit.iter().all(|l| l.torch == 0), "the ceiling, if lit, by the flame");
+        assert!(
+            set.face(1).is_empty() || set.face(1).lit.iter().all(|l| l.torch == 0),
+            "the ceiling, if lit, by the flame"
+        );
         // The floor's luxel under the flame (x = 0, y = 128 -> luxel (16, 24)
         // of 33 from texmins -256) is the mean of its four samples, 8 units
         // apart below and left of it, a unit above the floor.
@@ -944,18 +954,25 @@ mod tests {
     /// slab `x0 <= x <= x1` out solid, the rest empty (two planes, a solid
     /// and an empty leaf).
     fn walled_room(entities: &str, luxel: u8, x0: f32, x1: f32) -> Bsp {
-        use crate::bsp::{DLeaf, DNode, DPlane, CONTENTS_EMPTY};
+        use crate::bsp::{CONTENTS_EMPTY, DLeaf, DNode, DPlane};
         let mut bsp = torch_room(entities, luxel);
         let p = bsp.planes.len() as i32;
         for dist in [x0, x1] {
             bsp.planes.push(DPlane { normal: [1.0, 0.0, 0.0], dist, ptype: 0 });
         }
         let leaf = |contents| DLeaf {
-            contents, visofs: -1, mins: [0; 3], maxs: [0; 3], firstmarksurface: 0, nummarksurfaces: 0, ambient_level: [0; 4],
+            contents,
+            visofs: -1,
+            mins: [0; 3],
+            maxs: [0; 3],
+            firstmarksurface: 0,
+            nummarksurfaces: 0,
+            ambient_level: [0; 4],
         };
         bsp.leafs = vec![leaf(CONTENTS_SOLID), leaf(CONTENTS_EMPTY)];
         // Children: a node's number, or -(leaf + 1): -1 solid, -2 empty.
-        let node = |planenum, children| DNode { planenum, children, mins: [0; 3], maxs: [0; 3], firstface: 0, numfaces: 0 };
+        let node =
+            |planenum, children| DNode { planenum, children, mins: [0; 3], maxs: [0; 3], firstface: 0, numfaces: 0 };
         bsp.nodes = vec![node(p, [1, -2]), node(p + 1, [-2, -1])];
         bsp
     }
@@ -1037,8 +1054,15 @@ mod tests {
         let audit = |eye: Vec3, yaw: f32| {
             let cam = Camera { pos: eye, yaw, pitch: 0.0, roll: 0.0, fov_deg: 90.0 };
             let frame = |r: &mut Renderer, time: f32, torches| {
-                let options = RenderOptions { video: VideoCvars { torches, ..VideoCvars::CLASSIC }, ..RenderOptions::default() };
-                let scene = Scene { time, colormap: Some(&colormap), light_styles: &styles, options, ..Scene::new(&bsp, cam, w, h, &palette) };
+                let options =
+                    RenderOptions { video: VideoCvars { torches, ..VideoCvars::CLASSIC }, ..RenderOptions::default() };
+                let scene = Scene {
+                    time,
+                    colormap: Some(&colormap),
+                    light_styles: &styles,
+                    options,
+                    ..Scene::new(&bsp, cam, w, h, &palette)
+                };
                 r.render(&scene).pixels
             };
             let (mut lit, mut id) = (Renderer::new(), Renderer::new());
@@ -1071,7 +1095,9 @@ mod tests {
                     }
                 }
                 let q = at(lo - 2.0);
-                torches.iter().any(|t| dot(sub(t.origin, q), sub(t.origin, q)).sqrt() < t.light && test_line(&bsp, t.origin, q))
+                torches
+                    .iter()
+                    .any(|t| dot(sub(t.origin, q), sub(t.origin, q)).sqrt() < t.light && test_line(&bsp, t.origin, q))
             };
             let flickering: Vec<usize> = (0..w * h).filter(|&p| moved[p]).collect();
             let through = flickering.iter().filter(|&&p| !sees_a_torch(p)).count();
@@ -1161,7 +1187,13 @@ mod tests {
         assert!(bright.iter().chain(&dark).all(|&t| (64..=16320).contains(&t)));
     }
 
-    fn scene_at<'a>(bsp: &'a Bsp, palette: &'a crate::render::Palette, colormap: &'a [u8], time: f32, torches: TorchFlicker) -> Scene<'a> {
+    fn scene_at<'a>(
+        bsp: &'a Bsp,
+        palette: &'a crate::render::Palette,
+        colormap: &'a [u8],
+        time: f32,
+        torches: TorchFlicker,
+    ) -> Scene<'a> {
         let cam = Camera::looking_at([0.0, -200.0, 0.0], [0.0, 100.0, -128.0], 90.0);
         let options = RenderOptions { video: VideoCvars { torches, ..VideoCvars::MODERN }, ..RenderOptions::default() };
         Scene { time, colormap: Some(colormap), options, ..Scene::new(bsp, cam, 160, 100, palette) }
@@ -1223,7 +1255,8 @@ mod tests {
             let set = TorchSet::build(&world, 1);
             let (n, pairs) = set.counts();
             assert_eq!(n, torches, "{map}");
-            let lit: std::collections::BTreeSet<u32> = (0..world.faces.len()).flat_map(|f| set.face(f).lit.iter().map(|l| l.torch)).collect();
+            let lit: std::collections::BTreeSet<u32> =
+                (0..world.faces.len()).flat_map(|f| set.face(f).lit.iter().map(|l| l.torch)).collect();
             assert_eq!(lit.len(), n, "{map}: every torch lights a face");
             assert_eq!(pairs == 0, n == 0, "{map}");
         }
@@ -1231,4 +1264,3 @@ mod tests {
         assert_eq!(start.torches().iter().filter(|t| t.kind == TorchKind::LargeFlame).count(), 10);
     }
 }
-

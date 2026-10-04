@@ -94,13 +94,7 @@ pub fn spawn_temp_entity(
         // (color_start/color_length carried on the temp-entity event), and the
         // same light as the rocket's.
         TE_EXPLOSION2 => {
-            particles.spawn_explosion2(
-                ev.pos,
-                ev.color_start as i32,
-                ev.color_length as i32,
-                time,
-                rng,
-            );
+            particles.spawn_explosion2(ev.pos, ev.color_start as i32, ev.color_length as i32, time, rng);
             dlights.explosion(ev.pos, now);
             Some(TE_EXPLOSION_SOUND)
         }
@@ -188,7 +182,10 @@ mod tests {
             let drawn = dlights.active(2.0);
             assert_eq!(drawn.len(), usize::from(lit), "type {te}: {drawn:?}");
             if let Some(l) = drawn.first() {
-                assert_eq!((l.origin, l.radius, l.minlight, l.decay, l.key()), ([10.0, 20.0, 30.0], 350.0, 0.0, 300.0, 0));
+                assert_eq!(
+                    (l.origin, l.radius, l.minlight, l.decay, l.key()),
+                    ([10.0, 20.0, 30.0], 350.0, 0.0, 300.0, 0)
+                );
                 assert!((l.die - 2.5).abs() < 1e-6, "die = cl.time + 0.5");
             }
         }

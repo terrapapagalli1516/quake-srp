@@ -17,7 +17,7 @@ use quake_rs::render::{self, Camera};
 use quake_rs::wad::Wad2;
 
 use crate::entities::player_start;
-use crate::{read, CmdResult, Out};
+use crate::{CmdResult, Out, read};
 
 pub mod scene;
 pub mod shot;
@@ -55,19 +55,13 @@ pub fn cmd_render(path: &str, out: &str, palette: Option<&str>) -> CmdResult {
     let (img, mode) = match palette {
         Some(pp) => {
             let pbytes = read(pp)?;
-            let pal = render::parse_palette(&pbytes)
-                .ok_or_else(|| format!("bad palette {pp} (need >= 768 bytes)"))?;
+            let pal = render::parse_palette(&pbytes).ok_or_else(|| format!("bad palette {pp} (need >= 768 bytes)"))?;
             (render::Renderer::new().render(&render::Scene::new(&b, cam, 640, 400, &pal)).to_rgb(&pal), "textured")
         }
         None => (render::render_bsp(&b, &cam, 640, 400), "flat-shaded"),
     };
     img.write_ppm(out).map_err(|e| format!("cannot write {out}: {e}"))?;
-    Ok(Out::Text(format!(
-        "rendered {} faces of {path} ({mode}) -> {out} ({}x{} PPM)\n",
-        b.faces.len(),
-        img.w,
-        img.h
-    )))
+    Ok(Out::Text(format!("rendered {} faces of {path} ({mode}) -> {out} ({}x{} PPM)\n", b.faces.len(), img.w, img.h)))
 }
 
 pub fn cmd_render_demo(out: &str) -> CmdResult {
@@ -76,12 +70,7 @@ pub fn cmd_render_demo(out: &str) -> CmdResult {
     let cam = Camera::looking_at([-200.0, -200.0, 40.0], [0.0, 0.0, 0.0], 90.0);
     let img = render::render_bsp(&b, &cam, 640, 400);
     img.write_ppm(out).map_err(|e| format!("cannot write {out}: {e}"))?;
-    Ok(Out::Text(format!(
-        "rendered demo room ({} faces) -> {out} ({}x{} PPM)\n",
-        b.faces.len(),
-        img.w,
-        img.h
-    )))
+    Ok(Out::Text(format!("rendered demo room ({} faces) -> {out} ({}x{} PPM)\n", b.faces.len(), img.w, img.h)))
 }
 
 /// `menu <pak> <out.ppm>`: boot e1m1 from the pak, software-render its POV, draw
@@ -97,8 +86,7 @@ pub fn cmd_menu(pak_path: &str, out: &str) -> CmdResult {
     };
 
     // Palette is required to colour both the world and the menu pics.
-    let palette = render::parse_palette(&read("gfx/palette.lmp")?)
-        .ok_or("bad palette (need >= 768 bytes)")?;
+    let palette = render::parse_palette(&read("gfx/palette.lmp")?).ok_or("bad palette (need >= 768 bytes)")?;
 
     // The POV background: render e1m1 from the player spawn if we can; otherwise
     // fall back to a black 320x200 frame (the menu is the point of this command).
@@ -158,7 +146,8 @@ pub fn cmd_menu(pak_path: &str, out: &str) -> CmdResult {
     // frame is reproducible).
     let mut menu = render::Menu::new();
     menu.open();
-    let settings = quake_rs::settings::Settings::new(quake_rs::settings::Preset::Classic, quake_rs::settings::Machine::default());
+    let settings =
+        quake_rs::settings::Settings::new(quake_rs::settings::Preset::Classic, quake_rs::settings::Machine::default());
     render::draw_menu(&mut img, &menu, &settings, &pics, conchars.as_ref(), render::MenuClock::default());
 
     img.to_rgb(&palette).write_ppm(out).map_err(|e| format!("cannot write {out}: {e}"))?;

@@ -127,12 +127,7 @@ fn read_sprite_frame(r: &mut Reader) -> Result<SpriteFrame> {
 
     let pixels = r.take(size)?.to_vec();
 
-    Ok(SpriteFrame {
-        origin,
-        width,
-        height,
-        pixels,
-    })
+    Ok(SpriteFrame { origin, width, height, pixels })
 }
 
 /// Read a `SPR_GROUP`: `dspritegroup_t { int numframes }`, then `numframes`
@@ -181,11 +176,7 @@ impl Sprite {
         // --- dsprite_t header (36 bytes) ---
         let ident_bytes = r.bytes::<4>()?;
         if ident_bytes != IDSPRITEHEADER {
-            return Err(QError::BadMagic {
-                context: "spr header",
-                found: ident_bytes,
-                expected: "IDSP",
-            });
+            return Err(QError::BadMagic { context: "spr header", found: ident_bytes, expected: "IDSP" });
         }
         // Keep the raw little-endian i32 value of the magic for the struct.
         let ident = i32::from_le_bytes(ident_bytes);
@@ -208,23 +199,11 @@ impl Sprite {
 
         // C: if (numframes < 1) Sys_Error("Invalid # of frames").
         if numframes < 1 {
-            return Err(QError::invalid(format!(
-                "spr has invalid # of frames: {}",
-                numframes
-            )));
+            return Err(QError::invalid(format!("spr has invalid # of frames: {}", numframes)));
         }
 
-        let header = SpriteHeader {
-            ident,
-            version,
-            type_,
-            boundingradius,
-            width,
-            height,
-            numframes,
-            beamlength,
-            synctype,
-        };
+        let header =
+            SpriteHeader { ident, version, type_, boundingradius, width, height, numframes, beamlength, synctype };
 
         // --- frames ---
         // pframetype = (dspriteframetype_t *)(pin + 1); each frame begins with
@@ -238,10 +217,7 @@ impl Sprite {
                 SPR_SINGLE => Frame::Single(read_sprite_frame(&mut r)?),
                 SPR_GROUP => read_sprite_group(&mut r)?,
                 other => {
-                    return Err(QError::invalid(format!(
-                        "spr has unknown frame type: {}",
-                        other
-                    )));
+                    return Err(QError::invalid(format!("spr has unknown frame type: {}", other)));
                 }
             };
             frames.push(frame);
@@ -448,8 +424,7 @@ mod tests {
     fn rejects_unknown_frame_type() {
         let mut buf = synthetic_single_2x2();
         // frametype is the i32 right after the 36-byte header.
-        buf[SpriteHeader::SIZE..SpriteHeader::SIZE + 4]
-            .copy_from_slice(&99i32.to_le_bytes());
+        buf[SpriteHeader::SIZE..SpriteHeader::SIZE + 4].copy_from_slice(&99i32.to_le_bytes());
         assert!(Sprite::parse(&buf).is_err());
     }
 }

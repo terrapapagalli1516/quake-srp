@@ -46,7 +46,7 @@
 
 use std::io::{self, Read, Write};
 
-use quake_rs::client::in_win::{Pad, Rumble, JOY_MAX_AXES};
+use quake_rs::client::in_win::{JOY_MAX_AXES, Pad, Rumble};
 
 /// Input record kinds.
 const IN_TICK: u8 = 1;
@@ -262,29 +262,64 @@ pub(crate) struct AudioCounts {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Msg<'a> {
     /// A frame's bytes: the palette (empty for RGBA) and the pixels.
-    Frame { w: u16, h: u16, format: u8, palette: &'a [u8], pixels: &'a [u8] },
+    Frame {
+        w: u16,
+        h: u16,
+        format: u8,
+        palette: &'a [u8],
+        pixels: &'a [u8],
+    },
     /// A frame left where it lies in the program's shared memory: ring slot
     /// `slot`, its pixels and palette at those addresses.
-    FrameAt { w: u16, h: u16, format: u8, slot: u8, pixels: u32, palette: u32 },
-    Sync { seq: u32, wait: bool },
-    State { flags: u32, menu_screen: i32, pixel_size: u32 },
-    Reply { id: u32, value: f64, text: &'a str },
+    FrameAt {
+        w: u16,
+        h: u16,
+        format: u8,
+        slot: u8,
+        pixels: u32,
+        palette: u32,
+    },
+    Sync {
+        seq: u32,
+        wait: bool,
+    },
+    State {
+        flags: u32,
+        menu_screen: i32,
+        pixel_size: u32,
+    },
+    Reply {
+        id: u32,
+        value: f64,
+        text: &'a str,
+    },
     #[cfg(feature = "bench")]
     Bench(&'a [f64]),
     /// A tick's samples: `pairs` is the 16-bit stereo pairs as little-endian
     /// bytes.
-    Pcm { start: u32, rate: u32, flags: u32, pairs: &'a [u8] },
+    Pcm {
+        start: u32,
+        rate: u32,
+        flags: u32,
+        pairs: &'a [u8],
+    },
     Audio(AudioCounts),
     /// The CD player's state ([`quake_rs::cd_audio::CdState`]): the page
     /// plays the player's file for the track, beside the sound ring.
     Cd(quake_rs::cd_audio::CdState),
     /// A rumble, and whether the pad is read (else a phone vibrates).
-    Rumble { rumble: Rumble, pad: bool },
+    Rumble {
+        rumble: Rumble,
+        pad: bool,
+    },
     /// The game just quit (`Sys_Quit`): `registered` says which end screen
     /// id would show, and `screen` is that file's 4000 raw bytes when the
     /// pak had it ([`crate::sys::end_screen`]) — the host draws it with no
     /// extra round trip. The program ends right after this message.
-    Quit { registered: bool, screen: Option<&'a [u8]> },
+    Quit {
+        registered: bool,
+        screen: Option<&'a [u8]>,
+    },
 }
 
 /// Little-endian field writer for a message's fixed part.

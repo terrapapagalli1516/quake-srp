@@ -90,7 +90,14 @@ pub fn cmd_sound(pak_path: &str, demo: &str, out_path: &str, rest: &[String]) ->
     mixer.run(&pak, &calls);
     let mut starts = count_starts(&calls);
 
-    let vid = Vid { width: 320, height: 200, display_aspect: 4.0 / 3.0, persp_span: render::PerspSpan::Spans16, video: render::VideoCvars::CLASSIC, mip: render::MipCvars::DEFAULT };
+    let vid = Vid {
+        width: 320,
+        height: 200,
+        display_aspect: 4.0 / 3.0,
+        persp_span: render::PerspSpan::Spans16,
+        video: render::VideoCvars::CLASSIC,
+        mip: render::MipCvars::DEFAULT,
+    };
     let (mut realtime, mut oldrealtime) = (0.0f64, 0.0f64);
     let mut pcm: Vec<i16> = Vec::new();
     let mut trace = String::new();
@@ -305,8 +312,12 @@ fn walk_log_calls(log: &mut String, frame: u32, realtime: f64, w: &Walk, calls: 
                     let _ = writeln!(
                         log,
                         "start {} {} {} {} {x:.3} {y:.3} {z:.3} {} {}",
-                        e.entity, class(e.entity), e.channel, e.sample,
-                        byte(e.volume, 255.0), byte(e.attenuation, 64.0)
+                        e.entity,
+                        class(e.entity),
+                        e.channel,
+                        e.sample,
+                        byte(e.volume, 255.0),
+                        byte(e.attenuation, 64.0)
                     );
                 }
             }
@@ -327,7 +338,9 @@ fn walk_log_calls(log: &mut String, frame: u32, realtime: f64, w: &Walk, calls: 
                     let _ = writeln!(
                         log,
                         "static {} {x:.3} {y:.3} {z:.3} {} {}",
-                        s.sample, byte(s.volume, 255.0), byte(s.attenuation, 64.0)
+                        s.sample,
+                        byte(s.volume, 255.0),
+                        byte(s.attenuation, 64.0)
                     );
                 }
             }
@@ -337,7 +350,13 @@ fn walk_log_calls(log: &mut String, frame: u32, realtime: f64, w: &Walk, calls: 
 }
 
 /// `quaketool sndwalk`: see the module note.
-pub fn cmd_sndwalk(pak_path: &str, map: &str, script_path: &str, log_path: &str, rest: &[String]) -> Result<String, String> {
+pub fn cmd_sndwalk(
+    pak_path: &str,
+    map: &str,
+    script_path: &str,
+    log_path: &str,
+    rest: &[String],
+) -> Result<String, String> {
     let mut wav_path = None;
     let mut i = 0;
     while i < rest.len() {
@@ -360,7 +379,14 @@ pub fn cmd_sndwalk(pak_path: &str, map: &str, script_path: &str, log_path: &str,
     let mut w = host_cmd::build_walk_map(pak.clone(), &map_file, &rand, &mut calls, settings.cvars.max_edicts as usize)
         .ok_or_else(|| format!("{map_file} would not load"))?;
     w.viewsize = settings.cvars.viewsize;
-    let vid = Vid { width: 320, height: 200, display_aspect: 4.0 / 3.0, persp_span: render::PerspSpan::Spans16, video: render::VideoCvars::CLASSIC, mip: render::MipCvars::DEFAULT };
+    let vid = Vid {
+        width: 320,
+        height: 200,
+        display_aspect: 4.0 / 3.0,
+        persp_span: render::PerspSpan::Spans16,
+        video: render::VideoCvars::CLASSIC,
+        mip: render::MipCvars::DEFAULT,
+    };
     // id's mixer at id's rate, for --wav.
     let mut mixer = Mixer::new(&pak, 11025, Fixes::NONE);
     let rate = mixer.rate();
@@ -411,7 +437,11 @@ pub fn cmd_sndwalk(pak_path: &str, map: &str, script_path: &str, log_path: &str,
     if let Some(path) = &wav_path {
         std::fs::write(path, wav_bytes(&pcm, rate)).map_err(|e| format!("cannot write {path}: {e}"))?;
     }
-    Ok(format!("{map}: {frames} frames walked, {starts} S_StartSound, ended on {} -> {log_path}\n", w.map_name, frames = frame))
+    Ok(format!(
+        "{map}: {frames} frames walked, {starts} S_StartSound, ended on {} -> {log_path}\n",
+        w.map_name,
+        frames = frame
+    ))
 }
 
 fn num<T: std::str::FromStr>(w: &[&str], i: usize) -> Result<T, String> {

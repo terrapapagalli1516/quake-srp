@@ -162,7 +162,8 @@ pub fn calc_refdef(vid_w: usize, vid_h: usize, viewsize: f32, intermission: bool
     // allows, at its top, the bar's rows (and an odd row) under it.
     let stands_on_bar = sbar == SbarLayout::Overlay && sb_lines > 0 && viewsize >= 100.0;
     let bottom = vrect.y + vrect.h;
-    let below = (stands_on_bar && bottom < vid_h).then_some(ViewRect { x: vrect.x, y: bottom, w: vrect.w, h: vid_h - bottom });
+    let below =
+        (stands_on_bar && bottom < vid_h).then_some(ViewRect { x: vrect.x, y: bottom, w: vrect.w, h: vid_h - bottom });
     Refdef { vrect, sb_lines, below }
 }
 
@@ -183,11 +184,7 @@ pub fn status_bar_rows(vid_w: usize, vid_h: usize, viewsize: f32, intermission: 
 /// (the `lineadj` R_SetVrect keeps the view above: `sb_lines` scaled like the
 /// 2-D layer, see [`calc_refdef`]).
 fn status_lines(vid_w: usize, vid_h: usize, viewsize: f32, intermission: bool) -> (f32, i32, i64) {
-    let viewsize = if viewsize.is_finite() {
-        viewsize.clamp(VIEWSIZE_MIN, VIEWSIZE_MAX)
-    } else {
-        VIEWSIZE_DEFAULT
-    };
+    let viewsize = if viewsize.is_finite() { viewsize.clamp(VIEWSIZE_MIN, VIEWSIZE_MAX) } else { VIEWSIZE_DEFAULT };
     // "intermission is always full screen"
     let size = if intermission { 120.0 } else { viewsize };
     let sb_lines = if size >= 120.0 {
@@ -295,12 +292,7 @@ pub fn warp_vrect(vid_w: usize, vid_h: usize, viewsize: f32, intermission: bool,
 /// The tile only goes where the view does not — the four bands around it —
 /// so, the view drawn, every screen pixel is written exactly once: the
 /// screen is a spare frame buffer left uncleared (`Image::reused_uncleared`).
-pub fn screen_with_backtile(
-    vrect: ViewRect,
-    vid_w: usize,
-    vid_h: usize,
-    backtile: Option<&crate::wad::Qpic>,
-) -> Image {
+pub fn screen_with_backtile(vrect: ViewRect, vid_w: usize, vid_h: usize, backtile: Option<&crate::wad::Qpic>) -> Image {
     let mut img = Image::reused_uncleared(vid_w, vid_h);
     // The rectangle the view covers, clipped to the screen: [x0, x1) x [y0, y1).
     let x0 = vrect.x.min(vid_w);
@@ -362,12 +354,7 @@ pub(crate) fn center_string_top(vid_h: i32) -> i32 {
 /// lines truncate and skip to the next `\n`), the block starts at
 /// `vid.height*0.35` for <= 4 lines else 48, and every line centers
 /// independently — all verbatim from the C.
-pub fn draw_center_string_revealed(
-    image: &mut Image,
-    conchars: &crate::wad::Qpic,
-    text: &str,
-    remaining: i32,
-) {
+pub fn draw_center_string_revealed(image: &mut Image, conchars: &crate::wad::Qpic, text: &str, remaining: i32) {
     if image.w == 0 || image.h == 0 {
         return;
     }
@@ -447,11 +434,7 @@ pub fn finale_text_fully_revealed(text: &str, elapsed: f32) -> bool {
 
 /// Draw a `centerprint` message: `SCR_DrawCenterString` outside the finale
 /// (`remaining = 9999`, the whole string) — [`draw_center_string_revealed`].
-pub fn draw_centerprint(
-    image: &mut Image,
-    conchars: &crate::wad::Qpic,
-    text: &str,
-) {
+pub fn draw_centerprint(image: &mut Image, conchars: &crate::wad::Qpic, text: &str) {
     draw_center_string_revealed(image, conchars, text, -1);
 }
 
@@ -487,11 +470,7 @@ pub fn draw_fps(image: &mut Image, conchars: &crate::wad::Qpic, fps: u32) {
 /// row's corner (`show_fps`), the text row under it — so neither covers the
 /// other. Classic never shows the readout, so its notify lines are id's.
 pub fn notify_top(show_fps: bool) -> i32 {
-    if show_fps {
-        FPS_POS.1 + 8
-    } else {
-        0
-    }
+    if show_fps { FPS_POS.1 + 8 } else { 0 }
 }
 
 // ---------------------------------------------------------------------------
@@ -1032,7 +1011,10 @@ mod tests {
         // 1920x1080: the bar's 1600 columns from 160, from row 840; the two
         // corners, nothing between the view and the bar.
         let below = vr(0, 840, 1920, 240);
-        assert_eq!(parts(r(Some(below)), Some(vr(160, 840, 1600, 240))), [vr(0, 840, 160, 240), vr(1760, 840, 160, 240)]);
+        assert_eq!(
+            parts(r(Some(below)), Some(vr(160, 840, 1600, 240))),
+            [vr(0, 840, 160, 240), vr(1760, 840, 160, 240)]
+        );
         // The wide frame: the view's columns 1..1313, the bar's 338..978 from row
         // 440 (its 2-D screen is 268 rows, 536 pixels: the last is off the
         // frame), the view's bottom at 438: the corners and two rows above
@@ -1086,7 +1068,11 @@ mod tests {
         // The hires extra has no warp buffer: the view rectangle, at any size.
         for (w, h) in [(320, 200), (960, 600), (1920, 1080), (3840, 2160)] {
             for vs in [50.0, 100.0, 120.0] {
-                assert_eq!(warp_vrect(w, h, vs, false, true), calc_refdef(w, h, vs, false, Classic).vrect, "{w}x{h} @ {vs}");
+                assert_eq!(
+                    warp_vrect(w, h, vs, false, true),
+                    calc_refdef(w, h, vs, false, Classic).vrect,
+                    "{w}x{h} @ {vs}"
+                );
             }
         }
     }
@@ -1148,14 +1134,7 @@ mod tests {
                     crate::render::recycle_image(Image::new(w, h + 7, 1));
                 }
                 let want = reference(&view, vrect, w, h, t);
-                let got = compose_view(
-                    Image { w: view.w, h: view.h, pixels: view.pixels.clone() },
-                    vrect,
-                    w,
-                    h,
-                    t,
-                    3,
-                );
+                let got = compose_view(Image { w: view.w, h: view.h, pixels: view.pixels.clone() }, vrect, w, h, t, 3);
                 assert_eq!((got.w, got.h), (w, h));
                 assert!(got.pixels == want, "{w}x{h} {vrect:?} tile {}", t.is_some());
             }
@@ -1242,16 +1221,18 @@ mod tests {
         // round it.)
         assert_eq!((arms.len(), outline.len()), (4 * 4, 4 * (3 * 6 - 4) - 4));
         let (cx, cy) = (657, 219);
-        let mut expect: Vec<(usize, usize)> = (2..=5)
-            .flat_map(|d| [(cx + d, cy), (cx - d, cy), (cx, cy + d), (cx, cy - d)])
-            .collect();
+        let mut expect: Vec<(usize, usize)> =
+            (2..=5).flat_map(|d| [(cx + d, cy), (cx - d, cy), (cx, cy + d), (cx, cy - d)]).collect();
         let mut got = arms.clone();
         expect.sort_unstable();
         got.sort_unstable();
         assert_eq!(got, expect, "the four arms round ({cx}, {cy})");
         assert!(!arms.contains(&(cx, cy)) && !outline.contains(&(cx, cy)), "the centre pixel is the view's");
         for d in [1, 6] {
-            assert!(outline.contains(&(cx + d, cy)) && outline.contains(&(cx, cy - d)), "the arms' ends outlined at {d}");
+            assert!(
+                outline.contains(&(cx + d, cy)) && outline.contains(&(cx, cy - d)),
+                "the arms' ends outlined at {d}"
+            );
         }
 
         // An odd thickness on an even view: centred on V_RenderView's pixel,

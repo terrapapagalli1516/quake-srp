@@ -9,7 +9,7 @@
 use quake_rs::progs::OFS_PARM0;
 use quake_rs::render;
 
-use crate::app::{build_walk, build_walk_map, Walk};
+use crate::app::{Walk, build_walk, build_walk_map};
 use crate::cl_walk::step_walk;
 
 /// `PF_setorigin` through the engine's own builtin (origin + SV_LinkEdict), so
@@ -61,10 +61,9 @@ fn census_teleport_turns_the_view_to_the_destination() {
         step(&mut w, 0.1);
     }
     // The first always-armed teleporter (no targetname) and its destination.
-    let tele = find(&w, |w, e| {
-        class(w, e) == "trigger_teleport" && w.server.vm.ent_get_string(e, "targetname").is_empty()
-    })
-    .expect("start has a trigger_teleport");
+    let tele =
+        find(&w, |w, e| class(w, e) == "trigger_teleport" && w.server.vm.ent_get_string(e, "targetname").is_empty())
+            .expect("start has a trigger_teleport");
     let target = w.server.vm.ent_get_string(tele, "target");
     let dest = find(&w, |w, e| {
         class(w, e) == "info_teleport_destination" && w.server.vm.ent_get_string(e, "targetname") == target
@@ -269,10 +268,7 @@ fn census_weapon_switch_survives_the_cooldown() {
     w.in_attack = false;
     step(&mut w, 0.05);
     let p = w.player;
-    assert!(
-        w.server.time() < w.server.vm.ent_get_float(p, "attack_finished"),
-        "the launcher is cooling down"
-    );
+    assert!(w.server.time() < w.server.vm.ent_get_float(p, "attack_finished"), "the launcher is cooling down");
     w.next_impulse = 2; // shotgun, pressed during the cooldown
     step(&mut w, 0.05);
     for _ in 0..20 {
@@ -366,7 +362,7 @@ fn census_client_think_runs_before_player_prethink() {
 /// resumes ("player unpaused the game").
 #[test]
 fn census_pause_stops_the_game_and_shows_the_plaque() {
-    use crate::app::{boot, APP};
+    use crate::app::{APP, boot};
     use crate::common::pak;
     use crate::console::console_toggle;
     use crate::host::step as host_step;
@@ -436,8 +432,7 @@ fn census_pause_stops_the_game_and_shows_the_plaque() {
     assert!(s1.0 > s0.0 && s1.2 > s0.2, "the clocks run again");
     assert!(s1.1 != s0.1, "+forward moves the player again");
     key_up(i32::from(quake_rs::keys::K_UPARROW));
-    let text: Vec<String> =
-        APP.with(|c| c.borrow().as_ref().unwrap().console.lines().map(str::to_string).collect());
+    let text: Vec<String> = APP.with(|c| c.borrow().as_ref().unwrap().console.lines().map(str::to_string).collect());
     let said: Vec<&String> = text.iter().filter(|l| l.contains("the game")).collect();
     assert_eq!(said, ["player paused the game", "player unpaused the game"], "SV_BroadcastPrintf");
 }

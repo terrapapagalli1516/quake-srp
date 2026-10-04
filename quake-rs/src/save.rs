@@ -51,8 +51,8 @@ use crate::error::{QError, Result};
 use crate::progs::{EType, Progs};
 use crate::qrand::QRand;
 use crate::server::{
-    ed_new_string, link_edict, parse_float, parse_int, parse_vector, Server, Solid, StaticEntity,
-    Tokenizer, MAX_LIGHTSTYLES, NUM_SPAWN_PARMS,
+    MAX_LIGHTSTYLES, NUM_SPAWN_PARMS, Server, Solid, StaticEntity, Tokenizer, ed_new_string, link_edict, parse_float,
+    parse_int, parse_vector,
 };
 use crate::vm::Vm;
 
@@ -132,12 +132,9 @@ fn ugly_value_string(vm: &Vm, etype: EType, c: [u32; 3]) -> String {
         }
         EType::Void => "void".to_string(),
         EType::Float => fmt_f(f32::from_bits(c[0])),
-        EType::Vector => format!(
-            "{} {} {}",
-            fmt_f(f32::from_bits(c[0])),
-            fmt_f(f32::from_bits(c[1])),
-            fmt_f(f32::from_bits(c[2]))
-        ),
+        EType::Vector => {
+            format!("{} {} {}", fmt_f(f32::from_bits(c[0])), fmt_f(f32::from_bits(c[1])), fmt_f(f32::from_bits(c[2])))
+        }
         // The C's default arm: pointers (and anything else) print "bad type N".
         EType::Pointer => "bad type 7".to_string(),
     }
@@ -159,11 +156,7 @@ fn write_globals(vm: &Vm, out: &mut String) {
         let name = vm.progs().string(def.s_name);
         let ofs = def.ofs as usize;
         let cell = vm.gi(ofs) as u32;
-        out.push_str(&format!(
-            "\"{}\" \"{}\"\n",
-            name,
-            ugly_value_string(vm, etype, [cell, 0, 0])
-        ));
+        out.push_str(&format!("\"{}\" \"{}\"\n", name, ugly_value_string(vm, etype, [cell, 0, 0])));
     }
     out.push_str("}\n");
 }
@@ -203,11 +196,7 @@ fn write_edict(vm: &Vm, e: i32, out: &mut String) {
             continue;
         }
         let name = name.to_string(); // end the progs borrow before formatting
-        out.push_str(&format!(
-            "\"{}\" \"{}\"\n",
-            name,
-            ugly_value_string(vm, etype, cells)
-        ));
+        out.push_str(&format!("\"{}\" \"{}\"\n", name, ugly_value_string(vm, etype, cells)));
     }
     out.push_str("}\n");
 }
@@ -290,16 +279,7 @@ pub fn parse_savegame(text: &str) -> Result<SaveGame> {
         lightstyles.push(next_line("lightstyles")?.trim().to_string());
     }
 
-    Ok(SaveGame {
-        version,
-        comment,
-        spawn_parms,
-        skill,
-        map_name,
-        time,
-        lightstyles,
-        blocks_ofs: pos,
-    })
+    Ok(SaveGame { version, comment, spawn_parms, skill, map_name, time, lightstyles, blocks_ofs: pos })
 }
 
 /// Which value table an epair writes into (`ED_ParseEpair`'s `void *base`):
@@ -380,8 +360,7 @@ fn parse_globals_block(vm: &mut Vm, tok: &mut Tokenizer) -> Result<()> {
             return Err(QError::invalid("ED_ParseEntity: closing brace without data"));
         }
         // ED_FindGlobal; copy the def out so the progs borrow ends.
-        let Some((ofs, etype)) = vm.progs().find_global(&key).map(|d| (d.ofs as usize, d.etype()))
-        else {
+        let Some((ofs, etype)) = vm.progs().find_global(&key).map(|d| (d.ofs as usize, d.etype())) else {
             vm.print(&format!("'{key}' is not a global\n"));
             continue;
         };
@@ -436,20 +415,12 @@ fn parse_edict_block(vm: &mut Vm, tok: &mut Tokenizer, ent: i32) -> Result<bool>
             continue;
         }
 
-        let Some((ofs, etype)) = vm
-            .progs()
-            .find_field(&keyname)
-            .map(|d| (d.ofs as usize, d.etype()))
-        else {
+        let Some((ofs, etype)) = vm.progs().find_field(&keyname).map(|d| (d.ofs as usize, d.etype())) else {
             vm.print(&format!("'{keyname}' is not a field\n"));
             continue;
         };
 
-        let value = if anglehack {
-            format!("0 {value} 0")
-        } else {
-            value
-        };
+        let value = if anglehack { format!("0 {value} 0") } else { value };
         let _ = parse_epair(vm, &EpairBase::Edict(ent), ofs, etype, &value);
     }
     Ok(init)
@@ -545,10 +516,7 @@ impl Server {
     ) -> Result<Server> {
         let sg = parse_savegame(text)?;
         if sg.version != SAVEGAME_VERSION {
-            return Err(QError::invalid(format!(
-                "Savegame is version {}, not {}",
-                sg.version, SAVEGAME_VERSION
-            )));
+            return Err(QError::invalid(format!("Savegame is version {}, not {}", sg.version, SAVEGAME_VERSION)));
         }
 
         // Everything below builds a new server, with its own cvars, light
@@ -594,9 +562,7 @@ impl Server {
                 // see Server::load_savegame).
                 let e = entnum as usize;
                 if e >= server.vm.max_edicts() {
-                    return Err(QError::invalid(format!(
-                        "savegame has too many edicts (EDICT_NUM: bad number {e})"
-                    )));
+                    return Err(QError::invalid(format!("savegame has too many edicts (EDICT_NUM: bad number {e})")));
                 }
                 // memset (&ent->v, 0, progs->entityfields * 4); ent->free = false;
                 server.vm.load_edict(e);
@@ -637,8 +603,7 @@ impl Server {
         // CL_EstablishConnection/Host_Reconnect_f path runs Host_Spawn_f with
         // sv.loadgame set: no entrance script, no signon settle frames.
         let vm = &server.vm;
-        server.player =
-            vm.live_edicts().find(|&ent| ent > 0 && vm.ent_str(ent, vm.fo().classname) == "player");
+        server.player = vm.live_edicts().find(|&ent| ent > 0 && vm.ent_str(ent, vm.fo().classname) == "player");
         if server.player.is_none() {
             return Err(QError::invalid("savegame has no player edict"));
         }
@@ -689,7 +654,7 @@ fn free_statics_an_old_save_kept(server: &mut Server) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::progs::{Def, Function, MAX_PARMS, PROG_VERSION, DEF_SAVEGLOBAL};
+    use crate::progs::{DEF_SAVEGLOBAL, Def, Function, MAX_PARMS, PROG_VERSION};
     use crate::vm::MAX_EDICTS;
 
     // ---- synthetic progs.dat builder (mirrors vm.rs's test serializer) ----
@@ -713,15 +678,7 @@ mod tests {
     }
     fn ser_func(f: &Function) -> Vec<u8> {
         let mut v = Vec::new();
-        for x in [
-            f.first_statement,
-            f.parm_start,
-            f.locals,
-            f.profile,
-            f.s_name,
-            f.s_file,
-            f.numparms,
-        ] {
+        for x in [f.first_statement, f.parm_start, f.locals, f.profile, f.s_name, f.s_file, f.numparms] {
             v.extend_from_slice(&x.to_le_bytes());
         }
         v.extend_from_slice(&f.parm_size);
@@ -948,10 +905,7 @@ mod tests {
         assert_eq!(tok.next_token().as_deref(), Some("{"));
         parse_globals_block(&mut s2.vm, &mut tok).expect("globals parse");
         assert_eq!(s2.vm.gget_float("serverflags"), 5.0);
-        assert_eq!(
-            s2.vm.get_string(s2.vm.gget_int("gamename")),
-            "a name with spaces"
-        );
+        assert_eq!(s2.vm.get_string(s2.vm.gget_int("gamename")), "a name with spaces");
         assert_eq!(s2.vm.gget_int("lastboss"), 7);
         assert_eq!(s2.vm.gget_float("scratch"), 0.0);
     }
@@ -1050,8 +1004,8 @@ mod tests {
         assert_eq!(sg.lightstyles[5], "jklmnopqrst");
         assert_eq!(sg.lightstyles[1], "m", "unset style writes the C's \"m\"");
 
-        let s2 = Server::load_savegame(empty_bsp(), rich_progs(), None, &Rc::default(), &text, MAX_EDICTS)
-            .expect("loads");
+        let s2 =
+            Server::load_savegame(empty_bsp(), rich_progs(), None, &Rc::default(), &text, MAX_EDICTS).expect("loads");
         assert_eq!(s2.skill(), 2);
         assert_eq!(s2.time(), 33.5);
         assert_eq!(s2.client_spawn_parms[3], 25.0);
@@ -1146,11 +1100,7 @@ mod tests {
         // Inject an unknown global and an unknown field into the blocks.
         let blocks = &good[sg.blocks_ofs..];
         let blocks = blocks.replacen('{', "{\n\"bogus_global\" \"1\"", 1);
-        let blocks = blocks.replacen(
-            "\"classname\" \"player\"",
-            "\"bogus_field\" \"2\" \"classname\" \"player\"",
-            1,
-        );
+        let blocks = blocks.replacen("\"classname\" \"player\"", "\"bogus_field\" \"2\" \"classname\" \"player\"", 1);
         let doctored = format!("{}{}", &good[..sg.blocks_ofs], blocks);
         let s2 = Server::load_savegame(empty_bsp(), rich_progs(), None, &Rc::default(), &doctored, MAX_EDICTS)
             .expect("unknown names degrade, not abort");
@@ -1198,7 +1148,8 @@ mod tests {
         assert_eq!(lines[20], "1234.567890", "sv.time is %f of the double");
         // Host_Loadgame_f reads it with fscanf("%f") into `float time`, and
         // `sv.time = time`: the clock restarts from that float.
-        let s2 = Server::load_savegame(empty_bsp(), rich_progs(), None, &Rc::default(), &text, MAX_EDICTS).expect("loads");
+        let s2 =
+            Server::load_savegame(empty_bsp(), rich_progs(), None, &Rc::default(), &text, MAX_EDICTS).expect("loads");
         assert_eq!(s2.sv_time(), f64::from(saved as f32));
         assert_eq!(s2.vm.gget_float("time"), saved as f32, "the QC global is its float");
         // 64 lightstyles then the globals block opener.

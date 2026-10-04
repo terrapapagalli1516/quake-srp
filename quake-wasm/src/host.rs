@@ -5,9 +5,9 @@
 //! per-channel ramps the finished frame is packed through into the presented
 //! framebuffer (`VID_ShiftPalette`).
 
-use quake_rs::render::{self, build_gamma_table};
 use quake_rs::client::cl_input::derive_key_move;
-use quake_rs::client::host::{host_filter_time, host_filter_time_display, host_filter_time_uncapped, FrameCap};
+use quake_rs::client::host::{FrameCap, host_filter_time, host_filter_time_display, host_filter_time_uncapped};
+use quake_rs::render::{self, build_gamma_table};
 use quake_rs::stepping::Stepping;
 
 use crate::app::ensure_app;
@@ -104,7 +104,6 @@ impl ShowFps {
         self.shown
     }
 }
-
 
 /// `SCR_SetUpToDrawConsole` + `SCR_DrawConsole`: slide the console (`dt`,
 /// `host_frametime`) and draw it over `img` at its height.
@@ -203,8 +202,7 @@ pub(crate) fn step(dt: f32) -> i32 {
         // Keep the menu's M_Menu_Save_f gate current: a local single-player game
         // is running when walk mode is live and not in intermission (`sv.active
         // && !cl.intermission && svs.maxclients == 1` — always 1 client here).
-        let game_active =
-            a.mode == 0 && a.walk.as_ref().map(|wk| wk.intermission == 0).unwrap_or(false);
+        let game_active = a.mode == 0 && a.walk.as_ref().map(|wk| wk.intermission == 0).unwrap_or(false);
         a.menu.set_game_active(game_active);
         // sv.active (New Game asks "Are you sure?" while a game runs).
         a.menu.set_server_active(a.mode == 0 && a.walk.is_some());
@@ -302,9 +300,7 @@ pub(crate) fn step(dt: f32) -> i32 {
             None if !draw => (None, Vec::new()),
             // Disconnected (con_forcedup): no view — V_RenderView draws
             // nothing and the console covers the screen, the menu over it.
-            None if a.disconnected && a.palette.is_some() => {
-                (Some(render::Image::new(w, h, 0)), Vec::new())
-            }
+            None if a.disconnected && a.palette.is_some() => (Some(render::Image::new(w, h, 0)), Vec::new()),
             None => (None, Vec::new()),
         };
         // Con_Print: the frame's prints (svc_print) reach the console
@@ -454,21 +450,17 @@ pub(crate) fn step(dt: f32) -> i32 {
 /// The renderer of the game that draws this frame: the demo's in mode 1,
 /// else the walk's.
 fn active_renderer(a: &mut crate::app::App) -> Option<&mut render::Renderer> {
-    if a.mode == 1 {
-        a.demo.as_mut().map(|d| &mut d.renderer)
-    } else {
-        a.walk.as_mut().map(|w| &mut w.renderer)
-    }
+    if a.mode == 1 { a.demo.as_mut().map(|d| &mut d.renderer) } else { a.walk.as_mut().map(|w| &mut w.renderer) }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use quake_rs::client::host::{HOST_FRAMETIME_MAX, HOST_FRAMETIME_MIN};
-    use crate::app::{boot, APP};
+    use crate::app::{APP, boot};
     use crate::console::console_toggle;
     use crate::menu::{menu_cancel, menu_down, menu_left, menu_right, menu_select, menu_visible};
     use crate::test_util::*;
+    use quake_rs::client::host::{HOST_FRAMETIME_MAX, HOST_FRAMETIME_MIN};
 
     // -- Host_FilterTime: realtime vs host_time ---------------------------------
 
@@ -597,12 +589,18 @@ mod tests {
         step(0.0);
         let stepping = || APP.with(|c| c.borrow().as_ref().unwrap().walk.as_ref().unwrap().stepping);
         assert_eq!(stepping(), Stepping::Classic);
-        assert_eq!((video_cvars().fov_mode, video_cvars().hires, quake_rs::draw::scaled_2d()), (FovMode::Classic, false, false));
+        assert_eq!(
+            (video_cvars().fov_mode, video_cvars().hires, quake_rs::draw::scaled_2d()),
+            (FovMode::Classic, false, false)
+        );
         use_slop();
         crate::vid::set_window(1600, 1000);
         step(0.0);
         assert_eq!(stepping(), Stepping::Uncapped);
-        assert_eq!((video_cvars().fov_mode, video_cvars().hires, quake_rs::draw::scaled_2d()), (FovMode::HorPlus, true, true));
+        assert_eq!(
+            (video_cvars().fov_mode, video_cvars().hires, quake_rs::draw::scaled_2d()),
+            (FovMode::HorPlus, true, true)
+        );
         let (w, h) = APP.with(|c| {
             let b = c.borrow();
             (b.as_ref().unwrap().render_w, b.as_ref().unwrap().render_h)
@@ -632,7 +630,9 @@ mod tests {
         let reach = size.thickness / 2 + size.gap + size.arm + 1;
         assert_eq!(reach, 11);
         assert!(
-            differing.iter().all(|&(x, y)| (cx - reach..cx + reach).contains(&x) && (cy - reach..cy + reach).contains(&y)),
+            differing
+                .iter()
+                .all(|&(x, y)| (cx - reach..cx + reach).contains(&x) && (cy - reach..cy + reach).contains(&y)),
             "only the cross, about the view's centre {cx},{cy}: {:?}",
             &differing[..differing.len().min(8)]
         );
@@ -732,11 +732,22 @@ mod tests {
                 let (bsp, water) = (&wk.bsp, quake_rs::bsp::CONTENTS_WATER);
                 let wet = |p: [f32; 3]| quake_rs::world::point_contents(bsp, p) == water;
                 let deep = |p: [f32; 3]| {
-                    wet(p) && (0..3).all(|k| [-24.0, 24.0].iter().all(|d| wet({ let mut q = p; q[k] += d; q })))
+                    wet(p)
+                        && (0..3).all(|k| {
+                            [-24.0, 24.0].iter().all(|d| {
+                                wet({
+                                    let mut q = p;
+                                    q[k] += d;
+                                    q
+                                })
+                            })
+                        })
                 };
                 let eye = (bsp.leafs.iter().filter(|l| l.contents == water))
                     .flat_map(|l| {
-                        let at = |k: usize, i: usize| l.mins[k] as f32 + (l.maxs[k] - l.mins[k]) as f32 * (i as f32 + 0.5) / 7.0;
+                        let at = |k: usize, i: usize| {
+                            l.mins[k] as f32 + (l.maxs[k] - l.mins[k]) as f32 * (i as f32 + 0.5) / 7.0
+                        };
                         (0..343).map(move |c| [at(0, c % 7), at(1, c / 7 % 7), at(2, c / 49)])
                     })
                     .find(|&p| deep(p))
@@ -752,7 +763,8 @@ mod tests {
             }
             // Each at id's 100 (the bar and its inventory strip) and at the
             // slop preset's own 110 (the bar alone).
-            for (ww, wh, viewsize) in [(1920, 1080, 100.0), (1920, 1080, 110.0), (1315, 535, 100.0), (1315, 535, 110.0)] {
+            for (ww, wh, viewsize) in [(1920, 1080, 100.0), (1920, 1080, 110.0), (1315, 535, 100.0), (1315, 535, 110.0)]
+            {
                 crate::host_cmd::execute_console_command(&format!("viewsize {viewsize}"));
                 crate::vid::set_window(ww, wh);
                 step(0.0);
@@ -782,7 +794,10 @@ mod tests {
                         .flat_map(|y| (part.x..part.x + part.w).map(move |x| (x, y)))
                         .filter(|&(x, y)| px(&over, x, y) != px(&id, x, y))
                         .count();
-                    assert!(differs * 2 > part.w * part.h, "{what}: {part:?} shows the world, not the backtile ({differs} differ)");
+                    assert!(
+                        differs * 2 > part.w * part.h,
+                        "{what}: {part:?} shows the world, not the backtile ({differs} differ)"
+                    );
                 }
                 // Left of the view and right of it (id's even widths leave a
                 // column or two in the wide frame): the backtile, as id's.
@@ -886,10 +901,7 @@ mod tests {
         let bright = grab();
         assert_ne!(base, bright, "gamma 0.95 changes the presented frame");
         // No pixel got darker (the curve brightens everything below white).
-        assert!(
-            base.iter().zip(bright.iter()).all(|(a, b)| b >= a),
-            "gamma < 1 must only brighten"
-        );
+        assert!(base.iter().zip(bright.iter()).all(|(a, b)| b >= a), "gamma < 1 must only brighten");
 
         // Back to 1.0: the identity special case restores the EXACT bytes.
         menu_cancel(); // reopen: Main, still on "Options" (m_main_cursor)

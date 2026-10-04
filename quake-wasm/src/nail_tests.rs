@@ -4,8 +4,8 @@
 
 use std::rc::Rc;
 
-use quake_rs::client::nailbarrels::{NailBarrels, BARREL_MUZZLE, NAIL, NAILGUN};
-use quake_rs::client::{cl_main, host::host_filter_time_display, host_cmd, Vid, Walk};
+use quake_rs::client::nailbarrels::{BARREL_MUZZLE, NAIL, NAILGUN, NailBarrels};
+use quake_rs::client::{Vid, Walk, cl_main, host::host_filter_time_display, host_cmd};
 use quake_rs::mdl::{Frame, Mdl};
 use quake_rs::qrand::QRand;
 use quake_rs::render::{self, FovMode, SbarLayout, VideoCvars};
@@ -23,14 +23,20 @@ fn the_nailguns_barrels_end_where_nailbarrels_says() {
             frame.verts.iter().map(|t| std::array::from_fn(|i| f32::from(t.v[i]) * scale[i] + origin[i])).collect();
         for left in [true, false] {
             // Each barrel's front face: its vertices within 1.5 units of x.
-            let face: Vec<&[f32; 3]> = verts.iter().filter(|v| (v[1] > 0.0) == left && (v[0] - x).abs() <= 1.5).collect();
+            let face: Vec<&[f32; 3]> =
+                verts.iter().filter(|v| (v[1] > 0.0) == left && (v[0] - x).abs() <= 1.5).collect();
             assert!(face.len() >= 8, "frame {f}: a front face on each side");
             let mid = |k: usize| {
                 let (lo, hi) = face.iter().fold((f32::MAX, f32::MIN), |(lo, hi), v| (lo.min(v[k]), hi.max(v[k])));
                 (lo + hi) / 2.0
             };
             let side = if left { y } else { -y };
-            assert!((mid(1) - side).abs() < 0.2 && (mid(2) - z).abs() < 0.2, "frame {f}: centred at {}, {}", mid(1), mid(2));
+            assert!(
+                (mid(1) - side).abs() < 0.2 && (mid(2) - z).abs() < 0.2,
+                "frame {f}: centred at {}, {}",
+                mid(1),
+                mid(2)
+            );
             // No part of the gun reaches past the face, but the firing
             // frames' muzzle flash, which points along the barrel's axis.
             for v in verts.iter().filter(|v| (v[1] > 0.0) == left && v[0] > x + 1.5) {
@@ -64,7 +70,12 @@ fn burst(look: Look, nails: NailBarrels) -> Vec<(f32, usize, Option<bool>)> {
 }
 
 /// [`burst`] with the weapon `impulse`, every frame as drawn handed to `each`.
-fn burst_with(look: Look, nails: NailBarrels, impulse: i32, each: &mut dyn FnMut(&render::Image)) -> Vec<(f32, usize, Option<bool>)> {
+fn burst_with(
+    look: Look,
+    nails: NailBarrels,
+    impulse: i32,
+    each: &mut dyn FnMut(&render::Image),
+) -> Vec<(f32, usize, Option<bool>)> {
     let pak = crate::common::pak().expect("the shareware pak");
     let _scaled = ScaledTwoD::on();
     let (w, h) = (640, 360);

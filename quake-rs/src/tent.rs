@@ -115,13 +115,7 @@ struct Beam {
     end: [f32; 3],
 }
 
-const FREE_BEAM: Beam = Beam {
-    entity: 0,
-    model: None,
-    endtime: 0.0,
-    start: [0.0; 3],
-    end: [0.0; 3],
-};
+const FREE_BEAM: Beam = Beam { entity: 0, model: None, endtime: 0.0, start: [0.0; 3], end: [0.0; 3] };
 
 /// One expanded beam piece for the current frame: an alias-model instance the
 /// front-end draws (the `CL_NewTempEntity` visedict `CL_UpdateTEnts` filled).
@@ -157,8 +151,7 @@ pub fn beam_pitch_yaw(dist: [f32; 3]) -> (f32, f32) {
         (pitch, 0.0)
     } else {
         // yaw = (int)(atan2(dist[1], dist[0]) * 180 / M_PI); if (yaw < 0) yaw += 360;
-        let mut yaw = (f64::atan2(f64::from(dist[1]), f64::from(dist[0])) * 180.0
-            / std::f64::consts::PI) as i32 as f32;
+        let mut yaw = (f64::atan2(f64::from(dist[1]), f64::from(dist[0])) * 180.0 / std::f64::consts::PI) as i32 as f32;
         if yaw < 0.0 {
             yaw += 360.0;
         }
@@ -166,8 +159,8 @@ pub fn beam_pitch_yaw(dist: [f32; 3]) -> (f32, f32) {
         // pitch = (int)(atan2(dist[2], forward) * 180 / M_PI); wrap like yaw.
         let forward = dist[0] * dist[0] + dist[1] * dist[1];
         let forward = f64::from(forward).sqrt() as f32;
-        let mut pitch = (f64::atan2(f64::from(dist[2]), f64::from(forward)) * 180.0
-            / std::f64::consts::PI) as i32 as f32;
+        let mut pitch =
+            (f64::atan2(f64::from(dist[2]), f64::from(forward)) * 180.0 / std::f64::consts::PI) as i32 as f32;
         if pitch < 0.0 {
             pitch += 360.0;
         }
@@ -191,9 +184,7 @@ impl Default for Beams {
 impl Beams {
     /// All slots free (the zero-initialised C globals).
     pub fn new() -> Beams {
-        Beams {
-            beams: [FREE_BEAM; MAX_BEAMS],
-        }
+        Beams { beams: [FREE_BEAM; MAX_BEAMS] }
     }
 
     /// `CL_ClearState`'s `memset(cl_beams, 0, sizeof(cl_beams))`: drop every
@@ -212,37 +203,18 @@ impl Beams {
     /// dropped (the C printed "beam list overflow!").
     ///
     /// `now` is `cl.time`; the beam lives until `now + 0.2`.
-    pub fn parse_beam(
-        &mut self,
-        entity: i32,
-        model: BeamModel,
-        start: [f32; 3],
-        end: [f32; 3],
-        now: f32,
-    ) {
+    pub fn parse_beam(&mut self, entity: i32, model: BeamModel, start: [f32; 3], end: [f32; 3], now: f32) {
         // override any beam with the same entity
         for b in self.beams.iter_mut() {
             if b.entity == entity {
-                *b = Beam {
-                    entity,
-                    model: Some(model),
-                    endtime: now + 0.2,
-                    start,
-                    end,
-                };
+                *b = Beam { entity, model: Some(model), endtime: now + 0.2, start, end };
                 return;
             }
         }
         // find a free beam
         for b in self.beams.iter_mut() {
             if b.model.is_none() || b.endtime < now {
-                *b = Beam {
-                    entity,
-                    model: Some(model),
-                    endtime: now + 0.2,
-                    start,
-                    end,
-                };
+                *b = Beam { entity, model: Some(model), endtime: now + 0.2, start, end };
                 return;
             }
         }
@@ -294,13 +266,7 @@ impl Beams {
                 if out.len() == MAX_TEMP_ENTITIES {
                     return; // CL_NewTempEntity returned NULL
                 }
-                out.push(BeamSegment {
-                    model,
-                    origin: org,
-                    pitch,
-                    yaw,
-                    roll: rng.next_range(360) as f32,
-                });
+                out.push(BeamSegment { model, origin: org, pitch, yaw, roll: rng.next_range(360) as f32 });
                 org = crate::math::vector_ma(org, 30.0, dir);
                 d -= 30.0;
             }
@@ -311,9 +277,7 @@ impl Beams {
     /// skip the per-frame [`Beams::update`] walk entirely on the (overwhelmingly
     /// common) frames with no lightning on screen.
     pub fn any_live(&self, now: f32) -> bool {
-        self.beams
-            .iter()
-            .any(|b| b.model.is_some() && b.endtime >= now)
+        self.beams.iter().any(|b| b.model.is_some() && b.endtime >= now)
     }
 }
 

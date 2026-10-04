@@ -181,7 +181,7 @@ pub fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> CmdRes
                 continue;
             }
             let o1 = server.vm.ent_get_vector(d, "origin");
-            let disp = ((o1[0]-o0[0]).powi(2) + (o1[1]-o0[1]).powi(2) + (o1[2]-o0[2]).powi(2)).sqrt();
+            let disp = ((o1[0] - o0[0]).powi(2) + (o1[1] - o0[1]).powi(2) + (o1[2] - o0[2]).powi(2)).sqrt();
             if disp > 1.0 {
                 moved += 1;
                 max_disp = max_disp.max(disp);
@@ -237,21 +237,22 @@ pub fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> CmdRes
         let yaw = dir[1].atan2(dir[0]).to_degrees();
         let horiz = (dir[0] * dir[0] + dir[1] * dir[1]).sqrt();
         let pitch = -dir[2].atan2(horiz).to_degrees(); // QuakeC pitch is +down
-        let _ = writeln!(
-            o,
-            "\n  nearest monster: {mname} (edict {mon}) at {:.0} units, health {hp_before}",
-            d2.sqrt()
-        );
+        let _ = writeln!(o, "\n  nearest monster: {mname} (edict {mon}) at {:.0} units, health {hp_before}", d2.sqrt());
         // Diagnostic: trace a bullet from the eye toward the monster centre and
         // report what the engine's own collision says it hits (the monster, the
         // world, or nothing) — this distinguishes an aim/LOS miss from a damage bug.
         {
             let aim = [pe[0] + dir[0] * 4.0, pe[1] + dir[1] * 4.0, pe[2] + dir[2] * 4.0];
             let tr = quake_rs::server::sv_move(&mut server.vm, pe, aim, [0.0; 3], [0.0; 3], player, false, false);
-            let hit = if tr.ent == mon { format!("the monster (edict {mon}) ✓") }
-                      else if tr.ent == 0 { "the world (wall) — no LOS".into() }
-                      else if tr.ent < 0 { "nothing (clear)".into() }
-                      else { format!("another edict {}", tr.ent) };
+            let hit = if tr.ent == mon {
+                format!("the monster (edict {mon}) ✓")
+            } else if tr.ent == 0 {
+                "the world (wall) — no LOS".into()
+            } else if tr.ent < 0 {
+                "nothing (clear)".into()
+            } else {
+                format!("another edict {}", tr.ent)
+            };
             let _ = writeln!(o, "  eye {pe:?} -> bullet trace hits {hit} at fraction {:.2}", tr.fraction);
         }
         // AI PROBE: stand still in front of the monster (no firing) and watch
@@ -335,8 +336,7 @@ pub fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> CmdRes
                 peak_dlights = active;
             }
             if particles.len() > peak_parts.len() {
-                peak_parts =
-                    particles.particles().iter().map(|p| (p.origin, p.color)).collect();
+                peak_parts = particles.particles().iter().map(|p| (p.origin, p.color)).collect();
             }
         }
         let _ = writeln!(
@@ -344,10 +344,7 @@ pub fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> CmdRes
             "    particle() bursts during combat: {total_bursts} ({total_burst_particles} points); live at end: {}",
             particles.len()
         );
-        let _ = writeln!(
-            o,
-            "    temp entities: {te_total} ({te_explosions} explosions, {te_gunshots} gunshots)"
-        );
+        let _ = writeln!(o, "    temp entities: {te_total} ({te_explosions} explosions, {te_gunshots} gunshots)");
         let _ = writeln!(
             o,
             "    dynamic lights: peak {max_active_dlights} active during combat (explosions + EF_* muzzle/bright/dim lights)"
@@ -355,11 +352,7 @@ pub fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> CmdRes
         let hp_after = server.vm.ent_get_float(mon, "health");
         let alive = !server.vm.is_free_edict(mon);
         let (b0, weapon, shells) = server.player_attack_state();
-        let _ = writeln!(
-            o,
-            "  fired 15 frames (attack={b0}, weapon={weapon}, shells {} -> {}):",
-            25, shells as i64
-        );
+        let _ = writeln!(o, "  fired 15 frames (attack={b0}, weapon={weapon}, shells {} -> {}):", 25, shells as i64);
         let _ = writeln!(
             o,
             "    monster health {hp_before} -> {hp_after}{}",
@@ -401,7 +394,12 @@ pub fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> CmdRes
                 if let Ok(idx) = num.parse::<usize>() {
                     let origin = server.vm.ent_get_vector(ent, "origin");
                     let angles = server.vm.ent_get_vector(ent, "angles");
-                    bmodels.push(render::BModelInstance { model_index: idx, origin, frame: server.vm.ent_get_float(ent, "frame") as i32, angles });
+                    bmodels.push(render::BModelInstance {
+                        model_index: idx,
+                        origin,
+                        frame: server.vm.ent_get_float(ent, "frame") as i32,
+                        angles,
+                    });
                 }
                 continue;
             }
@@ -436,12 +434,20 @@ pub fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> CmdRes
         }
         let inst: Vec<render::ModelInstance> = owned
             .iter()
-            .map(|(mdl, origin, yaw, color)| render::ModelInstance { mdl, origin: *origin, yaw: *yaw, pitch: 0.0, roll: 0.0, color: *color, frame: 0, blend: None, skinnum: 0 })
+            .map(|(mdl, origin, yaw, color)| render::ModelInstance {
+                mdl,
+                origin: *origin,
+                yaw: *yaw,
+                pitch: 0.0,
+                roll: 0.0,
+                color: *color,
+                frame: 0,
+                blend: None,
+                skinnum: 0,
+            })
             .collect();
-        let external: Vec<render::ExternalBModel> = ext_owned
-            .iter()
-            .map(|(bsp, origin)| render::ExternalBModel { bsp, origin: *origin })
-            .collect();
+        let external: Vec<render::ExternalBModel> =
+            ext_owned.iter().map(|(bsp, origin)| render::ExternalBModel { bsp, origin: *origin }).collect();
 
         // The first-person weapon viewmodel: the player edict's `weaponmodel`
         // (e.g. "progs/v_shot.mdl") posed at its `weaponframe`. Loaded from the
@@ -459,16 +465,14 @@ pub fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> CmdRes
         let (vid_w, vid_h) = (640, 400);
         let (viewsize, refdef) = pov_screen(vid_w, vid_h);
         let vrect = refdef.vrect;
-        let viewmodel = weapon_mdl
-            .as_ref()
-            .map(|mdl| render::Viewmodel {
-                mdl,
-                frame: weapon_frame,
-                blend: None,
-                // No bob in this still.
-                origin_ofs: render::viewmodel_origin_ofs([cam.pitch, cam.yaw, 0.0], 0.0, viewsize),
-                angles: [cam.pitch, cam.yaw, 0.0],
-            });
+        let viewmodel = weapon_mdl.as_ref().map(|mdl| render::Viewmodel {
+            mdl,
+            frame: weapon_frame,
+            blend: None,
+            // No bob in this still.
+            origin_ofs: render::viewmodel_origin_ofs([cam.pitch, cam.yaw, 0.0], 0.0, viewsize),
+            angles: [cam.pitch, cam.yaw, 0.0],
+        });
         // The live particles as (world pos, palette index) for the renderer; they
         // share the scene z-buffer so any behind a wall are hidden. Use the
         // peak-combat snapshot so the action shot actually shows the blood burst

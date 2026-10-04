@@ -27,7 +27,8 @@ const N: u64 = 4_000_000;
 fn main() -> ExitCode {
     let numbers: Vec<u64> = (1..=N).collect();
     let sums: Vec<u64> = thread::scope(|s| {
-        let workers: Vec<_> = numbers.chunks(numbers.len() / 4).map(|part| s.spawn(move || part.iter().sum::<u64>())).collect();
+        let workers: Vec<_> =
+            numbers.chunks(numbers.len() / 4).map(|part| s.spawn(move || part.iter().sum::<u64>())).collect();
         workers.into_iter().map(|w| w.join().unwrap_or(0)).collect()
     });
     let total: u64 = sums.iter().sum();
@@ -38,10 +39,17 @@ fn main() -> ExitCode {
     let (rounds, per_round, reused) = rounds_of_threads(&numbers);
     let (grown, filled) = threads_filling_the_heap();
     let ok = total == N * (N + 1) / 2 && sums.len() == 4 && joined && !answer.is_empty() && reused && filled;
-    eprintln!("threadcheck: {} scoped threads summed {total} (want {}); a spawned thread answered {answer}; \
+    eprintln!(
+        "threadcheck: {} scoped threads summed {total} (want {}); a spawned thread answered {answer}; \
         {rounds} rounds of 7 scoped threads {}, {per_round:.0} us a round; 8 threads allocated {grown} MB {} in a memory of {} MB ({}): {}",
-        sums.len(), N * (N + 1) / 2, if reused { "right" } else { "WRONG" }, if filled { "right" } else { "WRONG" },
-        memory_bytes() >> 20, if memory_fixed() { "fixed" } else { "growable" }, if ok { "ok" } else { "FAILED" });
+        sums.len(),
+        N * (N + 1) / 2,
+        if reused { "right" } else { "WRONG" },
+        if filled { "right" } else { "WRONG" },
+        memory_bytes() >> 20,
+        if memory_fixed() { "fixed" } else { "growable" },
+        if ok { "ok" } else { "FAILED" }
+    );
     if ok { ExitCode::SUCCESS } else { ExitCode::FAILURE }
 }
 

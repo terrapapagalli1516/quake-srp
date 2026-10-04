@@ -78,16 +78,16 @@ mod host;
 mod host_cmd;
 mod input;
 mod menu;
+#[cfg(test)]
+mod oracle_screen;
 mod present;
 mod proto;
 mod savegame;
 mod snd_dma;
 mod sys;
-mod vid;
-#[cfg(test)]
-mod oracle_screen;
 #[cfg(test)]
 mod test_util;
+mod vid;
 
 #[cfg(test)]
 #[path = "census_tests.rs"]
@@ -166,7 +166,9 @@ fn check_fixed_memory() {
         let have = core::arch::wasm32::memory_size::<0>() as u64 * 65536;
         match option_env!("QUAKE_WASM_FIXED_MEMORY").and_then(|v| v.parse::<u64>().ok()) {
             Some(want) if have == want => {}
-            Some(want) => eprintln!("quake: the threads build's memory is {have} bytes, not the fixed {want}: it may grow"),
+            Some(want) => {
+                eprintln!("quake: the threads build's memory is {have} bytes, not the fixed {want}: it may grow")
+            }
             None => eprintln!("quake: the threads build was linked with a growable memory (QUAKE_WASM_GROWABLE)"),
         }
     }

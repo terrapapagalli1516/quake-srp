@@ -15,18 +15,17 @@
 //! the console, else the Quit confirmation prompt.
 
 use quake_rs::cd_audio::CdCall;
-use quake_rs::client::cl_demo::MAX_DEMOS;
 use quake_rs::client::SoundCall;
+use quake_rs::client::cl_demo::MAX_DEMOS;
 use quake_rs::client::host_cmd::run_game_command;
 use quake_rs::cmd::{self, Args, Command};
 use quake_rs::cvar::{self, CVARS};
 use quake_rs::keys::{self, Binding};
 use quake_rs::settings::Preset;
 
-use crate::app::{build_walk_map, ensure_app, App, KeyDest};
+use crate::app::{App, KeyDest, build_walk_map, ensure_app};
 use crate::cl_demo::{
-    cl_disconnect, cl_next_demo, cl_play_demo, cl_stop_playback, cl_timedemo, finish_host_error,
-    finish_menu_credits,
+    cl_disconnect, cl_next_demo, cl_play_demo, cl_stop_playback, cl_timedemo, finish_host_error, finish_menu_credits,
 };
 use crate::savegame::{do_load_command, do_save_command};
 use crate::snd_dma;
@@ -685,7 +684,7 @@ fn run_map_command(name: Option<&str>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use quake_rs::client::host_cmd::{try_changelevel, try_restart, IT_SHOTGUN};
+    use quake_rs::client::host_cmd::{IT_SHOTGUN, try_changelevel, try_restart};
     use quake_rs::server::{EntFlags, MoveType};
 
     const FL_GODMODE: i32 = EntFlags::GODMODE.bits();
@@ -693,7 +692,7 @@ mod tests {
     const MOVETYPE_FLY: f32 = MoveType::Fly.code() as f32;
     const MOVETYPE_NOCLIP: f32 = MoveType::NoClip.code() as f32;
 
-    use crate::app::{boot, player_start, APP};
+    use crate::app::{APP, boot, player_start};
     use crate::console::{console_toggle, console_visible};
     use crate::host::step;
     use crate::input::{key_down, key_up, set_attack};
@@ -733,9 +732,7 @@ mod tests {
         run_console_line("sizedown");
         assert_eq!(viewsize(), 110.0);
         run_console_line("viewsize");
-        let printed = APP.with(|c| {
-            c.borrow().as_ref().unwrap().console.lines().last().map(str::to_string)
-        });
+        let printed = APP.with(|c| c.borrow().as_ref().unwrap().console.lines().last().map(str::to_string));
         assert_eq!(printed.as_deref(), Some("\"viewsize\" is \"110\""), "Cvar_Command print");
         run_console_line("viewsize 5");
         assert_eq!(viewsize(), 30.0, "bounded at 30");
@@ -762,9 +759,7 @@ mod tests {
     #[test]
     fn r_threads_is_a_cvar_every_frame_hands_the_renderer() {
         use quake_rs::settings::{Machine, Settings};
-        let last_line = || {
-            APP.with(|c| c.borrow().as_ref().unwrap().console.lines().last().map(str::to_string))
-        };
+        let last_line = || APP.with(|c| c.borrow().as_ref().unwrap().console.lines().last().map(str::to_string));
         let threads = || walk_mut(|w| w.renderer.threads());
         assert_eq!(boot(), 1);
         close_menu();
@@ -795,9 +790,7 @@ mod tests {
     #[test]
     fn r_lerpmove_is_a_cvar_every_frame_hands_the_client() {
         use quake_rs::client::lerpmove::LerpMove;
-        let last_line = || {
-            APP.with(|c| c.borrow().as_ref().unwrap().console.lines().last().map(str::to_string))
-        };
+        let last_line = || APP.with(|c| c.borrow().as_ref().unwrap().console.lines().last().map(str::to_string));
         let lerpmove = || walk_mut(|w| w.lerpmove);
         assert_eq!(boot(), 1);
         close_menu();
@@ -827,9 +820,7 @@ mod tests {
     #[test]
     fn r_lerpmodels_is_a_cvar_every_frame_hands_the_client() {
         use quake_rs::client::lerpmodels::LerpModels;
-        let last_line = || {
-            APP.with(|c| c.borrow().as_ref().unwrap().console.lines().last().map(str::to_string))
-        };
+        let last_line = || APP.with(|c| c.borrow().as_ref().unwrap().console.lines().last().map(str::to_string));
         let lerpmodels = || walk_mut(|w| w.lerpmodels);
         assert_eq!(boot(), 1);
         close_menu();
@@ -859,9 +850,7 @@ mod tests {
     #[test]
     fn r_nailbarrels_is_a_cvar_every_frame_hands_the_client() {
         use quake_rs::client::nailbarrels::NailBarrels;
-        let last_line = || {
-            APP.with(|c| c.borrow().as_ref().unwrap().console.lines().last().map(str::to_string))
-        };
+        let last_line = || APP.with(|c| c.borrow().as_ref().unwrap().console.lines().last().map(str::to_string));
         let nailbarrels = || walk_mut(|w| w.nailbarrels);
         assert_eq!(boot(), 1);
         close_menu();
@@ -891,9 +880,7 @@ mod tests {
     #[test]
     fn wasm_extra_commands_print_and_set_like_cvars() {
         use crate::menu::extras;
-        let last_line = || {
-            APP.with(|c| c.borrow().as_ref().unwrap().console.lines().last().map(str::to_string))
-        };
+        let last_line = || APP.with(|c| c.borrow().as_ref().unwrap().console.lines().last().map(str::to_string));
         // No walk needed: they are host settings, like viewsize.
         console_toggle();
         assert_eq!(extras(), 0, "every extra starts off");
@@ -917,18 +904,21 @@ mod tests {
         run_console_line("r_perspspan");
         assert_eq!(last_line().as_deref(), Some("\"r_perspspan\" is \"8\""));
         run_console_line("wasm_help r_perspspan");
-        let said: String = APP.with(|c| c.borrow().as_ref().unwrap().console.lines().map(str::to_string).collect::<Vec<_>>().concat());
+        let said: String =
+            APP.with(|c| c.borrow().as_ref().unwrap().console.lines().map(str::to_string).collect::<Vec<_>>().concat());
         assert!(said.ends_with("r_perspspan \"8\": exact every 64,32,16 (id),8,4,1 px"), "{said:?}");
         run_console_line("r_perspspan 1");
         run_console_line("wasm_help");
-        let help: Vec<String> = APP.with(|c| {
-            c.borrow().as_ref().unwrap().console.lines().map(str::to_string).collect()
-        });
+        let help: Vec<String> =
+            APP.with(|c| c.borrow().as_ref().unwrap().console.lines().map(str::to_string).collect());
         assert!(help.iter().any(|l| l == "  host_maxfps 72"), "{help:?}");
         assert!(help.iter().any(|l| l == "  r_perspspan 1"), "{help:?}");
         let listed: Vec<&String> = help.iter().skip_while(|l| !l.starts_with("slop options (preset")).collect();
         assert!(!listed.is_empty(), "{help:?}");
-        assert!(!listed.iter().any(|l| l.contains("wasm_exactpersp") || l.contains("wasm_uncapped")), "the retired names are not listed: {help:?}");
+        assert!(
+            !listed.iter().any(|l| l.contains("wasm_exactpersp") || l.contains("wasm_uncapped")),
+            "the retired names are not listed: {help:?}"
+        );
         assert!(help.iter().all(|l| l.len() <= LIST_WIDTH), "fits a 320-wide console: {help:?}");
     }
 
@@ -1012,7 +1002,8 @@ mod tests {
         menu_cancel();
         menu_cancel();
         console_toggle();
-        let lines = || APP.with(|c| c.borrow().as_ref().unwrap().console.lines().map(str::to_string).collect::<Vec<_>>());
+        let lines =
+            || APP.with(|c| c.borrow().as_ref().unwrap().console.lines().map(str::to_string).collect::<Vec<_>>());
         run_console_line("wasm_help");
         assert!(lines().iter().any(|l| l == "commands (wasm_help <name> for one):"), "{:?}", lines());
         assert!(lines().iter().all(|l| l.len() <= LIST_WIDTH), "fits a 320-wide console: {:?}", lines());
@@ -1041,9 +1032,7 @@ mod tests {
     }
 
     fn console_scrollback() -> usize {
-        APP.with(|c| {
-            c.borrow().as_ref().map(|a| a.console.line_count()).unwrap_or(0)
-        })
+        APP.with(|c| c.borrow().as_ref().map(|a| a.console.line_count()).unwrap_or(0))
     }
 
     #[test]
@@ -1100,9 +1089,7 @@ mod tests {
         assert_eq!(boot(), 1);
         console_toggle();
         run_console_line("impulse 9");
-        let n = APP.with(|c| {
-            c.borrow().as_ref().unwrap().walk.as_ref().unwrap().next_impulse
-        });
+        let n = APP.with(|c| c.borrow().as_ref().unwrap().walk.as_ref().unwrap().next_impulse);
         assert_eq!(n, 9, "impulse 9 queued the give-all cheat impulse");
     }
 
@@ -1142,11 +1129,7 @@ mod tests {
             w.server.vm.ent_set_float(p, "health", 0.0);
         });
         run_console_line("kill");
-        assert_eq!(
-            player_field("ammo_rockets"),
-            5.0,
-            "a refused kill must not reload the level"
-        );
+        assert_eq!(player_field("ammo_rockets"), 5.0, "a refused kill must not reload the level");
         assert_eq!(player_field("health"), 0.0, "a refused kill leaves the player as-is");
 
         // Alive again: kill -> ClientKill -> respawn() -> localcmd("restart")
@@ -1165,11 +1148,7 @@ mod tests {
             MOVETYPE_WALK,
             "fresh player walks (the fly cheat did not survive the restart)"
         );
-        assert_eq!(
-            player_field("ammo_rockets"),
-            0.0,
-            "restart restored the level-ENTRY parms (the marker is gone)"
-        );
+        assert_eq!(player_field("ammo_rockets"), 0.0, "restart restored the level-ENTRY parms (the marker is gone)");
     }
 
     #[test]
@@ -1213,7 +1192,12 @@ mod tests {
         assert_eq!(boot(), 1);
         execute_console_command("profile 2026");
         let s = live();
-        assert!(s.binds.get(K_MWHEELUP).is_some() && s.cvars.max_fps == FrameCap::NONE && s.cvars.freelook && s.preset == Preset::Slop);
+        assert!(
+            s.binds.get(K_MWHEELUP).is_some()
+                && s.cvars.max_fps == FrameCap::NONE
+                && s.cvars.freelook
+                && s.preset == Preset::Slop
+        );
 
         execute_console_command("preset classic"); // the engine: the wheel off, the shared controls as they were
         let s = live();
@@ -1232,7 +1216,10 @@ mod tests {
 
         execute_console_command("preset classic"); // the slop options back, the keys and Always Run kept
         let s = live();
-        assert!(s.cvars.freelook && s.cvars.joy.enabled && s.cvars.max_fps == FrameCap::ID, "every slop option Classic's");
+        assert!(
+            s.cvars.freelook && s.cvars.joy.enabled && s.cvars.max_fps == FrameCap::ID,
+            "every slop option Classic's"
+        );
         assert!(s.binds.command(b'w').is_none() && !s.cvars.always_run(), "id's keys and Always Run kept");
     }
 
@@ -1241,7 +1228,8 @@ mod tests {
     /// (no menu says it); `version` too.
     #[test]
     fn preset_and_version_say_where_the_settings_stand() {
-        let lines = || APP.with(|c| c.borrow().as_ref().unwrap().console.lines().map(str::to_string).collect::<Vec<_>>());
+        let lines =
+            || APP.with(|c| c.borrow().as_ref().unwrap().console.lines().map(str::to_string).collect::<Vec<_>>());
         assert_eq!(boot(), 1);
         close_menu();
         console_toggle();
@@ -1249,7 +1237,10 @@ mod tests {
         assert_eq!(lines()[lines().len() - 2..], ["\"preset\" is \"classic\"", "Your settings are the Classic preset"]);
         run_console_line("wasm_showfps 1; crosshair 2");
         run_console_line("preset");
-        assert_eq!(lines()[lines().len() - 3..], ["\"preset\" is \"classic\"", "Yours differ from Classic in:", "  crosshair wasm_showfps"]);
+        assert_eq!(
+            lines()[lines().len() - 3..],
+            ["\"preset\" is \"classic\"", "Yours differ from Classic in:", "  crosshair wasm_showfps"]
+        );
         run_console_line("version");
         assert_eq!(lines().last().map(String::as_str), Some("quake-rs, preset classic, custom"));
         run_console_line("preset classic");
@@ -1327,10 +1318,7 @@ mod tests {
         let last = || APP.with(|c| c.borrow().as_ref().unwrap().console.lines().last().map(str::to_string));
         run_console_line("echo a; wait; echo b");
         assert_eq!(last(), Some("a".to_string()), "only up to `wait` ran this call");
-        assert_eq!(
-            APP.with(|c| c.borrow().as_ref().unwrap().pending_cmd.clone()),
-            Some("echo b".to_string())
-        );
+        assert_eq!(APP.with(|c| c.borrow().as_ref().unwrap().pending_cmd.clone()), Some("echo b".to_string()));
         step(0.0);
         assert_eq!(last(), Some("b".to_string()), "the rest ran on the next frame");
         assert_eq!(APP.with(|c| c.borrow().as_ref().unwrap().pending_cmd.clone()), None);
@@ -1383,7 +1371,8 @@ mod tests {
         use quake_rs::keys::K_F1;
         assert_eq!(boot(), 1);
         close_menu();
-        let lines = || APP.with(|c| c.borrow().as_ref().unwrap().console.lines().map(str::to_string).collect::<Vec<_>>());
+        let lines =
+            || APP.with(|c| c.borrow().as_ref().unwrap().console.lines().map(str::to_string).collect::<Vec<_>>());
 
         crate::input::press(K_F1 + 5); // F6: quicksave
         assert_eq!(lines().last().map(String::as_str), Some("Quicksaving..."), "the echo ran at once");
@@ -1472,15 +1461,9 @@ mod tests {
 
         // Select the RL through the REAL impulse path (PlayerPostThink ->
         // W_WeaponFrame -> ImpulseCommands -> W_ChangeWeapon -> W_SetCurrentAmmo).
-        APP.with(|c| {
-            c.borrow_mut().as_mut().unwrap().walk.as_mut().unwrap().next_impulse = 7
-        });
+        APP.with(|c| c.borrow_mut().as_mut().unwrap().walk.as_mut().unwrap().next_impulse = 7);
         step(0.05);
-        assert_eq!(
-            player_field("weapon") as i32,
-            IT_RL,
-            "impulse 7 selected the rocket launcher"
-        );
+        assert_eq!(player_field("weapon") as i32, IT_RL, "impulse 7 selected the rocket launcher");
 
         // Settle on the floor, then FIRE for one frame and release.
         for _ in 0..4 {
@@ -1506,11 +1489,7 @@ mod tests {
             if df == DEAD_DYING && !probed_button_while_dead {
                 set_attack(1);
                 step(0.05);
-                assert_eq!(
-                    player_field("button0"),
-                    1.0,
-                    "the attack button reaches QuakeC button0 while dead"
-                );
+                assert_eq!(player_field("button0"), 1.0, "the attack button reaches QuakeC button0 while dead");
                 assert!(player_field("health") < 0.0, "the probe ran while dead");
                 set_attack(0);
                 step(0.05); // settle the release
@@ -1544,9 +1523,7 @@ mod tests {
         // PlayerDeathThink consumes it and calls respawn() ->
         // localcmd("restart\n"); step_walk drains take_pending_restart() and
         // try_restart() reloads the level inside this same step.
-        let t_before = APP.with(|c| {
-            c.borrow().as_ref().unwrap().walk.as_ref().unwrap().server.time()
-        });
+        let t_before = APP.with(|c| c.borrow().as_ref().unwrap().walk.as_ref().unwrap().server.time());
         set_attack(1);
         step(0.05);
         set_attack(0);
@@ -1555,11 +1532,7 @@ mod tests {
         assert_eq!(player_field("deadflag"), 0.0, "fresh player is not dead");
         assert_eq!(player_field("movetype"), MOVETYPE_WALK, "fresh player walks");
         let items = player_field("items") as i32;
-        assert_eq!(
-            items & IT_RL,
-            0,
-            "the cheat rocket launcher did NOT survive (level-ENTRY parms restored)"
-        );
+        assert_eq!(items & IT_RL, 0, "the cheat rocket launcher did NOT survive (level-ENTRY parms restored)");
         assert_ne!(items & IT_SHOTGUN, 0, "the entry loadout (shotgun) is back");
         assert_eq!(player_field("ammo_rockets"), 0.0, "cheat rockets wiped");
         assert_eq!(player_field("ammo_shells"), 25.0, "entry shells restored");
@@ -1576,10 +1549,7 @@ mod tests {
                 && (org[2] - spawn_org[2]).abs() < 64.0,
             "respawned at the spawn point: {org:?} vs {spawn_org:?}"
         );
-        assert!(
-            t_after < t_before,
-            "the world was rebuilt: server time restarted ({t_after} < {t_before})"
-        );
+        assert!(t_after < t_before, "the world was rebuilt: server time restarted ({t_after} < {t_before})");
     }
 
     /// An ENVIRONMENT kill reaches the same chain: slime damage is dealt by
@@ -1610,8 +1580,7 @@ mod tests {
                 while x < maxs[0] {
                     let mut y = mins[1] + 16.0;
                     while y < maxs[1] {
-                        if quake_rs::world::point_contents(&w.bsp, [x, y, z])
-                            == quake_rs::bsp::CONTENTS_SLIME
+                        if quake_rs::world::point_contents(&w.bsp, [x, y, z]) == quake_rs::bsp::CONTENTS_SLIME
                             && quake_rs::world::point_contents(&w.bsp, [x, y, z + 48.0])
                                 == quake_rs::bsp::CONTENTS_SLIME
                         {
@@ -1662,11 +1631,7 @@ mod tests {
         set_attack(1);
         step(0.05);
         set_attack(0);
-        assert_eq!(
-            player_field("health"),
-            100.0,
-            "respawned alive after the environment kill"
-        );
+        assert_eq!(player_field("health"), 100.0, "respawned alive after the environment kill");
         assert_eq!(player_field("deadflag"), 0.0);
     }
 }

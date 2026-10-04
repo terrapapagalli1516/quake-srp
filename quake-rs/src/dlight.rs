@@ -77,22 +77,8 @@ impl DynamicLight {
     /// Construct a dynamic light directly (the `key` field is private, so this
     /// is how code outside this module — e.g. the renderer's tests — builds a
     /// light). `key` is the owning entity number (0 = unowned).
-    pub fn new(
-        origin: [f32; 3],
-        radius: f32,
-        die: f32,
-        minlight: f32,
-        decay: f32,
-        key: i32,
-    ) -> DynamicLight {
-        DynamicLight {
-            origin,
-            radius,
-            die,
-            minlight,
-            decay,
-            key,
-        }
+    pub fn new(origin: [f32; 3], radius: f32, die: f32, minlight: f32, decay: f32, key: i32) -> DynamicLight {
+        DynamicLight { origin, radius, die, minlight, decay, key }
     }
 
     /// The owning entity number (0 = unowned, e.g. explosions / temp entities).
@@ -104,14 +90,7 @@ impl DynamicLight {
     /// dl->key = key`. (`die` 0 is before any `cl.time`, so a cleared slot is
     /// free to take.)
     fn cleared(key: i32) -> DynamicLight {
-        DynamicLight {
-            origin: [0.0; 3],
-            radius: 0.0,
-            die: 0.0,
-            minlight: 0.0,
-            decay: 0.0,
-            key,
-        }
+        DynamicLight { origin: [0.0; 3], radius: 0.0, die: 0.0, minlight: 0.0, decay: 0.0, key }
     }
 
     /// `R_PushDlights`' test, inverted: the renderer draws a light whose
@@ -138,9 +117,7 @@ impl Default for DynamicLights {
 impl DynamicLights {
     /// An empty pool (all slots cleared).
     pub fn new() -> DynamicLights {
-        DynamicLights {
-            slots: [DynamicLight::cleared(0); MAX_DLIGHTS],
-        }
+        DynamicLights { slots: [DynamicLight::cleared(0); MAX_DLIGHTS] }
     }
 
     /// `CL_AllocDlight(key)`: choose a slot, clear it, populate it, and return a

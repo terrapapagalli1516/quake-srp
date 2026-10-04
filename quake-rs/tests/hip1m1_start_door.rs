@@ -28,7 +28,7 @@
 
 use quake_rs::bsp::Bsp;
 use quake_rs::pak::Pak;
-use quake_rs::progs::{Progs, OFS_PARM0};
+use quake_rs::progs::{OFS_PARM0, Progs};
 use quake_rs::server::{Server, UserCmd};
 
 const DOORS: [(&str, &str); 5] = [("t7", "t7"), ("t2", "t2"), ("t4", "t4"), ("t8", "t8"), ("t6", "t6")];
@@ -146,7 +146,11 @@ fn start_trigger_opens_all_five_doors_on_schedule_and_the_closed_doors_block_unt
     for &(label, e) in &doors {
         let origin = server.vm.ent_get_vector(e, "origin");
         assert_ne!(origin, [0.0, 0.0, 0.0], "{label} must have opened by t=6s");
-        assert_eq!(server.vm.ent_get_float(e, "solid"), SOLID_BSP, "{label} must stay solid while open (it just moved)");
+        assert_eq!(
+            server.vm.ent_get_float(e, "solid"),
+            SOLID_BSP,
+            "{label} must stay solid while open (it just moved)"
+        );
     }
     let final_y = server.vm.ent_get_vector(player, "origin")[1];
     assert!(

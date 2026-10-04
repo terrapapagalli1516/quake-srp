@@ -26,7 +26,7 @@
 
 use std::fmt::Write as _;
 
-use quake_rs::client::{cl_main, host_cmd, Vid};
+use quake_rs::client::{Vid, cl_main, host_cmd};
 use quake_rs::pak::Pak;
 use quake_rs::render;
 use quake_rs::settings::Preset;
@@ -62,7 +62,8 @@ pub fn cmd_shot(args: &[String]) -> Result<String, String> {
                 "--viewsize" => viewsize = Some(num(flag)?),
                 "--crosshair" => crosshair = render::Crosshair::from_cvar(num(flag)?),
                 "--sbaroverlay" => {
-                    sbar_layout = if num(flag)? != 0.0 { render::SbarLayout::Overlay } else { render::SbarLayout::Classic }
+                    sbar_layout =
+                        if num(flag)? != 0.0 { render::SbarLayout::Overlay } else { render::SbarLayout::Classic }
                 }
                 "--in-liquid" => {
                     liquid = Some(match val.as_str() {
@@ -73,7 +74,10 @@ pub fn cmd_shot(args: &[String]) -> Result<String, String> {
                     })
                 }
                 "--origin" => {
-                    let v: Vec<f32> = val.split(',').map(|p| p.trim().parse::<f32>()).collect::<Result<_, _>>()
+                    let v: Vec<f32> = val
+                        .split(',')
+                        .map(|p| p.trim().parse::<f32>())
+                        .collect::<Result<_, _>>()
                         .map_err(|_| format!("--origin: expected x,y,z, got {val:?}"))?;
                     origin = Some(v.try_into().map_err(|_| format!("--origin: expected 3 numbers, got {val:?}"))?);
                 }
@@ -96,7 +100,10 @@ pub fn cmd_shot(args: &[String]) -> Result<String, String> {
     wk.sbar_layout = sbar_layout;
     wk.renderer.set_threads(video.threads());
     if let Some(contents) = liquid {
-        origin = Some(largest_leaf_centre(&wk.bsp, contents).ok_or_else(|| format!("{map} has no leaf of contents {contents}"))?);
+        origin = Some(
+            largest_leaf_centre(&wk.bsp, contents)
+                .ok_or_else(|| format!("{map} has no leaf of contents {contents}"))?,
+        );
     }
     if let Some(o) = origin {
         let mut said = Vec::new();
@@ -156,7 +163,11 @@ pub fn cmd_shot(args: &[String]) -> Result<String, String> {
         vid.display_aspect,
         render::vid_aspect(w, h, vid.display_aspect),
         video.cvars.fov_mode.fov_x(90.0, w, h, render::vid_aspect(w, h, vid.display_aspect)),
-        eye[0], eye[1], eye[2], wk.yaw, wk.pitch,
+        eye[0],
+        eye[1],
+        eye[2],
+        wk.yaw,
+        wk.pitch,
     );
     Ok(o)
 }
@@ -180,7 +191,8 @@ fn default_viewsize(layout: render::SbarLayout) -> f32 {
 /// neighbourhood 24 units each way is all `contents` too — less the view
 /// height (`DEFAULT_VIEWHEIGHT` 22), as the eye is above the origin.
 fn largest_leaf_centre(bsp: &quake_rs::bsp::Bsp, contents: i32) -> Option<[f32; 3]> {
-    let volume = |l: &quake_rs::bsp::DLeaf| (0..3).map(|k| (l.maxs[k] as f32 - l.mins[k] as f32).max(0.0)).product::<f32>();
+    let volume =
+        |l: &quake_rs::bsp::DLeaf| (0..3).map(|k| (l.maxs[k] as f32 - l.mins[k] as f32).max(0.0)).product::<f32>();
     let mut leaves: Vec<&quake_rs::bsp::DLeaf> = bsp.leafs.iter().filter(|l| l.contents == contents).collect();
     leaves.sort_by(|a, b| volume(b).total_cmp(&volume(a)));
     let inside = |p: [f32; 3]| {
@@ -193,7 +205,9 @@ fn largest_leaf_centre(bsp: &quake_rs::bsp::Bsp, contents: i32) -> Option<[f32; 
         }) && quake_rs::world::point_contents(bsp, p) == contents
     };
     for leaf in leaves {
-        let at = |k: usize, i: usize| leaf.mins[k] as f32 + (leaf.maxs[k] as f32 - leaf.mins[k] as f32) * (i as f32 + 0.5) / 7.0;
+        let at = |k: usize, i: usize| {
+            leaf.mins[k] as f32 + (leaf.maxs[k] as f32 - leaf.mins[k] as f32) * (i as f32 + 0.5) / 7.0
+        };
         for (i, j, n) in (0..343).map(|c| (3 + (c % 7 + 4) % 7, (c / 7 % 7 + 3) % 7, (c / 49 + 3) % 7)) {
             let p = [at(0, i), at(1, j), at(2, n)];
             if inside(p) {
@@ -210,7 +224,11 @@ mod tests {
 
     #[test]
     fn a_shot_of_each_layout_starts_at_its_presets_screen_size() {
-        assert_eq!(default_viewsize(render::SbarLayout::Classic), render::VIEWSIZE_DEFAULT, "id's 100, with the inventory bar");
+        assert_eq!(
+            default_viewsize(render::SbarLayout::Classic),
+            render::VIEWSIZE_DEFAULT,
+            "id's 100, with the inventory bar"
+        );
         assert_eq!(default_viewsize(render::SbarLayout::Overlay), 110.0, "the slop preset's: the status bar alone");
     }
 }

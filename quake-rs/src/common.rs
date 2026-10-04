@@ -49,7 +49,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::pak::Pak;
-use crate::progs::{Progs, PROG_VERSION};
+use crate::progs::{PROG_VERSION, Progs};
 
 /// `GAMENAME` (quakedef.h): the game directory under the base directory.
 pub const GAMENAME: &str = "id1";
@@ -209,11 +209,7 @@ pub fn registration(files: &Pak) -> Registration {
     let Ok(Some(lmp)) = files.read_file("gfx/pop.lmp") else { return Registration::Shareware };
     let matches = lmp.len() >= 2 * POP.len()
         && lmp.chunks_exact(2).zip(POP).all(|(b, want)| u16::from_be_bytes([b[0], b[1]]) == want);
-    if matches {
-        Registration::Registered
-    } else {
-        Registration::Corrupted
-    }
+    if matches { Registration::Registered } else { Registration::Corrupted }
 }
 
 /// The `registered` cvar a search path gives the game: its
@@ -393,7 +389,11 @@ mod tests {
         let base = basedir("gap", &[pak0()]);
         std::fs::write(base.join(GAMENAME).join("pak2.pak"), write_pack(&[("gfx/pop.lmp", &pop_lmp())])).unwrap();
         let refused = init_filesystem(&base, &[], false).err();
-        assert_eq!(refused.as_deref(), Some("You must have the registered version to use modified games"), "pak2 is not on the path");
+        assert_eq!(
+            refused.as_deref(),
+            Some("You must have the registered version to use modified games"),
+            "pak2 is not on the path"
+        );
         std::fs::write(base.join(GAMENAME).join("pak1.pak"), b"not a pack at all").unwrap();
         let err = init_filesystem(&base, &[], false).unwrap_err();
         assert!(err.ends_with("pak1.pak is not a packfile"), "{err}");
@@ -489,7 +489,10 @@ mod tests {
         let fs = init_filesystem(&base, &[], false).expect("id's shareware game starts");
         assert!(!fs.registered && !fs.modified);
         let file = base.join(GAMENAME).join("pak0.pak");
-        assert_eq!(fs.log, [format!("Added packfile {} (339 files)", file.display()), "Playing shareware version.".into()]);
+        assert_eq!(
+            fs.log,
+            [format!("Added packfile {} (339 files)", file.display()), "Playing shareware version.".into()]
+        );
         assert_eq!(check_progs(&fs.files), Ok(()));
         let _ = std::fs::remove_dir_all(&base);
     }

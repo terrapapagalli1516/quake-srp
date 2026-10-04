@@ -11,17 +11,9 @@ pub enum QError {
     /// An underlying I/O failure (file open/read/seek).
     Io(std::io::Error),
     /// Ran off the end of the buffer while decoding `context`.
-    Truncated {
-        context: &'static str,
-        need: usize,
-        have: usize,
-    },
+    Truncated { context: &'static str, need: usize, have: usize },
     /// A magic / identification field did not match the expected value.
-    BadMagic {
-        context: &'static str,
-        found: [u8; 4],
-        expected: &'static str,
-    },
+    BadMagic { context: &'static str, found: [u8; 4], expected: &'static str },
     /// A structurally invalid value (bad count, version, offset, …).
     Invalid(String),
     /// A QuakeC runtime error: id's `Host_Error ("Program error")`, which
@@ -65,22 +57,12 @@ impl fmt::Display for QError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             QError::Io(e) => write!(f, "io error: {e}"),
-            QError::Truncated {
-                context,
-                need,
-                have,
-            } => write!(
-                f,
-                "truncated while reading {context}: need {need} byte(s), {have} available"
-            ),
-            QError::BadMagic {
-                context,
-                found,
-                expected,
-            } => write!(
-                f,
-                "bad magic in {context}: found {found:02x?}, expected {expected:?}"
-            ),
+            QError::Truncated { context, need, have } => {
+                write!(f, "truncated while reading {context}: need {need} byte(s), {have} available")
+            }
+            QError::BadMagic { context, found, expected } => {
+                write!(f, "bad magic in {context}: found {found:02x?}, expected {expected:?}")
+            }
             QError::Invalid(msg) => write!(f, "invalid data: {msg}"),
             QError::Program(e) => write!(f, "program error in {}(): {}", e.function, e.message),
         }

@@ -101,9 +101,26 @@ pub(super) struct Reached {
 impl Reached {
     pub fn add(&mut self, o: &Reached) {
         macro_rules! sum { ($($f:ident),*) => { $( self.$f += o.$f; )* } }
-        sum!(tables, lines, spans, inserted, removed, removed_on_first_line, pushbacks, pushback_walked,
-            pushback_to_head, pushback_past_removed, pushback_next_removed, pushback_prev_removed,
-            pushback_past_pushed, ties, zi_sorts, both_sides, tail_pushed, head_ub);
+        sum!(
+            tables,
+            lines,
+            spans,
+            inserted,
+            removed,
+            removed_on_first_line,
+            pushbacks,
+            pushback_walked,
+            pushback_to_head,
+            pushback_past_removed,
+            pushback_next_removed,
+            pushback_prev_removed,
+            pushback_past_pushed,
+            ties,
+            zi_sorts,
+            both_sides,
+            tail_pushed,
+            head_ub
+        );
     }
 }
 
@@ -248,8 +265,9 @@ impl CScan {
             if pedge >= FIRST_EDGE as usize {
                 let pos = |e: usize| if e == C_HEAD { 0 } else { self.line_pos[e] };
                 let (lo, hi) = (pos(pwedge), pos(pedge));
-                let between_removed = (0..self.edges.len())
-                    .any(|d| removed_here[d] && self.line_pos[d] != usize::MAX && lo < self.line_pos[d] && self.line_pos[d] < hi);
+                let between_removed = (0..self.edges.len()).any(|d| {
+                    removed_here[d] && self.line_pos[d] != usize::MAX && lo < self.line_pos[d] && self.line_pos[d] < hi
+                });
                 self.reached.pushback_walked += u64::from(walked);
                 self.reached.pushback_to_head += u64::from(pwedge == C_HEAD);
                 self.reached.pushback_past_removed += u64::from(between_removed);
@@ -360,7 +378,10 @@ impl CScan {
         #[allow(clippy::if_same_then_else)]
         if self.surfs[surf].key < self.surfs[surf2].key {
             go = Go::NewTop;
-        } else if self.surfs[surf].insubmodel && self.surfs[surf].key == self.surfs[surf2].key && self.zi_in_front(surf, surf2, edge) {
+        } else if self.surfs[surf].insubmodel
+            && self.surfs[surf].key == self.surfs[surf2].key
+            && self.zi_in_front(surf, surf2, edge)
+        {
             go = Go::NewTop;
         }
         let mut guard = 4 * self.surfs.len() + 8;
@@ -464,12 +485,26 @@ impl CScan {
         let w = self.w as i64;
         self.edges[C_HEAD] = CEdge { u: 0, u_step: 0, prev: CNULL, next: C_TAIL, surfs: [0, 1], nextremove: CNULL };
         self.edge_head_u_shift20 = (self.edges[C_HEAD].u >> 20) as i32;
-        self.edges[C_TAIL] = CEdge { u: (w << 20) + 0xFFFFF, u_step: 0, prev: C_HEAD, next: C_AFTERTAIL, surfs: [1, 0], nextremove: CNULL };
+        self.edges[C_TAIL] = CEdge {
+            u: (w << 20) + 0xFFFFF,
+            u_step: 0,
+            prev: C_HEAD,
+            next: C_AFTERTAIL,
+            surfs: [1, 0],
+            nextremove: CNULL,
+        };
         self.edge_tail_u_shift20 = (self.edges[C_TAIL].u >> 20) as i32;
-        self.edges[C_AFTERTAIL] = CEdge { u: -1, u_step: 0, prev: C_TAIL, next: C_SENTINEL, surfs: [0, 0], nextremove: CNULL };
+        self.edges[C_AFTERTAIL] =
+            CEdge { u: -1, u_step: 0, prev: C_TAIL, next: C_SENTINEL, surfs: [0, 0], nextremove: CNULL };
         // 2000 << 24 in a 32-bit int
-        self.edges[C_SENTINEL] =
-            CEdge { u: i64::from(2000i32.wrapping_shl(24)), u_step: 0, prev: C_AFTERTAIL, next: CNULL, surfs: [0, 0], nextremove: CNULL };
+        self.edges[C_SENTINEL] = CEdge {
+            u: i64::from(2000i32.wrapping_shl(24)),
+            u_step: 0,
+            prev: C_AFTERTAIL,
+            next: CNULL,
+            surfs: [0, 0],
+            nextremove: CNULL,
+        };
         let bottom = self.h as i32 - 1;
         let mut iv = 0;
         while iv < bottom {
@@ -592,11 +627,27 @@ impl Table {
         s.h = self.h;
         s.edges = vec![Edge::ZERO; FIRST_EDGE as usize];
         for e in &self.edges {
-            s.edges.push(Edge { u: e.u, u_step: e.u_step, prev: NONE, next: e.next, surfs: e.surfs, last: e.last, nearzi: 0.0, owner: NONE });
+            s.edges.push(Edge {
+                u: e.u,
+                u_step: e.u_step,
+                prev: NONE,
+                next: e.next,
+                surfs: e.surfs,
+                last: e.last,
+                nearzi: 0.0,
+                owner: NONE,
+            });
         }
         s.surfs = vec![Surf::ZERO, Surf { flags: SURF_DRAWBACKGROUND, key: 0x7FFF_FFFF, ..Surf::ZERO }];
         for t in &self.surfs {
-            s.surfs.push(Surf { key: t.key, insubmodel: t.insubmodel, d_ziorigin: t.zi[0], d_zistepu: t.zi[1], d_zistepv: t.zi[2], ..Surf::ZERO });
+            s.surfs.push(Surf {
+                key: t.key,
+                insubmodel: t.insubmodel,
+                d_ziorigin: t.zi[0],
+                d_zistepu: t.zi[1],
+                d_zistepv: t.zi[2],
+                ..Surf::ZERO
+            });
         }
         s.newedges = self.newedges.clone();
         s.spans.clear();
@@ -605,19 +656,47 @@ impl Table {
     }
 
     fn ids(&self) -> CScan {
-        let mut edges = vec![CEdge { u: 0, u_step: 0, prev: CNULL, next: CNULL, surfs: [0, 0], nextremove: CNULL }; FIRST_EDGE as usize];
+        let mut edges = vec![
+            CEdge { u: 0, u_step: 0, prev: CNULL, next: CNULL, surfs: [0, 0], nextremove: CNULL };
+            FIRST_EDGE as usize
+        ];
         let mut removeedges = vec![CNULL; self.h];
         for (k, e) in self.edges.iter().enumerate() {
             let next = if e.next == NONE { CNULL } else { e.next as usize };
             let idx = FIRST_EDGE as usize + k;
             // R_EmitEdge: edge->nextremove = removeedges[v2]; removeedges[v2] = edge;
-            edges.push(CEdge { u: e.u, u_step: e.u_step, prev: CNULL, next, surfs: [e.surfs[0] as usize, e.surfs[1] as usize], nextremove: removeedges[e.last as usize] });
+            edges.push(CEdge {
+                u: e.u,
+                u_step: e.u_step,
+                prev: CNULL,
+                next,
+                surfs: [e.surfs[0] as usize, e.surfs[1] as usize],
+                nextremove: removeedges[e.last as usize],
+            });
             removeedges[e.last as usize] = idx;
         }
-        let blank = CSurf { next: 0, prev: 0, spans: CNULL, key: 0, last_u: 0, spanstate: 0, insubmodel: false, d_ziorigin: 0.0, d_zistepu: 0.0, d_zistepv: 0.0 };
+        let blank = CSurf {
+            next: 0,
+            prev: 0,
+            spans: CNULL,
+            key: 0,
+            last_u: 0,
+            spanstate: 0,
+            insubmodel: false,
+            d_ziorigin: 0.0,
+            d_zistepu: 0.0,
+            d_zistepv: 0.0,
+        };
         let mut surfs = vec![blank, CSurf { key: 0x7FFF_FFFF, ..blank }];
         for t in &self.surfs {
-            surfs.push(CSurf { key: t.key, insubmodel: t.insubmodel, d_ziorigin: t.zi[0], d_zistepu: t.zi[1], d_zistepv: t.zi[2], ..blank });
+            surfs.push(CSurf {
+                key: t.key,
+                insubmodel: t.insubmodel,
+                d_ziorigin: t.zi[0],
+                d_zistepu: t.zi[1],
+                d_zistepv: t.zi[2],
+                ..blank
+            });
         }
         let n = edges.len();
         CScan {
@@ -673,7 +752,10 @@ fn fused(t: &Table) -> (Spans, Vec<Snap>, Vec<u32>) {
     let mut whole = t.port();
     whole.scan_edges();
     assert!(whole.row_spans == s.row_spans, "scan_edges is the loop");
-    assert!(whole.spans.iter().zip(&s.spans).all(|(a, b)| (a.u, a.count, a.surf) == (b.u, b.count, b.surf)) && whole.spans.len() == s.spans.len());
+    assert!(
+        whole.spans.iter().zip(&s.spans).all(|(a, b)| (a.u, a.count, a.surf) == (b.u, b.count, b.surf))
+            && whole.spans.len() == s.spans.len()
+    );
     let mut out = Vec::new();
     for v in 0..s.h {
         for sp in &s.spans[s.row_spans[v] as usize..s.row_spans[v + 1] as usize] {
@@ -721,7 +803,14 @@ fn compare(t: &Table) -> (Verdict, Reached) {
     let fspans: Vec<(i32, i32, i32)> = spans.iter().map(|&(_, u, n, s)| (u, n, s as i32)).collect();
     let reference_agrees = rspans == fspans && snaps.last().map(|s| &s.0) == Some(&ractive);
     if c.ub {
-        return (if reference_agrees { Verdict::IdUndefined } else { Verdict::Differs { line: 0, what: "id UB, reference too", reference_agrees } }, c.reached);
+        return (
+            if reference_agrees {
+                Verdict::IdUndefined
+            } else {
+                Verdict::Differs { line: 0, what: "id UB, reference too", reference_agrees }
+            },
+            c.reached,
+        );
     }
     for (line, (a, b)) in snaps.iter().zip(&c.snaps).enumerate() {
         if a.0 != b.0 {
@@ -801,7 +890,8 @@ fn random_table(rng: &mut Rng, domain: Domain) -> Table {
     let keys = rng.range(1, 6);
     let mut surfs = Vec::new();
     for _ in 0..nsurf {
-        let mut zi = [rng.range(1, 1000) as f32 * 1e-4, rng.range(-50, 50) as f32 * 1e-6, rng.range(-50, 50) as f32 * 1e-6];
+        let mut zi =
+            [rng.range(1, 1000) as f32 * 1e-4, rng.range(-50, 50) as f32 * 1e-6, rng.range(-50, 50) as f32 * 1e-6];
         if !surfs.is_empty() && rng.chance(25) {
             let other: &TSurf = &surfs[rng.below(surfs.len() as u64) as usize];
             zi = other.zi; // the same plane: the 0.99/1.01 test's tie
@@ -876,16 +966,34 @@ fn report(name: &str, n: u64, r: &Reached, same: u64, undefined: u64, differ: u6
         "[{name}] tables {n} (same {same}, id-UB {undefined}, differ {differ}); lines {}, spans {}, inserted {}, removed {} (on their first line {}); \
          pushbacks {} (walked {}, to head {}, past a removed edge's place {}, next ends here {}, prev ends here {}, past one pushed this line {}); \
          ties {}; 1/z sorts {}; two-sided edges visits {}; tail pushed {}; walk past head {}",
-        r.lines, r.spans, r.inserted, r.removed, r.removed_on_first_line, r.pushbacks, r.pushback_walked, r.pushback_to_head,
-        r.pushback_past_removed, r.pushback_next_removed, r.pushback_prev_removed, r.pushback_past_pushed, r.ties, r.zi_sorts,
-        r.both_sides, r.tail_pushed, r.head_ub
+        r.lines,
+        r.spans,
+        r.inserted,
+        r.removed,
+        r.removed_on_first_line,
+        r.pushbacks,
+        r.pushback_walked,
+        r.pushback_to_head,
+        r.pushback_past_removed,
+        r.pushback_next_removed,
+        r.pushback_prev_removed,
+        r.pushback_past_pushed,
+        r.ties,
+        r.zi_sorts,
+        r.both_sides,
+        r.tail_pushed,
+        r.head_ub
     );
 }
 
 #[test]
 fn the_one_walk_scan_is_ids_on_random_tables() {
     let tables: u64 = std::env::var("QUAKE_SCAN_TABLES").ok().and_then(|s| s.parse().ok()).unwrap_or(20_000);
-    for (domain, seed) in [(Domain::Clamped, 0x9E37_79B9_7F4A_7C15u64), (Domain::Screen, 0xD1B5_4A32_D192_ED03), (Domain::Wild, 0x2545_F491_4F6C_DD1D)] {
+    for (domain, seed) in [
+        (Domain::Clamped, 0x9E37_79B9_7F4A_7C15u64),
+        (Domain::Screen, 0xD1B5_4A32_D192_ED03),
+        (Domain::Wild, 0x2545_F491_4F6C_DD1D),
+    ] {
         let mut rng = Rng(seed);
         let mut total = Reached::default();
         let (mut same, mut undefined, mut differ) = (0, 0, 0);
@@ -924,7 +1032,13 @@ fn an_edge_past_the_tail_is_where_the_walks_part() {
     // from line 0 to 2 at u = 3.5 px, stepping +2 px a line: on line 1 it is
     // at 5.5 px, past the tail.
     let w = 4usize;
-    let mut t = Table { w, h: 3, surfs: vec![TSurf { key: 0, insubmodel: false, zi: [0.01, 0.0, 0.0] }], edges: Vec::new(), newedges: vec![NONE; 3] };
+    let mut t = Table {
+        w,
+        h: 3,
+        surfs: vec![TSurf { key: 0, insubmodel: false, zi: [0.01, 0.0, 0.0] }],
+        edges: Vec::new(),
+        newedges: vec![NONE; 3],
+    };
     t.edges.push(TEdge { u: (3 << 20) + (1 << 19), u_step: 2 << 20, surfs: [0, 2], v: 0, last: 2, next: NONE });
     t.sort_in(0);
     let (verdict, r) = compare(&t);
@@ -932,7 +1046,12 @@ fn an_edge_past_the_tail_is_where_the_walks_part() {
     let (spans, snaps, _) = fused(&t);
     let mut c = t.ids();
     c.scan_edges();
-    eprintln!("  fused spans {spans:?}\n  id's   spans {:?}\n  fused tables {:?}\n  id's   tables {:?}", c.emitted, snaps.iter().map(|s| &s.0).collect::<Vec<_>>(), c.snaps.iter().map(|s| &s.0).collect::<Vec<_>>());
+    eprintln!(
+        "  fused spans {spans:?}\n  id's   spans {:?}\n  fused tables {:?}\n  id's   tables {:?}",
+        c.emitted,
+        snaps.iter().map(|s| &s.0).collect::<Vec<_>>(),
+        c.snaps.iter().map(|s| &s.0).collect::<Vec<_>>()
+    );
     assert!(matches!(verdict, Verdict::Differs { .. }));
 }
 
@@ -951,16 +1070,35 @@ fn real_table(scene: &Scene, w: usize, h: usize) -> Table {
     edge.mark_leaves(bsp);
     edge.begin_edge_frame();
     edge.render_world(bsp);
-    let mut ents = vec![Ent { bsp, model: 0, origin: [0.0; 3], frame: 0, world_bsp: true, dlights: &[], rotation: world::IDENTITY_ROTATION }];
+    let mut ents = vec![Ent {
+        bsp,
+        model: 0,
+        origin: [0.0; 3],
+        frame: 0,
+        world_bsp: true,
+        dlights: &[],
+        rotation: world::IDENTITY_ROTATION,
+    }];
     for m in 1..bsp.models.len() {
-        ents.push(Ent { bsp, model: m, origin: [0.0; 3], frame: 0, world_bsp: true, dlights: &[], rotation: world::IDENTITY_ROTATION });
+        ents.push(Ent {
+            bsp,
+            model: m,
+            origin: [0.0; 3],
+            frame: 0,
+            world_bsp: true,
+            dlights: &[],
+            rotation: world::IDENTITY_ROTATION,
+        });
     }
     edge.draw_bentities(bsp, &ents);
     let edges = edge.edges[FIRST_EDGE as usize..]
         .iter()
         .map(|e| TEdge { u: e.u, u_step: e.u_step, surfs: e.surfs, v: 0, last: e.last, next: e.next })
         .collect();
-    let surfs = edge.surfs[2..].iter().map(|s| TSurf { key: s.key, insubmodel: s.insubmodel, zi: [s.d_ziorigin, s.d_zistepu, s.d_zistepv] }).collect();
+    let surfs = edge.surfs[2..]
+        .iter()
+        .map(|s| TSurf { key: s.key, insubmodel: s.insubmodel, zi: [s.d_ziorigin, s.d_zistepu, s.d_zistepv] })
+        .collect();
     let mut t = Table { w, h, surfs, edges, newedges: edge.newedges.clone() };
     // each edge's first line, from the lists (the report's "first line" count)
     for v in 0..h {
@@ -987,9 +1125,11 @@ fn the_one_walk_scan_is_ids_on_the_maps() {
     let mut total = Reached::default();
     let (mut same, mut undefined, mut differ) = (0u64, 0u64, 0u64);
     for map in ["start", "e1m1", "e1m2", "e1m3", "e1m4", "e1m5", "e1m6", "e1m7", "e1m8"] {
-        let world = Bsp::parse(&pak.read_file(&format!("maps/{map}.bsp")).expect("read").expect("the map")).expect("a bsp");
+        let world =
+            Bsp::parse(&pak.read_file(&format!("maps/{map}.bsp")).expect("read").expect("the map")).expect("a bsp");
         // Eyes: the centres of random leaves that are not solid.
-        let open: Vec<&crate::bsp::DLeaf> = world.leafs.iter().filter(|l| l.contents != CONTENTS_SOLID && l.maxs[0] > l.mins[0]).collect();
+        let open: Vec<&crate::bsp::DLeaf> =
+            world.leafs.iter().filter(|l| l.contents != CONTENTS_SOLID && l.maxs[0] > l.mins[0]).collect();
         for k in 0..views {
             let leaf = open[rng.below(open.len() as u64) as usize];
             let pos = [0, 1, 2].map(|i| (leaf.mins[i] as f32 + leaf.maxs[i] as f32) * 0.5);

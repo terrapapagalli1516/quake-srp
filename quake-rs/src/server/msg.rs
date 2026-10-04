@@ -21,8 +21,8 @@
 //! ([`Server::statics`]).
 
 use super::Server;
-use crate::vm::Vm;
 use crate::Result;
+use crate::vm::Vm;
 
 // ---------------------------------------------------------------------------
 // The outbox.
@@ -572,8 +572,8 @@ enum TePayload {
 /// corrupting every later write).
 fn te_payload(te_type: u8) -> Option<TePayload> {
     match te_type {
-        TE_SPIKE | TE_SUPERSPIKE | TE_GUNSHOT | TE_EXPLOSION | TE_TAREXPLOSION
-        | TE_WIZSPIKE | TE_KNIGHTSPIKE | TE_LAVASPLASH | TE_TELEPORT => Some(TePayload::Coords3),
+        TE_SPIKE | TE_SUPERSPIKE | TE_GUNSHOT | TE_EXPLOSION | TE_TAREXPLOSION | TE_WIZSPIKE | TE_KNIGHTSPIKE
+        | TE_LAVASPLASH | TE_TELEPORT => Some(TePayload::Coords3),
         TE_EXPLOSION2 => Some(TePayload::Coords3ThenTwoBytes),
         TE_LIGHTNING1 | TE_LIGHTNING2 | TE_LIGHTNING3 | TE_BEAM => Some(TePayload::Beam),
         _ => None,
@@ -648,9 +648,7 @@ impl TeMsg {
             TePayload::Coords3ThenTwoBytes => {
                 match *w {
                     MsgWrite::Coord(v) if self.coords.len() < 3 => self.coords.push(v),
-                    MsgWrite::Byte(v) if self.coords.len() == 3 => {
-                        self.bytes.push((v as i32).clamp(0, 255) as u8)
-                    }
+                    MsgWrite::Byte(v) if self.coords.len() == 3 => self.bytes.push((v as i32).clamp(0, 255) as u8),
                     _ => {}
                 }
                 if self.bytes.len() < 2 {
@@ -1090,7 +1088,8 @@ impl Server {
         let origin = entity_sound_origin(&self.vm, ent);
         let sound_index = lookup_sound_index(&mut self.vm, sample);
         let volume = (volume_byte as f32) / 255.0;
-        let ev = SoundEvent { entity: ent, channel, sound_index, sample: sample.to_string(), origin, volume, attenuation };
+        let ev =
+            SoundEvent { entity: ent, channel, sound_index, sample: sample.to_string(), origin, volume, attenuation };
         if let Some(o) = self.outbox() {
             o.sounds.push(ev);
         }
@@ -1100,7 +1099,7 @@ impl Server {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::progs::{Progs, OFS_PARM0};
+    use crate::progs::{OFS_PARM0, Progs};
     use crate::server::testutil::*;
 
     #[test]
@@ -1144,10 +1143,7 @@ mod tests {
         assert!(ev.sound_index >= 1, "precached sample resolved");
 
         // The queue is empty after draining.
-        assert!(
-            server.drain_sounds().is_empty(),
-            "drain_sounds cleared the queue"
-        );
+        assert!(server.drain_sounds().is_empty(), "drain_sounds cleared the queue");
     }
 
     #[test]
@@ -1188,14 +1184,8 @@ mod tests {
 
         // It is a loop registration, not a one-shot: the SoundEvent queue is
         // untouched, and the static registry is empty after draining.
-        assert!(
-            server.drain_sounds().is_empty(),
-            "no one-shot SoundEvent queued by ambientsound"
-        );
-        assert!(
-            server.drain_static_sounds().is_empty(),
-            "drain_static_sounds cleared the registry"
-        );
+        assert!(server.drain_sounds().is_empty(), "no one-shot SoundEvent queued by ambientsound");
+        assert!(server.drain_static_sounds().is_empty(), "drain_static_sounds cleared the registry");
     }
 
     #[test]
@@ -1250,11 +1240,7 @@ mod tests {
 
         let statics = server.drain_static_sounds();
         assert_eq!(statics[0].volume, 1.0, "volume byte clamps to 255");
-        assert_eq!(
-            statics[0].attenuation,
-            255.0 / 64.0,
-            "attenuation byte clamps to 255"
-        );
+        assert_eq!(statics[0].attenuation, 255.0 / 64.0, "attenuation byte clamps to 255");
     }
 
     #[test]
@@ -1275,10 +1261,7 @@ mod tests {
         server.vm.set_gf(OFS_PARM0 + 9, 3.0);
         bi_ambientsound(&mut server.vm).expect("bi_ambientsound");
 
-        assert!(
-            server.drain_static_sounds().is_empty(),
-            "un-precached ambientsound registers nothing"
-        );
+        assert!(server.drain_static_sounds().is_empty(), "un-precached ambientsound registers nothing");
         assert!(
             server.vm.output().contains("no precache: ambience/notthere.wav\n"),
             "the C's console message, routed to vm.output: {:?}",
@@ -1319,10 +1302,7 @@ mod tests {
         assert_eq!(b.count, 12);
 
         // The queue is empty after draining.
-        assert!(
-            server.drain_particles().is_empty(),
-            "drain_particles cleared the queue"
-        );
+        assert!(server.drain_particles().is_empty(), "drain_particles cleared the queue");
     }
 
     #[test]
@@ -1391,10 +1371,7 @@ mod tests {
         assert_eq!(evs[0].color_start, 0);
         assert_eq!(evs[0].color_length, 0);
         // drain cleared the queue (mirrors drain_sounds).
-        assert!(
-            server.drain_temp_entities().is_empty(),
-            "drain_temp_entities cleared the queue"
-        );
+        assert!(server.drain_temp_entities().is_empty(), "drain_temp_entities cleared the queue");
     }
 
     /// Drive a `WriteString(dest, text)` builtin (interning the text first, as
@@ -1427,10 +1404,7 @@ mod tests {
         write_byte(&mut server, MSG_ALL, SVC_FINALE as f32);
         assert!(server.drain_svc_events().is_empty(), "no event until the string lands");
         write_string(&mut server, MSG_ALL, "the Rune of Earth Magic");
-        assert_eq!(
-            server.drain_svc_events(),
-            vec![SvcEvent::Finale("the Rune of Earth Magic".into())]
-        );
+        assert_eq!(server.drain_svc_events(), vec![SvcEvent::Finale("the Rune of Earth Magic".into())]);
     }
 
     /// The re-release progs' `svc_achievement` (`Killed`: WriteByte(MSG_ALL,
@@ -1560,10 +1534,7 @@ mod tests {
         write_byte(&mut server, MSG_ALL, SVC_SELLSCREEN as f32);
         write_byte(&mut server, MSG_ALL, SVC_CUTSCENE as f32);
         write_string(&mut server, MSG_ALL, "cut");
-        assert_eq!(
-            server.drain_svc_events(),
-            vec![SvcEvent::SellScreen, SvcEvent::Cutscene("cut".into())]
-        );
+        assert_eq!(server.drain_svc_events(), vec![SvcEvent::SellScreen, SvcEvent::Cutscene("cut".into())]);
     }
 
     #[test]
@@ -1573,10 +1544,7 @@ mod tests {
         write_byte(&mut server, MSG_ALL, SVC_FINALE as f32);
         write_short(&mut server, MSG_ALL, 7.0);
         write_string(&mut server, MSG_ALL, "late text");
-        assert!(
-            server.drain_svc_events().is_empty(),
-            "desynced finale dropped, stray string ignored"
-        );
+        assert!(server.drain_svc_events().is_empty(), "desynced finale dropped, stray string ignored");
         // A queued event from the OLD level cannot reach a new server: each
         // has its own outbox.
         write_byte(&mut server, MSG_ALL, SVC_INTERMISSION as f32);
@@ -1662,10 +1630,7 @@ mod tests {
         let evs = server.drain_temp_entities();
         assert_eq!(evs.len(), 1);
         assert_eq!(evs[0].te_type, TE_LIGHTNING2);
-        assert_eq!(
-            evs[0].entity, 1,
-            "WriteEntity's int edict number survives the decode"
-        );
+        assert_eq!(evs[0].entity, 1, "WriteEntity's int edict number survives the decode");
         assert_eq!(evs[0].pos, [10.0, 20.0, 30.0]);
         assert_eq!(evs[0].end, [40.0, 50.0, 60.0]);
     }
@@ -1679,10 +1644,7 @@ mod tests {
         write_coord(&mut server, 1, 16.0);
         write_coord(&mut server, 1, 32.0);
         write_coord(&mut server, 1, 48.0);
-        assert!(
-            server.drain_temp_entities().is_empty(),
-            "MSG_ONE writes produce no broadcast temp entity"
-        );
+        assert!(server.drain_temp_entities().is_empty(), "MSG_ONE writes produce no broadcast temp entity");
     }
 
     #[test]
@@ -1697,10 +1659,7 @@ mod tests {
         write_coord(&mut server, 0, 9.0);
         write_coord(&mut server, 0, 9.0);
         write_coord(&mut server, 0, 9.0);
-        assert!(
-            server.drain_temp_entities().is_empty(),
-            "unknown type emits nothing"
-        );
+        assert!(server.drain_temp_entities().is_empty(), "unknown type emits nothing");
 
         // A clean, valid message right after still decodes.
         write_byte(&mut server, 0, SVC_TEMP_ENTITY as f32);
@@ -1726,9 +1685,6 @@ mod tests {
         // Continuing the old coords now must NOT complete a stale message.
         write_coord(&mut server, 0, 2.0);
         write_coord(&mut server, 0, 3.0);
-        assert!(
-            server.drain_temp_entities().is_empty(),
-            "reset dropped the partial temp entity"
-        );
+        assert!(server.drain_temp_entities().is_empty(), "reset dropped the partial temp entity");
     }
 }

@@ -8,13 +8,13 @@ use std::fmt::Write as _;
 use quake_rs::bsp::{self, Bsp};
 use quake_rs::mdl::{Frame as MFrame, Mdl, Skin};
 use quake_rs::pak::Pak;
-use quake_rs::progs::{Progs, OFS_RETURN};
+use quake_rs::progs::{OFS_RETURN, Progs};
 use quake_rs::spr::{Frame as SFrame, Sprite};
 use quake_rs::vm::Vm;
 use quake_rs::wad::{self, Wad2};
 
 use crate::entities::count_entity_classnames;
-use crate::{read, CmdResult, Out};
+use crate::{CmdResult, Out, read};
 
 /// `info`: sniff the magic and dispatch to the right summary.
 pub fn cmd_info(path: &str) -> CmdResult {
@@ -60,9 +60,7 @@ pub fn cmd_ls(path: &str) -> CmdResult {
 
 pub fn cmd_cat(path: &str, name: &str) -> CmdResult {
     let pak = Pak::open(path)?;
-    let data = pak
-        .read_file(name)?
-        .ok_or_else(|| format!("{name:?} not found in {path}"))?;
+    let data = pak.read_file(name)?.ok_or_else(|| format!("{name:?} not found in {path}"))?;
     Ok(Out::Bytes(data))
 }
 
@@ -72,14 +70,7 @@ pub fn cmd_wad(path: &str) -> CmdResult {
     let mut o = String::new();
     let _ = writeln!(o, "WAD2  {}  ({} lumps)", path, w.lumps().len());
     for l in w.lumps() {
-        let _ = writeln!(
-            o,
-            "  {:>8}  {:<16}  type {} ({})",
-            l.disksize,
-            l.name,
-            l.typ,
-            typ_name(l.typ)
-        );
+        let _ = writeln!(o, "  {:>8}  {:<16}  type {} ({})", l.disksize, l.name, l.typ, typ_name(l.typ));
     }
     Ok(Out::Text(o))
 }
@@ -137,12 +128,7 @@ pub fn cmd_bsp(path: &str) -> CmdResult {
         }
     }
 
-    let textures: Vec<&str> = b
-        .textures
-        .iter()
-        .filter_map(|t| t.as_ref().map(|m| m.name.as_str()))
-        .take(12)
-        .collect();
+    let textures: Vec<&str> = b.textures.iter().filter_map(|t| t.as_ref().map(|m| m.name.as_str())).take(12).collect();
     if !textures.is_empty() {
         let _ = writeln!(o, "\n  some textures: {}", textures.join(", "));
     }
@@ -183,7 +169,12 @@ pub fn cmd_map(path: &str) -> CmdResult {
     let _ = writeln!(
         o,
         "top-down view of {}  ({} verts, x:[{:.0},{:.0}] y:[{:.0},{:.0}])",
-        path, b.vertexes.len(), min_x, max_x, min_y, max_y
+        path,
+        b.vertexes.len(),
+        min_x,
+        max_x,
+        min_y,
+        max_y
     );
     let _ = writeln!(o, "+{}+", "-".repeat(W));
     for row in &grid {
@@ -216,11 +207,7 @@ pub fn cmd_mdl(path: &str) -> CmdResult {
             Skin::Group { .. } => group_skins += 1,
         }
     }
-    let _ = writeln!(
-        o,
-        "  skins        {} ({} single, {} group)",
-        m.skins.len(), single_skins, group_skins
-    );
+    let _ = writeln!(o, "  skins        {} ({} single, {} group)", m.skins.len(), single_skins, group_skins);
 
     let _ = writeln!(o, "  frames       {}", m.frames.len());
     for (i, f) in m.frames.iter().enumerate().take(16) {
@@ -300,11 +287,6 @@ pub fn cmd_run(path: &str, func: &str) -> CmdResult {
         o.push_str(vm.output().trim_end());
         o.push('\n');
     }
-    let _ = writeln!(
-        o,
-        "--- {func}() returned: float={} int={} ---",
-        vm.gf(OFS_RETURN),
-        vm.gi(OFS_RETURN)
-    );
+    let _ = writeln!(o, "--- {func}() returned: float={} int={} ---", vm.gf(OFS_RETURN), vm.gi(OFS_RETURN));
     Ok(Out::Text(o))
 }

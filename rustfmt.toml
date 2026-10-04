@@ -1,0 +1,5 @@
+# rustfmt for both crates (CODE_PLAN.md, W0a): the code was written to about 120
+# columns with short expressions kept on one line, so this keeps its shape.
+style_edition = "2024"
+max_width = 120
+use_small_heuristics = "Max"

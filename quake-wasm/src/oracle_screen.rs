@@ -38,7 +38,7 @@ use std::cell::Cell;
 
 use quake_rs::render::Image;
 
-use crate::app::{boot, ensure_app, APP};
+use crate::app::{APP, boot, ensure_app};
 use crate::console::{console_char, console_toggle};
 use crate::host::step;
 use crate::host_cmd::execute_console_command;

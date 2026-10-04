@@ -110,19 +110,12 @@ impl Qpic {
         let width = r.i32()?;
         let height = r.i32()?;
         if width < 0 || height < 0 {
-            return Err(QError::invalid(format!(
-                "qpic: negative dimensions {width}x{height}"
-            )));
+            return Err(QError::invalid(format!("qpic: negative dimensions {width}x{height}")));
         }
-        let pixels = (width as usize)
-            .checked_mul(height as usize)
-            .ok_or_else(|| QError::invalid("qpic: size overflow"))?;
+        let pixels =
+            (width as usize).checked_mul(height as usize).ok_or_else(|| QError::invalid("qpic: size overflow"))?;
         let data = r.take(pixels)?.to_vec();
-        Ok(Qpic {
-            width,
-            height,
-            data,
-        })
+        Ok(Qpic { width, height, data })
     }
 }
 
@@ -157,41 +150,27 @@ impl Wad2 {
             // wadinfo_t: identification[4], numlumps i32, infotableofs i32.
             let ident = r.bytes::<4>()?;
             if &ident != b"WAD2" {
-                return Err(QError::BadMagic {
-                    context: "wad",
-                    found: ident,
-                    expected: "WAD2",
-                });
+                return Err(QError::BadMagic { context: "wad", found: ident, expected: "WAD2" });
             }
             let numlumps = r.i32()?;
             let infotableofs = r.i32()?;
 
             if numlumps < 0 {
-                return Err(QError::invalid(format!(
-                    "wad: negative numlumps {numlumps}"
-                )));
+                return Err(QError::invalid(format!("wad: negative numlumps {numlumps}")));
             }
             if infotableofs < 0 {
-                return Err(QError::invalid(format!(
-                    "wad: negative infotableofs {infotableofs}"
-                )));
+                return Err(QError::invalid(format!("wad: negative infotableofs {infotableofs}")));
             }
             let numlumps = numlumps as usize;
             let infotableofs = infotableofs as usize;
 
             // The whole directory must lie within the buffer.
-            let table_bytes = numlumps.checked_mul(LUMPINFO_SIZE).ok_or_else(|| {
-                QError::invalid("wad: lump table size overflow")
-            })?;
-            let table_end = infotableofs.checked_add(table_bytes).ok_or_else(|| {
-                QError::invalid("wad: lump table end overflow")
-            })?;
+            let table_bytes =
+                numlumps.checked_mul(LUMPINFO_SIZE).ok_or_else(|| QError::invalid("wad: lump table size overflow"))?;
+            let table_end =
+                infotableofs.checked_add(table_bytes).ok_or_else(|| QError::invalid("wad: lump table end overflow"))?;
             if table_end > bytes.len() {
-                return Err(QError::Truncated {
-                    context: "wad lump table",
-                    need: table_end,
-                    have: bytes.len(),
-                });
+                return Err(QError::Truncated { context: "wad lump table", need: table_end, have: bytes.len() });
             }
 
             let mut lumps = Vec::with_capacity(numlumps);
@@ -211,14 +190,7 @@ impl Wad2 {
                 let raw_name = r.bytes::<NAME_LEN>()?;
                 let name = cleanup_name_bytes(&raw_name);
 
-                lumps.push(LumpInfo {
-                    filepos,
-                    disksize,
-                    size,
-                    typ,
-                    compression,
-                    name,
-                });
+                lumps.push(LumpInfo { filepos, disksize, size, typ, compression, name });
             }
             lumps
         };
@@ -267,16 +239,10 @@ impl Wad2 {
     /// past the end of the file.
     pub fn lump_data(&self, l: &LumpInfo) -> Result<&[u8]> {
         if l.filepos < 0 {
-            return Err(QError::invalid(format!(
-                "wad: lump '{}' has negative filepos {}",
-                l.name, l.filepos
-            )));
+            return Err(QError::invalid(format!("wad: lump '{}' has negative filepos {}", l.name, l.filepos)));
         }
         if l.disksize < 0 {
-            return Err(QError::invalid(format!(
-                "wad: lump '{}' has negative disksize {}",
-                l.name, l.disksize
-            )));
+            return Err(QError::invalid(format!("wad: lump '{}' has negative disksize {}", l.name, l.disksize)));
         }
         Reader::new(&self.base).slice_at(l.filepos as usize, l.disksize as usize)
     }
@@ -288,9 +254,7 @@ impl Wad2 {
     /// then the following `width * height` bytes of pixel data. The C engine
     /// would `Sys_Error` if the lump were missing; we return a [`QError`].
     pub fn qpic(&self, name: &str) -> Result<Qpic> {
-        let lump = self
-            .lump(name)
-            .ok_or_else(|| QError::invalid(format!("wad: lump '{name}' not found")))?;
+        let lump = self.lump(name).ok_or_else(|| QError::invalid(format!("wad: lump '{name}' not found")))?;
 
         if lump.typ != TYP_QPIC {
             return Err(QError::invalid(format!(
@@ -299,10 +263,7 @@ impl Wad2 {
             )));
         }
         if lump.filepos < 0 {
-            return Err(QError::invalid(format!(
-                "wad: qpic '{}' has negative filepos {}",
-                lump.name, lump.filepos
-            )));
+            return Err(QError::invalid(format!("wad: qpic '{}' has negative filepos {}", lump.name, lump.filepos)));
         }
 
         // qpic_t: width i32, height i32, data[width*height].
@@ -310,21 +271,13 @@ impl Wad2 {
         let width = r.i32()?;
         let height = r.i32()?;
         if width < 0 || height < 0 {
-            return Err(QError::invalid(format!(
-                "wad: qpic '{}' has negative dimensions {width}x{height}",
-                lump.name
-            )));
+            return Err(QError::invalid(format!("wad: qpic '{}' has negative dimensions {width}x{height}", lump.name)));
         }
-        let pixels = (width as usize)
-            .checked_mul(height as usize)
-            .ok_or_else(|| QError::invalid("wad: qpic size overflow"))?;
+        let pixels =
+            (width as usize).checked_mul(height as usize).ok_or_else(|| QError::invalid("wad: qpic size overflow"))?;
         let data = r.take(pixels)?.to_vec();
 
-        Ok(Qpic {
-            width,
-            height,
-            data,
-        })
+        Ok(Qpic { width, height, data })
     }
 }
 
@@ -341,11 +294,7 @@ fn cleanup_name_bytes(input: &[u8]) -> String {
         if c == 0 {
             break;
         }
-        let lowered = if c.is_ascii_uppercase() {
-            c + (b'a' - b'A')
-        } else {
-            c
-        };
+        let lowered = if c.is_ascii_uppercase() { c + (b'a' - b'A') } else { c };
         out.push(lowered as char);
     }
     out
@@ -356,15 +305,7 @@ mod tests {
     use super::*;
 
     /// Append a 32-byte `lumpinfo_t` entry to `dir`.
-    fn push_lump(
-        dir: &mut Vec<u8>,
-        filepos: i32,
-        disksize: i32,
-        size: i32,
-        typ: u8,
-        compression: u8,
-        name: &str,
-    ) {
+    fn push_lump(dir: &mut Vec<u8>, filepos: i32, disksize: i32, size: i32, typ: u8, compression: u8, name: &str) {
         dir.extend_from_slice(&filepos.to_le_bytes());
         dir.extend_from_slice(&disksize.to_le_bytes());
         dir.extend_from_slice(&size.to_le_bytes());
@@ -512,10 +453,7 @@ mod tests {
         // Stops at the first NUL, ignores anything after it.
         assert_eq!(Wad2::cleanup_name("ab\0cd"), "ab");
         // Truncated to the 16-char field.
-        assert_eq!(
-            Wad2::cleanup_name("ABCDEFGHIJKLMNOPQRST"),
-            "abcdefghijklmnop"
-        );
+        assert_eq!(Wad2::cleanup_name("ABCDEFGHIJKLMNOPQRST"), "abcdefghijklmnop");
         assert_eq!(Wad2::cleanup_name("ABCDEFGHIJKLMNOPQRST").len(), NAME_LEN);
     }
 

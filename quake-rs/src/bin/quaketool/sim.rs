@@ -21,7 +21,7 @@ use quake_rs::server::{Server, UserCmd};
 
 use crate::entities::player_start;
 use crate::render::color_for_name;
-use crate::{read, CmdResult, Out};
+use crate::{CmdResult, Out, read};
 
 pub mod changelevel;
 pub mod playtest;
@@ -52,7 +52,8 @@ pub fn cmd_sim(progs_path: &str, bsp_path: &str, frames: u32) -> CmdResult {
         let (mins, maxs) = ([-16.0, -16.0, -24.0], [16.0, 16.0, 32.0]);
         let tr = quake_rs::world::trace_world(&bsp, from, to, mins, maxs);
         let _ = writeln!(o, "\ncollision trace (player box, straight down from spawn):");
-        let _ = writeln!(o, "  start {from:?}  contents={}", contents_name(quake_rs::world::point_contents(&bsp, from)));
+        let _ =
+            writeln!(o, "  start {from:?}  contents={}", contents_name(quake_rs::world::point_contents(&bsp, from)));
         if tr.fraction < 1.0 {
             let _ = writeln!(
                 o,
@@ -92,11 +93,8 @@ pub fn cmd_sim(progs_path: &str, bsp_path: &str, frames: u32) -> CmdResult {
             let fr = server.run_frame_f64(0.1)?;
             total += fr.thinks_fired;
         }
-        let _ = writeln!(
-            o,
-            "\nphysics: {frames} frames @ dt=0.1 -> time {:.1}s, {total} think calls fired",
-            server.time()
-        );
+        let _ =
+            writeln!(o, "\nphysics: {frames} frames @ dt=0.1 -> time {:.1}s, {total} think calls fired", server.time());
     }
     Ok(Out::Text(o))
 }
@@ -199,10 +197,7 @@ pub fn cmd_simbench(pak_path: &str, map_name: &str, frames: u32) -> CmdResult {
         traces as f64 / frames as f64,
         thinks as f64 / frames as f64,
     );
-    let _ = writeln!(
-        o,
-        "  totals: {stmts} VM statements, {traces} traces, {thinks} thinks over the window",
-    );
+    let _ = writeln!(o, "  totals: {stmts} VM statements, {traces} traces, {thinks} thinks over the window",);
     Ok(Out::Text(o))
 }
 
@@ -214,26 +209,22 @@ pub fn cmd_simbench(pak_path: &str, map_name: &str, frames: u32) -> CmdResult {
 pub fn cmd_walk(pak_path: &str, map_name: &str, out_prefix: &str, steps: u32) -> CmdResult {
     let pak = Pak::open(pak_path)?;
     let read_pak = |name: &str| -> Result<Vec<u8>, String> {
-        pak.read_file(name)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("{name} not found in {pak_path}"))
+        pak.read_file(name).map_err(|e| e.to_string())?.ok_or_else(|| format!("{name} not found in {pak_path}"))
     };
     let bsp_bytes = read_pak(map_name)?;
     let bsp = Bsp::parse(&bsp_bytes)?; // render + collision
     let bsp_sim = Bsp::parse(&bsp_bytes)?; // moved into the server
-    let palette = render::parse_palette(&read_pak("gfx/palette.lmp")?)
-        .ok_or_else(|| "bad/short gfx/palette.lmp".to_string())?;
+    let palette =
+        render::parse_palette(&read_pak("gfx/palette.lmp")?).ok_or_else(|| "bad/short gfx/palette.lmp".to_string())?;
     let progs = Progs::parse(&read_pak("progs.dat")?)?;
 
-    let (spawn, ang) =
-        player_start(&bsp.entities).ok_or_else(|| "map has no info_player_start".to_string())?;
+    let (spawn, ang) = player_start(&bsp.entities).ok_or_else(|| "map has no info_player_start".to_string())?;
 
     // Spawn entities and gather their MDL models (drawn at fixed positions).
     let mut server = Server::with_pak(bsp_sim, progs, Some(pak.clone()))?;
     server.set_map_name(map_name); // SV_SpawnServer: world.model + the mapname global
     server.spawn_entities()?;
-    let mut model_cache: std::collections::HashMap<String, Option<Mdl>> =
-        std::collections::HashMap::new();
+    let mut model_cache: std::collections::HashMap<String, Option<Mdl>> = std::collections::HashMap::new();
     let mut owned: Vec<(Mdl, [f32; 3], f32, [u8; 3])> = Vec::new();
     for e in 0..server.vm.num_edicts() {
         if server.vm.is_free_edict(e as i32) {
@@ -241,11 +232,7 @@ pub fn cmd_walk(pak_path: &str, map_name: &str, out_prefix: &str, steps: u32) ->
         }
         let ent = e as i32;
         let model = server.vm.ent_get_string(ent, "model");
-        if model.is_empty()
-            || model.starts_with('*')
-            || model.starts_with("maps/")
-            || !model.ends_with(".mdl")
-        {
+        if model.is_empty() || model.starts_with('*') || model.starts_with("maps/") || !model.ends_with(".mdl") {
             continue;
         }
         if !model_cache.contains_key(&model) {
@@ -266,7 +253,9 @@ pub fn cmd_walk(pak_path: &str, map_name: &str, out_prefix: &str, steps: u32) ->
         .map(|(mdl, origin, yaw, color)| render::ModelInstance {
             mdl,
             origin: *origin,
-            yaw: *yaw, pitch: 0.0, roll: 0.0,
+            yaw: *yaw,
+            pitch: 0.0,
+            roll: 0.0,
             color: *color,
             frame: 0,
             blend: None,
@@ -291,7 +280,8 @@ pub fn cmd_walk(pak_path: &str, map_name: &str, out_prefix: &str, steps: u32) ->
         origin = quake_rs::world::walk_move(&bsp, origin, mins, maxs, wishvel, dt);
         let eye = [origin[0], origin[1], origin[2] + 22.0];
         let cam = Camera::looking_at(eye, [eye[0] + forward[0], eye[1] + forward[1], eye[2]], 90.0);
-        let img = renderer.render(&render::Scene { models: &instances, ..render::Scene::new(&bsp, cam, w, h, &palette) });
+        let img =
+            renderer.render(&render::Scene { models: &instances, ..render::Scene::new(&bsp, cam, w, h, &palette) });
         let path = format!("{out_prefix}_{i:03}.ppm");
         img.to_rgb(&palette).write_ppm(&path).map_err(|e| format!("cannot write {path}: {e}"))?;
         frames += 1;
@@ -302,15 +292,8 @@ pub fn cmd_walk(pak_path: &str, map_name: &str, out_prefix: &str, steps: u32) ->
         (dx * dx + dy * dy).sqrt()
     };
     let mut o = String::new();
-    let _ = writeln!(
-        o,
-        "walk {map_name}: {} model instances, {frames} frames @ {w}x{h}",
-        instances.len()
-    );
-    let _ = writeln!(
-        o,
-        "  spawn {start:?} -> end {origin:?}  (advanced {dist:.0} units; the slide stops at walls)"
-    );
+    let _ = writeln!(o, "walk {map_name}: {} model instances, {frames} frames @ {w}x{h}", instances.len());
+    let _ = writeln!(o, "  spawn {start:?} -> end {origin:?}  (advanced {dist:.0} units; the slide stops at walls)");
     let _ = writeln!(o, "  wrote {out_prefix}_000.ppm .. {out_prefix}_{:03}.ppm", frames.saturating_sub(1));
     Ok(Out::Text(o))
 }
@@ -323,26 +306,21 @@ pub fn cmd_walk(pak_path: &str, map_name: &str, out_prefix: &str, steps: u32) ->
 pub fn cmd_demo(pak_path: &str, demo_name: &str, out_prefix: &str, stride_arg: usize) -> CmdResult {
     let pak = Pak::open(pak_path)?;
     let read_pak = |name: &str| -> Result<Vec<u8>, String> {
-        pak.read_file(name)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("{name} not found in {pak_path}"))
+        pak.read_file(name).map_err(|e| e.to_string())?.ok_or_else(|| format!("{name} not found in {pak_path}"))
     };
 
     let demo = quake_rs::demo::parse_demo(&read_pak(demo_name)?)?;
-    let map = demo
-        .map_name()
-        .ok_or_else(|| "demo has no world model (never received serverinfo)".to_string())?
-        .to_string();
+    let map =
+        demo.map_name().ok_or_else(|| "demo has no world model (never received serverinfo)".to_string())?.to_string();
     let bsp = Bsp::parse(&read_pak(&map)?)?;
-    let palette = render::parse_palette(&read_pak("gfx/palette.lmp")?)
-        .ok_or_else(|| "bad/short gfx/palette.lmp".to_string())?;
+    let palette =
+        render::parse_palette(&read_pak("gfx/palette.lmp")?).ok_or_else(|| "bad/short gfx/palette.lmp".to_string())?;
 
     let total = demo.frames.len();
     let stride = if stride_arg == 0 { (total / 120).max(1) } else { stride_arg };
     let (w, h) = (480usize, 300usize);
 
-    let mut model_cache: std::collections::HashMap<String, Option<Mdl>> =
-        std::collections::HashMap::new();
+    let mut model_cache: std::collections::HashMap<String, Option<Mdl>> = std::collections::HashMap::new();
     let mut written = 0u32;
     let mut renderer = render::Renderer::new();
     for f in demo.frames.iter().step_by(stride) {
@@ -369,7 +347,9 @@ pub fn cmd_demo(pak_path: &str, demo_name: &str, out_prefix: &str, stride_arg: u
             .map(|(mdl, origin, yaw, color)| render::ModelInstance {
                 mdl,
                 origin: *origin,
-                yaw: *yaw, pitch: 0.0, roll: 0.0,
+                yaw: *yaw,
+                pitch: 0.0,
+                roll: 0.0,
                 color: *color,
                 frame: 0,
                 blend: None,
@@ -389,14 +369,15 @@ pub fn cmd_demo(pak_path: &str, demo_name: &str, out_prefix: &str, stride_arg: u
             roll: f.view_angles[2],
             fov_deg: 90.0,
         };
-        let img = renderer.render(&render::Scene { models: &instances, ..render::Scene::new(&bsp, cam, w, h, &palette) });
+        let img =
+            renderer.render(&render::Scene { models: &instances, ..render::Scene::new(&bsp, cam, w, h, &palette) });
         let path = format!("{out_prefix}_{written:04}.ppm");
         img.to_rgb(&palette).write_ppm(&path).map_err(|e| format!("cannot write {path}: {e}"))?;
         written += 1;
     }
 
     let mut o = String::new();
-    let _ = writeln!(o, "demo {demo_name}: map {map}, {total} server frames", );
+    let _ = writeln!(o, "demo {demo_name}: map {map}, {total} server frames",);
     let _ = writeln!(
         o,
         "  {} models precached, {} unique .mdl loaded; rendered {written} frames (stride {stride}) @ {w}x{h}",

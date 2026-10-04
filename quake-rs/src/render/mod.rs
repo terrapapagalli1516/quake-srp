@@ -38,69 +38,67 @@
 //! [`crate::sbar`], [`crate::menu`], [`crate::keys`], [`crate::console`].
 
 use crate::bsp::Bsp;
-use crate::math::{cross, dot, normalize, sub, Vec3};
-use alias::{prepare_alias_model, prepare_viewmodel, AliasDraw};
-use raster::{hash_color, raster_triangle, Projected};
+use crate::math::{Vec3, cross, dot, normalize, sub};
+use alias::{AliasDraw, prepare_alias_model, prepare_viewmodel};
+use raster::{Projected, hash_color, raster_triangle};
 use sprite::{SpriteDraw, SpriteView};
 use warp::TurbTable;
 
-mod view;
+mod alias;
 mod band;
 mod edge;
-mod raster;
-mod light;
-mod surf;
-mod warp;
-mod sky;
-mod vis;
-mod world;
-mod alias;
-mod polyse;
-mod sprite;
-mod part;
-mod stats;
-mod torch;
-mod video;
 #[cfg(test)]
 pub(crate) mod fixtures;
+mod light;
+mod part;
+mod polyse;
+mod raster;
+mod sky;
+mod sprite;
+mod stats;
+mod surf;
+mod torch;
+mod video;
+mod view;
+mod vis;
+mod warp;
+mod world;
 
 // The 2-D layer's names quake-wasm and quaketool reach as `render::X`.
-pub use crate::console::{draw_console, draw_notify, Console};
+pub use crate::console::{Console, draw_console, draw_notify};
 pub use crate::draw::conchars_pic;
 pub use crate::menu::{
-    draw_menu, draw_menu_over_console, SlopPage, Menu, MenuAction, MenuClock, MenuPics, MenuScreen, MenuSound, RowKind,
-    SettingRow,
-    BIND_ATTACK, BIND_BACK, BIND_CENTERVIEW, BIND_CHANGEWEAPON, BIND_FORWARD, BIND_JUMP,
-    BIND_LEFT, BIND_LOOKDOWN, BIND_LOOKUP, BIND_MOVEDOWN, BIND_MOVELEFT, BIND_MOVERIGHT,
-    BIND_MOVEUP, BIND_RIGHT, BIND_SIZEDOWN, BIND_SIZEUP, BIND_SPEED, BIND_STRAFE, NEW_GAME_MAP,
-    NUM_HELP_PAGES, RESOLUTION_PRESETS,
+    BIND_ATTACK, BIND_BACK, BIND_CENTERVIEW, BIND_CHANGEWEAPON, BIND_FORWARD, BIND_JUMP, BIND_LEFT, BIND_LOOKDOWN,
+    BIND_LOOKUP, BIND_MOVEDOWN, BIND_MOVELEFT, BIND_MOVERIGHT, BIND_MOVEUP, BIND_RIGHT, BIND_SIZEDOWN, BIND_SIZEUP,
+    BIND_SPEED, BIND_STRAFE, Menu, MenuAction, MenuClock, MenuPics, MenuScreen, MenuSound, NEW_GAME_MAP,
+    NUM_HELP_PAGES, RESOLUTION_PRESETS, RowKind, SettingRow, SlopPage, draw_menu, draw_menu_over_console,
 };
 pub use crate::sbar::{
-    draw_finale_overlay, draw_hud_into, draw_intermission_overlay, status_bar_rect, Hud, IntermissionStats,
+    Hud, IntermissionStats, draw_finale_overlay, draw_hud_into, draw_intermission_overlay, status_bar_rect,
 };
 pub use crate::screen::{
-    calc_refdef, compose_view, draw_centerprint, draw_crosshair, draw_fps, draw_pause, notify_top, screen_with_backtile,
-    status_bar_rows, vid_aspect, CrossSize, Crosshair, Refdef, SbarLayout, ViewRect,
-    SB_LINES_FULL, VIEWSIZE_DEFAULT,
+    CrossSize, Crosshair, Refdef, SB_LINES_FULL, SbarLayout, VIEWSIZE_DEFAULT, ViewRect, calc_refdef, compose_view,
+    draw_centerprint, draw_crosshair, draw_fps, draw_pause, notify_top, screen_with_backtile, status_bar_rows,
+    vid_aspect,
 };
 // The renderer's public API (its files are private).
 pub use alias::{ModelInstance, Viewmodel};
+pub(crate) use band::map_rows;
 pub use light::{LIGHTSTYLES, NEUTRAL_LIGHTSTYLE_SCALES};
 pub use part::draw_particles;
 pub use raster::PerspSpan;
+pub use sky::SkyScroll;
 pub use sprite::SpriteInstance;
-pub use surf::MipCvars;
 pub use stats::RenderStats;
+pub use surf::MipCvars;
+pub use torch::TorchFlicker;
+pub use video::{FovMode, HIRES_MAXHEIGHT, HIRES_MAXWIDTH, MAXHEIGHT, MAXWIDTH, VideoCvars};
 pub use view::{
-    build_gamma_table, content_cshift, cshift_ramps, pack_rgba, powerup_cshift, view_bob, viewmodel_angles, FramePalette,
-    viewmodel_fudge, viewmodel_origin_ofs,
+    FramePalette, build_gamma_table, content_cshift, cshift_ramps, pack_rgba, powerup_cshift, view_bob,
+    viewmodel_angles, viewmodel_fudge, viewmodel_origin_ofs,
 };
 pub use vis::point_in_leaf;
-pub use sky::SkyScroll;
-pub use torch::TorchFlicker;
-pub use video::{FovMode, VideoCvars, HIRES_MAXHEIGHT, HIRES_MAXWIDTH, MAXHEIGHT, MAXWIDTH};
 pub use world::{BModelInstance, ExternalBModel};
-pub(crate) use band::map_rows;
 
 // ---------------------------------------------------------------------------
 // Image
@@ -330,19 +328,9 @@ impl Camera {
         };
 
         // pitch: elevation above the XY plane. atan2(dz, horizontal_distance).
-        let pitch = if horiz == 0.0 && dir[2] == 0.0 {
-            0.0
-        } else {
-            (dir[2] as f64).atan2(horiz).to_degrees() as f32
-        };
+        let pitch = if horiz == 0.0 && dir[2] == 0.0 { 0.0 } else { (dir[2] as f64).atan2(horiz).to_degrees() as f32 };
 
-        Camera {
-            pos,
-            yaw,
-            pitch,
-            roll: 0.0,
-            fov_deg,
-        }
+        Camera { pos, yaw, pitch, roll: 0.0, fov_deg }
     }
 
     /// The orthonormal camera basis `(forward, right, up)` in world space.
@@ -358,11 +346,7 @@ impl Camera {
         let (sin_p, cos_p) = (cp.sin(), cp.cos());
 
         // forward: yaw rotates in XY, pitch lifts in Z.
-        let forward: Vec3 = [
-            (cos_p * cos_y) as f32,
-            (cos_p * sin_y) as f32,
-            sin_p as f32,
-        ];
+        let forward: Vec3 = [(cos_p * cos_y) as f32, (cos_p * sin_y) as f32, sin_p as f32];
         // right: forward rotated -90 deg about +Z, kept level (no pitch), so the
         // horizon stays horizontal regardless of pitch. (cos_y, sin_y) -> rotate
         // by -90 -> (sin_y, -cos_y).
@@ -536,11 +520,7 @@ impl RenderOptions {
     /// read as square pixels.
     pub(crate) fn aspect(&self) -> f32 {
         let a = self.pixel_aspect;
-        if a.is_finite() && a > 0.0 {
-            a
-        } else {
-            1.0
-        }
+        if a.is_finite() && a > 0.0 { a } else { 1.0 }
     }
 }
 
@@ -711,11 +691,7 @@ pub fn render_bsp(bsp: &Bsp, cam: &Camera, w: usize, h: usize) -> Image<[u8; 3]>
         if plane_index < 0 {
             continue;
         }
-        let plane = match plane_index
-            .try_into()
-            .ok()
-            .and_then(|pi: usize| bsp.planes.get(pi))
-        {
+        let plane = match plane_index.try_into().ok().and_then(|pi: usize| bsp.planes.get(pi)) {
             Some(p) => p,
             None => continue,
         };
@@ -757,11 +733,7 @@ pub fn render_bsp(bsp: &Bsp, cam: &Camera, w: usize, h: usize) -> Image<[u8; 3]>
             let vy = dot(rel, up);
             let sx = cx + focal * vx / vz;
             let sy = cy - focal * vy / vz;
-            proj_poly.push(Projected {
-                x: sx,
-                y: sy,
-                depth: vz,
-            });
+            proj_poly.push(Projected { x: sx, y: sy, depth: vz });
         }
         if clipped || proj_poly.len() < 3 {
             continue;
@@ -772,11 +744,7 @@ pub fn render_bsp(bsp: &Bsp, cam: &Camera, w: usize, h: usize) -> Image<[u8; 3]>
             // Prefer the miptex index for the hue; fall back to texinfo index.
             let texinfo_index = face.texinfo as i64;
             let surf_key = if texinfo_index >= 0 {
-                match texinfo_index
-                    .try_into()
-                    .ok()
-                    .and_then(|ti: usize| bsp.texinfo.get(ti))
-                {
+                match texinfo_index.try_into().ok().and_then(|ti: usize| bsp.texinfo.get(ti)) {
                     Some(ti) => ti.miptex as i64,
                     None => texinfo_index,
                 }
@@ -1427,7 +1395,11 @@ fn window_scene<'a>(scene: &Scene<'a>, part: ViewRect, screen: &Image) -> Option
         return None;
     }
     let window = ViewWindow { x: part.x - place.x, y: part.y - place.y, view_w: w, view_h: h };
-    let options = RenderOptions { screen: Some(ScreenPlace { x: part.x, y: part.y, ..place }), window: Some(window), ..scene.options };
+    let options = RenderOptions {
+        screen: Some(ScreenPlace { x: part.x, y: part.y, ..place }),
+        window: Some(window),
+        ..scene.options
+    };
     Some(Scene { width: part.w, height: part.h, options, ..*scene })
 }
 
@@ -1459,7 +1431,9 @@ impl<'a> Entities<'a> {
             .filter_map(|inst| Some((inst.models_before, SpriteDraw::prepare(&view, inst, scene.time)?)))
             .collect();
         sprites.sort_by_key(|&(before, _)| before);
-        if let Some(t) = ts { prof.add(|s| s.sprite_ns += t.elapsed().as_nanos() as u64); }
+        if let Some(t) = ts {
+            prof.add(|s| s.sprite_ns += t.elapsed().as_nanos() as u64);
+        }
         let opts = &scene.options;
         let proj = part::ParticleProjection::in_view(&frame.cam, &frame.geom, opts.aspect(), opts.video.hires);
         let particles = part::project_particles(&frame.cam, &proj, scene.particles);
@@ -1481,7 +1455,9 @@ impl<'a> Entities<'a> {
         let mut draw_sprite = |sprite: &SpriteDraw, band: &mut band::Band| {
             let t = prof.now();
             sprite.draw(band);
-            if let Some(t) = t { sprite_ns += t.elapsed().as_nanos() as u64; }
+            if let Some(t) = t {
+                sprite_ns += t.elapsed().as_nanos() as u64;
+            }
         };
         let mut sprites = self.sprites.iter().peekable();
         if !self.models.is_empty() {
@@ -1505,12 +1481,16 @@ impl<'a> Entities<'a> {
         }
         let tp = prof.now();
         part::draw_particle_dots(band, &self.particles);
-        if let Some(t) = tp { prof.add(|s| s.particle_ns += t.elapsed().as_nanos() as u64); }
+        if let Some(t) = tp {
+            prof.add(|s| s.particle_ns += t.elapsed().as_nanos() as u64);
+        }
         let tv = prof.now();
         if let Some(gun) = &self.gun {
             gun.draw(&mut polyse::PolyFramebuffer::new(band));
         }
-        if let Some(t) = tv { prof.add(|s| s.viewmodel_ns += t.elapsed().as_nanos() as u64); }
+        if let Some(t) = tv {
+            prof.add(|s| s.viewmodel_ns += t.elapsed().as_nanos() as u64);
+        }
     }
 }
 
@@ -1594,11 +1574,7 @@ pub fn demo_room() -> Bsp {
         }
 
         let planenum = planes.len() as i16;
-        planes.push(DPlane {
-            normal,
-            dist,
-            ptype,
-        });
+        planes.push(DPlane { normal, dist, ptype });
 
         faces.push(DFace {
             planenum,
@@ -1627,39 +1603,81 @@ pub fn demo_room() -> Bsp {
 
     // Floor (z = z0): inward normal +Z.
     add_quad(
-        &mut vertexes, &mut edges, &mut surfedges, &mut faces, &mut planes,
+        &mut vertexes,
+        &mut edges,
+        &mut surfedges,
+        &mut faces,
+        &mut planes,
         [[x0, y0, z0], [x1, y0, z0], [x1, y1, z0], [x0, y1, z0]],
-        [0.0, 0.0, 1.0], z0, 0, PT_Z,
+        [0.0, 0.0, 1.0],
+        z0,
+        0,
+        PT_Z,
     );
     // Ceiling (z = z1): inward normal -Z.
     add_quad(
-        &mut vertexes, &mut edges, &mut surfedges, &mut faces, &mut planes,
+        &mut vertexes,
+        &mut edges,
+        &mut surfedges,
+        &mut faces,
+        &mut planes,
         [[x0, y0, z1], [x0, y1, z1], [x1, y1, z1], [x1, y0, z1]],
-        [0.0, 0.0, -1.0], -z1, 1, PT_Z,
+        [0.0, 0.0, -1.0],
+        -z1,
+        1,
+        PT_Z,
     );
     // West wall (x = x0): inward normal +X.
     add_quad(
-        &mut vertexes, &mut edges, &mut surfedges, &mut faces, &mut planes,
+        &mut vertexes,
+        &mut edges,
+        &mut surfedges,
+        &mut faces,
+        &mut planes,
         [[x0, y0, z0], [x0, y0, z1], [x0, y1, z1], [x0, y1, z0]],
-        [1.0, 0.0, 0.0], x0, 2, PT_X,
+        [1.0, 0.0, 0.0],
+        x0,
+        2,
+        PT_X,
     );
     // East wall (x = x1): inward normal -X.
     add_quad(
-        &mut vertexes, &mut edges, &mut surfedges, &mut faces, &mut planes,
+        &mut vertexes,
+        &mut edges,
+        &mut surfedges,
+        &mut faces,
+        &mut planes,
         [[x1, y0, z0], [x1, y1, z0], [x1, y1, z1], [x1, y0, z1]],
-        [-1.0, 0.0, 0.0], -x1, 3, PT_X,
+        [-1.0, 0.0, 0.0],
+        -x1,
+        3,
+        PT_X,
     );
     // South wall (y = y0): inward normal +Y.
     add_quad(
-        &mut vertexes, &mut edges, &mut surfedges, &mut faces, &mut planes,
+        &mut vertexes,
+        &mut edges,
+        &mut surfedges,
+        &mut faces,
+        &mut planes,
         [[x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [x0, y0, z1]],
-        [0.0, 1.0, 0.0], y0, 4, PT_Y,
+        [0.0, 1.0, 0.0],
+        y0,
+        4,
+        PT_Y,
     );
     // North wall (y = y1): inward normal -Y.
     add_quad(
-        &mut vertexes, &mut edges, &mut surfedges, &mut faces, &mut planes,
+        &mut vertexes,
+        &mut edges,
+        &mut surfedges,
+        &mut faces,
+        &mut planes,
         [[x0, y1, z0], [x0, y1, z1], [x1, y1, z1], [x1, y1, z0]],
-        [0.0, -1.0, 0.0], -y1, 5, PT_Y,
+        [0.0, -1.0, 0.0],
+        -y1,
+        5,
+        PT_Y,
     );
 
     // --- Interior pillar: a small box near the centre, OUTWARD-facing so the ---
@@ -1671,42 +1689,73 @@ pub fn demo_room() -> Bsp {
     // base sits on the floor; the top is small) — four side quads suffice.
     // +X face (x = px1): outward normal +X.
     add_quad(
-        &mut vertexes, &mut edges, &mut surfedges, &mut faces, &mut planes,
+        &mut vertexes,
+        &mut edges,
+        &mut surfedges,
+        &mut faces,
+        &mut planes,
         [[px1, py0, pz0], [px1, py1, pz0], [px1, py1, pz1], [px1, py0, pz1]],
-        [1.0, 0.0, 0.0], px1, 6, PT_X,
+        [1.0, 0.0, 0.0],
+        px1,
+        6,
+        PT_X,
     );
     // -X face (x = px0): outward normal -X.
     add_quad(
-        &mut vertexes, &mut edges, &mut surfedges, &mut faces, &mut planes,
+        &mut vertexes,
+        &mut edges,
+        &mut surfedges,
+        &mut faces,
+        &mut planes,
         [[px0, py0, pz0], [px0, py0, pz1], [px0, py1, pz1], [px0, py1, pz0]],
-        [-1.0, 0.0, 0.0], -px0, 6, PT_X,
+        [-1.0, 0.0, 0.0],
+        -px0,
+        6,
+        PT_X,
     );
     // +Y face (y = py1): outward normal +Y.
     add_quad(
-        &mut vertexes, &mut edges, &mut surfedges, &mut faces, &mut planes,
+        &mut vertexes,
+        &mut edges,
+        &mut surfedges,
+        &mut faces,
+        &mut planes,
         [[px0, py1, pz0], [px0, py1, pz1], [px1, py1, pz1], [px1, py1, pz0]],
-        [0.0, 1.0, 0.0], py1, 7, PT_Y,
+        [0.0, 1.0, 0.0],
+        py1,
+        7,
+        PT_Y,
     );
     // -Y face (y = py0): outward normal -Y.
     add_quad(
-        &mut vertexes, &mut edges, &mut surfedges, &mut faces, &mut planes,
+        &mut vertexes,
+        &mut edges,
+        &mut surfedges,
+        &mut faces,
+        &mut planes,
         [[px0, py0, pz0], [px1, py0, pz0], [px1, py0, pz1], [px0, py0, pz1]],
-        [0.0, -1.0, 0.0], -py0, 7, PT_Y,
+        [0.0, -1.0, 0.0],
+        -py0,
+        7,
+        PT_Y,
     );
     // Pillar top (z = pz1): outward normal +Z.
     add_quad(
-        &mut vertexes, &mut edges, &mut surfedges, &mut faces, &mut planes,
+        &mut vertexes,
+        &mut edges,
+        &mut surfedges,
+        &mut faces,
+        &mut planes,
         [[px0, py0, pz1], [px1, py0, pz1], [px1, py1, pz1], [px0, py1, pz1]],
-        [0.0, 0.0, 1.0], pz1, 8, PT_Z,
+        [0.0, 0.0, 1.0],
+        pz1,
+        8,
+        PT_Z,
     );
 
     // --- A few texinfo entries with distinct miptex indices for varied hues. ---
     // The S/T vectors are unused by this renderer (no texturing) but kept sane.
-    let mk_texinfo = |miptex: i32| TexInfo {
-        vecs: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]],
-        miptex,
-        flags: 0,
-    };
+    let mk_texinfo = |miptex: i32| TexInfo { vecs: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]], miptex, flags: 0 };
     let texinfo: Vec<TexInfo> = (0..9).map(mk_texinfo).collect();
 
     // --- Model 0: the worldspawn, covering all faces, with the room bounds. ---
@@ -1808,16 +1857,8 @@ mod tests {
     fn demo_room_shape() {
         let bsp = demo_room();
         assert_eq!(bsp.version, 29);
-        assert!(
-            bsp.faces.len() >= 6,
-            "expected at least 6 faces, got {}",
-            bsp.faces.len()
-        );
-        assert!(
-            bsp.vertexes.len() >= 8,
-            "expected at least 8 vertexes, got {}",
-            bsp.vertexes.len()
-        );
+        assert!(bsp.faces.len() >= 6, "expected at least 6 faces, got {}", bsp.faces.len());
+        assert!(bsp.vertexes.len() >= 8, "expected at least 8 vertexes, got {}", bsp.vertexes.len());
         // The worldspawn model should cover all faces.
         let m0 = bsp.models.first().expect("model 0 present");
         assert_eq!(m0.numfaces as usize, bsp.faces.len());
@@ -1865,10 +1906,7 @@ mod tests {
         let drawn = img.pixels.iter().filter(|p| **p != bg).count();
         // It must actually have rasterised geometry (walls + pillar), not just
         // background. A central interior view fills a large fraction of pixels.
-        assert!(
-            drawn > 160 * 120 / 4,
-            "expected the renderer to fill a meaningful area, only {drawn} pixels drawn"
-        );
+        assert!(drawn > 160 * 120 / 4, "expected the renderer to fill a meaningful area, only {drawn} pixels drawn");
     }
 
     #[test]
@@ -1887,11 +1925,7 @@ mod tests {
         let mut colors: Vec<[u8; 3]> = img.pixels.iter().filter(|p| **p != bg).copied().collect();
         colors.sort();
         colors.dedup();
-        assert!(
-            colors.len() >= 2,
-            "expected multiple surface hues, found {}",
-            colors.len()
-        );
+        assert!(colors.len() >= 2, "expected multiple surface hues, found {}", colors.len());
     }
 
     #[test]
@@ -1905,7 +1939,10 @@ mod tests {
         let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
         let (w, h) = (320usize, 200usize);
         let render = |pixel_aspect: f32| {
-            render_once(&Scene { options: RenderOptions { pixel_aspect, ..Default::default() }, ..Scene::new(&bsp, cam, w, h, &pal) })
+            render_once(&Scene {
+                options: RenderOptions { pixel_aspect, ..Default::default() },
+                ..Scene::new(&bsp, cam, w, h, &pal)
+            })
         };
         // The pillar's face: the colour at the centre; its columns on the centre
         // row and its top row on the centre column.
@@ -1989,7 +2026,8 @@ mod tests {
         // at x = 84, it faces the eye in the plane x = 100.
         let models = [ModelInstance::with_frame(&mdl, [84.0, 0.0, 0.0], 90.0, 0, [200, 40, 40])];
         let pixel = |models_before: usize| {
-            let sprites = [SpriteInstance { sprite: &spr, origin: [100.0, 0.0, 0.0], angles: [0.0; 3], frame: 0, models_before }];
+            let sprites =
+                [SpriteInstance { sprite: &spr, origin: [100.0, 0.0, 0.0], angles: [0.0; 3], frame: 0, models_before }];
             let scene = Scene { models: &models, sprites: &sprites, ..Scene::new(&world, cam, 160, 120, &pal) };
             // Inside both, below and right of the centre: world (100, -6, -6).
             render_once(&scene).pixels[64 * 160 + 84]
@@ -2014,8 +2052,20 @@ mod tests {
         let particles: Vec<(Vec3, u8)> = (0..300)
             .map(|i| ([-150.0 + i as f32, (i % 13) as f32 * 9.0 - 60.0, (i % 7) as f32 * 9.0], (i % 250) as u8))
             .collect();
-        let sprites = [SpriteInstance { sprite: &spr, origin: [-60.0, 20.0, 10.0], angles: [0.0; 3], frame: 0, models_before: 1 }];
-        let gun = Viewmodel { mdl: &mdl, frame: 0, blend: None, origin_ofs: [8.0, 0.0, -6.0], angles: [cam.pitch, cam.yaw, 0.0] };
+        let sprites = [SpriteInstance {
+            sprite: &spr,
+            origin: [-60.0, 20.0, 10.0],
+            angles: [0.0; 3],
+            frame: 0,
+            models_before: 1,
+        }];
+        let gun = Viewmodel {
+            mdl: &mdl,
+            frame: 0,
+            blend: None,
+            origin_ofs: [8.0, 0.0, -6.0],
+            angles: [cam.pitch, cam.yaw, 0.0],
+        };
         let dlights = [crate::dlight::DynamicLight::new([0.0; 3], 250.0, f32::MAX, 0.0, 0.0, 0)];
         let world = Scene { time: 1.3, dlights: &dlights, ..Scene::new(&bsp, cam, 211, 157, &pal) };
         let scene = Scene { models: &models, particles: &particles, sprites: &sprites, viewmodel: Some(gun), ..world };
@@ -2072,8 +2122,17 @@ mod tests {
         let models = [ModelInstance::with_frame(&mdl, [-80.0, 0.0, 0.0], 30.0, 0, [200, 40, 40])];
         let particles: Vec<(Vec3, u8)> = (0..100).map(|i| ([-120.0 + 2.0 * i as f32, 0.0, 20.0], 77)).collect();
         let (vw, vh) = (161, 117);
-        let place = |x, y| RenderOptions { screen: Some(ScreenPlace { x, y, vid_w: 200, vid_h: 150 }), ..RenderOptions::default() };
-        let scene = |x, y| Scene { time: 0.7, models: &models, particles: &particles, options: place(x, y), ..Scene::new(&bsp, cam, vw, vh, &pal) };
+        let place = |x, y| RenderOptions {
+            screen: Some(ScreenPlace { x, y, vid_w: 200, vid_h: 150 }),
+            ..RenderOptions::default()
+        };
+        let scene = |x, y| Scene {
+            time: 0.7,
+            models: &models,
+            particles: &particles,
+            options: place(x, y),
+            ..Scene::new(&bsp, cam, vw, vh, &pal)
+        };
         for threads in [1, 4] {
             let mut r = Renderer::new();
             r.set_threads(threads);
@@ -2106,8 +2165,17 @@ mod tests {
         let models = [ModelInstance::with_frame(&mdl, [-80.0, 0.0, 0.0], 30.0, 0, [200, 40, 40])];
         let particles: Vec<(Vec3, u8)> = (0..100).map(|i| ([-120.0 + 2.0 * i as f32, 0.0, 20.0], 77)).collect();
         let (vw, vh) = (160, 120);
-        let place = RenderOptions { screen: Some(ScreenPlace { x: 0, y: 0, vid_w: vw, vid_h: vh + 40 }), ..RenderOptions::default() };
-        let view = Scene { time: 0.7, models: &models, particles: &particles, options: place, ..Scene::new(&bsp, cam, vw, vh, &pal) };
+        let place = RenderOptions {
+            screen: Some(ScreenPlace { x: 0, y: 0, vid_w: vw, vid_h: vh + 40 }),
+            ..RenderOptions::default()
+        };
+        let view = Scene {
+            time: 0.7,
+            models: &models,
+            particles: &particles,
+            options: place,
+            ..Scene::new(&bsp, cam, vw, vh, &pal)
+        };
         let mut r = Renderer::new();
         let mut whole = Image::new(vw, vh + 40, 1);
         r.render_into(&view, &mut whole);
@@ -2130,7 +2198,10 @@ mod tests {
         assert!(whole.pixels[vw * vh..].iter().filter(|&&p| p != 1).count() > vw * 40 / 2, "the world below the view");
         // Above or left of the view's place: nothing.
         let mut none = Image::new(vw, vh + 40, 1);
-        let moved = Scene { options: RenderOptions { screen: Some(ScreenPlace { x: 10, y: 10, vid_w: vw, vid_h: vh + 40 }), ..place }, ..view };
+        let moved = Scene {
+            options: RenderOptions { screen: Some(ScreenPlace { x: 10, y: 10, vid_w: vw, vid_h: vh + 40 }), ..place },
+            ..view
+        };
         r.render_window(&moved, crate::screen::ViewRect { x: 0, y: 0, w: 10, h: 10 }, &mut none);
         assert!(none.pixels.iter().all(|&p| p == 1));
     }
@@ -2157,7 +2228,10 @@ mod tests {
         let mut styles = NEUTRAL_LIGHTSTYLE_SCALES;
         styles[1] = 0.5;
         let (sw, sh, vw, vh) = (200, 150, 180, 100);
-        let options = RenderOptions { screen: Some(ScreenPlace { x: 10, y: 6, vid_w: sw, vid_h: sh }), ..RenderOptions::default() };
+        let options = RenderOptions {
+            screen: Some(ScreenPlace { x: 10, y: 6, vid_w: sw, vid_h: sh }),
+            ..RenderOptions::default()
+        };
         let view = Scene {
             time: 0.7,
             models: &models,
@@ -2185,7 +2259,10 @@ mod tests {
                 (screen, z, r.surfaces.block_entries())
             };
             let (screen, z, cache) = one_by_one(1);
-            assert!(screen.pixels[(106 + 20) * sw + 30] != 1 && screen.pixels[(106 + 20) * sw + 100] == 1, "the corners drawn");
+            assert!(
+                screen.pixels[(106 + 20) * sw + 30] != 1 && screen.pixels[(106 + 20) * sw + 100] == 1,
+                "the corners drawn"
+            );
             for threads in [1, 2, 4, 8] {
                 let mut r = Renderer::new();
                 r.set_threads(threads);
@@ -2240,7 +2317,13 @@ mod tests {
         // a texel a unit, a texture of 16 x 16 distinct texels.
         for f in &bsp.faces {
             let n = bsp.planes[f.planenum as usize].normal;
-            let (sa, ta) = if n[2] != 0.0 { ([1.0, 0.0, 0.0], [0.0, 1.0, 0.0]) } else if n[0] != 0.0 { ([0.0, 1.0, 0.0], [0.0, 0.0, 1.0]) } else { ([1.0, 0.0, 0.0], [0.0, 0.0, 1.0]) };
+            let (sa, ta) = if n[2] != 0.0 {
+                ([1.0, 0.0, 0.0], [0.0, 1.0, 0.0])
+            } else if n[0] != 0.0 {
+                ([0.0, 1.0, 0.0], [0.0, 0.0, 1.0])
+            } else {
+                ([1.0, 0.0, 0.0], [0.0, 0.0, 1.0])
+            };
             let ti = &mut bsp.texinfo[f.texinfo as usize];
             ti.vecs = [[sa[0], sa[1], sa[2], 0.37], [ta[0], ta[1], ta[2], 0.61]];
         }
@@ -2269,10 +2352,14 @@ mod tests {
         let exact = draw(PerspSpan::Exact);
         let off = |img: &[u8]| img.iter().zip(&exact).filter(|(a, b)| a != b).count();
         assert_eq!(draw(PerspSpan::Spans16), fixtures::render_once(&scene()).pixels, "16 is the default, id's");
-        let (d16, d8, d4) = (off(&draw(PerspSpan::Spans16)), off(&draw(PerspSpan::Spans8)), off(&draw(PerspSpan::Spans4)));
+        let (d16, d8, d4) =
+            (off(&draw(PerspSpan::Spans16)), off(&draw(PerspSpan::Spans8)), off(&draw(PerspSpan::Spans4)));
         let (d64, d32) = (off(&draw(PerspSpan::Spans64)), off(&draw(PerspSpan::Spans32)));
         // (2026-10-03: 63648, 44956, 24826, 12487 and 5136 of the 144000 pixels.)
-        assert!(d64 > d32 && d32 > d16 && d16 > d8 && d8 > d4 && d4 > 0, "pixels off exact: 64 {d64}, 32 {d32}, 16 {d16}, 8 {d8}, 4 {d4}");
+        assert!(
+            d64 > d32 && d32 > d16 && d16 > d8 && d8 > d4 && d4 > 0,
+            "pixels off exact: 64 {d64}, 32 {d32}, 16 {d16}, 8 {d8}, 4 {d4}"
+        );
     }
 
     #[test]
@@ -2288,11 +2375,7 @@ mod tests {
 
         // Header: "P6\n2 1\n255\n" followed by 2*1*3 = 6 bytes of pixel data.
         let header = b"P6\n2 1\n255\n";
-        assert!(
-            bytes.starts_with(header),
-            "PPM header mismatch: {:?}",
-            &bytes[..header.len().min(bytes.len())]
-        );
+        assert!(bytes.starts_with(header), "PPM header mismatch: {:?}", &bytes[..header.len().min(bytes.len())]);
         assert_eq!(bytes.len(), header.len() + 6);
         // First pixel is red.
         assert_eq!(&bytes[header.len()..header.len() + 3], &[255, 0, 0]);
@@ -2322,15 +2405,9 @@ mod tests {
         let b = render_once(&Scene { time: 0.6, ..Scene::new(&bsp, cam, 160, 120, &pal) });
 
         let bg = 2u8; // r_clearcolor, the background
-        assert!(
-            a.pixels.iter().any(|&p| p != bg),
-            "special-surface room rendered nothing"
-        );
+        assert!(a.pixels.iter().any(|&p| p != bg), "special-surface room rendered nothing");
         let changed = a.pixels.iter().zip(b.pixels.iter()).filter(|(x, y)| x != y).count();
-        assert!(
-            changed > 0,
-            "liquid/sky faces must animate between two game times"
-        );
+        assert!(changed > 0, "liquid/sky faces must animate between two game times");
     }
 
     #[test]
@@ -2351,7 +2428,7 @@ mod tests {
     /// routes those two faces through the turbulent / sky animated samplers while
     /// the four walls stay ordinary. Used to prove special surfaces animate.
     fn special_surface_room() -> Bsp {
-        use crate::bsp::{MipTex, TexInfo, TEX_SPECIAL};
+        use crate::bsp::{MipTex, TEX_SPECIAL, TexInfo};
         let mut bsp = demo_room();
 
         // Two inline miptextures: index 0 = liquid (64x64), index 1 = sky (256x128).
@@ -2380,11 +2457,8 @@ mod tests {
         // flat fallback, unchanged Normal walls). The floor uses texinfo 0, the
         // ceiling uses texinfo 1 (matching demo_room's add_quad ordering: floor is
         // the first face with texinfo 0, ceiling the second with texinfo 1).
-        let axis = |miptex: i32, flags: i32| TexInfo {
-            vecs: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]],
-            miptex,
-            flags,
-        };
+        let axis =
+            |miptex: i32, flags: i32| TexInfo { vecs: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]], miptex, flags };
         // texinfo 0 -> liquid (special); texinfo 1 -> sky (special); 2.. -> normal.
         let mut tex = vec![axis(0, TEX_SPECIAL), axis(1, TEX_SPECIAL)];
         for _ in 2..9 {
@@ -2394,4 +2468,3 @@ mod tests {
         bsp
     }
 }
-

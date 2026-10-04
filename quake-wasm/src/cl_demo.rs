@@ -8,17 +8,23 @@
 //! `svc_disconnect`: the loop's next demo, or disconnected). Its tests drive
 //! the real client on synthetic and on id's recorded demos.
 
-use quake_rs::client::cl_demo::{default_extension, demo_frame, demo_frame_undrawn, timedemo_frame, MAX_DEMOS};
+use quake_rs::client::cl_demo::{MAX_DEMOS, default_extension, demo_frame, demo_frame_undrawn, timedemo_frame};
 use quake_rs::client::{SoundCall, Vid};
 use quake_rs::render;
 
-use crate::app::{build_demo_file, App, DemoPlay, APP};
+use crate::app::{APP, App, DemoPlay, build_demo_file};
 
 /// One frame of demo playback at `render_w x render_h`: the finished screen
 /// (empty when not `draw`n: a frame-rate cap's) and its colour shifts
 /// (`cl.cshifts`, applied by the host after the menu and console); the
 /// frame's sound calls are carried out.
-pub(crate) fn step_demo(d: &mut DemoPlay, dt: f32, menu_up: bool, vid: &Vid, draw: bool) -> (render::Image, Vec<([u8; 3], f32)>) {
+pub(crate) fn step_demo(
+    d: &mut DemoPlay,
+    dt: f32,
+    menu_up: bool,
+    vid: &Vid,
+    draw: bool,
+) -> (render::Image, Vec<([u8; 3], f32)>) {
     let frame = if draw { demo_frame(d, dt, menu_up, vid) } else { demo_frame_undrawn(d, dt, menu_up, vid) };
     crate::snd_dma::play(&d.pak, frame.sound);
     (frame.image, frame.cshifts)
@@ -194,11 +200,11 @@ mod tests {
     use super::*;
     use quake_rs::client::cl_tent::rocket_trail_type;
     use quake_rs::client::view::V_KICKTIME;
-    use quake_rs::tent::BeamModel;
     use quake_rs::demo::parse_demo;
     use quake_rs::mdl::Mdl;
     use quake_rs::particles::Lcg;
     use quake_rs::server::{SoundEvent, TempEntityEvent};
+    use quake_rs::tent::BeamModel;
 
     use crate::app::build_demo;
     use crate::common::pak;
@@ -242,10 +248,7 @@ mod tests {
         // The last frame (index n-1) must appear in the shown sequence, and it
         // must be displayed BEFORE the wrap-back-to-0 that follows it.
         let last = n - 1;
-        let pos = shown
-            .iter()
-            .position(|&i| i == last)
-            .expect("the final frame index must be rendered at least once");
+        let pos = shown.iter().position(|&i| i == last).expect("the final frame index must be rendered at least once");
         assert_eq!(
             shown.get(pos + 1).copied(),
             Some(0),
@@ -262,7 +265,7 @@ mod tests {
         // must fill the live particle pool when playback advances onto it, and
         // must NOT re-spawn while the same frame lingers, and must reset on wrap.
         use quake_rs::demo::{Demo, DemoFrame};
-        use quake_rs::server::{te_consts, ParticleBurst, TempEntityEvent};
+        use quake_rs::server::{ParticleBurst, TempEntityEvent, te_consts};
 
         let plain = |t: f32| DemoFrame { time: t, ..Default::default() };
         // Frame 1 (t=0.05) carries the effects; frames 0 and 2 are empty. Frame
@@ -275,12 +278,7 @@ mod tests {
             view_entity_origin: [0.0, 0.0, 0.0],
             view_angles: [0.0, 0.0, 0.0],
             entities: Vec::new(),
-            particles: vec![ParticleBurst {
-                org: [0.0, 0.0, 0.0],
-                dir: [0.0, 0.0, 0.0],
-                color: 73,
-                count: 20,
-            }],
+            particles: vec![ParticleBurst { org: [0.0, 0.0, 0.0], dir: [0.0, 0.0, 0.0], color: 73, count: 20 }],
             temp_entities: vec![TempEntityEvent {
                 te_type: te_consts::TE_EXPLOSION,
                 pos: [10.0, 0.0, 0.0],
@@ -310,20 +308,14 @@ mod tests {
         let _ = step_demo(&mut d, 0.05, false, &crate::vid::mode_vid(DEFAULT_W, DEFAULT_H), true);
         assert_eq!(d.idx, 1, "advanced onto the effect frame");
         let after_first = d.particles.len();
-        assert!(
-            after_first > 500,
-            "the burst + 1024-particle explosion populate the pool (got {after_first})"
-        );
+        assert!(after_first > 500, "the burst + 1024-particle explosion populate the pool (got {after_first})");
 
         // A step that holds the clock on frame 1 (any later clock reads the
         // next message: CL_GetMessage) must NOT re-spawn the explosion (the
         // pool only shrinks as particles age — it never jumps back up).
         let _ = step_demo(&mut d, 0.0, false, &crate::vid::mode_vid(DEFAULT_W, DEFAULT_H), true);
         assert_eq!(d.idx, 1, "still on the effect frame");
-        assert!(
-            d.particles.len() <= after_first,
-            "no double-spawn: pool did not grow while the frame lingered"
-        );
+        assert!(d.particles.len() <= after_first, "no double-spawn: pool did not grow while the frame lingered");
 
         // Drive 0.05s steps until playback wraps back to frame 0. After landing
         // on the last frame the very NEXT step wraps (deferred-wrap, as the
@@ -339,10 +331,7 @@ mod tests {
         }
         assert!(wrapped, "playback looped back to the first frame within a cycle");
         assert_eq!(d.idx, 0, "looped back to the first frame");
-        assert!(
-            d.particles.is_empty(),
-            "wrap reset the particle pool (no stale explosion across the loop)"
-        );
+        assert!(d.particles.is_empty(), "wrap reset the particle pool (no stale explosion across the loop)");
     }
 
     #[test]
@@ -380,11 +369,7 @@ mod tests {
             .expect("progs/bolt.mdl parses from the embedded pak");
         let demo = Demo {
             level_name: "test".into(),
-            model_precache: vec![
-                String::new(),
-                "maps/test.bsp".into(),
-                "progs/bolt.mdl".into(),
-            ],
+            model_precache: vec![String::new(), "maps/test.bsp".into(), "progs/bolt.mdl".into()],
             sound_precache: Vec::new(),
             viewentity: 1,
             forcetrack: -1,
@@ -419,10 +404,7 @@ mod tests {
             guard += 1;
             assert!(guard < 10, "playback reaches the last frame");
         }
-        assert!(
-            d.beams.any_live(d.demo.frames[2].time),
-            "beam still live on the last frame (t=0.10 < endtime 0.25)"
-        );
+        assert!(d.beams.any_live(d.demo.frames[2].time), "beam still live on the last frame (t=0.10 < endtime 0.25)");
         // The step that takes the clock past the last message triggers the
         // deferred loop wrap: back to frame 0 with the beam store cleared (no
         // stale bolts carried into the replay; the wrap's frame reads only
@@ -470,9 +452,7 @@ mod tests {
         // (f) viewmodel: STAT_WEAPON resolves through the demo's precache to
         // the shotgun viewmodel.
         assert_eq!(
-            demo.model_precache
-                .get(f0.client.weapon_model.max(0) as usize)
-                .map(|s| s.as_str()),
+            demo.model_precache.get(f0.client.weapon_model.max(0) as usize).map(|s| s.as_str()),
             Some("progs/v_shot.mdl"),
             "SU_WEAPON -> model_precache -> v_shot.mdl"
         );
@@ -543,7 +523,12 @@ mod tests {
             cdtrack: None,
             frames: vec![plain(0.0), sound_frame, plain(0.10)],
         };
-        let mut d = DemoPlay::new(build_test_pak(&[("sound/doors/x.wav", b"WAVE")]), render::demo_room(), [[0u8; 3]; 256], demo);
+        let mut d = DemoPlay::new(
+            build_test_pak(&[("sound/doors/x.wav", b"WAVE")]),
+            render::demo_room(),
+            [[0u8; 3]; 256],
+            demo,
+        );
         d.prng = Lcg::new(1);
 
         reset_queue();
@@ -597,11 +582,7 @@ mod tests {
         assert_eq!(d.idx, 1, "advanced onto the damage frame");
         // count = max(10, blood*0.5) = 10 -> percent 30, faded by 0.05*150 =
         // 7.5 within the same step (V_UpdatePalette) -> 22 (the C's int).
-        assert!(
-            d.damage_blend == 22.0,
-            "V_ParseDamage percent 3*count then dt*150 fade, got {}",
-            d.damage_blend
-        );
+        assert!(d.damage_blend == 22.0, "V_ParseDamage percent 3*count then dt*150 fade, got {}", d.damage_blend);
         assert_eq!(d.damage_color, [255, 0, 0], "pure-blood red tint");
         assert_eq!(
             cshifts,
@@ -610,10 +591,7 @@ mod tests {
         );
         // The directional kick armed (forward hit -> pitch kick, no roll) and
         // already decayed one step (v_dmg_time -= host_frametime).
-        assert!(
-            (d.v_dmg_time - (V_KICKTIME - 0.05)).abs() < 1e-3,
-            "kick timer armed then decayed by dt"
-        );
+        assert!((d.v_dmg_time - (V_KICKTIME - 0.05)).abs() < 1e-3, "kick timer armed then decayed by dt");
         assert!(d.v_dmg_roll.abs() < 1e-3, "head-on hit has no roll component");
         assert!(
             (d.v_dmg_pitch - 10.0 * V_KICKPITCH).abs() < 1e-3,
@@ -637,11 +615,7 @@ mod tests {
             let demo = parse_demo(&pak.read_file(name).unwrap().unwrap()).unwrap();
             let armor = demo.model_precache.iter().position(|m| m == "progs/armor.mdl");
             let armor = armor.unwrap_or_else(|| panic!("{name} precaches armor.mdl"));
-            let yellow = demo
-                .frames
-                .iter()
-                .flat_map(|f| &f.entities)
-                .any(|e| e.modelindex == armor && e.skin == 1);
+            let yellow = demo.frames.iter().flat_map(|f| &f.entities).any(|e| e.modelindex == armor && e.skin == 1);
             assert!(yellow, "{name} draws yellow armour (armor.mdl skin 1)");
         }
     }
@@ -667,11 +641,8 @@ mod tests {
             forcelink: true,
             ..EntSnapshot::default()
         };
-        let frame = |t: f32, x: f32| DemoFrame {
-            time: t,
-            entities: vec![ent(7, x), ent(-1, 500.0)],
-            ..Default::default()
-        };
+        let frame =
+            |t: f32, x: f32| DemoFrame { time: t, entities: vec![ent(7, x), ent(-1, 500.0)], ..Default::default() };
         let demo = Demo {
             level_name: "test".into(),
             static_sounds: Vec::new(),
@@ -733,14 +704,15 @@ mod tests {
         // The recorded SU_WEAPON viewmodel parsed (v_shot.mdl).
         let f0 = &d.demo.frames[0];
         let wm = f0.client.weapon_model.max(0) as usize;
-        assert!(
-            matches!(d.models.get(wm), Some(Some(_))),
-            "the recorded viewmodel's Mdl parsed from the pak"
-        );
+        assert!(matches!(d.models.get(wm), Some(Some(_))), "the recorded viewmodel's Mdl parsed from the pak");
         // The recorded style table reaches the renderer's scale law: style 0
         // is the steady 'm' world (264/256, what the seeded default used to
         // hardcode) and the flicker styles are present.
-        let scales = quake_rs::server::lightstyle_scales_at(&f0.lightstyles, f64::from(f0.time), quake_rs::server::LerpLightStyles::Classic);
+        let scales = quake_rs::server::lightstyle_scales_at(
+            &f0.lightstyles,
+            f64::from(f0.time),
+            quake_rs::server::LerpLightStyles::Classic,
+        );
         assert!((scales[0] - 264.0 / 256.0).abs() < 1e-6, "style 0 'm'");
         assert!(d.gfx_wad.is_some(), "sbar pics available for the demo HUD");
 
@@ -774,15 +746,8 @@ mod tests {
         assert_eq!(d.idx, n - 1, "fast-forwarded to the last frame");
         let (img, _) = step_demo(&mut d, 0.05, false, &crate::vid::mode_vid(160, 100), true);
         assert_eq!(d.idx, 0, "the wrap landed back on frame 0");
-        assert!(
-            !d.demo.frames[0].entities.is_empty(),
-            "frame 0 is the post-signon in-world frame"
-        );
-        let lit = img
-            .pixels
-            .iter()
-            .filter(|&&p| p != 0)
-            .count();
+        assert!(!d.demo.frames[0].entities.is_empty(), "frame 0 is the post-signon in-world frame");
+        let lit = img.pixels.iter().filter(|&&p| p != 0).count();
         assert!(
             lit * 2 > img.pixels.len(),
             "the post-wrap frame renders a real scene ({lit}/{} lit)",

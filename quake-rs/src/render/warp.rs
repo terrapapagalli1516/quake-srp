@@ -30,7 +30,14 @@ use super::Image;
 /// by a hundredth and ripples twice across, and at 3840x2160 it would be a
 /// fine shimmer over a picture blown up twelve times. Scaled, it is 320x200's
 /// wobble at full resolution; at 320x200 it is id's to the pixel.
-pub(super) fn warp_screen(tables: &mut WarpTables, view: &Image, out: WarpTarget, clock: f32, hires: bool, threads: usize) {
+pub(super) fn warp_screen(
+    tables: &mut WarpTables,
+    view: &Image,
+    out: WarpTarget,
+    clock: f32,
+    hires: bool,
+    threads: usize,
+) {
     let scale = if hires { warp_scale(out.w, out.h) } else { 1.0 };
     warp_scaled(tables, view, out, clock, scale, threads);
 }
@@ -163,9 +170,9 @@ impl WarpTables {
         self.rowptr.extend((out_h + margin..out_h + below + margin).map(|v| row(v).min(h + below - 1) * w));
         // column[u] = (int)((float)u * wratio * w / (w + AMP2*2)), u < scr width + 2*AMP2
         self.column.clear();
-        self.column.extend((0..out_w + margin).map(|u| {
-            ((u as f32 * wratio * w as f32 / (w + margin) as f32) as usize).min(w - 1)
-        }));
+        self.column.extend(
+            (0..out_w + margin).map(|u| ((u as f32 * wratio * w as f32 / (w + margin) as f32) as usize).min(w - 1)),
+        );
     }
 }
 
@@ -306,7 +313,7 @@ impl TurbTable {
 mod tests {
     use super::*;
     use crate::render::fixtures::synthetic_liquid_pixels;
-    use crate::render::raster::{span_at, span_turb, AttrVert, PerspSpan, PolyGrads};
+    use crate::render::raster::{AttrVert, PerspSpan, PolyGrads, span_at, span_turb};
 
     /// `D_WarpScreen` at `scale` into an `out_w x out_h` image of its own,
     /// on fresh tables, on `threads` threads.
@@ -333,7 +340,14 @@ mod tests {
         let src = coord_image(w, h + below, Y);
         let mut alone = Image::new(w, h, 7);
         let target = WarpTarget { rows: &mut alone.pixels, stride: w, x0: 0, w, h, below: 0 };
-        warp_scaled(&mut WarpTables::default(), &Image { w, h, pixels: src.pixels[..w * h].to_vec() }, target, 1.25, scale, 1);
+        warp_scaled(
+            &mut WarpTables::default(),
+            &Image { w, h, pixels: src.pixels[..w * h].to_vec() },
+            target,
+            1.25,
+            scale,
+            1,
+        );
         let mut tables = WarpTables::default();
         let mut on = Image::new(w, h + below, 7);
         let target = WarpTarget { rows: &mut on.pixels, stride: w, x0: 0, w, h, below };
@@ -441,12 +455,10 @@ mod tests {
         fn per_frame(view: &Image, out_w: usize, out_h: usize, clock: f32) -> Vec<u8> {
             let (w, h) = (view.w, view.h);
             let (wratio, hratio) = (w as f32 / out_w as f32, h as f32 / out_h as f32);
-            let rowptr: Vec<usize> = (0..out_h + 6)
-                .map(|v| ((v as f32 * hratio * h as f32 / (h + 6) as f32) as usize).min(h - 1))
-                .collect();
-            let column: Vec<usize> = (0..out_w + 6)
-                .map(|u| ((u as f32 * wratio * w as f32 / (w + 6) as f32) as usize).min(w - 1))
-                .collect();
+            let rowptr: Vec<usize> =
+                (0..out_h + 6).map(|v| ((v as f32 * hratio * h as f32 / (h + 6) as f32) as usize).min(h - 1)).collect();
+            let column: Vec<usize> =
+                (0..out_w + 6).map(|u| ((u as f32 * wratio * w as f32 / (w + 6) as f32) as usize).min(w - 1)).collect();
             let phase = ((clock as f64 * 20.0) as i64 & 127) as usize;
             let sintable = intsintable(phase + out_w.max(out_h));
             let mut out = vec![0u8; out_w * out_h];

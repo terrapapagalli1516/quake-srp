@@ -54,11 +54,7 @@ impl<'a> Reader<'a> {
     /// Move the cursor to an absolute position. Errors if past the end.
     pub fn seek(&mut self, pos: usize) -> Result<()> {
         if pos > self.buf.len() {
-            return Err(QError::Truncated {
-                context: "seek",
-                need: pos,
-                have: self.buf.len(),
-            });
+            return Err(QError::Truncated { context: "seek", need: pos, have: self.buf.len() });
         }
         self.pos = pos;
         Ok(())
@@ -66,21 +62,14 @@ impl<'a> Reader<'a> {
 
     /// Advance the cursor by `n` bytes.
     pub fn skip(&mut self, n: usize) -> Result<()> {
-        let target = self
-            .pos
-            .checked_add(n)
-            .ok_or_else(|| QError::invalid("skip overflow"))?;
+        let target = self.pos.checked_add(n).ok_or_else(|| QError::invalid("skip overflow"))?;
         self.seek(target)
     }
 
     /// Borrow the next `n` bytes and advance the cursor.
     pub fn take(&mut self, n: usize) -> Result<&'a [u8]> {
         if self.remaining() < n {
-            return Err(QError::Truncated {
-                context: "take",
-                need: n,
-                have: self.remaining(),
-            });
+            return Err(QError::Truncated { context: "take", need: n, have: self.remaining() });
         }
         let s = &self.buf[self.pos..self.pos + n];
         self.pos += n;
@@ -89,15 +78,9 @@ impl<'a> Reader<'a> {
 
     /// Borrow `n` bytes starting at absolute `off` without moving the cursor.
     pub fn slice_at(&self, off: usize, n: usize) -> Result<&'a [u8]> {
-        let end = off
-            .checked_add(n)
-            .ok_or_else(|| QError::invalid("slice overflow"))?;
+        let end = off.checked_add(n).ok_or_else(|| QError::invalid("slice overflow"))?;
         if end > self.buf.len() {
-            return Err(QError::Truncated {
-                context: "slice_at",
-                need: end,
-                have: self.buf.len(),
-            });
+            return Err(QError::Truncated { context: "slice_at", need: end, have: self.buf.len() });
         }
         Ok(&self.buf[off..end])
     }

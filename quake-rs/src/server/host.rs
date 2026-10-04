@@ -20,10 +20,10 @@
 
 use std::rc::Rc;
 
-use super::{Outbox, Server, SysFn, UserCmd, NUM_SPAWN_PARMS, SETTLE_FRAMETIME, SV_GRAVITY};
+use super::{NUM_SPAWN_PARMS, Outbox, SETTLE_FRAMETIME, SV_GRAVITY, Server, SysFn, UserCmd};
+use crate::Result;
 use crate::qrand::QRand;
 use crate::vm::Vm;
-use crate::Result;
 
 // ---------------------------------------------------------------------------
 // The server's cvars.
@@ -197,15 +197,7 @@ impl Server {
             let vang = self.vm.ent_vec(p, self.vm.fo().v_angle);
             (ang[1], vang[0])
         });
-        let cmd = UserCmd {
-            forwardmove: 0.0,
-            sidemove: 0.0,
-            upmove: 0.0,
-            yaw,
-            pitch,
-            buttons: 0,
-            impulse: 0,
-        };
+        let cmd = UserCmd { forwardmove: 0.0, sidemove: 0.0, upmove: 0.0, yaw, pitch, buttons: 0, impulse: 0 };
         self.client_frame_f64(&cmd, SETTLE_FRAMETIME)?;
         self.client_frame_f64(&cmd, SETTLE_FRAMETIME)?;
         Ok(())
@@ -420,9 +412,9 @@ impl Server {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::progs::{Op, Progs, Statement, OFS_PARM0};
-    use crate::server::testutil::*;
+    use crate::progs::{OFS_PARM0, Op, Progs, Statement};
     use crate::server::EntFlags;
+    use crate::server::testutil::*;
 
     #[test]
     fn run_signon_frames_settles_the_spawned_player_before_frame_zero() {
@@ -460,19 +452,13 @@ mod tests {
         let flags = server.vm.flags(p);
         assert!(flags.contains(EntFlags::ONGROUND), "player is on the ground at frame 0");
         assert_eq!(vel[2], 0.0, "no residual fall velocity at frame 0");
-        assert!(
-            (23.0..=25.0).contains(&org[2]),
-            "box bottom rests on the z=0 floor (origin.z ~ 24), got {}",
-            org[2]
-        );
+        assert!((23.0..=25.0).contains(&org[2]), "box bottom rests on the z=0 floor (origin.z ~ 24), got {}", org[2]);
 
         // ...and frame 0 == frame N for a static, zero-input camera: subsequent
         // frames must not move the player AT ALL (the pop was exactly this
         // motion leaking into the first rendered frames).
         for i in 0..10 {
-            server
-                .client_frame(&UserCmd::default(), 1.0 / 60.0)
-                .expect("static frame");
+            server.client_frame(&UserCmd::default(), 1.0 / 60.0).expect("static frame");
             let now = server.vm.ent_get_vector(p, "origin");
             assert_eq!(now, org, "origin is bit-identical on static frame {i}");
         }
@@ -489,11 +475,7 @@ mod tests {
         let mut server = Server::new(empty_bsp(), progs).expect("server");
 
         // A fresh server has no pending request.
-        assert_eq!(
-            server.take_pending_changelevel(),
-            None,
-            "fresh server has no pending changelevel"
-        );
+        assert_eq!(server.take_pending_changelevel(), None, "fresh server has no pending changelevel");
 
         // Drive the builtin directly: place the map name's string_t in PARM0.
         let map_t = server.vm.intern("e1m2");
@@ -502,11 +484,7 @@ mod tests {
 
         // take_pending_changelevel returns it once, then drains to None.
         assert_eq!(server.take_pending_changelevel().as_deref(), Some("e1m2"));
-        assert_eq!(
-            server.take_pending_changelevel(),
-            None,
-            "second take drains to None"
-        );
+        assert_eq!(server.take_pending_changelevel(), None, "second take drains to None");
     }
 
     #[test]
@@ -573,12 +551,7 @@ mod tests {
         b.add_field("size", EV_VECTOR, 20);
         b.add_field("health", EV_FLOAT, 23);
 
-        let done = || Statement {
-            op: Op::Done,
-            a: 0,
-            b: 0,
-            c: 0,
-        };
+        let done = || Statement { op: Op::Done, a: 0, b: 0, c: 0 };
         b.add_function("ClientConnect", vec![done()]);
         b.add_function("PutClientInServer", vec![done()]);
 
@@ -592,18 +565,8 @@ mod tests {
         b.add_function(
             "ClientKill",
             vec![
-                Statement {
-                    op: Op::StoreS,
-                    a: g_str as i16,
-                    b: OFS_PARM0 as i16,
-                    c: 0,
-                },
-                Statement {
-                    op: Op::Call1,
-                    a: g_fn as i16,
-                    b: 0,
-                    c: 0,
-                },
+                Statement { op: Op::StoreS, a: g_str as i16, b: OFS_PARM0 as i16, c: 0 },
+                Statement { op: Op::Call1, a: g_fn as i16, b: 0, c: 0 },
                 done(),
             ],
         );
@@ -622,10 +585,7 @@ mod tests {
         let mut server = Server::new(empty_bsp(), progs).expect("server");
 
         // No client connected yet: refused, no QuakeC runs.
-        assert!(
-            !server.client_kill().expect("kill w/o client"),
-            "no connected client -> refused"
-        );
+        assert!(!server.client_kill().expect("kill w/o client"), "no connected client -> refused");
 
         let player = server.connect_client().expect("connect");
         // Fill ClientKill's constants: the "restart\n" string + localcmd fn value.
@@ -636,24 +596,15 @@ mod tests {
         // Alive player: ClientKill runs; its localcmd("restart\n") queues the
         // single-player respawn exactly once.
         server.vm.ent_set_float(player, "health", 100.0);
-        assert!(
-            server.client_kill().expect("kill alive"),
-            "alive player -> ClientKill ran"
-        );
-        assert!(
-            server.take_pending_restart(),
-            "ClientKill -> localcmd(restart) -> pending respawn"
-        );
+        assert!(server.client_kill().expect("kill alive"), "alive player -> ClientKill ran");
+        assert!(server.take_pending_restart(), "ClientKill -> localcmd(restart) -> pending respawn");
         assert!(!server.take_pending_restart(), "second take drains to false");
 
         // Dead player: refused (the C prints "Can't suicide -- allready dead!"),
         // and ClientKill must NOT have run — nothing queued.
         server.vm.ent_set_float(player, "health", 0.0);
         assert!(!server.client_kill().expect("kill dead"), "dead -> refused");
-        assert!(
-            !server.take_pending_restart(),
-            "a refused kill queues no respawn"
-        );
+        assert!(!server.take_pending_restart(), "a refused kill queues no respawn");
     }
 
     #[test]
@@ -671,11 +622,7 @@ mod tests {
         server.vm.set_gi(OFS_PARM0, bm);
         bi_changelevel(&mut server.vm).expect("second");
 
-        assert_eq!(
-            server.take_pending_changelevel().as_deref(),
-            Some("e1m2"),
-            "first writer wins"
-        );
+        assert_eq!(server.take_pending_changelevel().as_deref(), Some("e1m2"), "first writer wins");
     }
 
     #[test]
@@ -692,11 +639,7 @@ mod tests {
         // ...then a new server clears it before the old one ever drained.
         let progs2 = Progs::parse(&img).expect("parse");
         let mut s2 = Server::new(empty_bsp(), progs2).expect("server");
-        assert_eq!(
-            s2.take_pending_changelevel(),
-            None,
-            "new server starts with no pending changelevel"
-        );
+        assert_eq!(s2.take_pending_changelevel(), None, "new server starts with no pending changelevel");
     }
 
     #[test]

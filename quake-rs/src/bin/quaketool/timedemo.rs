@@ -45,7 +45,7 @@ use std::time::Instant;
 use quake_rs::client::cl_demo::{self, TimeDemoClock};
 use quake_rs::client::host::host_filter_time_uncapped;
 use quake_rs::client::lerpmodels::LerpModels;
-use quake_rs::client::{set_lap_hook, Phase, Vid};
+use quake_rs::client::{Phase, Vid, set_lap_hook};
 use quake_rs::pak::Pak;
 use quake_rs::render;
 
@@ -171,7 +171,14 @@ pub fn cmd_timedemo(pak_path: &str, demo: &str, rest: &[String]) -> Result<Strin
         // CL_PlayDemo_f, then CL_TimeDemo_f in host frame 0.
         let _ = writeln!(o, "Playing demo from {name}.");
         let display_aspect = video.display_aspect(width, height, Some(DISPLAY_ASPECT));
-        let vid = Vid { width, height, display_aspect, persp_span: video.persp_span, video: video.cvars, mip: render::MipCvars::DEFAULT };
+        let vid = Vid {
+            width,
+            height,
+            display_aspect,
+            persp_span: video.persp_span,
+            video: video.cvars,
+            mip: render::MipCvars::DEFAULT,
+        };
         let Some(timed) = run(&pak, &name, &vid, video.threads(), &mut clock, &mut rgba, false, lerpmodels) else {
             let _ = writeln!(o, "ERROR: couldn't open.");
             return Ok(o);
@@ -252,9 +259,13 @@ pub fn cmd_timedemo(pak_path: &str, demo: &str, rest: &[String]) -> Result<Strin
             // cracks and sparkles, or the eye outside the world. (demo1 has no
             // intermission and no underwater frame, so every frame's view is
             // the viewsize-100 rectangle; this command draws nothing under it.)
-            let vrect = render::calc_refdef(width, height, render::VIEWSIZE_DEFAULT, false, render::SbarLayout::Classic).vrect;
+            let vrect =
+                render::calc_refdef(width, height, render::VIEWSIZE_DEFAULT, false, render::SbarLayout::Classic).vrect;
             let background = (frames as u64 * (vrect.w * vrect.h) as u64).saturating_sub(st.world_pixels);
-            let _ = writeln!(o, "  background pixels in all {frames} frames (if every frame is the viewsize-100 view): {background}");
+            let _ = writeln!(
+                o,
+                "  background pixels in all {frames} frames (if every frame is the viewsize-100 view): {background}"
+            );
             let _ = writeln!(o, "  surface cache at the end: {:.1} MB in {blocks} blocks", bytes as f64 / 1e6);
         }
     }

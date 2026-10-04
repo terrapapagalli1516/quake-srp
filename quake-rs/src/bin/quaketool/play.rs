@@ -42,7 +42,7 @@ use std::fmt::Write as _;
 use std::rc::Rc;
 
 use quake_rs::client::host::host_filter_time;
-use quake_rs::client::{cl_demo, cl_input, cl_main, host_cmd, ClientFrame, DemoPlay, SoundCall, Vid, Walk};
+use quake_rs::client::{ClientFrame, DemoPlay, SoundCall, Vid, Walk, cl_demo, cl_input, cl_main, host_cmd};
 use quake_rs::pak::Pak;
 use quake_rs::qrand::QRand;
 use quake_rs::render;
@@ -254,7 +254,14 @@ pub fn cmd_play(pak_path: &str, workloads: &str, rest: &[String]) -> Result<Stri
         .flatten()
         .and_then(|b| render::parse_palette(&b))
         .ok_or("gfx/palette.lmp is missing or short")?;
-    let vid = Vid { width: 0, height: 0, display_aspect: DISPLAY_ASPECT, persp_span: video.persp_span, video: video.cvars, mip: render::MipCvars::DEFAULT };
+    let vid = Vid {
+        width: 0,
+        height: 0,
+        display_aspect: DISPLAY_ASPECT,
+        persp_span: video.persp_span,
+        video: video.cvars,
+        mip: render::MipCvars::DEFAULT,
+    };
     let mut host = Host {
         pak,
         settings: Settings::id(Preset::Classic), // id's controls by name: the oracle pins against them explicitly
@@ -349,9 +356,20 @@ fn trace_frame(out: &mut String, traced: &mut usize, d: &DemoPlay) {
     let _ = writeln!(
         out,
         "F {} t={:.17} old={:.17} m0={} m1={} ang={} {} {} vorg={} {} {} vel={} {} {}",
-        *traced, d.time, d.oldtime, f.time, f.prev_time, v.view_angles[0], v.view_angles[1], v.view_angles[2],
-        v.view_entity_origin[0], v.view_entity_origin[1], v.view_entity_origin[2],
-        v.velocity[0], v.velocity[1], v.velocity[2],
+        *traced,
+        d.time,
+        d.oldtime,
+        f.time,
+        f.prev_time,
+        v.view_angles[0],
+        v.view_angles[1],
+        v.view_angles[2],
+        v.view_entity_origin[0],
+        v.view_entity_origin[1],
+        v.view_entity_origin[2],
+        v.velocity[0],
+        v.velocity[1],
+        v.velocity[2],
     );
     *traced += 1;
     for e in v.entities.iter().filter(|e| e.num >= 0) {
@@ -368,7 +386,14 @@ fn trace_frame(out: &mut String, traced: &mut usize, d: &DemoPlay) {
         let _ = writeln!(
             out,
             "D {slot} {} {} {} {} {} {} {} {}",
-            l.key(), l.origin[0], l.origin[1], l.origin[2], l.radius, l.die, l.decay, l.minlight
+            l.key(),
+            l.origin[0],
+            l.origin[1],
+            l.origin[2],
+            l.radius,
+            l.die,
+            l.decay,
+            l.minlight
         );
     }
 }

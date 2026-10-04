@@ -81,4 +81,3 @@ pub fn player_start(ents: &str) -> Option<([f32; 3], f32)> {
     }
     None
 }
-

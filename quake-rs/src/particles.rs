@@ -34,7 +34,7 @@
 //! * All arithmetic is plain `f32`; there is no indexing that could be out of
 //!   bounds.
 
-use crate::stepping::{Stepping, ID_FRAMETIME};
+use crate::stepping::{ID_FRAMETIME, Stepping};
 
 /// How a particle is animated each frame (the C `particle_t::type`,
 /// `ptype_t`). Only the four kinds this port spawns are modelled; the C had a
@@ -209,22 +209,14 @@ pub struct TrailStep {
 fn trail_path(start: [f32; 3], end: [f32; 3]) -> ([f32; 3], f32) {
     let vec = [end[0] - start[0], end[1] - start[1], end[2] - start[2]];
     let len = (vec[0] * vec[0] + vec[1] * vec[1] + vec[2] * vec[2]).sqrt();
-    if len > 0.0 {
-        ([vec[0] / len, vec[1] / len, vec[2] / len], len)
-    } else {
-        (vec, len)
-    }
+    if len > 0.0 { ([vec[0] / len, vec[1] / len, vec[2] / len], len) } else { (vec, len) }
 }
 
 /// `R_RocketTrail`'s `dec`, the trail length each particle uses up, and the
 /// trail type: 3 units for `type < 128`, 1 for the `+128` types (then `type
 /// -= 128`).
 fn trail_step(ttype: i32) -> (f32, i32) {
-    if ttype < 128 {
-        (3.0, ttype)
-    } else {
-        (1.0, ttype - 128)
-    }
+    if ttype < 128 { (3.0, ttype) } else { (1.0, ttype - 128) }
 }
 
 /// A tiny deterministic linear-congruential generator (the Numerical Recipes /
@@ -279,9 +271,7 @@ pub struct ParticleSystem {
 impl ParticleSystem {
     /// An empty system (no live particles).
     pub fn new() -> ParticleSystem {
-        ParticleSystem {
-            particles: Vec::new(),
-        }
+        ParticleSystem { particles: Vec::new() }
     }
 
     /// Spawn one `particle()` burst, porting `R_RunParticleEffect`'s non-rocket
@@ -300,15 +290,7 @@ impl ParticleSystem {
     /// exactly as the C bailed when its `free_particles` list was exhausted, so a
     /// runaway `count` cannot grow memory unbounded. A non-positive `count` adds
     /// nothing.
-    pub fn spawn_burst(
-        &mut self,
-        org: [f32; 3],
-        dir: [f32; 3],
-        color: u8,
-        count: i32,
-        now: f32,
-        rng: &mut Lcg,
-    ) {
+    pub fn spawn_burst(&mut self, org: [f32; 3], dir: [f32; 3], color: u8, count: i32, now: f32, rng: &mut Lcg) {
         if count <= 0 {
             return;
         }
@@ -333,11 +315,7 @@ impl ParticleSystem {
         for _ in 0..to_spawn {
             // Per-axis position jitter in [-8, 8): the C `(rand()&15)-8`.
             let jitter = |rng: &mut Lcg| (rng.next_range(16) as i32 - 8) as f32;
-            let origin = [
-                org[0] + jitter(rng),
-                org[1] + jitter(rng),
-                org[2] + jitter(rng),
-            ];
+            let origin = [org[0] + jitter(rng), org[1] + jitter(rng), org[2] + jitter(rng)];
             // Velocity = dir*15 (the C `p->vel[j] = dir[j]*15`).
             let velocity = [dir[0] * 15.0, dir[1] * 15.0, dir[2] * 15.0];
             // Colour ramp: (color & ~7) + (rand()&7). next_range(8) is already 0..=7.
@@ -391,11 +369,7 @@ impl ParticleSystem {
             // `if (i & 1) { type = pt_explode } else { type = pt_explode2 }`. (Both
             // halves spawn from the same rand() sequence, so this only changes which
             // 512-particle subset fades via ramp1 vs ramp2 — but match id exactly.)
-            let kind = if i & 1 != 0 {
-                ParticleKind::Explode
-            } else {
-                ParticleKind::Explode2
-            };
+            let kind = if i & 1 != 0 { ParticleKind::Explode } else { ParticleKind::Explode2 };
             self.particles.push(Particle {
                 origin: [org[0] + jx as f32, org[1] + jy as f32, org[2] + jz as f32],
                 velocity: [vx, vy, vz],
@@ -424,14 +398,7 @@ impl ParticleSystem {
     ///
     /// SAFETY/FAITHFULNESS: the spawn count is clamped against the remaining pool
     /// capacity, exactly as the C bailed once `free_particles` was exhausted.
-    pub fn spawn_explosion2(
-        &mut self,
-        org: [f32; 3],
-        color_start: i32,
-        color_length: i32,
-        now: f32,
-        rng: &mut Lcg,
-    ) {
+    pub fn spawn_explosion2(&mut self, org: [f32; 3], color_start: i32, color_length: i32, now: f32, rng: &mut Lcg) {
         let remaining = MAX_PARTICLES.saturating_sub(self.particles.len());
         let to_spawn = 512usize.min(remaining);
         // The C divides by colorLength; guard a 0/negative length to avoid a
@@ -537,17 +504,10 @@ impl ParticleSystem {
                 // Color: 224 + (rand()&7).
                 let color = (224 + (rng.next_u32() & 7)) as u8;
                 // dir = (j*8 + rand()&7, i*8 + rand()&7, 256).
-                let dir = [
-                    (j * 8) as f32 + (rng.next_u32() & 7) as f32,
-                    (i * 8) as f32 + (rng.next_u32() & 7) as f32,
-                    256.0,
-                ];
+                let dir =
+                    [(j * 8) as f32 + (rng.next_u32() & 7) as f32, (i * 8) as f32 + (rng.next_u32() & 7) as f32, 256.0];
                 // Origin offset by the (un-normalised) dir X/Y; Z by rand()&63.
-                let origin = [
-                    org[0] + dir[0],
-                    org[1] + dir[1],
-                    org[2] + (rng.next_u32() & 63) as f32,
-                ];
+                let origin = [org[0] + dir[0], org[1] + dir[1], org[2] + (rng.next_u32() & 63) as f32];
                 // VectorNormalize(dir); vel = 50 + (rand()&63); vel = dir*vel.
                 let n = normalize(dir);
                 let speed = 50.0 + (rng.next_u32() & 63) as f32;
@@ -822,14 +782,7 @@ impl ParticleSystem {
             }
         }
 
-        self.particles.push(Particle {
-            origin,
-            velocity,
-            color,
-            die,
-            kind,
-            ramp,
-        });
+        self.particles.push(Particle { origin, velocity, color, die, kind, ramp });
     }
 
     /// Advance every particle one frame and retire the expired ones, porting the

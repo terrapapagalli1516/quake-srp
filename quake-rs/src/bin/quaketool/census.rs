@@ -42,7 +42,7 @@ use std::rc::Rc;
 
 use quake_rs::bsp::Bsp;
 use quake_rs::pak::Pak;
-use quake_rs::progs::{Progs, OFS_PARM0};
+use quake_rs::progs::{OFS_PARM0, Progs};
 use quake_rs::qrand::QRand;
 use quake_rs::server::{Server, SvcEvent, UserCmd};
 use quake_rs::vm::{Builtin, Vm};
@@ -57,6 +57,7 @@ const DT: f64 = 0.1;
 
 /// The builtin names by number (pr_cmds.c `pr_builtin[]`), for the report.
 fn builtin_name(n: usize) -> &'static str {
+    #[rustfmt::skip] // id's builtin table, as id lists it
     const NAMES: [&str; 80] = [
         "#0", "makevectors", "setorigin", "setmodel", "setsize", "#5", "break", "random", "sound",
         "normalize", "error", "objerror", "vlen", "vectoyaw", "spawn", "remove", "traceline",
@@ -217,7 +218,9 @@ fn track_pushers(server: &Server, run: &mut Run) {
         let o = server.vm.ent_get_vector(e, "origin");
         let a = server.vm.ent_get_vector(e, "angles");
         let d = ((o[0] - rec.2[0]).powi(2) + (o[1] - rec.2[1]).powi(2) + (o[2] - rec.2[2]).powi(2)).sqrt()
-            + a[0].abs() + a[1].abs() + a[2].abs() * 0.0;
+            + a[0].abs()
+            + a[1].abs()
+            + a[2].abs() * 0.0;
         if d > rec.3 {
             rec.3 = d;
         }
@@ -239,14 +242,19 @@ fn frame(server: &mut Server, pak: &Pak, run: &mut Run, cmd: &UserCmd) {
     }
     run.frames += 1;
     let after = server.vm.ent_get_vector(player, "origin");
-    let jump = ((after[0] - before[0]).powi(2) + (after[1] - before[1]).powi(2) + (after[2] - before[2]).powi(2)).sqrt();
+    let jump =
+        ((after[0] - before[0]).powi(2) + (after[1] - before[1]).powi(2) + (after[2] - before[2]).powi(2)).sqrt();
     // A teleport: a big move that set fixangle (teleport_touch does both).
     if jump > 64.0 && server.vm.ent_get_float(player, "fixangle") != 0.0 {
         let ang = server.vm.ent_get_vector(player, "angles");
         let fixangle = server.vm.ent_get_float(player, "fixangle");
         run.teleports.push(format!(
             "t={:.1} player jumped {:.0}u to {:?}, entity angles {:?}, fixangle now {}",
-            server.time(), jump, after, ang, fixangle
+            server.time(),
+            jump,
+            after,
+            ang,
+            fixangle
         ));
     }
     drain(server, pak, run);
@@ -267,7 +275,9 @@ fn drain(server: &mut Server, pak: &Pak, run: &mut Run) {
     for ev in server.drain_svc_events() {
         run.svc.push(match ev {
             SvcEvent::Intermission => format!("t={:.1} svc_intermission", server.time()),
-            SvcEvent::Finale(t) => format!("t={:.1} svc_finale {:?}", server.time(), t.chars().take(40).collect::<String>()),
+            SvcEvent::Finale(t) => {
+                format!("t={:.1} svc_finale {:?}", server.time(), t.chars().take(40).collect::<String>())
+            }
             SvcEvent::Cutscene(t) => format!("t={:.1} svc_cutscene {t:?}", server.time()),
             SvcEvent::SellScreen => format!("t={:.1} svc_sellscreen", server.time()),
             // The CD's track is the client's music, not the game's state: the
@@ -300,7 +310,6 @@ fn set_origin(server: &mut Server, e: i32, org: [f32; 3]) {
     vm.set_gv(OFS_PARM0 + 3, org);
     let _ = vm.call_builtin(2, 2);
 }
-
 
 fn point_contents(server: &mut Server, p: [f32; 3]) -> f32 {
     let vm = &mut server.vm;
@@ -348,11 +357,8 @@ fn census_map(pak: &Pak, progs_bytes: &[u8], map: &str, rand: &Rc<QRand>, o: &mu
             i += 4;
         }
     }
-    let nofunc: Vec<String> = classes
-        .iter()
-        .filter(|(c, _)| progs.find_function(c).is_none())
-        .map(|(c, n)| format!("{c} x{n}"))
-        .collect();
+    let nofunc: Vec<String> =
+        classes.iter().filter(|(c, _)| progs.find_function(c).is_none()).map(|(c, n)| format!("{c} x{n}")).collect();
 
     reset_logs();
     let mut server = Server::with_pak(bsp, progs, Some(pak.clone())).map_err(|e| e.to_string())?;
@@ -406,13 +412,13 @@ fn census_map(pak: &Pak, progs_bytes: &[u8], map: &str, rand: &Rc<QRand>, o: &mu
 
     // 1. idle
     idle(&mut server, pak, &mut run, 3.0, 0);
-    let idle_movers: Vec<String> = run
-        .pushers
-        .iter()
-        .filter(|(_, r)| r.3 > 1.0)
-        .map(|(e, r)| format!("{}#{e}", r.0))
-        .collect();
-    let _ = writeln!(o, "idle 3s: pushers already moving: {}", if idle_movers.is_empty() { "none".into() } else { idle_movers.join(" ") });
+    let idle_movers: Vec<String> =
+        run.pushers.iter().filter(|(_, r)| r.3 > 1.0).map(|(e, r)| format!("{}#{e}", r.0)).collect();
+    let _ = writeln!(
+        o,
+        "idle 3s: pushers already moving: {}",
+        if idle_movers.is_empty() { "none".into() } else { idle_movers.join(" ") }
+    );
 
     // 2. god + impulse 9
     let flags = server.vm.ent_get_float(player, "flags") as i32;
@@ -482,8 +488,23 @@ fn census_map(pak: &Pak, progs_bytes: &[u8], map: &str, rand: &Rc<QRand>, o: &mu
             frame(&mut server, pak, &mut run, &cmd);
             if std::env::var("CENSUS_DUEL").as_deref() == Ok(kind.as_str()) {
                 let th = server.vm.ent_get_int(m, "think");
-                let fname = server.vm.progs().functions.get(th as usize).map(|f| server.vm.progs().string(f.s_name).to_string());
-                eprintln!("{_i} {:?} org {:?} enemy {} health {} player {:?} psolid {} pmove {} p {:?}", fname, server.vm.ent_get_vector(m, "origin"), server.vm.ent_get_int(m, "enemy"), server.vm.ent_get_float(m, "health"), server.vm.ent_get_vector(player, "origin"), server.vm.ent_get_float(player, "solid"), server.vm.ent_get_float(player, "movetype"), p);
+                let fname = server
+                    .vm
+                    .progs()
+                    .functions
+                    .get(th as usize)
+                    .map(|f| server.vm.progs().string(f.s_name).to_string());
+                eprintln!(
+                    "{_i} {:?} org {:?} enemy {} health {} player {:?} psolid {} pmove {} p {:?}",
+                    fname,
+                    server.vm.ent_get_vector(m, "origin"),
+                    server.vm.ent_get_int(m, "enemy"),
+                    server.vm.ent_get_float(m, "health"),
+                    server.vm.ent_get_vector(player, "origin"),
+                    server.vm.ent_get_float(player, "solid"),
+                    server.vm.ent_get_float(player, "movetype"),
+                    p
+                );
             }
         }
         let te: Vec<String> = run
@@ -500,7 +521,13 @@ fn census_map(pak: &Pak, progs_bytes: &[u8], map: &str, rand: &Rc<QRand>, o: &mu
             .collect();
         // Kill it so it does not follow the player into the next duel.
         if live(&server, m as usize) && server.vm.ent_get_float(m, "health") > 0.0 {
-            let _ = call_qc(&mut server, "T_Damage", m, player, &[Arg::Ent(m), Arg::Ent(player), Arg::Ent(player), Arg::F(1000.0)]);
+            let _ = call_qc(
+                &mut server,
+                "T_Damage",
+                m,
+                player,
+                &[Arg::Ent(m), Arg::Ent(player), Arg::Ent(player), Arg::F(1000.0)],
+            );
         }
         let _ = writeln!(
             o,
@@ -529,7 +556,13 @@ fn census_map(pak: &Pak, progs_bytes: &[u8], map: &str, rand: &Rc<QRand>, o: &mu
             continue;
         }
         let dmg = if i % 2 == 1 { server.vm.ent_get_float(m, "health") } else { 1000.0 };
-        match call_qc(&mut server, "T_Damage", m, player, &[Arg::Ent(m), Arg::Ent(player), Arg::Ent(player), Arg::F(dmg)]) {
+        match call_qc(
+            &mut server,
+            "T_Damage",
+            m,
+            player,
+            &[Arg::Ent(m), Arg::Ent(player), Arg::Ent(player), Arg::F(dmg)],
+        ) {
             Ok(()) => killed += 1,
             Err(e) => {
                 kill_err += 1;
@@ -541,7 +574,11 @@ fn census_map(pak: &Pak, progs_bytes: &[u8], map: &str, rand: &Rc<QRand>, o: &mu
     idle(&mut server, pak, &mut run, 5.0, 0);
     let alive: Vec<String> = monsters
         .iter()
-        .filter(|&&m| live(&server, m as usize) && server.vm.ent_get_float(m, "health") > 0.0 && (server.vm.ent_get_float(m, "flags") as i32) & FL_MONSTER != 0)
+        .filter(|&&m| {
+            live(&server, m as usize)
+                && server.vm.ent_get_float(m, "health") > 0.0
+                && (server.vm.ent_get_float(m, "flags") as i32) & FL_MONSTER != 0
+        })
         .map(|&m| server.vm.ent_get_string(m, "classname"))
         .collect();
     let _ = writeln!(
@@ -635,7 +672,8 @@ fn census_map(pak: &Pak, progs_bytes: &[u8], map: &str, rand: &Rc<QRand>, o: &mu
             } else {
                 (0.0, "freed".into())
             };
-            let _ = writeln!(o, "chthon round {round}: electrodes {doors:?} (STATE_TOP=0) -> boss health {h} ({alive})");
+            let _ =
+                writeln!(o, "chthon round {round}: electrodes {doors:?} (STATE_TOP=0) -> boss health {h} ({alive})");
             for t in ["t12", "t13"] {
                 for btn in buttons(&server, t) {
                     press(&mut server, &mut run, btn);
@@ -648,7 +686,8 @@ fn census_map(pak: &Pak, progs_bytes: &[u8], map: &str, rand: &Rc<QRand>, o: &mu
             o,
             "chthon: boss {} ; killed_monsters={} total_monsters={}",
             match boss {
-                Some(b) if live(&server, b as usize) => format!("still there, health {}", server.vm.ent_get_float(b, "health")),
+                Some(b) if live(&server, b as usize) =>
+                    format!("still there, health {}", server.vm.ent_get_float(b, "health")),
                 _ => "removed".into(),
             },
             server.vm.gget_float("killed_monsters"),
@@ -661,10 +700,8 @@ fn census_map(pak: &Pak, progs_bytes: &[u8], map: &str, rand: &Rc<QRand>, o: &mu
     let mut trig_err = 0;
     let mut touched = 0;
     for pass in 0..3 {
-        let targets: Vec<i32> = (0..server.vm.num_edicts())
-            .filter(|&e| live(&server, e) && e as i32 != player)
-            .map(|e| e as i32)
-            .collect();
+        let targets: Vec<i32> =
+            (0..server.vm.num_edicts()).filter(|&e| live(&server, e) && e as i32 != player).map(|e| e as i32).collect();
         for t in targets {
             if !live(&server, t as usize) {
                 continue;
@@ -693,7 +730,13 @@ fn census_map(pak: &Pak, progs_bytes: &[u8], map: &str, rand: &Rc<QRand>, o: &mu
                 frame(&mut server, pak, &mut run, &UserCmd::default());
             }
             if shootable && live(&server, t as usize) {
-                let _ = call_qc(&mut server, "T_Damage", t, player, &[Arg::Ent(t), Arg::Ent(player), Arg::Ent(player), Arg::F(200.0)]);
+                let _ = call_qc(
+                    &mut server,
+                    "T_Damage",
+                    t,
+                    player,
+                    &[Arg::Ent(t), Arg::Ent(player), Arg::Ent(player), Arg::F(200.0)],
+                );
                 frame(&mut server, pak, &mut run, &UserCmd::default());
             }
         }
@@ -734,7 +777,12 @@ fn census_map(pak: &Pak, progs_bytes: &[u8], map: &str, rand: &Rc<QRand>, o: &mu
             idle(&mut server, pak, &mut run, 2.0, 0);
         }
     }
-    let _ = writeln!(o, "exits: {} trigger_changelevel; svc events: {}", exits.len(), if run.svc.is_empty() { "none".into() } else { run.svc.join(" | ") });
+    let _ = writeln!(
+        o,
+        "exits: {} trigger_changelevel; svc events: {}",
+        exits.len(),
+        if run.svc.is_empty() { "none".into() } else { run.svc.join(" | ") }
+    );
 
     // Report.
     let _ = writeln!(o, "frames run: {} (sim t={:.1})", run.frames, server.time());
@@ -742,7 +790,11 @@ fn census_map(pak: &Pak, progs_bytes: &[u8], map: &str, rand: &Rc<QRand>, o: &mu
     for e in run.think_errors.iter().take(12) {
         let _ = writeln!(o, "  {e}");
     }
-    let _ = writeln!(o, "fixangle set on the player in {} frames; teleports (big moves that set fixangle):", run.fixangle_seen);
+    let _ = writeln!(
+        o,
+        "fixangle set on the player in {} frames; teleports (big moves that set fixangle):",
+        run.fixangle_seen
+    );
     for t in run.teleports.iter().take(12) {
         let _ = writeln!(o, "  {t}");
     }
@@ -770,16 +822,29 @@ fn census_map(pak: &Pak, progs_bytes: &[u8], map: &str, rand: &Rc<QRand>, o: &mu
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
-    let _ = writeln!(o, "models set/precached but not in the pak: {}", if missing_models.is_empty() { "none".into() } else { missing_models.join(" ") });
+    let _ = writeln!(
+        o,
+        "models set/precached but not in the pak: {}",
+        if missing_models.is_empty() { "none".into() } else { missing_models.join(" ") }
+    );
     let missing_snd: Vec<String> = PRECACHE
         .with(|s| s.borrow().clone())
         .into_iter()
         .filter(|m| m.ends_with(".wav") && !matches!(pak.read_file(&format!("sound/{m}")), Ok(Some(_))))
         .collect();
-    let _ = writeln!(o, "sounds precached but not in the pak: {}", if missing_snd.is_empty() { "none".into() } else { missing_snd.join(" ") });
+    let _ = writeln!(
+        o,
+        "sounds precached but not in the pak: {}",
+        if missing_snd.is_empty() { "none".into() } else { missing_snd.join(" ") }
+    );
     let _ = writeln!(o, "sounds played ({} distinct):", run.sounds.len());
     for (s, (n, inpak, pre)) in &run.sounds {
-        let _ = writeln!(o, "  {s} x{n}{}{}", if *inpak { "" } else { "  NOT IN PAK" }, if *pre { "" } else { "  NOT PRECACHED" });
+        let _ = writeln!(
+            o,
+            "  {s} x{n}{}{}",
+            if *inpak { "" } else { "  NOT IN PAK" },
+            if *pre { "" } else { "  NOT PRECACHED" }
+        );
     }
     let _ = writeln!(o, "centerprints: {:?}", run.centers);
     let _ = writeln!(o, "prints: {:?}", run.prints.keys().take(40).collect::<Vec<_>>());
@@ -810,8 +875,10 @@ fn open_layered(pak_path: &str) -> Result<Pak, String> {
 pub fn cmd_census(pak_path: &str, maps: &[String]) -> Result<String, String> {
     let pak = open_layered(pak_path)?;
     let progs = pak.read_file("progs.dat").map_err(|e| e.to_string())?.ok_or("no progs.dat")?;
-    let default: Vec<String> =
-        ["start", "e1m1", "e1m2", "e1m3", "e1m4", "e1m5", "e1m6", "e1m7", "e1m8"].iter().map(|s| s.to_string()).collect();
+    let default: Vec<String> = ["start", "e1m1", "e1m2", "e1m3", "e1m4", "e1m5", "e1m6", "e1m7", "e1m8"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
     let maps = if maps.is_empty() { &default[..] } else { maps };
     let mut o = String::new();
     // One session: every map's server draws from the same random streams, as
@@ -875,7 +942,12 @@ pub fn cmd_census_edicts(pak_path: &str, map: &str, times: &str) -> Result<Strin
                 "{e}\t{}\t{}\t{:.3} {:.3} {:.3}\t{:.3} {:.3} {:.3}\t{}\t{}\t{}\t{}\t{}\t{:.3}\t{}\t{}\t{:.3} {:.3} {:.3}\t{:.3} {:.3} {:.3}",
                 vm.ent_get_string(ei, "classname"),
                 vm.ent_get_string(ei, "model"),
-                org[0], org[1], org[2], an[0], an[1], an[2],
+                org[0],
+                org[1],
+                org[2],
+                an[0],
+                an[1],
+                an[2],
                 vm.ent_get_float(ei, "frame"),
                 vm.ent_get_float(ei, "movetype"),
                 vm.ent_get_float(ei, "solid"),
@@ -884,7 +956,12 @@ pub fn cmd_census_edicts(pak_path: &str, map: &str, times: &str) -> Result<Strin
                 vm.ent_get_float(ei, "nextthink"),
                 vm.ent_get_float(ei, "effects"),
                 vm.ent_get_string(ei, "targetname"),
-                mi[0], mi[1], mi[2], ma[0], ma[1], ma[2],
+                mi[0],
+                mi[1],
+                mi[2],
+                ma[0],
+                ma[1],
+                ma[2],
             );
         }
     }

@@ -8,7 +8,7 @@
 use quake_rs::client::host_cmd;
 use quake_rs::menu::MAX_SAVEGAMES;
 
-use crate::app::{ensure_app, Walk};
+use crate::app::{Walk, ensure_app};
 use crate::common::{self, pak};
 use crate::snd_dma;
 
@@ -74,11 +74,7 @@ pub(crate) fn scan_saves() {
 /// component already carries a `.` extension.
 fn default_extension(path: &str, ext: &str) -> String {
     let last = path.rsplit('/').next().unwrap_or(path);
-    if last.contains('.') {
-        path.to_string()
-    } else {
-        format!("{path}{ext}")
-    }
+    if last.contains('.') { path.to_string() } else { format!("{path}{ext}") }
 }
 
 /// `Host_Savegame_f` (host_cmd.c): the C's guard sequence (exact messages,
@@ -159,8 +155,7 @@ fn build_walk_savegame(text: &str) -> Result<Walk, String> {
     // ceiling.
     let mut max_edicts = quake_rs::vm::MAX_EDICTS;
     crate::app::ensure_app(|a| max_edicts = a.settings.cvars.max_edicts as usize);
-    let walk =
-        host_cmd::build_walk_savegame(pak.clone(), text, &crate::app::session_rand(), &mut sound, max_edicts);
+    let walk = host_cmd::build_walk_savegame(pak.clone(), text, &crate::app::session_rand(), &mut sound, max_edicts);
     snd_dma::play(&pak, sound);
     walk
 }
@@ -168,7 +163,7 @@ fn build_walk_savegame(text: &str) -> Result<Walk, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::{boot, boot_attract, APP};
+    use crate::app::{APP, boot, boot_attract};
     use crate::console::console_toggle;
     use crate::host::step;
     use crate::input::{set_attack, set_move};
@@ -185,12 +180,7 @@ mod tests {
 
     /// The whole console scrollback as one string (oldest line first).
     fn console_text() -> String {
-        APP.with(|c| {
-            c.borrow()
-                .as_ref()
-                .map(|a| a.console.lines().collect::<Vec<_>>().join("\n"))
-                .unwrap_or_default()
-        })
+        APP.with(|c| c.borrow().as_ref().map(|a| a.console.lines().collect::<Vec<_>>().join("\n")).unwrap_or_default())
     }
 
     /// A deterministic world-state digest: the player's view/inventory fields,
@@ -218,9 +208,18 @@ mod tests {
                 v6(vm.ent_get_vector(p, "v_angle")),
             );
             for name in [
-                "health", "armorvalue", "items", "weapon", "currentammo",
-                "ammo_shells", "ammo_nails", "ammo_rockets", "ammo_cells",
-                "deadflag", "weaponframe", "frags",
+                "health",
+                "armorvalue",
+                "items",
+                "weapon",
+                "currentammo",
+                "ammo_shells",
+                "ammo_nails",
+                "ammo_rockets",
+                "ammo_cells",
+                "deadflag",
+                "weaponframe",
+                "frags",
             ] {
                 let _ = writeln!(d, "p.{name}={}", f6(vm.ent_get_float(p, name)));
             }
@@ -275,11 +274,7 @@ mod tests {
         assert!(in_demo, "boot_attract plays the demo");
         console_toggle();
         run_console_line("save nope");
-        assert!(
-            console_text().contains("Not playing a local game."),
-            "demo mode refuses: {}",
-            console_text()
-        );
+        assert!(console_text().contains("Not playing a local game."), "demo mode refuses: {}", console_text());
 
         // A live walk now (boot() opens the menu over it, the console up:
         // M_Menu_Main_f's key_dest = key_menu); back to the console.
@@ -363,10 +358,7 @@ mod tests {
         walk_mut(|w| w.pitch = 0.0);
         step(0.05);
         let health = player_field("health");
-        assert!(
-            health > 0.0 && health < 100.0,
-            "took real (survivable) rocket damage: {health}"
-        );
+        assert!(health > 0.0 && health < 100.0, "took real (survivable) rocket damage: {health}");
 
         let digest_saved = world_digest();
 
@@ -426,11 +418,7 @@ mod tests {
         APP.with(|c| c.borrow_mut().as_mut().unwrap().menu.visible = false);
 
         assert!(load_game_text(&text), "the save loads in the fresh session");
-        assert_eq!(
-            world_digest(),
-            digest_saved,
-            "a fresh boot + load restores the same world"
-        );
+        assert_eq!(world_digest(), digest_saved, "a fresh boot + load restores the same world");
         for _ in 0..50 {
             step(0.05);
         }
@@ -487,16 +475,8 @@ mod tests {
             assert_eq!(s.cvars.viewsize, 60.0, "Screen size survives load");
             assert!((s.cvars.gamma - 0.95).abs() < 1e-6, "Brightness survives load");
             assert!(!s.cvars.always_run(), "Always Run (off) survives load");
-            assert_eq!(
-                s.binds.command(b'j'),
-                Some(render::BIND_JUMP),
-                "rebind survives load"
-            );
-            assert_eq!(
-                m.save_comment(4),
-                "e1m1 slot four",
-                "slot listings survive load"
-            );
+            assert_eq!(s.binds.command(b'j'), Some(render::BIND_JUMP), "rebind survives load");
+            assert_eq!(m.save_comment(4), "e1m1 slot four", "slot listings survive load");
             assert_eq!(m.resolution(), (320, 200), "the video mode survives load");
         });
     }
@@ -529,11 +509,7 @@ mod tests {
         let mut wrong = text.clone();
         wrong.replace_range(0..1, "9");
         assert!(!load_game_text(&wrong));
-        assert!(
-            console_text().contains("Savegame is version 9, not 5"),
-            "{}",
-            console_text()
-        );
+        assert!(console_text().contains("Savegame is version 9, not 5"), "{}", console_text());
         assert_eq!(world_digest(), digest);
 
         // Truncated mid-block (cut inside the last "classname" key).
@@ -634,7 +610,8 @@ mod tests {
         assert_eq!(loaded.server.statics(), w.server.statics(), "the map's spawn rebuilt them");
         let (vm, lvm) = (&w.server.vm, &loaded.server.vm);
         assert_eq!(lvm.num_edicts(), vm.num_edicts(), "the save's slots");
-        let freed: Vec<i32> = (0..vm.num_edicts() as i32).filter(|&e| lvm.is_free_edict(e) != vm.is_free_edict(e)).collect();
+        let freed: Vec<i32> =
+            (0..vm.num_edicts() as i32).filter(|&e| lvm.is_free_edict(e) != vm.is_free_edict(e)).collect();
         assert_eq!(freed, [], "every slot free or live as saved: nothing migrated");
     }
 
@@ -666,7 +643,11 @@ mod tests {
             vm.ent_set_vector(e, "angles", st.angles);
         }
         let old_text = w.server.write_savegame();
-        assert_eq!(old_text.matches("light_torch_small_walltorch").count(), statics.len(), "the old file's live statics");
+        assert_eq!(
+            old_text.matches("light_torch_small_walltorch").count(),
+            statics.len(),
+            "the old file's live statics"
+        );
 
         let mut new = build_walk_savegame(&new_text).expect("the new save loads");
         let mut old = build_walk_savegame(&old_text).expect("the old save loads");
@@ -674,7 +655,10 @@ mod tests {
         assert_eq!(old.server.live_entities(), live, "the live edicts are the new save's");
         assert_eq!(new.server.live_entities(), live);
         let vm = &old.server.vm;
-        assert_eq!(vm.live_edicts().filter(|&e| vm.ent_string_ref(e, "classname") == "light_torch_small_walltorch").count(), 0);
+        assert_eq!(
+            vm.live_edicts().filter(|&e| vm.ent_string_ref(e, "classname") == "light_torch_small_walltorch").count(),
+            0
+        );
 
         // Drawn once: the same alias models reach the renderer, the same pixels.
         let draw = |w: &mut Walk| {

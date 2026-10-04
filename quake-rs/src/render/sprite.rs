@@ -32,13 +32,15 @@
 //! choices a fraction of a texel apart, not modelled. Ported loops keep id's
 //! shape.
 
-use crate::math::{add, angle_vectors, dot, inverse, normalize, scale, sub, Vec3, ROLL};
-use crate::spr::{Frame as SprFrame, Sprite, SpriteFrame, SPR_FACING_UPRIGHT, SPR_ORIENTED, SPR_VP_PARALLEL,
-    SPR_VP_PARALLEL_ORIENTED, SPR_VP_PARALLEL_UPRIGHT};
 use super::band::Band;
 use super::edge::{frustum_planes, view_edges};
 use super::polyse::c_ftoi;
 use super::{Frame, Projection};
+use crate::math::{ROLL, Vec3, add, angle_vectors, dot, inverse, normalize, scale, sub};
+use crate::spr::{
+    Frame as SprFrame, SPR_FACING_UPRIGHT, SPR_ORIENTED, SPR_VP_PARALLEL, SPR_VP_PARALLEL_ORIENTED,
+    SPR_VP_PARALLEL_UPRIGHT, Sprite, SpriteFrame,
+};
 
 /// A sprite-model entity to draw (Quake's `mod_sprite` entities: the
 /// `s_explod.spr` explosion, bubbles, Scourge of Armagon's bullet holes).
@@ -391,7 +393,15 @@ impl<'a> SpriteDraw<'a> {
         // Prescale to 16.16 fixed-point.
         let mut z = 65536.0 / zi;
         let mut izi = c_ftoi(f64::from(zi * 32768.0 * 65536.0));
-        let clamp = |x: i32, lo: i32, hi: i32| if x > hi { hi } else if x < lo { lo } else { x };
+        let clamp = |x: i32, lo: i32, hi: i32| {
+            if x > hi {
+                hi
+            } else if x < lo {
+                lo
+            } else {
+                x
+            }
+        };
         let fix = |divz: f32, z: f32, adjust: i32| c_ftoi(f64::from(divz * z)).wrapping_add(adjust);
         let mut s = clamp(fix(sdivz, z, g.sadjust), 0, g.bbextents);
         let mut t = clamp(fix(tdivz, z, g.tadjust), 0, g.bbextentt);
@@ -460,7 +470,13 @@ impl<'a> SpriteDraw<'a> {
 /// `NEAR_CLIP` deep). The corners come back in order with the first repeated
 /// at the end (`D_DrawSprite`'s copy, so the edge walkers need not wrap);
 /// `None` when nothing is left.
-fn setup_sprite(view: &SpriteView, axes: &Axes, frame: &SpriteFrame, entorigin: Vec3, modelorg: Vec3) -> Option<Vec<EmitPoint>> {
+fn setup_sprite(
+    view: &SpriteView,
+    axes: &Axes,
+    frame: &SpriteFrame,
+    entorigin: Vec3,
+    modelorg: Vec3,
+) -> Option<Vec<EmitPoint>> {
     // Backface cull.
     if dot(axes.vpn, modelorg) >= 0.0 {
         return None;
@@ -574,8 +590,24 @@ fn scan_spans(view: &SpriteView, pverts: &[EmitPoint]) -> Option<Vec<SSpan>> {
     }
 
     // D_SpriteScanRightEdge
-    let clamp_v = |v: f32| if v < view.fvrecty_adj { view.fvrecty_adj } else if v > view.fvrectbottom_adj { view.fvrectbottom_adj } else { v };
-    let clamp_u = |u: f32| if u < view.fvrectx_adj { view.fvrectx_adj } else if u > view.fvrectright_adj { view.fvrectright_adj } else { u };
+    let clamp_v = |v: f32| {
+        if v < view.fvrecty_adj {
+            view.fvrecty_adj
+        } else if v > view.fvrectbottom_adj {
+            view.fvrectbottom_adj
+        } else {
+            v
+        }
+    };
+    let clamp_u = |u: f32| {
+        if u < view.fvrectx_adj {
+            view.fvrectx_adj
+        } else if u > view.fvrectright_adj {
+            view.fvrectright_adj
+        } else {
+            u
+        }
+    };
     let mut k = 0;
     let mut i = minindex;
     let mut vvert = clamp_v(pverts[i].v);
@@ -751,7 +783,8 @@ mod tests {
         let mut img = Image::new(w, h, 9);
         let mut zbuf = vec![i16::MIN; w * h];
         let spr = sprite_of_type(SPR_VP_PARALLEL, 16, 16, 42);
-        let inst = SpriteInstance { sprite: &spr, origin: [100.0, 0.0, 0.0], angles: [0.0; 3], frame: 0, models_before: 0 };
+        let inst =
+            SpriteInstance { sprite: &spr, origin: [100.0, 0.0, 0.0], angles: [0.0; 3], frame: 0, models_before: 0 };
         draw(&mut img, &mut zbuf, cam_at_origin(), std::slice::from_ref(&inst), 0.0);
         let painted: Vec<(usize, usize)> =
             (0..w * h).filter(|&i| img.pixels[i] == 42).map(|i| (i % w, i / w)).collect();
@@ -772,7 +805,8 @@ mod tests {
         let mut img = Image::new(w, h, 9);
         let mut zbuf = vec![i16::MIN; w * h];
         let spr = sprite_of_type(SPR_VP_PARALLEL, 16, 16, 255);
-        let inst = SpriteInstance { sprite: &spr, origin: [100.0, 0.0, 0.0], angles: [0.0; 3], frame: 0, models_before: 0 };
+        let inst =
+            SpriteInstance { sprite: &spr, origin: [100.0, 0.0, 0.0], angles: [0.0; 3], frame: 0, models_before: 0 };
         draw(&mut img, &mut zbuf, cam_at_origin(), std::slice::from_ref(&inst), 0.0);
         assert!(img.pixels.iter().all(|&p| p == 9));
         assert!(zbuf.iter().all(|&z| z == i16::MIN));
@@ -785,7 +819,8 @@ mod tests {
         let mut img = Image::new(w, h, 9);
         let mut zbuf = vec![3276i16; w * h];
         let spr = sprite_of_type(SPR_VP_PARALLEL, 16, 16, 42);
-        let inst = SpriteInstance { sprite: &spr, origin: [100.0, 0.0, 0.0], angles: [0.0; 3], frame: 0, models_before: 0 };
+        let inst =
+            SpriteInstance { sprite: &spr, origin: [100.0, 0.0, 0.0], angles: [0.0; 3], frame: 0, models_before: 0 };
         draw(&mut img, &mut zbuf, cam_at_origin(), std::slice::from_ref(&inst), 0.0);
         assert!(img.pixels.iter().all(|&p| p == 9));
     }
@@ -799,7 +834,13 @@ mod tests {
         let mut img = Image::new(w, h, 9);
         let mut zbuf = vec![i16::MIN; w * h];
         let spr = sprite_of_type(SPR_ORIENTED, 32, 32, 42);
-        let inst = SpriteInstance { sprite: &spr, origin: [100.0, 0.0, 0.0], angles: [0.0, 45.0, 0.0], frame: 0, models_before: 0 };
+        let inst = SpriteInstance {
+            sprite: &spr,
+            origin: [100.0, 0.0, 0.0],
+            angles: [0.0, 45.0, 0.0],
+            frame: 0,
+            models_before: 0,
+        };
         draw(&mut img, &mut zbuf, cam_at_origin(), std::slice::from_ref(&inst), 0.0);
         let column_height = |x: usize| (0..h).filter(|&y| img.pixels[y * w + x] == 42).count();
         let cols: Vec<usize> = (0..w).filter(|&x| column_height(x) > 0).collect();
@@ -823,7 +864,8 @@ mod tests {
         let mut img = Image::new(w, h, 9);
         let mut zbuf = vec![i16::MIN; w * h];
         let spr = sprite_of_type(SPR_VP_PARALLEL, 64, 64, 42);
-        let inst = SpriteInstance { sprite: &spr, origin: [60.0, 70.0, 0.0], angles: [0.0; 3], frame: 0, models_before: 0 };
+        let inst =
+            SpriteInstance { sprite: &spr, origin: [60.0, 70.0, 0.0], angles: [0.0; 3], frame: 0, models_before: 0 };
         draw(&mut img, &mut zbuf, cam_at_origin(), std::slice::from_ref(&inst), 0.0);
         let rows_at_left = (0..h).filter(|&y| img.pixels[y * w] == 42).count();
         assert!(rows_at_left > 20, "the clipped poster reaches column 0 on {rows_at_left} rows");

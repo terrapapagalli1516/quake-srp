@@ -9,22 +9,19 @@
 //! page's other events. Its answer is a number (`1`/`0` for a flag, `NaN`
 //! for a name nobody knows) and, for the few that read text, a string.
 
-use crate::app::{boot, boot_attract, boot_demo, in_walk_mode, APP};
+use crate::app::{APP, boot, boot_attract, boot_demo, in_walk_mode};
 use crate::cl_demo::timedemo_running;
-use crate::console::{
-    console_backspace, console_char, console_enter, console_toggle, console_visible,
-};
+use crate::console::{console_backspace, console_char, console_enter, console_toggle, console_visible};
 use crate::host::step;
 use crate::host_cmd::execute_console_command;
 use crate::input::{
-    clear_all_states, key_down, key_event, key_is_down, key_up, keys_held, look, mouse_count,
-    mouse_move, mouse_sensitivity, player_pitch, pointer_unlocked, set_attack, set_impulse, set_jump,
-    set_move, set_movedown,
+    clear_all_states, key_down, key_event, key_is_down, key_up, keys_held, look, mouse_count, mouse_move,
+    mouse_sensitivity, player_pitch, pointer_unlocked, set_attack, set_impulse, set_jump, set_move, set_movedown,
 };
 use crate::menu::{
-    extras, menu_backspace, menu_bind_grabbing, menu_bind_key, menu_cancel, menu_cursor, menu_down,
-    menu_left, menu_point, menu_quit_no, menu_quit_yes, menu_right, menu_screen_id, menu_select,
-    menu_tap, menu_up, menu_visible, set_extras,
+    extras, menu_backspace, menu_bind_grabbing, menu_bind_key, menu_cancel, menu_cursor, menu_down, menu_left,
+    menu_point, menu_quit_no, menu_quit_yes, menu_right, menu_screen_id, menu_select, menu_tap, menu_up, menu_visible,
+    set_extras,
 };
 use crate::snd_dma::{listener, sound_generation, volume};
 use crate::vid::{height, scaled_2d, set_resolution, set_scaled_2d, set_viewsize, set_window, viewsize, width};
@@ -193,7 +190,9 @@ pub(crate) fn call(line: &str) -> Answer {
         "cvar" => cvar_value(rest.trim()),
         "preset" => text_answer(|a| a.settings.preset.name().to_string()),
         // The live game's map (`maps/e1m1.bsp`; empty with none).
-        "map_name" => text_answer(|a| a.walk.as_ref().filter(|_| a.mode == 0).map(|w| w.map_name.clone()).unwrap_or_default()),
+        "map_name" => {
+            text_answer(|a| a.walk.as_ref().filter(|_| a.mode == 0).map(|w| w.map_name.clone()).unwrap_or_default())
+        }
         "config_text" => text_answer(|a| a.settings.config_text()),
         // A console line, as if typed and entered (`Cmd_ExecuteString`).
         "exec" => done(|| execute_console_command(rest)),

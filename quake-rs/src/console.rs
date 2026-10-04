@@ -4,10 +4,10 @@
 //! Source: `WinQuake/console.c` — `Con_Print`, `Con_DrawInput`, `Con_DrawConsole`,
 //! `Con_DrawNotify`; `WinQuake/keys.c` — `Key_Console`, the line editing.
 
-use crate::draw::{draw_char_scaled, draw_string_scaled, fill_rect, screen_2d, Screen2d};
+use crate::draw::{Screen2d, draw_char_scaled, draw_string_scaled, fill_rect, screen_2d};
 use crate::keys::{
-    K_BACKSPACE, K_DOWNARROW, K_END, K_ENTER, K_HOME, K_LEFTARROW, K_MWHEELDOWN, K_MWHEELUP,
-    K_PGDN, K_PGUP, K_TAB, K_UPARROW,
+    K_BACKSPACE, K_DOWNARROW, K_END, K_ENTER, K_HOME, K_LEFTARROW, K_MWHEELDOWN, K_MWHEELUP, K_PGDN, K_PGUP, K_TAB,
+    K_UPARROW,
 };
 use crate::menu::realtime_blink_bit;
 use crate::render::Image;
@@ -17,12 +17,7 @@ use std::collections::VecDeque;
 /// row `top` of the [`screen_2d`] screen, each character at `(x+1)<<3`. id's
 /// `top` is 0, the very top (`v = 0`); the slop Show FPS readout takes that
 /// row while it shows ([`crate::screen::notify_top`]).
-pub fn draw_notify(
-    image: &mut Image,
-    conchars: &crate::wad::Qpic,
-    lines: &[&str],
-    top: i32,
-) {
+pub fn draw_notify(image: &mut Image, conchars: &crate::wad::Qpic, lines: &[&str], top: i32) {
     if image.w == 0 || image.h == 0 {
         return;
     }
@@ -206,11 +201,7 @@ impl ConNotify {
     /// `NUM_CON_TIMES` console lines, skipping any older than
     /// `con_notifytime`.
     pub fn visible(&self, now: f32) -> Vec<&str> {
-        self.lines
-            .iter()
-            .filter(|(_, t)| now - t <= CON_NOTIFYTIME)
-            .map(|(l, _)| l.as_str())
-            .collect()
+        self.lines.iter().filter(|(_, t)| now - t <= CON_NOTIFYTIME).map(|(l, _)| l.as_str()).collect()
     }
 
     /// `Con_CheckResize` for a `vid_w x vid_h` framebuffer: text is laid out
@@ -766,10 +757,7 @@ mod tests {
         assert_eq!(n.visible(1.0), ["You receive 25 health"]);
         // 38 columns: the word that would cross the edge starts a new line.
         n.print("aaaaaaaaaa bbbbbbbbbb cccccccccc dddddddddd\n", 2.0);
-        assert_eq!(
-            n.visible(2.0),
-            ["You receive 25 health", "aaaaaaaaaa bbbbbbbbbb cccccccccc ", "dddddddddd"]
-        );
+        assert_eq!(n.visible(2.0), ["You receive 25 health", "aaaaaaaaaa bbbbbbbbbb cccccccccc ", "dddddddddd"]);
         n.print("\n", 2.5); // a blank line takes a slot
         n.print("last\n", 2.5);
         assert_eq!(n.visible(2.5), ["aaaaaaaaaa bbbbbbbbbb cccccccccc ", "dddddddddd", "", "last"]);

@@ -45,9 +45,7 @@ const HEADER_SIZE: usize = 60; // 15 * i32
 /// 32-bit targets (e.g. `wasm32`, where `usize` is 32-bit): there an `i32`
 /// count near `i32::MAX` times an 8-byte record already overflows `u32`.
 fn table_span(count: usize, record_size: usize, what: &'static str) -> Result<usize> {
-    count.checked_mul(record_size).ok_or_else(|| {
-        QError::invalid(format!("progs.dat {what} table size overflows"))
-    })
+    count.checked_mul(record_size).ok_or_else(|| QError::invalid(format!("progs.dat {what} table size overflows")))
 }
 
 /// QuakeC value type (`etype_t`).
@@ -169,8 +167,15 @@ impl Op {
     /// Number of call arguments for an `OP_CALLn`, else `None`.
     pub fn call_argc(self) -> Option<usize> {
         match self {
-            Op::Call0 | Op::Call1 | Op::Call2 | Op::Call3 | Op::Call4 | Op::Call5 | Op::Call6
-            | Op::Call7 | Op::Call8 => Some(usize::from(self.code() - Op::Call0.code())),
+            Op::Call0
+            | Op::Call1
+            | Op::Call2
+            | Op::Call3
+            | Op::Call4
+            | Op::Call5
+            | Op::Call6
+            | Op::Call7
+            | Op::Call8 => Some(usize::from(self.code() - Op::Call0.code())),
             _ => None,
         }
     }
@@ -221,11 +226,7 @@ pub struct Function {
 impl Function {
     /// Builtin number if this is a builtin, else `None`.
     pub fn builtin(&self) -> Option<usize> {
-        if self.first_statement < 0 {
-            Some((-self.first_statement) as usize)
-        } else {
-            None
-        }
+        if self.first_statement < 0 { Some((-self.first_statement) as usize) } else { None }
     }
 }
 
@@ -258,11 +259,7 @@ impl Progs {
     /// lies within the buffer.
     pub fn parse(bytes: &[u8]) -> Result<Progs> {
         if bytes.len() < HEADER_SIZE {
-            return Err(QError::Truncated {
-                context: "progs header",
-                need: HEADER_SIZE,
-                have: bytes.len(),
-            });
+            return Err(QError::Truncated { context: "progs header", need: HEADER_SIZE, have: bytes.len() });
         }
         let mut h = Reader::new(bytes);
         let version = h.i32()?;
@@ -282,24 +279,14 @@ impl Progs {
         let entityfields = h.i32()?;
 
         if version != PROG_VERSION {
-            return Err(QError::invalid(format!(
-                "progs.dat wrong version {version} (expected {PROG_VERSION})"
-            )));
+            return Err(QError::invalid(format!("progs.dat wrong version {version} (expected {PROG_VERSION})")));
         }
 
         let count = |n: i32, what: &'static str| -> Result<usize> {
-            if n < 0 {
-                Err(QError::invalid(format!("progs.dat negative {what} count: {n}")))
-            } else {
-                Ok(n as usize)
-            }
+            if n < 0 { Err(QError::invalid(format!("progs.dat negative {what} count: {n}"))) } else { Ok(n as usize) }
         };
         let off = |o: i32, what: &'static str| -> Result<usize> {
-            if o < 0 {
-                Err(QError::invalid(format!("progs.dat negative {what} offset: {o}")))
-            } else {
-                Ok(o as usize)
-            }
+            if o < 0 { Err(QError::invalid(format!("progs.dat negative {what} offset: {o}"))) } else { Ok(o as usize) }
         };
 
         // A hostile progs can carry an enormous (untrusted) record count; the
@@ -314,12 +301,7 @@ impl Progs {
         let _ = r.slice_at(off(ofs_statements, "statements")?, span(n, STATEMENT_SIZE, "statement")?)?;
         let mut statements = Vec::with_capacity(n.min(bytes.len() / STATEMENT_SIZE));
         for _ in 0..n {
-            statements.push(Statement {
-                op: Op::from_code(r.u16()?),
-                a: r.i16()?,
-                b: r.i16()?,
-                c: r.i16()?,
-            });
+            statements.push(Statement { op: Op::from_code(r.u16()?), a: r.i16()?, b: r.i16()?, c: r.i16()? });
         }
 
         // --- global defs ---
@@ -328,11 +310,7 @@ impl Progs {
         let _ = r.slice_at(off(ofs_globaldefs, "globaldefs")?, span(n, DEF_SIZE, "globaldef")?)?;
         let mut globaldefs = Vec::with_capacity(n.min(bytes.len() / DEF_SIZE));
         for _ in 0..n {
-            globaldefs.push(Def {
-                type_: r.u16()?,
-                ofs: r.u16()?,
-                s_name: r.i32()?,
-            });
+            globaldefs.push(Def { type_: r.u16()?, ofs: r.u16()?, s_name: r.i32()? });
         }
 
         // --- field defs ---
@@ -341,11 +319,7 @@ impl Progs {
         let _ = r.slice_at(off(ofs_fielddefs, "fielddefs")?, span(n, DEF_SIZE, "fielddef")?)?;
         let mut fielddefs = Vec::with_capacity(n.min(bytes.len() / DEF_SIZE));
         for _ in 0..n {
-            fielddefs.push(Def {
-                type_: r.u16()?,
-                ofs: r.u16()?,
-                s_name: r.i32()?,
-            });
+            fielddefs.push(Def { type_: r.u16()?, ofs: r.u16()?, s_name: r.i32()? });
         }
 
         // --- functions ---
@@ -368,9 +342,7 @@ impl Progs {
 
         // --- strings (raw NUL-separated heap) ---
         let slen = count(numstrings, "string")?;
-        let strings = Reader::new(bytes)
-            .slice_at(off(ofs_strings, "strings")?, slen)?
-            .to_vec();
+        let strings = Reader::new(bytes).slice_at(off(ofs_strings, "strings")?, slen)?.to_vec();
 
         // --- globals (one 32-bit cell each) ---
         let ng = count(numglobals, "global")?;
@@ -382,24 +354,18 @@ impl Progs {
         }
 
         if entityfields < 0 {
-            return Err(QError::invalid(format!(
-                "progs.dat negative entityfields: {entityfields}"
-            )));
+            return Err(QError::invalid(format!("progs.dat negative entityfields: {entityfields}")));
         }
 
         // Build the name->offset caches once (first occurrence wins, matching the
         // old linear scans). Done here so every later lookup is O(1).
         let mut field_ofs_map = std::collections::HashMap::with_capacity(fielddefs.len());
         for d in &fielddefs {
-            field_ofs_map
-                .entry(string_in(&strings, d.s_name).to_string())
-                .or_insert(d.ofs);
+            field_ofs_map.entry(string_in(&strings, d.s_name).to_string()).or_insert(d.ofs);
         }
         let mut global_ofs_map = std::collections::HashMap::with_capacity(globaldefs.len());
         for d in &globaldefs {
-            global_ofs_map
-                .entry(string_in(&strings, d.s_name).to_string())
-                .or_insert(d.ofs);
+            global_ofs_map.entry(string_in(&strings, d.s_name).to_string()).or_insert(d.ofs);
         }
 
         Ok(Progs {
@@ -436,9 +402,7 @@ impl Progs {
 
     /// Index of the function named `name`, if any.
     pub fn find_function(&self, name: &str) -> Option<usize> {
-        self.functions
-            .iter()
-            .position(|f| self.string(f.s_name) == name)
+        self.functions.iter().position(|f| self.string(f.s_name) == name)
     }
 
     /// A global def by name.
@@ -464,11 +428,8 @@ impl Progs {
             let _ = writeln!(out, "function {name} = #{b};  // builtin ({file})");
             return out;
         }
-        let _ = writeln!(
-            out,
-            "function {name}()  // {file}, {} parms, {} locals @ {}",
-            f.numparms, f.locals, f.parm_start
-        );
+        let _ =
+            writeln!(out, "function {name}()  // {file}, {} parms, {} locals @ {}", f.numparms, f.locals, f.parm_start);
         let start = f.first_statement.max(0) as usize;
         let mut s = start;
         while s < self.statements.len() {
@@ -500,11 +461,7 @@ pub fn string_in(heap: &[u8], s: i32) -> &str {
         return "";
     }
     let start = s as usize;
-    let end = heap[start..]
-        .iter()
-        .position(|&b| b == 0)
-        .map(|p| start + p)
-        .unwrap_or(heap.len());
+    let end = heap[start..].iter().position(|&b| b == 0).map(|p| start + p).unwrap_or(heap.len());
     std::str::from_utf8(&heap[start..end]).unwrap_or("")
 }
 
@@ -592,10 +549,8 @@ mod tests {
             parm_size: [0; 8],
         };
 
-        let statements = [
-            Statement { op: Op::AddF, a: 28, b: 29, c: 30 },
-            Statement { op: Op::Done, a: 0, b: 0, c: 0 },
-        ];
+        let statements =
+            [Statement { op: Op::AddF, a: 28, b: 29, c: 30 }, Statement { op: Op::Done, a: 0, b: 0, c: 0 }];
         // a float global "x" at offset 28 (type 2 == ev_float)
         let globaldefs = [Def { type_: 2, ofs: 28, s_name: name_x }];
         let fielddefs: [Def; 0] = [];
@@ -629,30 +584,49 @@ mod tests {
 
         let mut body = Vec::new();
         let ofs_statements = HEADER_SIZE + body.len();
-        for s in &statements { body.extend_from_slice(&ser_stmt(s)); }
+        for s in &statements {
+            body.extend_from_slice(&ser_stmt(s));
+        }
         let ofs_globaldefs = HEADER_SIZE + body.len();
-        for d in &globaldefs { body.extend_from_slice(&ser_def(d)); }
+        for d in &globaldefs {
+            body.extend_from_slice(&ser_def(d));
+        }
         let ofs_fielddefs = HEADER_SIZE + body.len();
-        for d in &fielddefs { body.extend_from_slice(&ser_def(d)); }
+        for d in &fielddefs {
+            body.extend_from_slice(&ser_def(d));
+        }
         let ofs_functions = HEADER_SIZE + body.len();
-        for f in &functions { body.extend_from_slice(&ser_func(f)); }
+        for f in &functions {
+            body.extend_from_slice(&ser_func(f));
+        }
         let ofs_strings = HEADER_SIZE + body.len();
         body.extend_from_slice(&strings);
         let ofs_globals = HEADER_SIZE + body.len();
-        for g in &globals { body.extend_from_slice(&g.to_le_bytes()); }
+        for g in &globals {
+            body.extend_from_slice(&g.to_le_bytes());
+        }
 
         let header: [i32; 15] = [
-            PROG_VERSION, 0,
-            ofs_statements as i32, statements.len() as i32,
-            ofs_globaldefs as i32, globaldefs.len() as i32,
-            ofs_fielddefs as i32, fielddefs.len() as i32,
-            ofs_functions as i32, functions.len() as i32,
-            ofs_strings as i32, strings.len() as i32,
-            ofs_globals as i32, globals.len() as i32,
+            PROG_VERSION,
+            0,
+            ofs_statements as i32,
+            statements.len() as i32,
+            ofs_globaldefs as i32,
+            globaldefs.len() as i32,
+            ofs_fielddefs as i32,
+            fielddefs.len() as i32,
+            ofs_functions as i32,
+            functions.len() as i32,
+            ofs_strings as i32,
+            strings.len() as i32,
+            ofs_globals as i32,
+            globals.len() as i32,
             0, // entityfields
         ];
         let mut out = Vec::new();
-        for x in header { out.extend_from_slice(&x.to_le_bytes()); }
+        for x in header {
+            out.extend_from_slice(&x.to_le_bytes());
+        }
         out.extend_from_slice(&body);
         out
     }

@@ -8,7 +8,7 @@
 use quake_rs::bsp::Bsp;
 use quake_rs::crc;
 use quake_rs::pak::Pak;
-use quake_rs::wad::{Wad2, TYP_PALETTE};
+use quake_rs::wad::{TYP_PALETTE, Wad2};
 
 // ---------------------------------------------------------------------------
 // Synthetic file builders (little-endian, matching the on-disk layouts)
@@ -149,12 +149,7 @@ fn pak_directory_crc_matches_independent_computation() {
 
 #[test]
 fn bsp_parses_and_reports_geometry() {
-    let verts = [
-        [0.0, 0.0, 0.0],
-        [64.0, 0.0, 0.0],
-        [64.0, 128.0, 0.0],
-        [0.0, 128.0, 16.0],
-    ];
+    let verts = [[0.0, 0.0, 0.0], [64.0, 0.0, 0.0], [64.0, 128.0, 0.0], [0.0, 128.0, 16.0]];
     let ents = "{\n\"classname\" \"worldspawn\"\n\"wad\" \"gfx.wad\"\n}\n\
                 {\n\"classname\" \"info_player_start\"\n\"origin\" \"32 64 24\"\n}";
     let img = build_bsp(&verts, ents);
@@ -175,10 +170,7 @@ fn assets_packed_in_a_pak_load_end_to_end() {
     // PAK, are pulled out by name, then parsed by the format loaders.
     let bsp_bytes = build_bsp(&[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], "{ \"classname\" \"worldspawn\" }");
     let wad_bytes = build_wad_with_palette();
-    let img = build_pak(&[
-        ("maps/start.bsp", &bsp_bytes),
-        ("gfx.wad", &wad_bytes),
-    ]);
+    let img = build_pak(&[("maps/start.bsp", &bsp_bytes), ("gfx.wad", &wad_bytes)]);
 
     let path = temp_path("pak_assets");
     std::fs::write(&path, &img).unwrap();
