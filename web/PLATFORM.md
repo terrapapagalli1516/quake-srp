@@ -2034,6 +2034,21 @@ fullscreen; the no-finger row is the page's changes alone on 8 threads.)
 With `r_perspspan 16` the 2640×1080 frame in touch play is 11.7–12.1 ms and
 82–84 are shown a second, against 14.4 and 69 exact in the same minutes.
 
+A day later (2026-10-04), after main's own renderer round (one round of
+threads a frame; the default span now 8), the same comparison in touch play —
+main `a3452f5` → this branch with main merged in, a kit tab each, in turn
+twice — frames shown a second ; frames more than 20 ms apart in 45 s ;
+median frame ms:
+
+| | 1320×540 | 2640×1080 |
+|---|---|---|
+| exact perspective | 102–114 ; 31–134 ; 4.4–6.1 → 117 ; 11–12 ; 6.0–6.2 | 64 ; 251–277 ; 15.1 → 85–86 ; 17–19 ; 11.2–11.5 |
+| `r_perspspan 8` (the default) | 113–114 ; 26–27 ; 5.5 → 116 ; 10–11 ; 5.1–5.5 | 77–84 ; 51–70 ; 10.3–12.0 → 96–100 ; 13–16 ; 9.2–9.8 |
+
+Main's round shows on the phone (2640×1080 exact was 50–58 a second on
+`4d28bd2`), and this round's changes pay on top of it as before: the
+frame's 99th percentile at 1320×540 goes from 16–24 ms to 8.5–8.9.
+
 - **What changed it.** On a touch screen the page no longer spins for a
   frame of most of a refresh or more ("A frame"): the spin sat on the fast
   core, 97–99% busy, while the game drew on the others. The upload's order ("Presentation"): 2.3 → 0.3 ms of the
