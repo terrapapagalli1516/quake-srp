@@ -184,7 +184,11 @@ pub(crate) fn fill_rect(image: &mut Image, x0: i64, y0: i64, x1: i64, y1: i64, c
 /// image or past the rectangle is skipped. The source-column map and the
 /// clipping are worked out once per blit and each row is written as a slice
 /// (PERF_PLAN B4: a float mapping and a bounds-checked `put` per pixel made
-/// the status bar ~3x as expensive).
+/// the status bar ~3x as expensive). Blown up, a source row is several
+/// destination rows: where it has no transparent texel they are the same
+/// pixels, so the first is drawn and the rest are copies of it (at the
+/// scaled 2-D layer's 5 on a phone's native screen, four rows in five of
+/// the status bar).
 pub(crate) fn blit_scaled(
     image: &mut Image,
     src: &[u8],
@@ -207,6 +211,10 @@ pub(crate) fn blit_scaled(
         return;
     }
     let x_start = (dst_x0 + dx_lo) as usize;
+    let (first, last) = (cols[0], cols[cols.len() - 1]);
+    // The last row drawn: where it starts in the image, its source row, and
+    // whether every texel it could sample is opaque.
+    let mut drawn: Option<(usize, usize, bool)> = None;
     for dy in 0..dst_h {
         let py = dst_y0 + dy;
         if py < 0 || py >= ih {
@@ -219,11 +227,19 @@ pub(crate) fn blit_scaled(
         let row0 = (sy0 + sy) * stride + sx0;
         let Some(srow) = src.get(row0..row0 + sw) else { continue };
         let d0 = py as usize * image.w + x_start;
-        let Some(drow) = image.pixels.get_mut(d0..d0 + cols.len()) else { continue };
-        for (out, &sx) in drow.iter_mut().zip(&cols) {
-            let t = srow[sx];
-            if t != transparent {
-                *out = t;
+        if image.pixels.len() < d0 + cols.len() {
+            continue;
+        }
+        match drawn {
+            Some((from, from_sy, true)) if from_sy == sy => image.pixels.copy_within(from..from + cols.len(), d0),
+            _ => {
+                for (out, &sx) in image.pixels[d0..d0 + cols.len()].iter_mut().zip(&cols) {
+                    let t = srow[sx];
+                    if t != transparent {
+                        *out = t;
+                    }
+                }
+                drawn = Some((d0, sy, !srow[first..=last].contains(&transparent)));
             }
         }
     }
@@ -629,11 +645,19 @@ mod tests {
     #[test]
     fn blit_qpic_at_matches_the_per_pixel_blit() {
         let mut seed = 1;
-        for &(pw, ph) in &[(1, 1), (7, 5), (24, 24), (33, 17), (320, 24)] {
-            // Every fourth texel transparent.
+        // Every fourth texel transparent; the same in the odd rows only (the
+        // even ones opaque: blown up, their repeats are copies of the first
+        // row drawn); and no transparent texel at all.
+        let sizes = [(1, 1), (7, 5), (24, 24), (33, 17), (320, 24)];
+        for (&(pw, ph), holes) in sizes.iter().flat_map(|size| [0, 1, 2].map(|holes| (size, holes))) {
             let data: Vec<u8> = bytes(seed, pw * ph)
                 .into_iter()
-                .map(|b| if b % 4 == 0 { HUD_TRANSPARENT } else { b })
+                .enumerate()
+                .map(|(i, b)| match (holes, (i / pw) % 2) {
+                    (0, _) | (1, 1) if b % 4 == 0 => HUD_TRANSPARENT,
+                    _ if b == HUD_TRANSPARENT => 0,
+                    _ => b,
+                })
                 .collect();
             let pic = crate::wad::Qpic { width: pw as i32, height: ph as i32, data };
             for &scale in &SCALES {
@@ -651,7 +675,7 @@ mod tests {
                     let y0 = (oy + vy * scale).floor() as i64;
                     ref_blit(&mut want, &pic, x0, y0, scale, HUD_TRANSPARENT);
                     blit_qpic_at(&mut got, &pic, vx, vy, scale, ox, oy);
-                    assert!(got.pixels == want.pixels, "{pw}x{ph} scale {scale} at ({vx},{vy})+({ox},{oy})");
+                    assert!(got.pixels == want.pixels, "{pw}x{ph} holes {holes} scale {scale} at ({vx},{vy})+({ox},{oy})");
                 }
             }
         }

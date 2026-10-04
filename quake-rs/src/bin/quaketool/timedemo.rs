@@ -214,9 +214,24 @@ pub fn cmd_timedemo(pak_path: &str, demo: &str, rest: &[String]) -> Result<Strin
             );
             let _ = writeln!(
                 o,
-                "  bands: {:.3} ms wall per frame on {} thread(s) (the 3-D times above add every thread's)",
+                "  bands: {:.3} ms wall per frame on {} thread(s), {:.1} rounds of threads a frame (the 3-D times above add every thread's)",
                 ns(st.bands_ns),
                 st.band_threads / frames as u64,
+                st.thread_rounds as f64 / frames as f64,
+            );
+            let _ = writeln!(
+                o,
+                "  on the calling thread alone: {:.3} ms of the views' {:.3} ({:.1} views a frame): setup {:.3}  walk {:.3}  brush ents {:.3}  scan {:.3}  surface lookups {:.3}  entity setup {:.3}; the bands' round has the bakes ({:.3} ms, every thread's)",
+                ns(st.view_ns.saturating_sub(st.bands_ns)),
+                ns(st.view_ns),
+                st.views as f64 / frames as f64,
+                ns(st.view_setup_ns),
+                ns(st.world_sort_ns),
+                ns(st.submodel_ns),
+                ns(st.world_setup_ns),
+                ns(st.surf_lookup_ns),
+                ns(st.entity_setup_ns),
+                ns(st.surf_bake_ns),
             );
             let per = |n: u64| n / frames as u64;
             let _ = writeln!(
