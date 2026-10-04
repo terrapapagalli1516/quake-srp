@@ -2099,7 +2099,7 @@ fps at 1320×540; 148 / 162 / 155 at 2640×1080 with exact perspective; 182 /
 – / 194 with `r_perspspan 16`. Warm (1171/1478 MHz) on 8 threads: 69 exact,
 85 with span 16.
 
-In play, warm, before this round (main `4d28bd2`) → after (the page's two
+In play, warm, before this round (main `b22b29f`) → after (the page's two
 changes and Auto's four threads, below), median frame ms ; frames shown a
 second ; frames more than 20 ms apart in 45 s:
 
@@ -2115,7 +2115,7 @@ With `r_perspspan 16` the 2640×1080 frame in touch play is 11.7–12.1 ms and
 
 A day later (2026-10-04), after main's own renderer round (one round of
 threads a frame; the default span now 8), the same comparison in touch play —
-main `a3452f5` → this branch with main merged in, a kit tab each, in turn
+main `ab7eff0` → this branch with main merged in, a kit tab each, in turn
 twice — frames shown a second ; frames more than 20 ms apart in 45 s ;
 median frame ms:
 
@@ -2125,7 +2125,7 @@ median frame ms:
 | `r_perspspan 8` (the default) | 113–114 ; 26–27 ; 5.5 → 116 ; 10–11 ; 5.1–5.5 | 77–84 ; 51–70 ; 10.3–12.0 → 96–100 ; 13–16 ; 9.2–9.8 |
 
 Main's round shows on the phone (2640×1080 exact was 50–58 a second on
-`4d28bd2`), and this round's changes pay on top of it as before: the
+`b22b29f`), and this round's changes pay on top of it as before: the
 frame's 99th percentile at 1320×540 goes from 16–24 ms to 8.5–8.9.
 
 - **What changed it.** On a touch screen the page no longer spins for a

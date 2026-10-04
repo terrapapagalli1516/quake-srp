@@ -1,6 +1,6 @@
 # Quake-RS — status and hand-off
 
-Last updated 2026-10-02, after the polish round's third wave (`main` @ 05d347a). The first section is
+Last updated 2026-10-02, after the polish round's third wave (`main` @ 66452ff). The first section is
 where things stand. Then the rounds, newest first, branch by branch; how to work here; and
 the older history, kept as evidence, with superseded items marked.
 
