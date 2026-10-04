@@ -14,8 +14,12 @@ RGBA for the same frame (the `frame_hash` call: what the 2-D path puts, and
 what `quaketool play --hash-every` hashes natively). It runs the page as it
 is (WebGL2 on a GPU), with `?webgl` (WebGL2 even drawn by the CPU, as
 headless Chromium's is without $QUAKE_GPU) and with `?canvas2d`; on WebGL2
-it also sends the frames through the staging copy, and loses the context and
-restores it.
+it also sends the frames through the staging copy, loses the context and
+restores it, and — the palette changing every few milliseconds — reads the
+canvas right after each of the presenter's own draws: every frame through
+the palette it came with, never the one before or after (the readback of the
+other cases draws the frame again with whatever textures are current, so it
+could not see a palette that reached the GPU late).
 
 A headless Firefox has WebGL2 only with a display to ask (`DISPLAY` set, the
 GPU behind it; with none the page takes the 2-D canvas and the WebGL2 parts
@@ -52,6 +56,55 @@ STATES = [
     ("console", ["key_event 27 1 0", "key_event 27 0 0", "console_toggle"], 20, 0.05),
     ("gamma 0.7", ["console_toggle", "exec gamma 0.7"], 3, 1 / 72),
 ]
+
+# Each frame through its own palette (WebGL2). While the palette flips (gamma
+# 1.0 <-> 0.6 from the console, every few ms, so consecutive frames often
+# differ in it), every presenter.draw is watched: the frame's indices and
+# palette are copied as the draw starts, and the canvas is read right after
+# the draw's own drawArrays, before any later GL call, and compared pixel by
+# pixel with palette[index]. Answers the draws watched, how many came with a
+# palette other than the frame before's, and the draws whose canvas differed.
+OWN_PALETTE = """async ([secs, flipMs]) => {
+    const gl = presenter.gl, draw = presenter.draw, drawArrays = gl.drawArrays;
+    const log = { draws: 0, changes: 0, wrong: 0, wrongPixels: 0 };
+    let expect = null, last = null;
+    gl.drawArrays = (...a) => {
+        drawArrays.apply(gl, a);
+        const e = expect; expect = null;
+        if (!e) return;
+        const { w, h, px, pal } = e, out = new Uint8Array(w * h * 4);
+        gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, out);        // the bottom row first
+        let bad = 0;
+        for (let y = 0; y < h; y++) {
+            const o = (h - 1 - y) * w * 4, i0 = y * w;
+            for (let x = 0; x < w; x++) {
+                const c = px[i0 + x] * 4, q = o + x * 4;
+                if (out[q] !== pal[c] || out[q + 1] !== pal[c + 1] || out[q + 2] !== pal[c + 2]) bad++;
+            }
+        }
+        if (bad) { log.wrong++; log.wrongPixels += bad; }
+    };
+    presenter.draw = (frame, done) => {
+        if (frame.indexed) {
+            const pal = frame.palette.slice();
+            expect = { w: frame.w, h: frame.h, px: frame.pixels.slice(), pal };
+            const key = pal.join();
+            log.draws++;
+            if (last !== null && key !== last) log.changes++;
+            last = key;
+        }
+        return draw.call(presenter, frame, done);
+    };
+    let n = 0;
+    const flip = setInterval(() => quake.callLine('exec gamma ' + (n++ & 1 ? '1.0' : '0.6')), flipMs);
+    quake.resume();
+    await new Promise(r => setTimeout(r, secs * 1000));
+    clearInterval(flip);
+    quake.pause();
+    await new Promise(r => setTimeout(r, 100));
+    presenter.draw = draw; gl.drawArrays = drawArrays;
+    return log;
+}"""
 
 fails = []
 
@@ -105,6 +158,12 @@ def run(pg, query):
         r = pg.evaluate(FRAME, [2, 1 / 72])
         check("after a lost and restored context: canvas = program's RGBA", r["presented"] and r["page"] == r["prog"],
               f"canvas {r['page']} program {r['prog']}")
+        # Every frame through the palette it came with, the palette flipping.
+        r = pg.evaluate(OWN_PALETTE, [3, 7])
+        check("a changing palette: every frame is drawn through its own",
+              r["wrong"] == 0 and r["draws"] >= 30 and r["changes"] >= 10,
+              f"{r['draws']} draws, {r['changes']} with a new palette, {r['wrong']} wrong ({r['wrongPixels']} pixels)")
+        pg.evaluate("line => quake.callLine(line)", "exec gamma 0.7")
     check(f"no page errors{query}", not errs, "; ".join(errs[-3:]))
 
 
