@@ -7,7 +7,7 @@
 
 use quake_rs::render::{self, build_gamma_table};
 use quake_rs::client::cl_input::derive_key_move;
-use quake_rs::client::host::{host_filter_time, host_filter_time_capped, host_filter_time_uncapped, FrameCap};
+use quake_rs::client::host::{host_filter_time, host_filter_time_display, host_filter_time_uncapped, FrameCap};
 use quake_rs::stepping::Stepping;
 
 use crate::app::ensure_app;
@@ -15,14 +15,17 @@ use crate::bench::{self, Phase};
 use crate::cl_demo::{finish_host_error, finish_menu_credits, host_end_game, step_demo, step_timedemo};
 use crate::cl_walk::step_walk;
 
-/// How a host frame is gated and stepped: [`host_filter_time`]'s 72 fps cap
-/// with id's per-frame code (`host_maxfps 72`, the Classic preset's: today's
-/// gate exactly, as the oracle proves it); every call without the cap while
-/// a `timedemo` runs (id's `cls.timedemo`: [`host_filter_time_uncapped`]);
-/// or, with any other `host_maxfps` (the slop preset's), a frame on a
-/// display refresh — every one with no cap, else the first at least 1/cap
-/// after the last frame ([`host_filter_time_capped`]) — stepped as a run of
-/// id's 72 Hz frames ([`Stepping::Uncapped`], `FRAMERATE.md`).
+/// How a host frame is gated, stepped and drawn: [`host_filter_time`]'s 72
+/// fps cap with id's per-frame code, every frame drawn (`host_maxfps 72`, the
+/// Classic preset's: today's gate exactly, as the oracle proves it); every
+/// call without the cap while a `timedemo` runs, every one drawn (id's
+/// `cls.timedemo`: [`host_filter_time_uncapped`]); or, with any other
+/// `host_maxfps` (the slop preset's), a frame on every display refresh
+/// ([`host_filter_time_display`]) stepped as a run of id's 72 Hz frames
+/// ([`Stepping::Uncapped`], `FRAMERATE.md`), its picture held to the cap
+/// ([`FrameCap::picture_due`]): the game at the display's rate, which
+/// `quaketool framerate --check` proves from 60 to 480 Hz, the pictures at
+/// most the cap's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FrameGate {
     Classic,
@@ -44,7 +47,17 @@ impl FrameGate {
         match self {
             FrameGate::Classic => host_filter_time(realtime, oldrealtime),
             FrameGate::Timedemo => Some(host_filter_time_uncapped(realtime, oldrealtime)),
-            FrameGate::Display(cap) => host_filter_time_capped(realtime, oldrealtime, cap),
+            FrameGate::Display(_) => host_filter_time_display(realtime, oldrealtime),
+        }
+    }
+
+    /// Whether the frame that runs at `realtime` draws its picture: under a
+    /// cap other than id's, the first at least 1/cap after the last picture
+    /// (`last_picture`); every frame otherwise.
+    fn drawn(self, realtime: f64, last_picture: &mut f64) -> bool {
+        match self {
+            FrameGate::Display(cap) => cap.picture_due(realtime, last_picture),
+            FrameGate::Classic | FrameGate::Timedemo => true,
         }
     }
 
@@ -110,9 +123,12 @@ fn console_layer(a: &mut crate::app::App, img: Option<&mut render::Image>, dt: f
 /// (see [`HOST_FRAME_TOLERANCE`](quake_rs::client::host::HOST_FRAME_TOLERANCE)), each advancing the game (world, demo,
 /// `host_time`) by the time since the last one, clamped to [0.001, 0.1].
 /// A frame starts with `IN_Commands` (the gamepad's keys), and the live
-/// game's move takes `IN_JoyMove`'s. Returns 1 when a frame ran and the
-/// framebuffer holds it, 0 when the cap skipped this call (the page then has
-/// nothing new to present).
+/// game's move takes `IN_JoyMove`'s. Under a frame-rate cap other than id's a
+/// frame runs every call and only draws when its picture is due
+/// ([`FrameGate::drawn`]): the game, the sound and the clocks move, and the
+/// screen, the menu and the console are not drawn (the console still
+/// slides). Returns 1 when a frame drew and the framebuffer holds it, 0 when
+/// none ran or it was not drawn (the page then has nothing new to present).
 ///
 /// `dt = 0` (or a non-finite / negative `dt`) is the tests' and automation's
 /// frozen frame: it always renders, and neither the gate nor the game clock
@@ -136,9 +152,11 @@ pub(crate) fn step(dt: f32) -> i32 {
         // `host_frametime`, the C's double: the server advances sv.time by it
         // exactly; everything else here times itself with its f32.
         let frametime = if real_dt == 0.0 { Some(0.0) } else { gate.frame_time(a.realtime, &mut a.oldrealtime) };
-        gated = frametime.map(|t| (gate, t));
+        // The picture: a frozen frame always draws.
+        let draw = frametime.is_some() && (real_dt == 0.0 || gate.drawn(a.realtime, &mut a.last_picture));
+        gated = frametime.map(|t| (gate, t, draw));
     });
-    let Some((gate, host_frametime)) = gated else { return 0 };
+    let Some((gate, host_frametime, draw)) = gated else { return 0 };
     // IN_Commands: the pad's buttons through Key_Event, before the frame's
     // commands and move, as host.c orders them.
     crate::input::in_commands();
@@ -160,11 +178,12 @@ pub(crate) fn step(dt: f32) -> i32 {
     ensure_app(|a| {
         let stepping = gate.stepping();
         let dt = host_frametime as f32;
-        ran = 1;
+        ran = i32::from(draw);
         // Every presented real frame counts toward the wasm_showfps readout
         // (counted whether or not it is shown, so switching it on reads true
-        // from the first second); the automation's frozen frames do not.
-        if real_dt > 0.0 {
+        // from the first second): the frames drawn, which a frame-rate cap
+        // holds; the automation's frozen frames do not.
+        if real_dt > 0.0 && draw {
             a.show_fps.frame(a.realtime);
         }
         bench::frame_begin(active_renderer(a));
@@ -269,14 +288,18 @@ pub(crate) fn step(dt: f32) -> i32 {
         }
         if frame.is_none() {
             frame = if a.mode == 1 {
-                a.demo.as_mut().map(|d| step_demo(d, dt, gate_gameplay, &vid))
+                a.demo.as_mut().map(|d| step_demo(d, dt, gate_gameplay, &vid, draw))
             } else {
-                a.walk.as_mut().map(|wk| step_walk(wk, host_frametime, gate_gameplay, &vid))
+                a.walk.as_mut().map(|wk| step_walk(wk, host_frametime, gate_gameplay, &vid, draw))
             };
         }
         crate::input::rumble_after_frame(a);
         let (mut img, cshifts) = match frame {
+            // Not drawn: no screen, so the menu and the console are not
+            // drawn either (the console still slides) and nothing is shown.
+            Some((_, cshifts)) if !draw => (None, cshifts),
             Some((image, cshifts)) => (Some(image), cshifts),
+            None if !draw => (None, Vec::new()),
             // Disconnected (con_forcedup): no view — V_RenderView draws
             // nothing and the console covers the screen, the menu over it.
             None if a.disconnected && a.palette.is_some() => {
@@ -615,10 +638,11 @@ mod tests {
         );
     }
 
-    /// `host_maxfps 0` runs a frame every refresh, `host_maxfps 72` id's gate
-    /// again, `host_maxfps 60` every second refresh of a 120 Hz display and
-    /// `144` every one; the retired `wasm_uncapped` (and the checks' bit 1)
-    /// set the two ends.
+    /// `host_maxfps 0` runs and draws a frame every refresh, `host_maxfps 72`
+    /// id's gate again; `host_maxfps 60` runs a frame every refresh and draws
+    /// every second one of a 120 Hz display (every third at 144), `144` every
+    /// one; the retired `wasm_uncapped` (and the checks' bit 1) set the two
+    /// ends.
     #[test]
     fn step_with_no_cap_runs_one_frame_per_refresh_and_72_restores_ids_gate() {
         assert_eq!(boot(), 1);
@@ -633,12 +657,19 @@ mod tests {
         crate::host_cmd::execute_console_command("host_maxfps 72");
         assert_eq!(second_at_144hz(), 72, "72 again: id's gate is back");
         let refreshes_at_120hz = || (0..120).map(|_| step(1.0 / 120.0)).collect::<Vec<i32>>();
+        let host_frames = || APP.with(|c| c.borrow().as_ref().unwrap().host_framecount);
         crate::host_cmd::execute_console_command("host_maxfps 60");
-        let w0 = walk_clock();
+        let (w0, f0) = (walk_clock(), host_frames());
         let ran = refreshes_at_120hz();
-        assert_eq!(ran.iter().sum::<i32>(), 60, "60: every second refresh of 120 Hz");
+        assert_eq!(ran.iter().sum::<i32>(), 60, "60: a picture every second refresh of 120 Hz");
         assert!(ran.windows(2).all(|w| w[0] != w[1]), "evenly: {ran:?}");
+        assert_eq!(host_frames() - f0, 120, "the game: a host frame every refresh");
         assert!((walk_clock() - w0 - 1.0).abs() < 1e-3, "the world still advances 1 s a second");
+        let (w0, f0) = (walk_clock(), host_frames());
+        let ran: Vec<i32> = (0..144).map(|_| step(1.0 / 144.0)).collect();
+        assert_eq!(ran.iter().sum::<i32>(), 48, "60 on 144 Hz: a picture every third refresh");
+        assert_eq!(host_frames() - f0, 144, "...and the game at 144");
+        assert!((walk_clock() - w0 - 1.0).abs() < 1e-3);
         crate::host_cmd::execute_console_command("host_maxfps 144");
         assert_eq!(refreshes_at_120hz().iter().sum::<i32>(), 120, "a cap above the display: every refresh");
         crate::host_cmd::execute_console_command("wasm_uncapped 1");

@@ -460,8 +460,8 @@ pub fn draw_centerprint(
 /// (`Con_DrawNotify`'s `(x+1)<<3`) on their first row (`v = 0`).
 const FPS_POS: (i32, i32) = (8, 0);
 
-/// EXTRA, not in id's Quake (Options > Classic / slop > Show FPS,
-/// `wasm_showfps`): the frame rate as QuakeWorld's `SCR_DrawFPS`
+/// EXTRA, not in id's Quake (Options > Slop Options > Picture and sound >
+/// Show FPS, `wasm_showfps`): the frame rate as QuakeWorld's `SCR_DrawFPS`
 /// (QW/client/screen.c) writes it — `sprintf(st, "%3d FPS", lastfps)` in
 /// white conchars (`Draw_String`) — but in the top-left corner,
 /// [`FPS_POS`], where QuakeWorld put it in the bottom-right one, just above

@@ -44,7 +44,7 @@
      Up/Enter away again, at the picked pixel size — the same list, never a
      dead end.
 
-Screenshots (in the web dir): verify_settings_2026.png, verify_settings_classic.png,
+Screenshots (in the web dir): verify_settings_slop.png, verify_settings_classic.png,
 verify_settings_video_native.png.
 Also passes with QUAKE_BROWSER=firefox, where Playwright loses the context's
 devicePixelRatio on a cross-origin isolated page (this one; a plain page
@@ -155,7 +155,7 @@ with sync_playwright() as p:
           and c["flags"] & NATIVE, str(c))
     check("...and the canvas is the page's box exactly",
           (round(c["cssW"]), round(c["cssH"])) == (c["iw"] - 34, c["ih"] - 84) and c["rendering"] == "pixelated", str(c))
-    pg.locator("#c").screenshot(path=os.path.join(WEB, "verify_settings_2026.png"))
+    pg.locator("#c").screenshot(path=os.path.join(WEB, "verify_settings_slop.png"))
     pg.set_viewport_size({"width": 1600, "height": 600})
     pg.wait_for_function("document.getElementById('c').width === 1566", timeout=5000)
     c = pg.evaluate(CANVAS)
@@ -310,7 +310,7 @@ with sync_playwright() as p:
     controls = ["freelook", "cl_jumpswim", "vid_altenter", "joystick"]
     vals = {n: cvar(pg, n) for n in departures + controls + ["cl_forwardspeed"]}
     check("every engine departure off", all(vals[n] == "0" for n in departures) and cvar(pg, "r_perspspan") == "16", str(vals))
-    check("Screen size is id's 100 (the page started 2026; the address switched it, never moved)",
+    check("Screen size is id's 100 (the page started slop; the address switched it, never moved)",
           cvar(pg, "viewsize") == "100", cvar(pg, "viewsize"))
     check("the controls are slop's: mouse look, Space swims up, Alt+Enter, the gamepad, Always Run (400)",
           all(vals[n] == "1" for n in controls) and vals["cl_forwardspeed"] == "400", str(vals))

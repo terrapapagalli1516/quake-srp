@@ -3,7 +3,7 @@
 restarting into a running game, end-to-end in headless Chromium
 (web/PLATFORM.md, "Quit").
 
-  1. Fullscreen (2026's F key, a real user gesture to headless Chromium —
+  1. Fullscreen (slop's F key, a real user gesture to headless Chromium —
      Playwright's key press counts) and the pointer lock (a canvas click),
      both acquired while walking.
   2. Menu > Quit > Y (menu_up wraps to Main's last item, Quit; menu_select
@@ -44,7 +44,7 @@ with sync_playwright() as p:
     pg.goto(f"http://127.0.0.1:{PORT}/index.html", wait_until="load")
     pg.wait_for_function("window.quake && quake.ready", timeout=120000)
 
-    # Boot walk (2026 default: Alt+Enter is the fullscreen key, vid_altenter), close
+    # Boot walk (the slop default: Alt+Enter is the fullscreen key, vid_altenter), close
     # the menu, and capture fullscreen + the pointer.
     pg.evaluate("document.getElementById('walkBtn').click()")
     time.sleep(1.0)

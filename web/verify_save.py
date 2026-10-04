@@ -68,7 +68,7 @@ with sync_playwright() as p:
     pg.on("console", lambda m: errs.append(m.text) if m.type == "error" else None)
     pg.on("pageerror", lambda e: errs.append("PAGEERROR: " + str(e)))
     # Classic (1:1 menus: the Load menu's rows are read at id's
-    # coordinates below); the migration at the end runs the default, 2026.
+    # coordinates below); the migration at the end runs the default, slop.
     pg.goto(f"http://127.0.0.1:{PORT}/index.html?classic", wait_until="load")
     wait_ready(pg)
     if pg.evaluate(KEPT.format(KEY)) or pg.evaluate(KEPT.format(SLOT_KEY)):

@@ -243,6 +243,22 @@ fn disconnected_frame(vid: &Vid, sound: Vec<SoundCall>) -> ClientFrame {
 /// `Host_Error`: [`host_error`] ends the game, and this frame and every later
 /// one is the disconnected screen, until the host drops the walk.
 pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -> ClientFrame {
+    client_frame(w, host_frametime, menu_up, vid, true)
+}
+
+/// [`walk_frame`] without its picture: a host frame a frame-rate cap does not
+/// draw (`client::host::FrameCap`). Everything the frame does to the game and
+/// to what the view shows next runs as in a drawn one — the server's frame,
+/// the client's clocks, the effects, particles and lights, the palette's
+/// fades, the view's kick and stair smoothing, the frame blends, the sound —
+/// and only the pixels are skipped: the 3-D view, the status bar and the
+/// messages. Its image is empty.
+pub fn walk_frame_undrawn(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -> ClientFrame {
+    client_frame(w, host_frametime, menu_up, vid, false)
+}
+
+/// [`walk_frame`], its picture drawn or not (`draw`).
+fn client_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid, draw: bool) -> ClientFrame {
     if w.host_error.is_some() {
         return disconnected_frame(vid, Vec::new());
     }
@@ -684,7 +700,7 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
             .retain(|&e, _| !vm.is_free_edict(e));
     }
     let smooth = w.lerpmove == LerpMove::Smooth;
-    // r_nailbarrels (the 2026 extra): the player's own nails, as (index in
+    // r_nailbarrels (a slop option): the player's own nails, as (index in
     // `descs`, edict), drawn leaving the nailgun's barrels once the camera
     // and the gun are placed (below).
     let barrel_nails = w.nailbarrels == NailBarrels::Barrels;
@@ -952,7 +968,7 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
     let hide_gun = intermission
         || w.server.vm.ent_float(w.player, w.server.vm.fo().health) <= 0.0
         || (w.server.vm.ent_float(w.player, w.server.vm.fo().items) as i32) & IT_INVISIBILITY != 0;
-    // r_nailbarrels (the 2026 extra): each of the player's nails drawn
+    // r_nailbarrels (a slop option): each of the player's nails drawn
     // leaving the barrel it fires from, while the nailgun is drawn where
     // V_CalcRefdef puts it this frame (`client::nailbarrels`); the world
     // stops the offset short of its surfaces.
@@ -1166,10 +1182,18 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
     // overlay the world goes on under the view, beside the bar (underwater,
     // in the view's buffer, to be wobbled with it). The status bar is drawn
     // over it later.
-    let backtile = backtile_for(&vrect, render_w, render_h, w.gfx_wad.as_ref());
-    let mut img = render::screen_with_backtile(vrect, render_w, render_h, backtile.as_ref());
+    // An undrawn frame (`walk_frame_undrawn`) stops here for the pixels: an
+    // empty image, and no 3-D view, warp, crosshair or 2-D layer below.
+    let mut img = if draw {
+        let backtile = backtile_for(&vrect, render_w, render_h, w.gfx_wad.as_ref());
+        render::screen_with_backtile(vrect, render_w, render_h, backtile.as_ref())
+    } else {
+        render::Image::new(0, 0, 0)
+    };
     let below = warp_below(&refdef, vid);
-    let warp_view = if dowarp {
+    let warp_view = if !draw {
+        None
+    } else if dowarp {
         Some(w.renderer.render_extended(&scene, below))
     } else {
         draw_view(&mut w.renderer, &scene, &refdef, &mut img);
@@ -1198,13 +1222,15 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
     }
     // The 2-D oracle harness paints the view one flat colour (the C oracle's
     // `oracle_blank`), so a shot measures the 2-D layer alone (`set_view_hook`).
-    view_hook(&mut img, vrect);
+    if draw {
+        view_hook(&mut img, vrect);
+    }
     // V_RenderView: the crosshair over the view, before the 2-D layer — but
     // not over an intermission or finale, which id's GLQuake leaves it off
     // (gl_screen.c's SCR_UpdateScreen draws it only outside them): WinQuake
     // draws it there too, over the level's stats, with nothing to aim at.
     // (`crosshair` is a slop setting; Classic draws none.)
-    if w.intermission == 0 {
+    if draw && w.intermission == 0 {
         render::draw_crosshair(&mut img, w.crosshair, w.conchars.as_ref(), &vrect);
     }
     // cl.cshifts order: CONTENTS (bottom) -> DAMAGE -> BONUS -> POWERUP (top).
@@ -1240,7 +1266,9 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
     //    for == 2, the center string alone for == 3 — and only while the game
     //    owns the screen (`key_dest == key_game`; with the menu/console up
     //    neither the bar nor the overlay paints, the view is full-screen).
-    if w.intermission != 0 {
+    if !draw {
+        // Undrawn: no status bar, overlay, plaque or messages.
+    } else if w.intermission != 0 {
         if !menu_up {
             match w.intermission {
                 1 => {
@@ -1326,7 +1354,7 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
 
     // SCR_DrawPause: the plaque while cl.paused, outside an intermission and
     // whatever key_dest is (the menu draws over it).
-    if cl_paused && w.intermission == 0 {
+    if draw && cl_paused && w.intermission == 0 {
         if let Some(pic) = w.pic_pause.as_ref() {
             render::draw_pause(&mut img, pic);
         }
@@ -1340,7 +1368,7 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
     // Also suppressed during intermission: SCR_UpdateScreen's intermission
     // branches draw neither SCR_CheckDrawCenterString (the finale text above is
     // its own path) nor the console notify lines.
-    if !menu_up && w.intermission == 0 {
+    if draw && !menu_up && w.intermission == 0 {
         if let Some(cc) = w.conchars.as_ref() {
             if let Some((text, _)) = &w.centerprint {
                 render::draw_centerprint(&mut img, cc, text);

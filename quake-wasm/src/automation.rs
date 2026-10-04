@@ -118,6 +118,15 @@ pub(crate) fn call(line: &str) -> Answer {
         "set_window" => done(|| set_window(f(0) as u32, f(1) as u32)),
         "set_video" => crate::vid::set_video(rest).into(),
         "render_threads" => render_threads().into(),
+        // The host frames run so far (`host_framecount`): the game's ticks,
+        // drawn or not — under a frame-rate cap other than id's one every
+        // tick, while the pictures are held to the cap (verify_pacing.py
+        // counts both).
+        "host_frames" => {
+            let mut n = 0;
+            crate::app::ensure_app(|a| n = a.host_framecount);
+            Answer::from(n as f64)
+        }
         "viewsize" => viewsize().into(),
         "set_viewsize" => done(|| set_viewsize(real(0))),
         "scaled_2d" => scaled_2d().into(),

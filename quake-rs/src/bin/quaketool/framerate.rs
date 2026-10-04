@@ -1,5 +1,8 @@
 //! `quaketool framerate <pak> [--rates LIST] [--only NAMES] [--markdown]
 //! [--check]` — does the game play the same at every display rate?
+//! `quaketool framerate <pak> --cap N [--rates LIST] [--check]` — and with
+//! the frame-rate cap's picture held to N a second (`host_maxfps N`), the
+//! game still a host frame every refresh: the capped twin.
 //! `quaketool framerate <pak> --budget [--res WxH,...]` — what a frame of it
 //! costs at 480 Hz.
 //! `quaketool framerate <pak> --lerpmove [--rates LIST] [--strip DIR]` — how
@@ -49,12 +52,21 @@
 //! differ only by their frame times. With `--check` the command fails when
 //! an uncapped value is further from the 72 Hz reference than the scenario's
 //! stated tolerance.
+//!
+//! The capped twin (`--cap N`; rates `60,72,90,105,110,120,144,240` unless
+//! given) runs each uncapped scenario again with only the frames whose
+//! picture is due drawn ([`FrameCap::picture_due`]) and the rest stepped
+//! undrawn ([`cl_main::walk_frame_undrawn`], [`cl_demo::demo_frame_undrawn`])
+//! — as the browser host runs a cap other than id's 72 — and reports
+//! `uncapped → capped`. With `--check` it fails when a capped value is not
+//! exactly the uncapped one at its rate (drawing touched the game) or is
+//! further from the 72 Hz reference than the tolerance.
 
 use std::cell::RefCell;
 use std::fmt::Write as _;
 use std::time::Instant;
 
-use quake_rs::client::host::{host_filter_time_display, host_filter_time_uncapped};
+use quake_rs::client::host::{host_filter_time_display, host_filter_time_uncapped, FrameCap};
 use quake_rs::client::lerpmove::LerpMove;
 use quake_rs::client::{cl_demo, cl_main, host_cmd, DemoPlay, Phase, SoundCall, Vid, Walk};
 use quake_rs::pak::Pak;
@@ -126,11 +138,24 @@ struct FrameClock {
     oldrealtime: f64,
     frames: u64,
     seed: u32,
+    /// The picture's cap ([`PICTURE_CAP`]) and its last picture's time.
+    cap: FrameCap,
+    last_picture: f64,
 }
+
+/// The capped twin's cap (`--cap N`): every clock made while it is set draws
+/// only the frames whose picture is due. 0: every frame drawn.
+static PICTURE_CAP: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 impl FrameClock {
     fn new(rate: Rate, stepping: Stepping) -> FrameClock {
-        FrameClock { rate, stepping, realtime: 0.0, oldrealtime: 0.0, frames: 0, seed: 0x5eed }
+        let cap = FrameCap::new(PICTURE_CAP.load(std::sync::atomic::Ordering::Relaxed));
+        FrameClock { rate, stepping, realtime: 0.0, oldrealtime: 0.0, frames: 0, seed: 0x5eed, cap, last_picture: f64::MIN }
+    }
+
+    /// Whether the frame [`FrameClock::next`] just gave draws its picture.
+    fn draws(&mut self) -> bool {
+        self.cap.picture_due(self.realtime, &mut self.last_picture)
     }
 
     /// The next refresh interval.
@@ -206,7 +231,11 @@ impl Sim {
     /// One host frame; returns its `host_frametime`.
     fn frame(&mut self) -> f64 {
         let dt = self.clock.next();
-        let frame = cl_main::walk_frame(&mut self.w, dt, false, &VID);
+        let frame = if self.clock.draws() {
+            cl_main::walk_frame(&mut self.w, dt, false, &VID)
+        } else {
+            cl_main::walk_frame_undrawn(&mut self.w, dt, false, &VID)
+        };
         self.t += dt;
         self.dt = dt;
         for call in &frame.sound {
@@ -1252,9 +1281,13 @@ fn demo(c: &Ctx) -> Vec<Measure> {
     while t < 20.0 {
         let dt = clock.next();
         t += dt;
-        let frame = cl_demo::demo_frame(&mut d, dt as f32, false, &VID);
+        let frame = if clock.draws() {
+            cl_demo::demo_frame(&mut d, dt as f32, false, &VID)
+        } else {
+            cl_demo::demo_frame_undrawn(&mut d, dt as f32, false, &VID)
+        };
         render::recycle_image(frame.image);
-        // The POV the frame drew.
+        // The POV the frame drew (or would have).
         let pov = (d.view.view_origin, d.view.view_angles);
         if pov != last {
             moves += 1;
@@ -2135,6 +2168,8 @@ fn fmt(v: f64) -> String {
 pub fn cmd_framerate(pak_path: &str, rest: &[String]) -> Result<String, String> {
     let mut rates = vec![Rate::Hz(60), Rate::Hz(144), Rate::Hz(240), Rate::Hz(480), Rate::Jitter];
     let (mut only, mut markdown, mut check) = (None::<Vec<String>>, false, false);
+    // `--cap`'s: the capped twin, its cap, and the rates as given (72 kept).
+    let (mut cap, mut given_rates) = (None::<FrameCap>, None::<Vec<Rate>>);
     let (mut budget, mut res) = (false, "1280x800,1280x1024".to_string());
     let (mut lerpmove, mut strip) = (false, None::<String>);
     // `--lightstyles`' own: 72 Hz is a rate like any other there.
@@ -2155,6 +2190,7 @@ pub fn cmd_framerate(pak_path: &str, rest: &[String]) -> Result<String, String> 
                 let v = rest.get(i + 1).ok_or("--rates needs a list")?;
                 rates = v.split(',').map(Rate::parse).collect::<Result<_, _>>()?;
                 style_rates = rates.clone();
+                given_rates = Some(rates.clone());
                 rates.retain(|&r| r != Rate::Hz(72));
                 i += 1;
             }
@@ -2164,6 +2200,15 @@ pub fn cmd_framerate(pak_path: &str, rest: &[String]) -> Result<String, String> 
             }
             "--markdown" => markdown = true,
             "--check" => check = true,
+            "--cap" => {
+                let v = rest.get(i + 1).ok_or("--cap needs a number")?;
+                let n: u32 = v.parse().map_err(|_| format!("--cap: bad number {v:?}"))?;
+                if FrameCap::new(n) == FrameCap::NONE || FrameCap::new(n) == FrameCap::ID || FrameCap::new(n).cvar() != n {
+                    return Err(format!("--cap: {n} is not a cap the picture is held to (60..=240 but id's 72)"));
+                }
+                cap = Some(FrameCap::new(n));
+                i += 1;
+            }
             "--budget" => budget = true,
             "--lerpmove" => lerpmove = true,
             "--strip" => {
@@ -2316,6 +2361,11 @@ pub fn cmd_framerate(pak_path: &str, rest: &[String]) -> Result<String, String> 
         return lerpmove_report(&pak, &rates, strip.as_deref());
     }
 
+    if let Some(cap) = cap {
+        let rates = given_rates.unwrap_or_else(|| [60, 72, 90, 105, 110, 120, 144, 240].map(Rate::Hz).to_vec());
+        return capped_twin(&pak, cap, &rates, only.as_deref(), markdown, check);
+    }
+
     let mut o = String::new();
     let mut failures = Vec::new();
     for sc in SCENARIOS {
@@ -2348,7 +2398,7 @@ pub fn cmd_framerate(pak_path: &str, rest: &[String]) -> Result<String, String> 
                 }
             }
         }
-        report(&mut o, sc, &rates, &rows, markdown);
+        report(&mut o, sc, &rates, &rows, markdown, "id's → uncapped");
     }
     if check {
         if failures.is_empty() {
@@ -2360,9 +2410,68 @@ pub fn cmd_framerate(pak_path: &str, rest: &[String]) -> Result<String, String> 
     Ok(o)
 }
 
-fn report(o: &mut String, sc: &Scenario, rates: &[Rate], rows: &[Row], markdown: bool) {
+/// The capped twin (`--cap`): each scenario at 72 Hz with id's code (the
+/// reference), then at each rate uncapped and again with its picture held to
+/// `cap`, every frame still run. A capped value must be the uncapped one
+/// exactly — what a frame draws never moves the game — and, with `check`,
+/// within the scenario's tolerance of the reference.
+fn capped_twin(pak: &Pak, cap: FrameCap, rates: &[Rate], only: Option<&[String]>, markdown: bool, check: bool) -> Result<String, String> {
+    let mut o = format!("the capped twin: host_maxfps {}, the picture held to it, the game a frame every refresh\n", cap.cvar());
+    let mut failures = Vec::new();
+    for sc in SCENARIOS {
+        if only.is_some_and(|names| !names.iter().any(|n| n == sc.name)) {
+            continue;
+        }
+        let run = |rate, stepping, picture: FrameCap| {
+            PICTURE_CAP.store(picture.cvar(), std::sync::atomic::Ordering::Relaxed);
+            let values = (sc.run)(&Ctx { pak, rate, stepping });
+            PICTURE_CAP.store(0, std::sync::atomic::Ordering::Relaxed);
+            values
+        };
+        let reference = run(Rate::Hz(72), Stepping::Classic, FrameCap::NONE);
+        let mut rows: Vec<Row> = reference
+            .iter()
+            .map(|r| Row { name: r.name, unit: r.unit, tolerance: r.tolerance, reference: r.value, cells: Vec::new() })
+            .collect();
+        for &rate in rates {
+            let uncapped = run(rate, Stepping::Uncapped, FrameCap::NONE);
+            let capped = run(rate, Stepping::Uncapped, cap);
+            for (row, (a, b)) in rows.iter_mut().zip(uncapped.iter().zip(&capped)) {
+                row.cells.push((a.value, b.value));
+                let same = a.value == b.value || (a.value.is_nan() && b.value.is_nan());
+                if !same {
+                    failures.push(format!("{} / {} at {}: capped {} vs uncapped {}", sc.name, row.name, rate.label(), fmt(b.value), fmt(a.value)));
+                }
+                let within = (b.value - row.reference).abs() <= row.tolerance + 1e-9;
+                if check && !row.tolerance.is_nan() && !within {
+                    failures.push(format!(
+                        "{} / {} at {} capped: {} vs {} at 72 (tolerance ±{})",
+                        sc.name,
+                        row.name,
+                        rate.label(),
+                        fmt(b.value),
+                        fmt(row.reference),
+                        fmt(row.tolerance)
+                    ));
+                }
+            }
+        }
+        report(&mut o, sc, rates, &rows, markdown, "uncapped → capped");
+    }
+    if !failures.is_empty() {
+        return Err(format!("{o}check failed:\n  {}", failures.join("\n  ")));
+    }
+    if check {
+        let _ = writeln!(o, "check: every capped value is the uncapped one at its rate, within its tolerance of 72 Hz");
+    }
+    Ok(o)
+}
+
+/// One scenario's table: each rate's pair of values (`pair` names them) against
+/// the 72 Hz reference.
+fn report(o: &mut String, sc: &Scenario, rates: &[Rate], rows: &[Row], markdown: bool, pair: &str) {
     if markdown {
-        let _ = writeln!(o, "**{}** — {}\n", sc.name, sc.what);
+        let _ = writeln!(o, "**{}** — {} ({pair})\n", sc.name, sc.what);
         let head: Vec<String> = rates.iter().map(|r| r.label()).collect();
         let _ = writeln!(o, "| quantity | 72 (id) | {} | tolerance |", head.join(" | "));
         let _ = writeln!(o, "|---|---|{}---|", "---|".repeat(rates.len()));
@@ -2381,7 +2490,7 @@ fn report(o: &mut String, sc: &Scenario, rates: &[Rate], rows: &[Row], markdown:
     } else {
         let _ = writeln!(o, "{} — {}", sc.name, sc.what);
         let head: String = rates.iter().map(|r| format!(" {:>17}", r.label())).collect();
-        let _ = writeln!(o, "  {:<34} {:>9}{head}", "quantity (id's → uncapped)", "72 (id)");
+        let _ = writeln!(o, "  {:<34} {:>9}{head}", format!("quantity ({pair})"), "72 (id)");
         for r in rows {
             let name = if r.unit.is_empty() { r.name.to_string() } else { format!("{} ({})", r.name, r.unit) };
             let cells: String = r.cells.iter().map(|&(a, b)| format!(" {:>17}", format!("{} → {}", fmt(a), fmt(b)))).collect();

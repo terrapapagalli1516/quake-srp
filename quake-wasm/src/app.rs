@@ -112,6 +112,9 @@ pub(crate) struct App {
     /// [`host_filter_time`](quake_rs::client::host::host_filter_time)'s gate
     /// measures the time since then.
     pub(crate) oldrealtime: f64,
+    /// `realtime` when the last host frame drew its picture: a frame-rate cap
+    /// holds the pictures to it (`FrameCap::picture_due`), not the frames.
+    pub(crate) last_picture: f64,
     /// Current render resolution (runtime; defaults to [`DEFAULT_W`] x
     /// [`DEFAULT_H`]): the size of the frames the scene renders.
     pub(crate) render_w: usize,
@@ -593,6 +596,7 @@ pub(crate) fn ensure_app(f: impl FnOnce(&mut App)) {
                 clock: 0.0,
                 realtime: 0.0,
                 oldrealtime: 0.0,
+                last_picture: f64::MIN,
                 render_w: DEFAULT_W,
                 render_h: DEFAULT_H,
                 present: Present::new(false),
@@ -1112,8 +1116,8 @@ mod tests {
             let d = a.demo.as_mut().unwrap();
             // Render the current demo frame with a tiny dt twice; with the menu
             // OFF and ON. (A tiny dt keeps both renders on the same frame.)
-            let (plain, _) = step_demo(d, 0.0001, false, &crate::vid::mode_vid(w, h));
-            let (mut withm, _) = step_demo(d, 0.0001, false, &crate::vid::mode_vid(w, h));
+            let (plain, _) = step_demo(d, 0.0001, false, &crate::vid::mode_vid(w, h), true);
+            let (mut withm, _) = step_demo(d, 0.0001, false, &crate::vid::mode_vid(w, h), true);
             let clock = render::MenuClock { host_time: a.clock, realtime: a.realtime };
             render::draw_menu(&mut withm, &a.menu, &a.settings, &a.menu_pics, a.conchars.as_ref(), clock);
             // The two frames are the same scene; only the menu overlay differs.

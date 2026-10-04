@@ -312,6 +312,20 @@ fn spawn_demo_frame_effects(d: &mut DemoPlay, idx: usize, time: f64, sound: &mut
 /// 0 where this one starts from `dt`. Both are more than 0.1 s before a real
 /// demo's first message, where `CL_LerpPoint` snaps the clock.
 pub fn demo_frame(d: &mut DemoPlay, dt: f32, menu_up: bool, vid: &Vid) -> ClientFrame {
+    playback_frame(d, dt, menu_up, vid, true)
+}
+
+/// [`demo_frame`] without its picture: a host frame a frame-rate cap does not
+/// draw (`client::host::FrameCap`), as `cl_main::walk_frame_undrawn` is the
+/// live game's — the messages read, the clock, the effects, particles and
+/// lights, the fades and the sound as in a drawn frame; only the pixels
+/// skipped, and its image empty.
+pub fn demo_frame_undrawn(d: &mut DemoPlay, dt: f32, menu_up: bool, vid: &Vid) -> ClientFrame {
+    playback_frame(d, dt, menu_up, vid, false)
+}
+
+/// [`demo_frame`], its picture drawn or not (`draw`).
+fn playback_frame(d: &mut DemoPlay, dt: f32, menu_up: bool, vid: &Vid, draw: bool) -> ClientFrame {
     let mut sound = Vec::new();
     // Con_CheckResize: the notify lines are laid out con_linewidth wide.
     d.notify.check_resize(vid.width, vid.height);
@@ -349,7 +363,7 @@ pub fn demo_frame(d: &mut DemoPlay, dt: f32, menu_up: bool, vid: &Vid) -> Client
     }
     // R_DrawParticles and the stair smoothing step by `cl.time - cl.oldtime`.
     let cl_frametime = (d.time - d.oldtime) as f32;
-    render_demo_frame(d, dt, cl_frametime, menu_up, vid, sound, d.lerpmodels)
+    render_demo_frame(d, dt, cl_frametime, menu_up, vid, sound, d.lerpmodels, draw)
 }
 
 /// The port's loop wrap ([`demo_frame`]): the playback starts over at its
@@ -425,7 +439,7 @@ pub fn timedemo_frame_lerpmodels(
     d.time = f64::from(now);
     // No glides either: a timedemo stays id's measure.
     cl_relink_entities(d, 1.0, first_read, LerpMove::Classic);
-    Some(render_demo_frame(d, frametime, now - oldtime, menu_up, vid, sound, lerpmodels))
+    Some(render_demo_frame(d, frametime, now - oldtime, menu_up, vid, sound, lerpmodels, true))
 }
 
 // ---------------------------------------------------------------------------
@@ -608,7 +622,9 @@ fn cl_relink_entities(d: &mut DemoPlay, frac: f32, first_read: usize, lerpmove: 
 /// the particles' and lights' decay and the stair smoothing's step (the two are
 /// the same frame time in ordinary playback). `lerpmodels` is a parameter rather
 /// than read off `d` (like `lerpmove` above it) so [`timedemo_frame`] can hold it to
-/// [`LerpModels::Classic`] regardless of `d.lerpmodels`.
+/// [`LerpModels::Classic`] regardless of `d.lerpmodels`. Not `draw`n
+/// ([`demo_frame_undrawn`]): everything but the pixels, and an empty image.
+#[allow(clippy::too_many_arguments)]
 fn render_demo_frame(
     d: &mut DemoPlay,
     dt: f32,
@@ -617,6 +633,7 @@ fn render_demo_frame(
     vid: &Vid,
     mut sound: Vec<SoundCall>,
     lerpmodels: LerpModels,
+    draw: bool,
 ) -> ClientFrame {
     let (render_w, render_h) = (vid.width, vid.height);
     // What moves — the clock, the POV, the entities — as the relink left it
@@ -984,9 +1001,15 @@ fn render_demo_frame(
     // the 3-D view FIRST; the content tint joins the deferred whole-screen
     // blend below (V_UpdatePalette order). slop's status bar overlay goes on
     // drawing the world under the view, as live play does.
-    let backtile = backtile_for(&vrect, render_w, render_h, d.gfx_wad.as_ref());
-    let mut img = render::screen_with_backtile(vrect, render_w, render_h, backtile.as_ref());
-    if dowarp {
+    let mut img = if draw {
+        let backtile = backtile_for(&vrect, render_w, render_h, d.gfx_wad.as_ref());
+        render::screen_with_backtile(vrect, render_w, render_h, backtile.as_ref())
+    } else {
+        render::Image::new(0, 0, 0)
+    };
+    if !draw {
+        // Undrawn: no 3-D view, crosshair or 2-D layer (below).
+    } else if dowarp {
         let below = warp_below(&refdef, vid);
         let view = d.renderer.render_extended(&scene, below);
         lap(Phase::Render3d);
@@ -1004,14 +1027,16 @@ fn render_demo_frame(
     // (gl_screen.c's SCR_UpdateScreen draws it only outside them): WinQuake
     // draws it there too, over the level's stats, with nothing to aim at.
     // (`crosshair` is a slop setting; Classic draws none.)
-    if f.intermission == 0 {
+    if draw && f.intermission == 0 {
         render::draw_crosshair(&mut img, d.crosshair, d.conchars.as_ref(), &vrect);
     }
     lap(Phase::Post3d);
     // A recorded intermission/finale frame draws its overlay exactly like the
     // live walk (SCR_UpdateScreen's cl.intermission branches), gated on the game
     // owning the screen (`key_dest == key_game` — i.e. no menu/console up).
-    if f.intermission != 0 && !menu_up {
+    if !draw {
+        // Undrawn: no status bar or overlay.
+    } else if f.intermission != 0 && !menu_up {
         match f.intermission {
             1 => {
                 if let Some(wad) = d.gfx_wad.as_ref() {
@@ -1090,7 +1115,7 @@ fn render_demo_frame(
     // intermission, whatever key_dest is). (V_RenderView also stops
     // V_CalcRefdef while cl.paused; a recording's pause keeps its recorded
     // view here — id's demos have none.)
-    if f.paused && f.intermission == 0 {
+    if draw && f.paused && f.intermission == 0 {
         if let Some(pic) = d.pic_pause.as_ref() {
             render::draw_pause(&mut img, pic);
         }
@@ -1104,7 +1129,7 @@ fn render_demo_frame(
             d.centerprint = None;
         }
     }
-    if !menu_up && f.intermission == 0 {
+    if draw && !menu_up && f.intermission == 0 {
         if let Some(cc) = d.conchars.as_ref() {
             if let Some((text, _)) = &d.centerprint {
                 render::draw_centerprint(&mut img, cc, text);

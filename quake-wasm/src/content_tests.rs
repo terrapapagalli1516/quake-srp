@@ -70,7 +70,7 @@ fn the_start_maps_episode_gate_opens_only_when_registered() {
         vm.set_gv(quake_rs::progs::OFS_PARM0 + 3, centre);
         vm.call_builtin(2, 2).expect("setorigin");
         for _ in 0..3 {
-            let _ = step_walk(&mut w, 0.1, false, &crate::vid::mode_vid(320, 200));
+            let _ = step_walk(&mut w, 0.1, false, &crate::vid::mode_vid(320, 200), true);
         }
         let gone = w.server.vm.is_free_edict(gate);
         (gone, w.centerprint.map(|(t, _)| t).unwrap_or_default())

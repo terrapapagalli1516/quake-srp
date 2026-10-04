@@ -679,7 +679,7 @@ mod tests {
         // Drawn once: the same alias models reach the renderer, the same pixels.
         let draw = |w: &mut Walk| {
             w.renderer.stats_begin();
-            let (img, _) = crate::cl_walk::step_walk(w, 0.0, true, &crate::vid::mode_vid(320, 200));
+            let (img, _) = crate::cl_walk::step_walk(w, 0.0, true, &crate::vid::mode_vid(320, 200), true);
             (img, w.renderer.stats_end().alias_models)
         };
         let ((new_img, new_models), (old_img, old_models)) = (draw(&mut new), draw(&mut old));

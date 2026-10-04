@@ -151,7 +151,8 @@ pub enum RowKind {
     /// A cvar that is on or off (`M_DrawCheckbox`); any key flips it.
     Toggle,
     /// `host_maxfps`: `60`, `id's 72`, `120`, `144`, `240`, `none`
-    /// ([`FrameCap::STEPS`]); left and right step it, right the more frames.
+    /// ([`FrameCap::STEPS`]), the most frames drawn a second; left and right
+    /// step it, right the more frames.
     FrameCap,
     /// The picture's size (`vid_native`, `vid_pixelsize`): shows the size the
     /// game draws at; Enter opens Video Options, the one place it is
@@ -222,7 +223,7 @@ pub const PICTURE_ROWS: [SettingRow; 9] = [
     SettingRow {
         cvar: "host_maxfps",
         label: "        Frame rate cap",
-        help: ["At most this many frames a second;", "none: one every screen refresh"],
+        help: ["Frames drawn a second, at most;", "id's 72 holds the game to it too"],
         kind: RowKind::FrameCap,
     },
     SettingRow {
@@ -541,12 +542,19 @@ pub const RESOLUTION_PRESETS: [(i32, i32); 7] = [
 
 /// Video Options' native-resolution rows, appended after [`RESOLUTION_PRESETS`]
 /// when they show ([`Menu::native_rows_shown`]): the whole pixel sizes
-/// 1..=[`PIXEL_SIZE_MAX`] — one row per value `vid_pixelsize` takes, the
-/// row's offset from [`RESOLUTION_PRESETS`]'s end the value less one — each
-/// with the size it gives. The slop preset's own "native resolution" option
-/// (AUDIT.md), off in Classic: a departure from id's `VID_MenuDraw`, which
-/// has no such rows.
+/// 1..=[`PIXEL_SIZE_MAX`] the page's box can be drawn at, each with the size
+/// it gives — at most one row per value `vid_pixelsize` takes. The slop
+/// preset's own "native resolution" option (AUDIT.md), off in Classic: a
+/// departure from id's `VID_MenuDraw`, which has no such rows.
 pub const NATIVE_ROWS: usize = PIXEL_SIZE_MAX as usize;
+
+/// What each pixel size, 1x..4x, gives on the page's box
+/// ([`Menu::sync_resolution`]): `Some` the frame's size — `(0, 0)` while no
+/// box is known — or `None` when the box cannot be drawn at that size (its
+/// frame would pass what the memory holds, or be under id's 320x200 where a
+/// smaller size is not; the host draws another size instead). A `None` row
+/// is left out of Video Options: a row that cannot be given is not offered.
+pub type NativeSizes = [Option<(i32, i32)>; NATIVE_ROWS];
 
 // --- analog cvar ranges (M_AdjustSliders) + their slider fraction mapping ------
 
@@ -955,11 +963,10 @@ pub struct Menu {
     /// what Slop Options' Resolution row shows, so no menu shows a number
     /// the screen isn't.
     actual_size: (i32, i32),
-    /// The size each native row of Video Options gives (`sync_resolution`'s
-    /// `native_sizes`: 1x..4x on the page's box, past what the memory holds
-    /// the next size up): what each row prints. (0, 0) while no window is
-    /// known.
-    native_sizes: [(i32, i32); NATIVE_ROWS],
+    /// What each pixel size gives on the page's box (`sync_resolution`'s
+    /// `native_sizes`): the native rows Video Options offers, and what each
+    /// prints.
+    native_sizes: NativeSizes,
     /// Whether the picture is genuinely native resolution right now — not
     /// just `vid_native`'s cvar, but the host's `vid::native`, which also
     /// needs a known window (`sync_resolution`'s `native`). Says which Video
@@ -1029,7 +1036,7 @@ impl Menu {
             cursors: Cursors::default(),
             res_preset: 0,
             actual_size: RESOLUTION_PRESETS[0],
-            native_sizes: [(0, 0); NATIVE_ROWS],
+            native_sizes: [Some((0, 0)); NATIVE_ROWS],
             actual_native: false,
             native_rows: false,
             video_from: MenuScreen::Options,
@@ -1526,14 +1533,16 @@ impl Menu {
                 let row = self.cursor();
                 if self.native_rows && row >= RESOLUTION_PRESETS.len() {
                     // PORT ROW (not in id's Quake, off in Classic): Enter on
-                    // one of the native-resolution rows (1x..4x pixel
-                    // size) turns native resolution back on at that pixel
-                    // size — reversing a fixed mode picked above, or just
-                    // reaffirming the live one (AUDIT.md's "native
-                    // resolution" departure).
-                    let pixel = (row - RESOLUTION_PRESETS.len()).min(NATIVE_ROWS - 1) + 1;
-                    s.cvars.native = true;
-                    s.cvars.pixel_size = pixel as u8;
+                    // one of the native-resolution rows (a pixel size the
+                    // box can be drawn at) turns native resolution back on
+                    // at that pixel size — reversing a fixed mode picked
+                    // above, or just reaffirming the live one (AUDIT.md's
+                    // "native resolution" departure).
+                    let offer = self.native_offer();
+                    if let Some(&(pixel, _)) = offer.get(row - RESOLUTION_PRESETS.len()).or(offer.last()) {
+                        s.cvars.native = true;
+                        s.cvars.pixel_size = pixel;
+                    }
                 } else {
                     // VID_MenuKey K_ENTER: menu1 (NOT menu2) + VID_SetMode on
                     // the highlighted mode line. A mode is a size in the 4:3
@@ -2039,24 +2048,41 @@ impl Menu {
     }
 
     /// How many rows [`MenuScreen::Video`] has right now: [`RESOLUTION_PRESETS`],
-    /// plus the native-resolution rows ([`NATIVE_ROWS`]: 1x..4x pixel size)
-    /// appended when they show ([`Menu::native_rows_shown`]). Appended,
-    /// not prepended, so a fixed mode's row index never moves.
+    /// plus the native-resolution rows the box can be drawn at
+    /// ([`Menu::native_offer`]) appended when they show
+    /// ([`Menu::native_rows_shown`]). Appended, not prepended, so a fixed
+    /// mode's row index never moves.
     fn video_rows(&self) -> usize {
-        RESOLUTION_PRESETS.len() + if self.native_rows { NATIVE_ROWS } else { 0 }
+        RESOLUTION_PRESETS.len() + if self.native_rows { self.native_offer().len() } else { 0 }
+    }
+
+    /// The native rows offered, in order: each pixel size the page's box can
+    /// be drawn at, with the size it gives ([`NativeSizes`]).
+    fn native_offer(&self) -> Vec<(u8, (i32, i32))> {
+        (1..=PIXEL_SIZE_MAX).zip(self.native_sizes).filter_map(|(p, size)| size.map(|size| (p, size))).collect()
+    }
+
+    /// Which native row is the picture drawn now, while it is native: the
+    /// row whose size is the frame's ([`Menu::actual_size`]) — the size drawn,
+    /// whatever `vid_pixelsize` asks — or, before the box's sizes are known,
+    /// `pixel_size`'s ([`crate::cvar::Cvars::pixel_size`]; the caller has it,
+    /// which this engine-level `Menu` does not store).
+    fn native_row_drawn(&self, pixel_size: u8) -> Option<usize> {
+        if !(self.native_rows && self.actual_native) {
+            return None;
+        }
+        let offer = self.native_offer();
+        offer.iter().position(|&(_, size)| size == self.actual_size).or_else(|| offer.iter().position(|&(p, _)| p == pixel_size))
     }
 
     /// The row [`MenuScreen::Video`] should mark current and open its cursor
-    /// on: a native row (at `pixel_size`'s index) while the picture actually
-    /// is native, else the fixed mode [`Menu::resolution`] marks
-    /// ([`Menu::res_preset`], unmoved by the native rows). `pixel_size` is
-    /// [`crate::cvar::Cvars::pixel_size`]; the caller has it (`Settings`),
-    /// which this engine-level `Menu` does not store.
+    /// on: the native row drawn ([`Menu::native_row_drawn`]) while the
+    /// picture actually is native, else the fixed mode [`Menu::resolution`]
+    /// marks ([`Menu::res_preset`], unmoved by the native rows).
     fn video_current_row(&self, pixel_size: u8) -> usize {
-        if self.native_rows && self.actual_native {
-            RESOLUTION_PRESETS.len() + usize::from(pixel_size.max(1) - 1).min(NATIVE_ROWS - 1)
-        } else {
-            self.res_preset
+        match self.native_row_drawn(pixel_size) {
+            Some(i) => RESOLUTION_PRESETS.len() + i,
+            None => self.res_preset,
         }
     }
 
@@ -2068,12 +2094,12 @@ impl Menu {
     /// `native_rows` says the native rows belong in the list at all — the
     /// slop preset, or a native picture whatever the preset
     /// ([`Menu::native_rows_shown`]; Classic's list is `RESOLUTION_PRESETS`
-    /// alone, unchanged); `native_sizes` is the size each of them gives, 1x
-    /// to 4x on the page's box ((0, 0) while none is known). The host calls
+    /// alone, unchanged); `native_sizes` is what 1x to 4x give on the page's
+    /// box ([`NativeSizes`]: a size, or `None` for a row left out). The host calls
     /// this every frame (`vid::apply_settings`) and at every reset point, so
     /// the list can never desync from reality — not even across a boot /
     /// New Game / `map` that changed the render size independently.
-    pub fn sync_resolution(&mut self, w: i32, h: i32, native: bool, native_rows: bool, native_sizes: [(i32, i32); NATIVE_ROWS]) {
+    pub fn sync_resolution(&mut self, w: i32, h: i32, native: bool, native_rows: bool, native_sizes: NativeSizes) {
         self.actual_size = (w, h);
         self.actual_native = native;
         self.native_rows = native_rows;
@@ -2746,7 +2772,7 @@ fn draw_options_screen(
         // is — white when they are no preset (a value that differs from it).
         let ry = OPTIONS_ROW_Y0 + ROW_SLOP_OPTIONS as f32 * OPTIONS_ROW_STEP;
         let standing = settings.standing();
-        let print = if standing.changed.is_empty() { m_print } else { draw_string_scaled };
+        let print = if standing.is_preset() { m_print } else { draw_string_scaled };
         print(image, cc, OPTIONS_WIDGET_X, ry, standing.word(), scale, ox, oy);
 
         // The flashing cursor: M_DrawCharacter(200, 32 + cursor*8, 12 + (blink)).
@@ -3113,12 +3139,14 @@ fn draw_keys_screen(
 ///
 /// **In slop, or with a native picture** ([`Menu::native_rows_shown`]; off
 /// in Classic, where this draws exactly as above and nothing else —
-/// `VID_MenuDraw` unchanged): [`NATIVE_ROWS`] more rows follow the presets
-/// — pixel sizes 1..=[`PIXEL_SIZE_MAX`], each with the size it gives on the
-/// page's box — and a bronze line under the list says a mode above draws
-/// in a 4:3 box. While the picture really is native
-/// ([`Menu::actual_native`]) no preset is current; the native row of the
-/// pixel size is, white, so the screen never marks a size it isn't drawing.
+/// `VID_MenuDraw` unchanged): up to [`NATIVE_ROWS`] more rows follow the
+/// presets — the pixel sizes 1..=[`PIXEL_SIZE_MAX`] the page's box can be
+/// drawn at, each with the size it gives (a size it cannot be drawn at is
+/// left out: [`NativeSizes`]) — and a bronze line under the list says a
+/// mode above draws in a 4:3 box. While the picture really is native
+/// ([`Menu::actual_native`]) no preset is current; the native row drawn is
+/// ([`Menu::native_row_drawn`]), white, so the screen never marks a size it
+/// isn't drawing.
 /// Picking a preset above turns native off (as id's grid always did);
 /// picking a native row turns it back on — the two halves are the same
 /// list, so the way back is never more than an arrow away.
@@ -3155,14 +3183,15 @@ fn draw_video_screen(
     let mut rows = RESOLUTION_PRESETS.len();
     let mut hints_y = VIDEO_ROW_Y0 + rows as f32 * TEXT_ROW_STEP + 16.0;
     if menu.native_rows_shown() {
-        // PORT ROWS (not in id's Quake, off in Classic): 1x..4x, each with
-        // the size it gives (none before the page's box is known); the one
-        // drawing now white.
-        for (p, &(w, h)) in (1..=PIXEL_SIZE_MAX).zip(&menu.native_sizes) {
+        // PORT ROWS (not in id's Quake, off in Classic): the pixel sizes
+        // the box can be drawn at, each with the size it gives (none before
+        // the page's box is known); the one drawing now white.
+        let drawn = menu.native_row_drawn(settings.cvars.pixel_size);
+        for (i, (p, (w, h))) in menu.native_offer().into_iter().enumerate() {
             let y = VIDEO_ROW_Y0 + TEXT_ROW_STEP * rows as f32;
             let size = if w > 0 && h > 0 { format!("  {w}x{h}") } else { String::new() };
             let row = format!("Native  {p}x{size}");
-            if native_now && settings.cvars.pixel_size == p {
+            if native_now && drawn == Some(i) {
                 draw_string_scaled(image, cc, 16.0, y, &row, scale, ox, oy);
             } else {
                 m_print(image, cc, 16.0, y, &row, scale, ox, oy);
@@ -3310,7 +3339,7 @@ mod tests {
     use crate::settings::{Machine, Preset, Settings};
 
     /// Video Options' native rows with no size: no window known yet.
-    const NO_SIZES: [(i32, i32); NATIVE_ROWS] = [(0, 0); NATIVE_ROWS];
+    const NO_SIZES: NativeSizes = [Some((0, 0)); NATIVE_ROWS];
     /// The size a test's picture is drawn at (what the Resolution row shows).
     const PICTURE: (i32, i32) = (960, 600);
 
@@ -4739,7 +4768,9 @@ mod tests {
         // ceiling spawns at all), so a console cvar (like id's own
         // `sv_gravity`, which also has no menu row) is the whole interface.
         let pad_layout = |n: &str| n.starts_with("joy") && n != "joystick" && n != "joy_rumble";
-        let listed = |c: &&cvar::Cvar| c.departure && !pad_layout(c.name) && !matches!(c.name, "sv_max_edicts" | "vid_pixelsize");
+        let listed = |c: &&cvar::Cvar| {
+            c.departure && !pad_layout(c.name) && !crate::settings::CONSOLE_ONLY.contains(&c.name) && c.name != "vid_pixelsize"
+        };
         for c in cvar::CVARS.iter().filter(listed) {
             assert_eq!(page_rows().filter(|(_, _, r)| r.cvar == c.name).count(), 1, "{}: one row", c.name);
         }
@@ -5815,7 +5846,8 @@ mod tests {
         }
         let conchars = crate::wad::Qpic { width: 128, height: 128, data };
         let (mut m, mut s) = (Menu::new(), Settings::default());
-        let sizes = [(960, 540), (480, 270), (320, 200), (320, 200)];
+        // A 960x540 box: 3x and 4x would be under 320x200, so they are left out.
+        let sizes = [Some((960, 540)), Some((480, 270)), None, None];
         m.sync_resolution(960, 540, true, true, sizes); // genuinely native, 1x
         m.open();
         m.screen = MenuScreen::Video;
@@ -5835,7 +5867,8 @@ mod tests {
         // No Auto word anywhere on the screen: the rows are 1x..4x, and a
         // line under them says what a mode above does; no size before a
         // window is known.
-        let hint = 36 + (native + NATIVE_ROWS) * 8 + 16;
+        assert_eq!(m.video_rows(), native + 2, "1x and 2x offered, 3x and 4x left out");
+        let hint = 36 + (native + 2) * 8 + 16;
         let lit = |y: usize| img.pixels[(y + 3) * 320..(y + 4) * 320].iter().filter(|&&p| p != 0).count();
         assert!(lit(hint) > 0, "the 4:3 line under the native rows");
         assert_eq!(VIDEO_BOX_HINT.len(), 33);
@@ -5850,6 +5883,34 @@ mod tests {
         draw_menu(&mut id, &m, &s, &MenuPics::default(), Some(&conchars), clock(0.0, 0.0));
         assert_eq!(id.pixels[row_px(native)], 0, "no native rows in Classic");
         assert_eq!(id.pixels[row_px(4)], 6, "960x600 current, white");
+    }
+
+    /// A small window: the sizes it cannot be drawn at are left out (at
+    /// 1246x716, 4x would be 311x179, under 320x200, so the host draws 3x).
+    /// The rows offered are 1x to 3x; a player's 4x, kept in `vid_pixelsize`,
+    /// marks the 3x row white, the one drawn; picking a row stores its own
+    /// size.
+    #[test]
+    fn video_options_leaves_out_the_sizes_the_window_cannot_be_drawn_at() {
+        let (mut m, mut s) = (Menu::new(), Settings::default());
+        s.cvars.pixel_size = 4;
+        let sizes = [Some((1246, 716)), Some((623, 358)), Some((415, 238)), None];
+        m.sync_resolution(415, 238, true, true, sizes);
+        m.open();
+        m.screen = MenuScreen::Options;
+        m.set_cursor(ROW_VIDEO);
+        m.select(&mut s);
+        let native = RESOLUTION_PRESETS.len();
+        assert_eq!(m.video_rows(), native + 3, "1x, 2x and 3x; no 4x row");
+        assert_eq!(m.cursor(), native + 2, "opens on the row drawn, 3x");
+        assert_eq!(m.native_row_drawn(s.cvars.pixel_size), Some(2));
+        m.set_cursor(native + 1);
+        m.select(&mut s);
+        assert_eq!((s.cvars.native, s.cvars.pixel_size), (true, 2), "the 2x row stores 2");
+        // An 8K box the other way: 1x would pass what the memory holds.
+        m.sync_resolution(3840, 2160, true, true, [None, Some((3840, 2160)), Some((2560, 1440)), Some((1920, 1080))]);
+        assert_eq!(m.native_offer()[0].0, 2, "the first row offered is 2x");
+        assert_eq!(m.native_row_drawn(1), Some(0), "drawn at 2x, whatever 1x asked");
     }
 
     /// Classic with `vid_native` on (from the console): the picture is

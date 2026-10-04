@@ -1,5 +1,5 @@
 #!/usr/bin/env -S uv run --with playwright --script
-"""Verify the 2026 mixer's lead survives a late host frame, in headless
+"""Verify the slop mixer's lead survives a late host frame, in headless
 Chromium: a frame the worker took a long time to compute (a phone's slow
 underwater render pass, a GC pause, a core another process is using) used to
 run the ring dry and break the sound — `quake-wasm/src/snd_dma.rs`'s

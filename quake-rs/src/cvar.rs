@@ -103,11 +103,13 @@ pub struct Cvars {
     /// `_vid_default_mode_win`), shown in a 4:3 box; the Video Options list.
     /// Not used while [`Cvars::native`] is on.
     pub vid_resolution: (u16, u16),
-    /// `host_maxfps` (QuakeSpasm's name): the most frames a second
-    /// ([`FrameCap`]). id's 72 is `Host_FilterTime`'s gate (Classic); none, a
-    /// host frame on every display refresh, the game stepped as id's 72 Hz
-    /// frames ([`crate::stepping::Stepping::Uncapped`]); a touch screen's
-    /// slop preset starts at 60 ([`crate::settings::Machine::frame_cap`]).
+    /// `host_maxfps` (QuakeSpasm's name): the most frames drawn a second
+    /// ([`FrameCap`]). id's 72 is `Host_FilterTime`'s gate (Classic): the
+    /// game's frames too. Otherwise a host frame on every display refresh,
+    /// the game stepped as id's 72 Hz frames
+    /// ([`crate::stepping::Stepping::Uncapped`]), and only the pictures held
+    /// to the cap (none: every one drawn); a touch screen's slop preset
+    /// starts at 60 ([`crate::settings::Machine::frame_cap`]).
     /// The retired `wasm_uncapped` still sets and reads it ([`RETIRED`]).
     pub max_fps: FrameCap,
     /// `wasm_showfps`: QuakeWorld's frame-rate readout.
@@ -136,8 +138,10 @@ pub struct Cvars {
     /// `vid_pixelsize`: with [`Cvars::native`], how many device pixels a
     /// side make one of the picture's, 1..=[`PIXEL_SIZE_MAX`]: whole pixels,
     /// never smoothed. The presets start it at the machine's number
-    /// ([`crate::settings::Machine::pixel_size`]); the host takes the next
-    /// size up when a frame this size would not fit its memory.
+    /// ([`crate::settings::Machine::pixel_size`]), and 0 on the console or in
+    /// a file is that number (`Settings::set_cvar`); the host takes the next
+    /// size up when a frame this size would not fit its memory, and the next
+    /// down when it would be under 320x200 and a smaller one is not.
     pub pixel_size: u8,
     /// `fov_adapt`: Hor+ — `fov` spans a 4:3 screen and a wider one sees more
     /// at the sides ([`crate::render::FovMode::HorPlus`]).
@@ -177,7 +181,8 @@ pub struct Cvars {
     pub sound: SoundMode,
     /// `r_threads`: how many threads draw the 3-D view, at least 1. The
     /// presets start it at the machine's number
-    /// ([`crate::settings::Machine::render_threads`]). The pixels are the
+    /// ([`crate::settings::Machine::render_threads`]), and 0 on the console
+    /// or in a file is that number (`Settings::set_cvar`). The pixels are the
     /// same for any count, so it is no departure.
     pub threads: usize,
     /// `sv_max_edicts`: the `ED_Alloc` ceiling ([`crate::vm::MAX_EDICTS`] in
@@ -271,7 +276,7 @@ impl Cvars {
             max_edicts: MAX_EDICTS as u32,
             touch: true,
             touch_accel: 0.0,
-            joy: JoyCvars::modern(),
+            joy: JoyCvars::twin_stick(),
             lightstyles: LerpLightStyles::Classic,
             torches: TorchFlicker::OFF,
         }
@@ -313,7 +318,7 @@ impl Cvars {
             lerpmodels: LerpModels::Smooth,
             nailbarrels: NailBarrels::Barrels,
             sky: SkyScroll::Fluid,
-            sound: SoundMode::Modern,
+            sound: SoundMode::Slop,
             max_edicts: 8192,
             lightstyles: LerpLightStyles::Smooth,
             torches: TorchFlicker::MODERN,
@@ -413,6 +418,13 @@ pub struct Cvar {
 }
 
 impl Cvar {
+    /// A number the machine picks (`settings::Machine`): the pixel size and the
+    /// renderer's threads. On the console or in a file, 0 is this machine's
+    /// number (`Settings::set_cvar`), as the value is never "auto".
+    pub fn machine_picked(&self) -> bool {
+        matches!(self.name, "vid_pixelsize" | "r_threads")
+    }
+
     /// The value as the console prints it (`var->string`).
     pub fn get(&self, c: &Cvars) -> String {
         (self.get)(c)
@@ -540,7 +552,7 @@ pub const CVARS: &[Cvar] = &[
     Cvar { name: "_vid_resolution", archive: true, departure: false, help: "video mode WxH (4:3 box)",
         get: |c| format!("{}x{}", c.vid_resolution.0, c.vid_resolution.1),
         set: |c, v| if let Some(m) = parse_mode(v) { c.vid_resolution = m } },
-    Cvar { name: "host_maxfps", archive: true, departure: true, help: "frames a second at most, 0 none",
+    Cvar { name: "host_maxfps", archive: true, departure: true, help: "frames drawn a second, 0 none",
         get: |c| c.max_fps.cvar().to_string(), set: |c, v| c.max_fps = FrameCap::from_cvar(atof(v)) },
     Cvar { name: "wasm_showfps", archive: true, departure: true, help: "frame rate readout",
         get: |c| flag(c.show_fps), set: |c, v| c.show_fps = on(v) },
@@ -577,8 +589,8 @@ pub const CVARS: &[Cvar] = &[
         get: |c| flag(c.sky == SkyScroll::Fluid),
         set: |c, v| c.sky = if on(v) { SkyScroll::Fluid } else { SkyScroll::Classic } },
     Cvar { name: "snd_modern", archive: true, departure: true, help: "slop mixer: device rate, fixes",
-        get: |c| flag(c.sound == SoundMode::Modern),
-        set: |c, v| c.sound = if on(v) { SoundMode::Modern } else { SoundMode::Classic } },
+        get: |c| flag(c.sound == SoundMode::Slop),
+        set: |c, v| c.sound = if on(v) { SoundMode::Slop } else { SoundMode::Classic } },
     Cvar { name: "r_threads", archive: true, departure: false, help: "threads that draw the 3-D view",
         get: |c| c.threads.to_string(), set: |c, v| c.threads = atof(v).max(1.0) as usize },
     Cvar { name: "sv_max_edicts", archive: true, departure: true, help: "edict pool past id's 600, for big maps",
@@ -683,7 +695,7 @@ mod tests {
     }
 
     #[test]
-    fn the_profiles_differ_only_in_departures_and_the_screen_size() {
+    fn the_presets_differ_only_in_slop_options_and_the_screen_size() {
         let (id, slop) = (Cvars::classic(), Cvars::slop());
         for c in CVARS {
             if c.get(&id) != c.get(&slop) {
@@ -720,7 +732,7 @@ mod tests {
             assert_eq!(c.departure, !name.starts_with("cl_") || name == "cl_jumpswim", "{name}: a slop option, but Always Run");
         }
         assert_eq!(id.joy, slop.joy, "the whole gamepad layout, not just `joystick`");
-        assert_eq!(id.joy, JoyCvars::modern(), "Cvars::classic already has the slop pad");
+        assert_eq!(id.joy, JoyCvars::twin_stick(), "Cvars::classic already has the slop pad");
 
         // with_id_controls touches only the controls: everything else stays
         // whatever preset it came from.

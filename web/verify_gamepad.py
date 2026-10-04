@@ -216,7 +216,7 @@ with sync_playwright() as p:
     pg.evaluate("__pad.connected = true; __setPad([], [0, 0, 0, 0])")
     time.sleep(0.2)
     pg.locator("#c").screenshot(path=os.path.join(WEB, "verify_gamepad.png"))
-    check("no page errors (2026)", not errs, str(errs[-3:]))
+    check("no page errors (slop)", not errs, str(errs[-3:]))
     pg.close()
 
     # ---- Classic: the gamepad is shared by default; id's is one step away ----

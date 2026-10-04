@@ -263,7 +263,7 @@ impl<W: Write> Sys<W> {
         let flags = if pcm.clear { PCM_CLEAR } else { 0 };
         Msg::Pcm { start, rate, flags, pairs: &self.pcm_bytes }.write_to(&mut self.out)?;
         let s = self.audio.stats;
-        let mode = u32::from(self.audio.mode() == quake_rs::snd::SoundMode::Modern);
+        let mode = u32::from(self.audio.mode() == quake_rs::snd::SoundMode::Slop);
         let counts = AudioCounts {
             rate,
             mode,

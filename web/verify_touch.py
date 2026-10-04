@@ -724,7 +724,7 @@ def main():
         # rect here independently of touch.js's own `--bar` (so a bug in its
         # arithmetic cannot hide from this check) and compared against every
         # static control's actual box, at several phone sizes and every
-        # Screen size (viewsize 100/110/120). 2026 starts at 110, the status
+        # Screen size (viewsize 100/110/120). slop starts at 110, the status
         # bar alone, so the default case is the first one checked at each size.
         BAR_RECT_JS = """async () => {
           const rows = (await quake.callLine('sbar_height')).value;
@@ -761,7 +761,7 @@ def main():
             check(f"{label}: FIRE/JUMP/WEAPON/the hint clear the status bar", not bad,
                   f"bar {bar}" + (f" overlaps {bad}" if bad else ""))
 
-        check("the touch controls start at 2026's Screen size, 110 (never moved)",
+        check("the touch controls start at slop's Screen size, 110 (never moved)",
               pg.evaluate("exp.viewsize()") == 110, str(pg.evaluate("exp.viewsize()")))
         for w, h in [(844, 390), (1012, 412), (748, 360)]:
             pg.set_viewport_size({"width": w, "height": h})

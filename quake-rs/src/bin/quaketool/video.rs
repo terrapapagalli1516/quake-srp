@@ -197,7 +197,7 @@ mod tests {
     /// alone, and a later `--video` sets it again with the rest, as it does
     /// every video option.
     #[test]
-    fn video_modern_carries_the_profiles_perspective_span() {
+    fn video_modern_carries_the_slop_presets_perspective_span() {
         let mut v = VideoArgs::default();
         assert_eq!(v.persp_span, PerspSpan::Spans16, "id's spans by default");
         assert_eq!(v.parse("--video", "modern"), Ok(true));

@@ -182,7 +182,7 @@ fn cvar_command(args: &Args) -> bool {
             let value = var.get(&a.settings.cvars);
             a.console.println(format!("\"{}\" is \"{value}\"", var.name));
         } else {
-            var.set(&mut a.settings.cvars, args.argv(1));
+            a.settings.set_cvar(var, args.argv(1));
         }
     });
     true
@@ -298,7 +298,7 @@ fn cmd_version(_: &Args) {
     ensure_app(|a| {
         let standing = a.settings.standing();
         a.console.println(format!("Version {}", quake_rs::console::CON_VERSION));
-        let custom = if standing.changed.is_empty() { "" } else { ", custom" };
+        let custom = if standing.is_preset() { "" } else { ", custom" };
         a.console.println(format!("quake-rs, preset {}{custom}", standing.preset.name()));
     });
 }
@@ -400,7 +400,7 @@ fn cmd_preset(args: &Args) {
             let standing = a.settings.standing();
             a.console.println(format!("\"preset\" is \"{}\"", standing.preset.name()));
             a.console.println(standing.line());
-            if !standing.changed.is_empty() {
+            if !standing.is_preset() {
                 for line in wrap(standing.changed.iter().copied(), LIST_WIDTH) {
                     a.console.println(line);
                 }
@@ -774,11 +774,14 @@ mod tests {
         assert_eq!(last_line().as_deref(), Some("\"r_threads\" is \"6\""), "the machine's number");
         step(0.0);
         assert_eq!(threads(), 6);
+        run_console_line("r_threads 3");
+        step(0.0);
+        assert_eq!(threads(), 3);
         run_console_line("r_threads 0");
         run_console_line("r_threads");
-        assert_eq!(last_line().as_deref(), Some("\"r_threads\" is \"1\""), "0 reads as 1");
+        assert_eq!(last_line().as_deref(), Some("\"r_threads\" is \"6\""), "0 is the machine's number, printed");
         step(0.0);
-        assert_eq!(threads(), 1);
+        assert_eq!(threads(), 6);
         run_console_line("r_threads 3");
         step(0.0);
         assert_eq!(threads(), 3);

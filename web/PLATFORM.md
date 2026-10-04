@@ -130,22 +130,33 @@ AudioWorklet (audio thread): plays the sound ring, moves its clock
   purpose (`stall_ms`, a bench build).
 
   *The frame-rate cap* (`host_maxfps`, Picture and sound > Frame rate cap:
-  60, id's 72, 120, 144, 240, none) is the program's, on top of all this:
-  the page posts a tick every refresh whatever the cap, and the program
-  answers a tick with a frame only on the first refresh at least 1/cap
-  after the last frame (5% less, for a refresh's time a hair early;
-  `client::host::host_filter_time_capped`), with no frame otherwise — a
-  tick answered at once, which the pacing does not count as a frame's time.
-  So 60 on a 120 Hz panel is every second refresh, evenly; a cap above the
-  display's rate draws every refresh; one that does not divide it runs
-  below itself (60 on 144 Hz: every third, 48). The time of the refreshes
-  skipped goes to the next frame, so the game keeps time, and a tick the
-  relaxed pacing posts between refreshes draws no sooner. 72 is id's own
-  gate (`Host_FilterTime`, Classic's), none a frame every refresh. A touch
-  screen starts at 60, anywhere else at none. `verify_pacing.py` counts the
-  gaps through the page's own tick at 120 and 144 Hz, and in the page's
-  loop at 120 Hz (its refreshes from a 120 Hz clock: a headless browser's
-  are 60) on a touch screen, waited for and relaxed.
+  60, id's 72, 120, 144, 240, none) holds the frames drawn, not the game,
+  and is the program's, on top of all this: the page posts a tick every
+  refresh whatever the cap, the program runs a host frame on every one —
+  the game at the display's rate, the 60 to 480 Hz `quaketool framerate
+  --check` proves — and draws its picture only on the first refresh at
+  least 1/cap after the last picture (5% less, for a refresh's time a hair
+  early; `client::host::FrameCap::picture_due`). A frame not drawn
+  (`cl_main::walk_frame_undrawn`) does everything but the pixels — the
+  server, the clocks, effects, particles, lights, fades, the view's kick
+  and smoothing, the sound — and answers the tick with no frame, which the
+  pacing does not count as a frame's time; it costs what `framerate
+  --budget`'s "sim" column says (0.04 ms against 1–2 for a whole frame on
+  one thread here), so the cap keeps its heat saving. So 60 on a 120 Hz
+  panel draws every second refresh, evenly; on 110 Hz (a phone's page with
+  a finger down) every second too, 55 a second; on 144 Hz every third, 48;
+  a cap above the display's rate draws every refresh; and the game steps at
+  the display's rate in every case. A tick the relaxed pacing posts between
+  refreshes draws no sooner. 72 is id's own gate (`Host_FilterTime`,
+  Classic's: the game's frames held with the pictures), none draws every
+  frame. A touch screen starts at 60, anywhere else at none. `quaketool
+  framerate --cap 60 --check` runs every scenario's capped twin at 60, 72,
+  90, 105, 110, 120, 144 and 240 Hz: each value is the uncapped one at its
+  rate exactly. `verify_pacing.py` counts the drawn gaps and the game's
+  host frames (`host_frames`) through the page's own tick at 120, 144 and
+  110 Hz, and in the page's loop at those rates (its refreshes from a clock
+  at that rate: a headless browser's are 60) on a touch screen, at 120
+  waited for and relaxed.
 
   *Measure to the swap, not to the draw call.* The page's latency probe
   (`quake.latency`, `latency.py`) stops at its own draw call, and a draw
@@ -1668,7 +1679,8 @@ cleanly on the main thread — `memory allocation of N bytes failed`, then
 larger pixel size, in Video Options, needs less" (a 96 MiB build at 4K).
 
 **The renderer's threads** are the cvar `r_threads`, a number (at least 1;
-0 reads as 1): the presets start it at the machine's — every thread the host
+0 on the console or in a file is this machine's number, as for
+`vid_pixelsize`): the presets start it at the machine's — every thread the host
 offers (`-hwthreads`; a `wasm32-wasip1` build, without threads, gets 1), at
 most four on a touch screen (`settings::Machine::render_threads`; "On an
 Android phone", below, has the measurements and the why) — and `vid::render_threads`
@@ -2069,9 +2081,9 @@ frame at a pixel size of 1, 1320×540 at Auto's 2. `hardwareConcurrency` is
   refreshes and the relaxed pacing's back-to-back asks come unevenly, so
   in touch play it showed about 270 gaps of more than 20 ms in 45 s, the fast
   core 3–5% busy (2026-10-04). Since then a touch screen starts at the
-  frame-rate cap's 60 (`host_maxfps`, a slop option: "A frame"), a frame on
-  the first refresh at least 1/60 s after the last — every second refresh
-  of a 120 Hz panel, evenly. Whether a held 60 at 2640×1080 (1x) is a better
+  frame-rate cap's 60 (`host_maxfps`, a slop option: "A frame"), a picture
+  on the first refresh at least 1/60 s after the last — every second refresh
+  of a 120 Hz panel, evenly — while the game still runs every refresh. Whether a held 60 at 2640×1080 (1x) is a better
   touch default than 2x is for a phone run to say: `with.sh phone NAME --
   uv run --with playwright web/phone.py DEPLOY --fullscreen --touch --px
   2,1 --threads 4 --cvar host_maxfps=60,0 --secs 45 --cool 120`.

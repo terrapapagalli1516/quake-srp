@@ -27,13 +27,17 @@ does not wait for a slow one; where the line lies depends on the device:
   9. `?wait` in the address: slow frames are waited for too;
   10. the page takes a touch screen for one (`?touch`; an emulated phone in
       Chromium), and a desktop for none;
-  11. the frame-rate cap (`host_maxfps`): through the page's own tick, 60
-      against a 120 Hz refresh is every second refresh, evenly (the gaps
-      counted), and every third at 144 Hz; a cap above the refresh does
-      nothing; 72 is id's gate (every second refresh at 144 Hz and at 120).
-      Then the page's loop at 120 Hz (its refreshes come from a 120 Hz clock:
-      a headless browser's are 60): a touch screen starts at 60 and draws
-      every second refresh, waited for or relaxed; 144 draws every refresh;
+  11. the frame-rate cap (`host_maxfps`) holds the frames drawn, not the
+      game: through the page's own tick, 60 against a 120 Hz refresh draws
+      every second refresh, evenly (the gaps counted), every third at 144 Hz
+      (48 a second) and every second at 110 Hz (55), while the game runs a
+      host frame every refresh (`host_frames`); a cap above the refresh does
+      nothing; 72 is id's gate (every second refresh at 144 Hz and at 120,
+      the game's frames with it). Then the page's loop at 120, 144 and 110 Hz
+      (its refreshes come from a clock at that rate: a headless browser's
+      are 60): a touch screen starts at 60 and draws every second, third and
+      second refresh, a host frame every one; at 120 relaxed as well as
+      waited for; 144 there draws every refresh;
   12. no console errors.
 
 `stall_ms` makes a host frame slow on demand and exists only in a
@@ -84,12 +88,12 @@ WINDOW = """(secs) => new Promise(done => {
   }, secs * 1000);
 })"""
 
-# The refreshes of a 120 Hz panel: the page's requestAnimationFrame answered
-# on an exact 8.33 ms grid (every callback asked for before a refresh runs at
-# it, with its time; never two at one), where a headless browser's own run
-# at 60 Hz.
-REFRESH_120 = """(() => {
-  const period = 1000 / 120;
+# The refreshes of a panel at HZ: the page's requestAnimationFrame answered
+# on an exact grid (8.33 ms at 120 Hz; every callback asked for before a
+# refresh runs at it, with its time; never two at one), where a headless
+# browser's own run at 60 Hz.
+REFRESH = """(() => {
+  const period = 1000 / HZ;
   let queue = [], timer = null, last = 0;
   window.requestAnimationFrame = cb => {
     queue.push(cb);
@@ -103,15 +107,18 @@ REFRESH_120 = """(() => {
 })();"""
 
 # `n` ticks of `dt` through the page's own tick (its loop paused): which
-# ones drew a frame, after `warm` ticks for the cap to take.
+# ones drew a frame, after `warm` ticks for the cap to take, and how many
+# host frames the `n` ran (`host_frames`: the game's ticks, drawn or not).
 TICKS = """async ([n, dt, warm]) => {
   quake.pause();
   await new Promise(r => setTimeout(r, 50));
   for (let i = 0; i < warm; i++) quake.tick(dt);
+  const f0 = await quake.call('host_frames');
   const drew = [];
   for (let i = 0; i < n; i++) drew.push(quake.tick(dt).presented);
+  const game = (await quake.call('host_frames')) - f0;
   quake.resume();
-  return drew;
+  return { drew, game };
 }"""
 
 def gaps(drew):
@@ -288,37 +295,60 @@ with sync_playwright() as p:
 
     # 11. The frame-rate cap. Exactly, through the page's own tick.
     pg = page()
-    def cadence(name, cap, hz, every):
+    host_frames = lambda pg: int(pg.evaluate("quake.call('host_frames')"))
+    def cadence(name, cap, hz, every, game_every=1):
+        """`hz` refreshes' worth of ticks twice over: the drawn ones every
+        `every`th, evenly, and the game's host frames every `game_every`th."""
         pg.evaluate(f"quake.callLine('exec host_maxfps {cap}')")
-        g = gaps(pg.evaluate(TICKS, [int(hz) * 2, 1 / hz, 8]))
-        check(f"{name}: every {['', '', 'second ', 'third '][every] if every > 1 else ''}refresh, evenly",
-              len(g) >= int(hz) * 2 // every - 2 and all(x == every for x in g),
-              f"host_maxfps {cap} at {hz} Hz: {len(g) + 1} frames in {int(hz) * 2} refreshes, gaps {sorted(set(g))}")
+        n, warm = int(hz) * 2, 8
+        r = pg.evaluate(TICKS, [n, 1 / hz, warm])
+        g, ran = gaps(r["drew"]), r["game"]
+        check(f"{name}: drawn every {['', '', 'second ', 'third '][every] if every > 1 else ''}refresh, evenly",
+              len(g) >= n // every - 2 and all(x == every for x in g),
+              f"host_maxfps {cap} at {hz} Hz: {len(g) + 1} drawn in {n} refreshes, gaps {sorted(set(g))}")
+        check(f"{name}: the game {'every refresh' if game_every == 1 else 'with the frames drawn'}",
+              abs(ran - n / game_every) <= 1, f"{ran} host frames in {n} refreshes")
     cadence("60 against 120 Hz", 60, 120.0, 2)
-    cadence("60 against 144 Hz (48 a second: 60 does not divide 144)", 60, 144.0, 3)
+    cadence("60 against 144 Hz (48 drawn a second: 60 does not divide 144)", 60, 144.0, 3)
+    cadence("60 against 110 Hz (55 drawn a second: a phone's page with a finger down)", 60, 110.0, 2)
     cadence("a cap above the refresh does nothing (144 against 120 Hz)", 144, 120.0, 1)
-    cadence("id's 72 against 144 Hz: id's gate", 72, 144.0, 2)
-    cadence("id's 72 against 120 Hz", 72, 120.0, 2)
+    cadence("id's 72 against 144 Hz: id's gate", 72, 144.0, 2, game_every=2)
+    cadence("id's 72 against 120 Hz", 72, 120.0, 2, game_every=2)
     cadence("no cap", 0, 120.0, 1)
     pg.context.close()
 
-    # The page's own loop at 120 Hz, a touch screen.
+    # The page's own loop at 144, 110 and 120 Hz, a touch screen (60).
     def evenly(w, every):
         g = gaps(w["drew"])
         share = sum(1 for x in g if x == every) / len(g) if g else 0.0
         return share >= 0.9 and w["shown"] >= 0.85 * w["refreshes"] / every, \
-            f"{w['shown']} frames in {w['refreshes']} refreshes ({w['refresh']:.2f} ms), {share:.0%} of the gaps {every}"
-    pg = page(REFRESH_120, query="?slop&touch")
+            f"{w['shown']} drawn in {w['refreshes']} refreshes ({w['refresh']:.2f} ms), {share:.0%} of the gaps {every}"
+    def window_with_game(pg):
+        """A window of the page's loop, and the host frames run in it."""
+        f0 = host_frames(pg)
+        w = window(pg)
+        w["game"] = host_frames(pg) - f0
+        return w
+    for hz, every in [(144, 3), (110, 2)]:
+        pg = page(REFRESH.replace("HZ", str(hz)), query="?slop&touch")
+        w = window_with_game(pg)
+        ok, detail = evenly(w, every)
+        check(f"a touch screen at {hz} Hz: drawn every {['', '', 'second', 'third'][every]} refresh", ok, detail)
+        check(f"...and the game every refresh at {hz} Hz", w["game"] >= 0.95 * w["refreshes"],
+              f"{w['game']} host frames in {w['refreshes']} refreshes")
+        pg.context.close()
+    pg = page(REFRESH.replace("HZ", "120"), query="?slop&touch")
     cap = pg.evaluate("quake.text('cvar', 'host_maxfps')")
     check("a touch screen starts at a 60 fps cap (the machine's, the slop preset)", cap == "60", f"host_maxfps {cap}")
-    w = window(pg)
+    w = window_with_game(pg)
     ok, detail = evenly(w, 2)
-    check("a touch screen at 120 Hz, waited for: every second refresh", ok and w["relaxed"] == 0, detail)
+    check("a touch screen at 120 Hz, waited for: drawn every second refresh", ok and w["relaxed"] == 0, detail)
+    check("...and the game every refresh", w["game"] >= 0.95 * w["refreshes"], f"{w['game']} host frames in {w['refreshes']} refreshes")
     pg.evaluate("quake.pacing.force = true")
     settle(pg, True)
     w = window(pg)
     ok, detail = evenly(w, 2)
-    check("...relaxed (not waited for): every second refresh still", ok and w["relaxed"] == w["refreshes"], detail)
+    check("...relaxed (not waited for): drawn every second refresh still", ok and w["relaxed"] == w["refreshes"], detail)
     pg.evaluate("quake.pacing.force = null")
     pg.evaluate("quake.callLine('exec host_maxfps 144')")
     time.sleep(0.5)
