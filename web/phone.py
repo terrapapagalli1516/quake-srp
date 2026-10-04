@@ -490,11 +490,10 @@ def main():
                 adb("shell", "am", "start", "-n", CHROME_MAIN, "-a", "android.intent.action.VIEW", "-d", url)
                 time.sleep(3.0)
             br, pg = find_page(p, a.port, a.deploy)
-        pg.wait_for_function("window.quake && quake.ready && quake.firstFrameAt > 0", timeout=180000)
+        # The program runs; its frames may wait for an upright phone to be turned.
+        pg.wait_for_function("window.quake && quake.ready", timeout=180000)
         t = Target(pg, not a.local)
         t.wait_front()
-        if a.deploy:
-            t.start()
         if a.fullscreen and t.phone and not pg.evaluate(VIEW)["fullscreen"]:
             # No DevTools client may be attached while the page asks (the doc
             # above): let go, press the page's chord from Android, come back.
@@ -506,11 +505,19 @@ def main():
             t = Target(pg, True)
             if not pg.evaluate(VIEW)["fullscreen"]:
                 print("  (the page did not go fullscreen: its rows are windowed)", flush=True)
-        if t.phone and pg.evaluate("!!document.fullscreenElement && innerHeight > innerWidth"):
-            # Fullscreen but upright (the phone lies flat): the game is played
-            # sideways, and the page's own fullscreen button locks it so.
-            pg.evaluate("screen.orientation.lock('landscape').then(() => true).catch(() => false)")
-            time.sleep(2.5)
+        if t.phone and pg.evaluate("innerHeight > innerWidth"):
+            # Upright (the phone lies flat), where the page does not play. In
+            # fullscreen the kit turns it sideways as the page's own
+            # fullscreen button does; else someone must turn the phone.
+            if pg.evaluate("!!document.fullscreenElement"):
+                pg.evaluate("screen.orientation.lock('landscape').then(() => true).catch(() => false)")
+                time.sleep(2.5)
+            while pg.evaluate("innerHeight > innerWidth"):
+                print("  (the phone is upright and the page waits to be turned: turn it, or run with --fullscreen)", flush=True)
+                time.sleep(5)
+        if a.deploy:
+            t.start()
+        pg.wait_for_function("quake.firstFrameAt > 0", timeout=120000)
         # (A run stopped while it rested the phone leaves the page's ticks paused.)
         pg.evaluate("() => { if (quake.paused) quake.resume(); }")
         if a.eval:
