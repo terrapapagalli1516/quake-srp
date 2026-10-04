@@ -1,4 +1,4 @@
-//! `r_lerpmove`: monsters glide between their steps — the port's 2026 extra,
+//! `r_lerpmove`: monsters glide between their steps — the port's slop extra,
 //! after QuakeSpasm's `r_lerpmove` (`R_SetupEntityTransform`, r_alias.c).
 //! No id file ports here: id's client draws a step mover where its last step
 //! put it ([`LerpMove::Classic`]).
@@ -14,7 +14,7 @@
 //! collisions) stays the server's. The animation frames are a separate
 //! extra, [`crate::client::lerpmodels::LerpModels::Smooth`] (QuakeSpasm's
 //! `r_lerpmodels`): off here, the stepped animation is part of the look;
-//! on (2026's default, beside this one), it blends too.
+//! on (slop's default, beside this one), it blends too.
 //!
 //! **How long a glide lasts: 0.1 s, id1's think interval (and QuakeSpasm's
 //! glide), from where the entity is drawn when the step comes.** A step that

@@ -84,7 +84,7 @@ The crate is roughly layered, from id's files up to the client, which drives the
 
 ```
 client       client, demo, particles, tent, dlight     the live frame, demos, effects, the host clock
-settings     cvar, cmd, settings, stepping             variables, commands, the Classic and 2026 profiles
+settings     cvar, cmd, settings, stepping             variables, commands, the slop options and their presets
 sound        snd, cd_audio                             id's mixer and the CD player's state
 2-D          draw, screen, sbar, menu, console, keys   the status bar, menus, console, key bindings
 renderer     render                                    the 3-D view, on any number of threads
@@ -142,9 +142,9 @@ of spare frame buffers, the 2-D layer's scale flag, a hull cache and a trace cou
 | `client::cl_main`, `cl_demo` | `cl_main.c`, `cl_demo.c`, `cl_parse.c` | the live frame; demo playback with id's interpolation; `timedemo` |
 | `client::cl_input`, `in_win` | `cl_input.c`, `in_win.c` | the move from keys and mouse; the joystick |
 | `client::view` | `view.c` | the damage kick and the colour shifts (damage, bonus flash) and their fades |
-| `client::host`, `host_cmd` | `host.c`, `host_cmd.c` | `Host_FilterTime`, `Host_Error`; `map`, `load`, the cheats |
-| `client::lerpmove` | QuakeSpasm's `r_lerpmove` | monsters glide between steps (2026) |
-| `client::lerpmodels` | QuakeSpasm's `r_lerpmodels` | an alias model's animation blends between frames (2026) |
+| `client::host`, `host_cmd` | `host.c`, `host_cmd.c` | `Host_FilterTime`, the frame-rate cap (`host_maxfps`), `Host_Error`; `map`, `load`, the cheats |
+| `client::lerpmove` | QuakeSpasm's `r_lerpmove` | monsters glide between steps (slop) |
+| `client::lerpmodels` | QuakeSpasm's `r_lerpmodels` | an alias model's animation blends between frames (slop) |
 | `client::cl_tent`, `tent`, `particles`, `dlight` | `cl_tent.c`, `r_part.c`, `cl_main.c` | beams, temp entities, trails, particles, dynamic lights |
 | `demo` | `cl_demo.c`, `cl_parse.c` | `.dem` framing and the message decoder |
 | `stepping` | the port's | what the uncapped frame steps so it plays like 72 Hz (see [FRAMERATE.md](../FRAMERATE.md)) |
@@ -160,8 +160,8 @@ of spare frame buffers, the 2-D layer's scale flag, a hull cache and a trace cou
 | `render::sky`, `warp` | `r_sky.c`, `d_sky.c`, `d_scan.c` | the two-layer sky, liquids, the underwater wobble |
 | `render::alias`, `polyse`, `sprite`, `part` | `r_alias.c`, `d_polyse.c`, `r_sprite.c`, `d_part.c` | models and the gun, the affine triangle filler, sprites, particles |
 | `render::view` | `view.c` | view bob, the gun's placement, the frame's palette (`V_UpdatePalette` into `FramePalette`), packing to RGBA |
-| `render::video` | the port's | past id's 1280x1024 limit, and wider views on wide screens (2026) |
-| `render::torch` | the port's, after LIGHT.EXE's `SingleLightFace` | the steady torches flicker about the light they baked (2026) |
+| `render::video` | the port's | past id's 1280x1024 limit, and wider views on wide screens (slop) |
+| `render::torch` | the port's, after LIGHT.EXE's `SingleLightFace` | the steady torches flicker about the light they baked (slop) |
 | `render::world`, `vis`, `stats` | `r_main.c`, `model.c` | brush entities, `Mod_PointInLeaf`, timers |
 
 **2-D, sound, settings**
@@ -169,10 +169,10 @@ of spare frame buffers, the 2-D layer's scale flag, a hull cache and a trace cou
 | module | id's C | what |
 |---|---|---|
 | `draw`, `screen`, `sbar` | `draw.c`, `screen.c`, `sbar.c` | pics and text, the view rectangle and the composed screen, the status bar |
-| `menu`, `console`, `keys` | `menu.c`, `console.c`, `keys.c` | every menu (and the Classic / 2026 settings: a hub and three pages), the console, key bindings |
+| `menu`, `console`, `keys` | `menu.c`, `console.c`, `keys.c` | every menu (and the port's Slop Options: three pages, and Options' two resets), the console, key bindings |
 | `snd::dma`, `snd::mix`, `snd::mem` | `snd_dma.c`, `snd_mix.c`, `snd_mem.c` | id's mixer: channels, spatialization, painting, resampling |
 | `cd_audio` | `cd_win.c` | which CD track plays; the host plays it |
-| `cvar`, `cmd`, `settings` | `cvar.c`, `cmd.c` | typed console variables, the command table, profiles and `config.cfg` |
+| `cvar`, `cmd`, `settings` | `cvar.c`, `cmd.c` | typed console variables, the command table, the presets, the machine's numbers and `config.cfg` |
 
 `src/bin/quaketool/` is the CLI. The test fixtures (`render::fixtures`, `server::testutil`)
 exist only in test builds.
@@ -189,11 +189,11 @@ exist only in test builds.
   and the game state come out identical. Doc comments name the C function each piece
   ports, and explain any departure.
 - **Every departure is a setting.** Anything that differs from id's game is a typed field
-  in `cvar::Cvars`, or a key binding in `keys::Bindings`, and the Classic profile turns it
-  off. [AUDIT.md](../AUDIT.md) lists them all.
+  in `cvar::Cvars`, or a key binding in `keys::Bindings` — a "slop option" — and the
+  Classic preset turns it off. [AUDIT.md](../AUDIT.md) lists them all.
 - **The same result on any machine.** The renderer draws the same pixels on 1 thread or
-  16. In 2026, the game steps anything that would otherwise drift with the frame rate, so
-  high frame rates play like id's 72.
+  16. With the slop options, the game steps anything that would otherwise drift with the
+  frame rate, so high frame rates play like id's 72.
 
 ## Testing
 

@@ -1,44 +1,48 @@
 #!/usr/bin/env -S uv run --with playwright --with pillow --script
-"""Verify the two profiles and the settings, end-to-end in headless Chromium:
+"""Verify the two presets and the settings, end-to-end in headless Chromium:
 
-  1. The default is the 2026 profile, and the picture fills the window:
+  1. The default is the slop preset, and the picture fills the window:
      at 1280x800 (devicePixelRatio 1) the page's box is 1246x716 (the window
-     less the chrome), the frame 1246x716 at one device pixel a pixel (Auto),
-     the canvas that box exactly; any window shape (1600x600: a 1566x516
-     frame). The State says native, and the pixel size.
+     less the chrome), the frame 1246x716 at one device pixel a pixel (a
+     desktop's 1x), the canvas that box exactly; any window shape (1600x600:
+     a 1566x516 frame). The State says native, and the pixel size.
   2. Whole pixels: at devicePixelRatio 2 the box is 2492x1432 device
-     pixels; Auto (one render thread) picks 2x2, the frame 1246x716 and the
+     pixels, and a desktop still draws it at 1x (no guess from the ratio:
+     the machine's number); vid_pixelsize 2 gives a 1246x716 frame, the
      canvas 2492 device pixels wide — every frame pixel a whole 2x2 square of
      the screenshot, never smoothed; vid_pixelsize 3 gives 830x477 at 3x3.
-  3. The 2026 frame: the 2026 cross centred on the view (crosshair 1 and 0
+  3. The slop frame: the slop cross centred on the view (crosshair 1 and 0
      differ only there), id's + crossing the same centre at the 2-D scale
      (crosshair 2), the perspective span at 8 (r_perspspan 8; id's 16 and
      exact redraw the walls, and 8 again restores the frame), no 72 fps cap (a second of 1/144 s steps runs 144
      frames), and W walks.
-  4. `?classic` is Classic: the profile, config.cfg with nothing changed from
-     it, every engine departure off (the 72 fps cap: 72 frames in a second at
-     144 Hz; the video mode in the 4:3 box, 960x600; no crosshair), but the
-     controls the same as 2026's — WASD, mouse look, Space swims up, Alt+Enter,
-     Always Run (cl_forwardspeed 400): W walks, the mouse looks, the wheel
-     does nothing (it is 2026's alone). `idcontrols` is the one step to id's
-     own (`w` unbound, `a` +lookup, Always Run off).
-  5. The one switch: Options > "Classic / 2026", left and right, flips the
-     profile, and the canvas goes from the window to the 4:3 box and back;
-     the controls are kept across it (a control set by hand stays as set, WASD
-     stays bound) and only the wheel follows the profile. Screen size starts
-     at 110 in 2026 (the status bar alone) and 100 in Classic (id's, with the
-     inventory bar), and goes with the switch while the player has not moved it.
-  6. The settings survive a reload: a 2026 session's pixel size, a binding
+  4. `?classic` is Classic: the preset, config.cfg with nothing changed from
+     it, every engine slop option off (id's 72 fps cap: 72 frames in a
+     second at 144 Hz; the video mode in the 4:3 box, 960x600; no
+     crosshair), but the controls the same as slop's — WASD, mouse look,
+     Space swims up, Alt+Enter, Always Run (cl_forwardspeed 400): W walks,
+     the mouse looks, the wheel does nothing (it is slop's alone).
+     `idcontrols` is the one step to id's own (`w` unbound, `a` +lookup,
+     Always Run off).
+  5. Options > "Reset to Classic" (its 15th row, up from the first) asks,
+     and yes sets every slop option to Classic's: the canvas goes from the
+     window to the 4:3 box, a slop control set by hand goes back to the
+     preset's, the keys stay (WASD bound, a rebind kept) but the wheel,
+     Screen size goes with it while the player has not moved it (110 in
+     slop, the status bar alone; id's 100 in Classic, with the inventory
+     bar). The console's `preset slop` brings slop back, keys kept.
+  6. The settings survive a reload: a slop session's pixel size, a binding
      and Screen size; a `?classic` visit sticks for a plain reload after it;
      a returning visitor's old localStorage settings keep their choice (Show
-     FPS) and get the 2026 defaults (uncapped, scaled 2-D, the span at 8,
-     and Screen size 110: the old page's viewsize 100 was its default).
+     FPS) and get the slop values (no cap, scaled 2-D, the span at 8, and
+     Screen size 110: the old page's viewsize 100 was its default).
   7. Video Options is honest about native resolution (review: it used to show
      960x600 as current and a pick silently turned Native off): opened while
-     actually native, the cursor lands on the live native row (not a stale
-     preset) and `vid_native` is still 1; picking a fixed mode turns it off,
-     visibly (that mode is now the one marked); and native is one Up/Enter
-     away again, at the picked pixel size — the same list, never a dead end.
+     actually native, the cursor lands on the live native row (1x, not a
+     stale preset) and `vid_native` is still 1; picking a fixed mode turns it
+     off, visibly (that mode is now the one marked); and native is one
+     Up/Enter away again, at the picked pixel size — the same list, never a
+     dead end.
 
 Screenshots (in the web dir): verify_settings_2026.png, verify_settings_classic.png,
 verify_settings_video_native.png.
@@ -139,12 +143,11 @@ with sync_playwright() as p:
         pg.on("pageerror", lambda e: errs.append("PAGEERROR: " + str(e)))
         return pg
 
-    # 1. The 2026 default fills the window.
+    # 1. The slop default fills the window.
     ctx = br.new_context(viewport={"width": 1280, "height": 800})
     pg = page(ctx)
     boot(pg)
-    check("the default is the 2026 profile", text(pg, "profile") == "2026")
-    pg.evaluate("quake.callLine('exec r_threads 1')")   # Auto's budget on one thread
+    check("the default is the slop preset", text(pg, "preset") == "slop")
     walk(pg)
     frames(pg)
     c = pg.evaluate(CANVAS)
@@ -159,7 +162,7 @@ with sync_playwright() as p:
     check("any shape: 1600x600 fills with a 1566x516 frame", (c["w"], c["h"], round(c["cssW"]), round(c["cssH"]))
           == (1566, 516, 1566, 516), str(c))
 
-    # 3. The 2026 frame: the crosshair, no cap, W walks.
+    # 3. The slop frame: the crosshair, no cap, W walks.
     pg.set_viewport_size({"width": 1280, "height": 800})
     pg.wait_for_function("document.getElementById('c').width === 1246", timeout=5000)
     pg.evaluate(GRAB, "_x1")
@@ -167,10 +170,10 @@ with sync_playwright() as p:
     pg.evaluate(GRAB, "_x0")
     pg.evaluate("quake.callLine('exec crosshair 1')")
     d = pg.evaluate(DIFF, ["_x1", "_x0"])
-    # 2026 starts Screen size at 110: the status bar alone, 24 rows at the
+    # Slop starts Screen size at 110: the status bar alone, 24 rows at the
     # 2-D layer's 3x on a 1246x716 screen, 72 rows, and no inventory strip.
     bar = pg.evaluate("quake.callLine('sbar_height').then(r => r.value)")
-    check("Screen size starts at 110 in 2026: the status bar alone, 24 rows at 3x",
+    check("Screen size starts at 110 in slop: the status bar alone, 24 rows at 3x",
           cvar(pg, "viewsize") == "110" and bar == 72, f"viewsize {cvar(pg, 'viewsize')}, {bar} rows")
     # The view is above the status bar: its centre pixel (623, cy) with cy
     # = (716 - 72) / 2 = 322 (at id's 100 the bar is 144 rows and cy 286).
@@ -179,7 +182,7 @@ with sync_playwright() as p:
     # (where the scene is not already black).
     cy = (716 - bar) // 2
     ok = d is not None and 616 <= d["x0"] <= 617 and 629 <= d["x1"] <= 630 and cy - 7 <= d["y0"] <= cy - 6 and cy + 6 <= d["y1"] <= cy + 7
-    check("the crosshair: the 2026 cross about the view's centre, and nothing else", ok, f"{d}; centre row {cy}")
+    check("the crosshair: the slop cross about the view's centre, and nothing else", ok, f"{d}; centre row {cy}")
     # crosshair 2: id's + at the 2-D scale (3), its crossing on the centre:
     # the 8x8 cell's corner at (623 - 4*3, cy - 4.5*3) = (611, cy - 13), the
     # glyph's grey texels (columns 1-6, rows 2-6) 614..632 x cy-7..cy+7, its
@@ -190,11 +193,11 @@ with sync_playwright() as p:
     d = pg.evaluate(DIFF, ["_x2", "_x0"])
     ok = d is not None and (d["x0"], d["y0"]) == (614, cy - 7) and 632 <= d["x1"] <= 634 and cy + 7 <= d["y1"] <= cy + 10
     check("crosshair 2: id's + at the 2-D scale, crossing the view's centre", ok, str(d))
-    # The perspective is found every 8 pixels in 2026 (id's portable C loop;
+    # The perspective is found every 8 pixels in slop (id's portable C loop;
     # at 1080p and above id's 16-pixel spans wobble along a wall seen at a
     # grazing angle); id's 16 redraws the walls, exact does too, and 8 again
     # is the same frame.
-    check("the perspective span is 8 in 2026 (r_perspspan 8, not exact)",
+    check("the perspective span is 8 in slop (r_perspspan 8, not exact)",
           cvar(pg, "r_perspspan") == "8" and cvar(pg, "wasm_exactpersp") == "0")
     pg.evaluate(GRAB, "_p8")
     pg.evaluate("quake.callLine('exec r_perspspan 16')")
@@ -209,51 +212,56 @@ with sync_playwright() as p:
           d is not None and d["n"] > 1000 and d1 is not None and d1["n"] > 1000
           and pg.evaluate(DIFF, ["_p8", "_p8b"]) is None, f"16: {d}; exact: {d1}")
     pg.evaluate("quake.resume()")
-    check("no 72 fps cap: 144 frames in a second at 144 Hz", pg.evaluate(second_at_144) == 144)
+    check("no frame cap (host_maxfps 0): 144 frames in a second at 144 Hz",
+          cvar(pg, "host_maxfps") == "0" and pg.evaluate(second_at_144) == 144)
     x0 = pg.evaluate("exp.listener_x()"), pg.evaluate("exp.listener_y()")
     pg.keyboard.down("w"); time.sleep(1.0); pg.keyboard.up("w")
     x1 = pg.evaluate("exp.listener_x()"), pg.evaluate("exp.listener_y()")
     check("W walks", abs(x1[0] - x0[0]) + abs(x1[1] - x0[1]) > 50, f"{x0} -> {x1}")
 
-    # 5. The one switch: Options > Classic / 2026.
-    pg.evaluate("quake.callLine('exec cl_jumpswim 0')")        # a control, set by hand
+    # 5. Options > Reset to Classic (asks; y), and the console back to slop.
+    pg.evaluate("quake.callLine('exec cl_jumpswim 0; bind j \"+jump\"')")   # a slop control by hand; a key
     pg.keyboard.press("Escape")
     pg.keyboard.press("ArrowDown"); pg.keyboard.press("ArrowDown"); pg.keyboard.press("Enter")
-    pg.keyboard.press("ArrowUp")          # row 0 wraps to the 14th: Classic / 2026
+    pg.keyboard.press("ArrowUp")          # row 0 wraps to the 15th: Reset to Classic
     time.sleep(0.2)
-    pg.keyboard.press("ArrowLeft")
+    pg.keyboard.press("Enter")
+    pg.wait_for_function("quake.state.flags & 256", timeout=5000)    # ST.ASK: the question
+    check("Reset to Classic asks first", text(pg, "preset") == "slop" and pg.evaluate("quake.state.flags & 32") != 0)
+    pg.keyboard.press("y")
     pg.wait_for_function("!(quake.state.flags & 32)", timeout=5000)
     frames(pg)
     c = pg.evaluate(CANVAS)
-    check("left: Classic, the 960x600 mode in the 4:3 box",
-          text(pg, "profile") == "classic" and (c["w"], c["h"]) == (960, 600)
+    check("yes: Classic, the 960x600 mode in the 4:3 box",
+          text(pg, "preset") == "classic" and (c["w"], c["h"]) == (960, 600)
           and abs(c["cssW"] / c["cssH"] - 4 / 3) < 0.01, str(c))
-    check("...the controls kept: the hand-set one still off, mouse look and WASD still on, the wheel off",
-          cvar(pg, "cl_jumpswim") == "0" and cvar(pg, "freelook") == "1" and bind_of(pg, "w") == '"w" = "+forward"'
-          and bind_of(pg, "MWHEELUP") == '"MWHEELUP" is not bound')
+    check("...the slop control back to the preset's, the keys kept (WASD, the rebind), the wheel off",
+          cvar(pg, "cl_jumpswim") == "1" and cvar(pg, "freelook") == "1" and bind_of(pg, "w") == '"w" = "+forward"'
+          and bind_of(pg, "j") == '"j" = "+jump"' and bind_of(pg, "MWHEELUP") == '"MWHEELUP" is not bound')
     check("...Screen size, never moved, follows to id's 100 (the inventory bar is back)",
           cvar(pg, "viewsize") == "100" and pg.evaluate("quake.callLine('sbar_height').then(r => r.value)") == 48,
           cvar(pg, "viewsize"))
-    pg.keyboard.press("ArrowRight")
+    check("...and id's own 72 fps cap", cvar(pg, "host_maxfps") == "72" and 71 <= pg.evaluate(second_at_144) <= 73)
+    pg.evaluate("quake.callLine('exec preset slop')")
     pg.wait_for_function("quake.state.flags & 32", timeout=5000)
     frames(pg)
     c = pg.evaluate(CANVAS)
-    check("right: 2026 again, the window filled", text(pg, "profile") == "2026" and c["w"] == 1246, str(c))
-    check("...Screen size follows back to 2026's 110", cvar(pg, "viewsize") == "110", cvar(pg, "viewsize"))
-    check("...the controls kept, the wheel back (impulse 10)",
-          cvar(pg, "cl_jumpswim") == "0" and bind_of(pg, "w") == '"w" = "+forward"'
+    check("`preset slop`: slop again, the window filled", text(pg, "preset") == "slop" and c["w"] == 1246, str(c))
+    check("...Screen size follows back to slop's 110", cvar(pg, "viewsize") == "110", cvar(pg, "viewsize"))
+    check("...the keys kept, the wheel back (impulse 10)",
+          bind_of(pg, "j") == '"j" = "+jump"' and bind_of(pg, "w") == '"w" = "+forward"'
           and bind_of(pg, "MWHEELUP") == '"MWHEELUP" = "impulse 10"')
-    pg.evaluate("quake.callLine('exec cl_jumpswim 1')")
+    pg.evaluate("quake.callLine('exec unbind j')")
     for _ in range(3):
         pg.keyboard.press("Escape")
 
-    # 6a. A 2026 session's settings survive a reload.
+    # 6a. A slop session's settings survive a reload.
     pg.evaluate("quake.callLine('exec vid_pixelsize 2; bind j \"+jump\"; viewsize 90')")
     frames(pg)
     isolated.wait_until(pg, "quake.kept('id1/config.cfg').then(t => !!t && t.includes('vid_pixelsize \"2\"'))", 5)
     boot(pg)
-    check("reloaded: the profile, the pixel size, the binding, Screen size",
-          text(pg, "profile") == "2026" and cvar(pg, "vid_pixelsize") == "2" and cvar(pg, "viewsize") == "90"
+    check("reloaded: the preset, the pixel size, the binding, Screen size",
+          text(pg, "preset") == "slop" and cvar(pg, "vid_pixelsize") == "2" and cvar(pg, "viewsize") == "90"
           and "+jump" in pg.evaluate("quake.callLine('exec bind j').then(() => quake.text('console_text'))"),
           text(pg, "config_text"))
     ctx.close()
@@ -265,11 +273,15 @@ with sync_playwright() as p:
     if pg.evaluate("devicePixelRatio") != 2:
         print("SKIP the devicePixelRatio 2 checks (this browser lost the context's device_scale_factor on the isolated page)")
     else:
-        pg.evaluate("quake.callLine('exec r_threads 1')")
         walk(pg)
+        pg.wait_for_function("document.getElementById('c').width === 2492", timeout=5000)
+        c = pg.evaluate(CANVAS)
+        check("dpr 2: a 2492x1432 box, drawn at a desktop's 1x (the machine's number, no guess from the ratio)",
+              (c["w"], c["h"], c["px"]) == (2492, 1432, 1) and cvar(pg, "vid_pixelsize") == "1", str(c))
+        pg.evaluate("quake.callLine('exec vid_pixelsize 2')")
         pg.wait_for_function("document.getElementById('c').width === 1246", timeout=5000)
         c = pg.evaluate(CANVAS)
-        check("dpr 2: a 2492x1432 box, Auto picks 2x2, a 1246x716 frame",
+        check("vid_pixelsize 2: a 1246x716 frame, the canvas 2492 device pixels wide",
               (c["w"], c["h"], c["px"], round(c["cssW"] * c["dpr"])) == (1246, 716, 2, 2492), str(c))
         frames(pg)
         bad = whole_pixels(pg, 2)
@@ -288,11 +300,11 @@ with sync_playwright() as p:
     pg = page(ctx)
     boot(pg, "?classic")
     frames(pg)
-    check("?classic: the Classic profile", text(pg, "profile") == "classic")
-    check("config.cfg: the profile and nothing changed from it",
-          text(pg, "config_text") == '// generated by quake, do not modify\nprofile "classic"\n', text(pg, "config_text"))
-    # The engine: every departure off. The controls are the player's, the
-    # same as 2026's: mouse look, Space swims up, Alt+Enter, Always Run (400).
+    check("?classic: the Classic preset", text(pg, "preset") == "classic")
+    check("config.cfg: the preset and nothing changed from it",
+          text(pg, "config_text") == '// generated by quake, do not modify\npreset "classic"\n', text(pg, "config_text"))
+    # The engine: every slop option off. The controls are the same as
+    # slop's: mouse look, Space swims up, Alt+Enter, Always Run (400).
     departures = ["wasm_uncapped", "wasm_scaled2d", "scr_sbaroverlay", "vid_native", "fov_adapt", "crosshair",
                   "wasm_showfps", "wasm_exactpersp"]
     controls = ["freelook", "cl_jumpswim", "vid_altenter", "joystick"]
@@ -300,11 +312,11 @@ with sync_playwright() as p:
     check("every engine departure off", all(vals[n] == "0" for n in departures) and cvar(pg, "r_perspspan") == "16", str(vals))
     check("Screen size is id's 100 (the page started 2026; the address switched it, never moved)",
           cvar(pg, "viewsize") == "100", cvar(pg, "viewsize"))
-    check("the controls are 2026's: mouse look, Space swims up, Alt+Enter, the gamepad, Always Run (400)",
+    check("the controls are slop's: mouse look, Space swims up, Alt+Enter, the gamepad, Always Run (400)",
           all(vals[n] == "1" for n in controls) and vals["cl_forwardspeed"] == "400", str(vals))
     pg.evaluate("quake.callLine('exec bind w; bind a; bind MWHEELUP')")
     lines = pg.evaluate("quake.text('console_text')").splitlines()[-3:]
-    check("the keys: WASD bound, the wheel not (2026's alone)",
+    check("the keys: WASD bound, the wheel not (slop's alone)",
           lines == ['"w" = "+forward"', '"a" = "+moveleft"', '"MWHEELUP" is not bound'], str(lines))
     check("the 72 fps cap: 72 frames in a second at 144 Hz", 71 <= pg.evaluate(second_at_144) <= 73)
     walk(pg)
@@ -352,18 +364,18 @@ with sync_playwright() as p:
     pg.mouse.move(640, 300)
     pg.mouse.wheel(0, -120); pg.mouse.wheel(0, -120); pg.mouse.wheel(0, 120)
     time.sleep(0.5)
-    check("Classic walk: the wheel does nothing (2026's alone)", weapon() == w0 == 2, f"{w0:.0f} -> {weapon():.0f}")
+    check("Classic walk: the wheel does nothing (slop's alone)", weapon() == w0 == 2, f"{w0:.0f} -> {weapon():.0f}")
 
     # idcontrols: the one step to id's own 1996 controls, the engine untouched.
     pg.evaluate("quake.callLine('exec idcontrols')")
     vals = {n: cvar(pg, n) for n in departures + controls + ["cl_forwardspeed"]}
     check("idcontrols: id's controls (mouse look, swim-up, Alt+Enter, gamepad off, Always Run off)",
           all(vals[n] == "0" for n in controls) and vals["cl_forwardspeed"] == "200", str(vals))
-    check("...the engine untouched", all(vals[n] == "0" for n in departures) and text(pg, "profile") == "classic")
+    check("...the engine untouched", all(vals[n] == "0" for n in departures) and text(pg, "preset") == "classic")
     check("...id's keys: w unbound, a +lookup",
           [bind_of(pg, "w"), bind_of(pg, "a")] == ['"w" is not bound', '"a" = "+lookup"'])
     boot(pg)
-    check("a plain reload after ?classic stays Classic", text(pg, "profile") == "classic")
+    check("a plain reload after ?classic stays Classic", text(pg, "preset") == "classic")
     ctx.close()
 
     # 6b. A returning visitor of the old page: its localStorage settings.
@@ -374,13 +386,13 @@ with sync_playwright() as p:
     pg = page(ctx)
     boot(pg)
     ext = pg.evaluate("exp.extras()")
-    check("old settings: the choice kept (Show FPS), the 2026 defaults on (uncapped, scaled 2-D, the span at 8)",
-          text(pg, "profile") == "2026" and ext == 11 and cvar(pg, "r_perspspan") == "8",
+    check("old settings: the choice kept (Show FPS), the slop values on (no cap, scaled 2-D, the span at 8)",
+          text(pg, "preset") == "slop" and ext == 11 and cvar(pg, "r_perspspan") == "8",
           f"extras {ext}; {text(pg, 'config_text')!r}")
     # The old page's viewsize 100 was its default, not a choice (verify_save.py
     # migrates a chosen 80, which stays): the player who never moved Screen
-    # size gets 2026's own start.
-    check("old settings: their viewsize 100 was the old default, so Screen size is 2026's 110",
+    # size gets slop's own start.
+    check("old settings: their viewsize 100 was the old default, so Screen size is slop's 110",
           cvar(pg, "viewsize") == "110", cvar(pg, "viewsize"))
     ctx.close()
 
@@ -400,13 +412,13 @@ with sync_playwright() as p:
         pg.keyboard.press("ArrowDown")
     pg.keyboard.press("Enter")  # -> Video Options
     time.sleep(0.2)
-    check("Video Options opens on the live native row (Auto), not a stale preset",
+    check("Video Options opens on the live native row (1x), not a stale preset",
           cursor() == VIDEO_PRESETS, f"cursor={cursor()}, pixel_size={cvar(pg, 'vid_pixelsize')}")
     check("...and native resolution is still on (no silent change just from opening)",
           cvar(pg, "vid_native") == "1")
     pg.locator("#c").screenshot(path=os.path.join(WEB, "verify_settings_video_native.png"))
 
-    # Picking a fixed mode (3 Up from the Auto row: preset index 3, 800x500)
+    # Picking a fixed mode (4 Up from the 1x row: preset index 3, 800x500)
     # turns native off, visibly — a preset is now the one Enter marked.
     for _ in range(VIDEO_PRESETS - 3):
         pg.keyboard.press("ArrowUp")
@@ -426,7 +438,7 @@ with sync_playwright() as p:
     pg.keyboard.press("Enter")
     time.sleep(0.2)
     check("native resolution chosen back", cvar(pg, "vid_native") == "1")
-    check("...at the row's own pixel size", cvar(pg, "vid_pixelsize") == str(cur - VIDEO_PRESETS))
+    check("...at the row's own pixel size", cvar(pg, "vid_pixelsize") == str(cur - VIDEO_PRESETS + 1))
     for _ in range(3):
         pg.keyboard.press("Escape")
     ctx.close()

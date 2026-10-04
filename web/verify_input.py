@@ -17,7 +17,7 @@
      walk mode with no menu/console up; never in attract/demo/locked states.
   5. KEYBOARD-ONLY PLAY — arrows move the camera and Ctrl fires (+attack)
      without the pointer ever being locked.
-  6. THE CANVAS BOX (Classic: a video mode in the 4:3 box; the 2026 profile
+  6. THE CANVAS BOX (Classic: a video mode in the 4:3 box; the slop preset
      fills the window, verify_settings.py) — at 1440x900 the 960-wide framebuffer gets a 960x720
      box (a whole pixel per column: the 1088 the window fits would double
      one column in 7), at 1920x1080 the natural 1328x996 (1.38 is no near
@@ -388,7 +388,7 @@ with sync_playwright() as p:
     check("pointer never locked during keyboard play",
           pg.evaluate("document.pointerLockElement === null"))
 
-    # (5b) The wheel (2026): a notch switches weapons, with no pointer lock.
+    # (5b) The wheel (slop): a notch switches weapons, with no pointer lock.
     # "impulse 3" (the super shotgun) sits between two owned weapons so next
     # and previous land somewhere different (`W_ChangeWeapon`/
     # `CycleWeaponCommand`/`CycleWeaponReverseCommand`): axe < shotgun < SUPER
@@ -419,7 +419,7 @@ with sync_playwright() as p:
     w1 = wait_weapon(4)
     pg.mouse.wheel(0, 120)                  # one notch down: back to the previous
     w2 = wait_weapon(2)
-    check("2026: a wheel notch up switches to the next weapon, down back to it",
+    check("slop: a wheel notch up switches to the next weapon, down back to it",
           (w0, w1, w2) == (2, 4, 2), f"{w0:.0f} -> {w1:.0f} -> {w2:.0f}")
     # A trackpad's burst of small deltas (Chrome's own notch is ~100 px)
     # accumulates and fires exactly once, not once per event. Dispatched with
@@ -486,7 +486,7 @@ with sync_playwright() as p:
         got = wheel_notches(steps)
         check(f"wheel: {name}", got == want, f"down {got[0]}, up {got[1]}; want {want}")
     # Classic leaves the wheel unbound, as id's default.cfg.
-    pg.evaluate("quake.callLine('exec profile classic')")
+    pg.evaluate("quake.callLine('exec preset classic')")
     time.sleep(0.3)
     pg.evaluate("quake.callLine('exec impulse 9')")
     wait_weapon(32)
@@ -496,7 +496,7 @@ with sync_playwright() as p:
     pg.mouse.wheel(0, -120)
     time.sleep(0.5)
     check("Classic: the wheel is unbound, nothing changes", field("weapon") == wc, f"{wc:.0f} -> {field('weapon'):.0f}")
-    pg.evaluate("quake.callLine('exec profile 2026')")
+    pg.evaluate("quake.callLine('exec preset slop')")
     time.sleep(0.2)
 
     # (2) The Esc pattern. A real canvas click captures the mouse...
@@ -596,13 +596,13 @@ with sync_playwright() as p:
         print("SKIP fullscreen checks (headless refused requestFullscreen) — "
               "covered by the manual test script")
 
-    # (6) The canvas box (fitCanvas) for a video mode — the Classic profile
-    # (the 2026 profile fills the window: verify_settings.py): the largest
+    # (6) The canvas box (fitCanvas) for a video mode — the Classic preset
+    # (the slop preset fills the window: verify_settings.py): the largest
     # 4:3 box the window fits, snapped to a whole number of pixels per
     # framebuffer column when it is at most 1/6 past one (no doubled column
     # in the pixelated upscale), smoothed when it is narrower than the
     # framebuffer (no dropped column).
-    pg.evaluate("quake.callLine('exec profile classic')")
+    pg.evaluate("quake.callLine('exec preset classic')")
     pg.wait_for_function("!(quake.state.flags & 32)", timeout=5000)
     box = lambda: pg.evaluate("""(async () => { const c = document.getElementById('c');
         return [parseFloat(c.style.width), parseFloat(c.style.height),
@@ -618,9 +618,9 @@ with sync_playwright() as p:
 
     # (7) Keys by their place (KeyboardEvent.code), as id's keys were
     # scancodes: on AZERTY the key in W's place types 'z' and is keynum 'w'
-    # (+forward in the 2026 WASD), while the console types what the layout
+    # (+forward in the shared WASD), while the console types what the layout
     # typed. Synthetic events, since a headless browser has one layout.
-    pg.evaluate("quake.callLine('exec profile 2026')")
+    pg.evaluate("quake.callLine('exec preset slop')")
     pg.evaluate("exp.boot().then(() => exp.menu_cancel())")
     time.sleep(0.5)
     azerty = lambda typ: pg.evaluate(

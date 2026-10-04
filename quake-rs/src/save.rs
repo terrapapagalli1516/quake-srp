@@ -529,7 +529,7 @@ impl Server {
     /// whole new `Server`). The new server draws from the host session's
     /// `rand` streams, as every server the session runs does
     /// ([`Server::set_rand`]).
-    /// `max_edicts` is the live `sv_max_edicts` cvar (the 2026-only extra
+    /// `max_edicts` is the live `sv_max_edicts` cvar (the slop-only extra
     /// that raises the edict ceiling past id's 600, [`crate::vm::MAX_EDICTS`]);
     /// pass that constant for Classic-equivalent behaviour. Set on the fresh
     /// server before [`Self::load_savegame_body`] spawns the map and parses

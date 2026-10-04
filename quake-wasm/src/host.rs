@@ -7,7 +7,7 @@
 
 use quake_rs::render::{self, build_gamma_table};
 use quake_rs::client::cl_input::derive_key_move;
-use quake_rs::client::host::{host_filter_time, host_filter_time_display, host_filter_time_uncapped};
+use quake_rs::client::host::{host_filter_time, host_filter_time_capped, host_filter_time_uncapped, FrameCap};
 use quake_rs::stepping::Stepping;
 
 use crate::app::ensure_app;
@@ -16,24 +16,26 @@ use crate::cl_demo::{finish_host_error, finish_menu_credits, host_end_game, step
 use crate::cl_walk::step_walk;
 
 /// How a host frame is gated and stepped: [`host_filter_time`]'s 72 fps cap
-/// with id's per-frame code (Classic); every call without the cap while a
-/// `timedemo` runs (id's `cls.timedemo`: [`host_filter_time_uncapped`]); or,
-/// with `wasm_uncapped` (the 2026 profile), a frame on every display refresh
-/// ([`host_filter_time_display`]) stepped as a run of id's 72 Hz frames
-/// ([`Stepping::Uncapped`], `FRAMERATE.md`).
+/// with id's per-frame code (`host_maxfps 72`, the Classic preset's: today's
+/// gate exactly, as the oracle proves it); every call without the cap while
+/// a `timedemo` runs (id's `cls.timedemo`: [`host_filter_time_uncapped`]);
+/// or, with any other `host_maxfps` (the slop preset's), a frame on a
+/// display refresh — every one with no cap, else the first at least 1/cap
+/// after the last frame ([`host_filter_time_capped`]) — stepped as a run of
+/// id's 72 Hz frames ([`Stepping::Uncapped`], `FRAMERATE.md`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FrameGate {
     Classic,
     Timedemo,
-    Display,
+    Display(FrameCap),
 }
 
 impl FrameGate {
-    fn new(uncapped: bool, timedemo: bool) -> FrameGate {
-        match (timedemo, uncapped) {
+    fn new(cap: FrameCap, timedemo: bool) -> FrameGate {
+        match (timedemo, cap) {
             (true, _) => FrameGate::Timedemo,
-            (false, true) => FrameGate::Display,
-            (false, false) => FrameGate::Classic,
+            (false, FrameCap::ID) => FrameGate::Classic,
+            (false, cap) => FrameGate::Display(cap),
         }
     }
 
@@ -42,21 +44,21 @@ impl FrameGate {
         match self {
             FrameGate::Classic => host_filter_time(realtime, oldrealtime),
             FrameGate::Timedemo => Some(host_filter_time_uncapped(realtime, oldrealtime)),
-            FrameGate::Display => host_filter_time_display(realtime, oldrealtime),
+            FrameGate::Display(cap) => host_filter_time_capped(realtime, oldrealtime, cap),
         }
     }
 
     /// How the game steps a frame of any length.
     fn stepping(self) -> Stepping {
         match self {
-            FrameGate::Display => Stepping::Uncapped,
+            FrameGate::Display(_) => Stepping::Uncapped,
             FrameGate::Classic | FrameGate::Timedemo => Stepping::Classic,
         }
     }
 }
 
-/// The `wasm_showfps` measurement (a departure on Options > Classic / 2026's
-/// settings page, off in both profiles): QuakeWorld's `SCR_DrawFPS` counter. Every
+/// The `wasm_showfps` measurement (a departure on Options > Slop Options'
+/// settings page, off in both presets): QuakeWorld's `SCR_DrawFPS` counter. Every
 /// presented frame counts (`fps_count++`); once a second of `realtime` has
 /// passed since the window opened (`lastframetime`), the window's rate
 /// becomes the shown value (`lastfps`) and a new window opens. QW shows the
@@ -130,7 +132,7 @@ pub(crate) fn step(dt: f32) -> i32 {
         // `realtime += time`): it drives the flashing cursors, which keep
         // animating over a frozen frame.
         a.realtime += real_dt as f64;
-        let gate = FrameGate::new(a.settings.cvars.uncapped, a.cls.timedemo);
+        let gate = FrameGate::new(a.settings.cvars.max_fps, a.cls.timedemo);
         // `host_frametime`, the C's double: the server advances sv.time by it
         // exactly; everything else here times itself with its f32.
         let frametime = if real_dt == 0.0 { Some(0.0) } else { gate.frame_time(a.realtime, &mut a.oldrealtime) };
@@ -206,10 +208,10 @@ pub(crate) fn step(dt: f32) -> i32 {
         if a.demoplayback() && !a.cls.timedemo && dt > 0.0 && a.demo.as_ref().is_some_and(|d| d.at_end()) {
             host_end_game(a);
         }
-        // The renderer's threads (`r_threads` against what the host offers:
-        // vid.rs), to whichever game draws: every Walk and DemoPlay the host
-        // builds (a boot, a load, the attract loop's next demo) draws on the
-        // setting from its first frame.
+        // The renderer's threads (`r_threads`: vid.rs), to whichever game
+        // draws: every Walk and DemoPlay the host builds (a boot, a load, the
+        // attract loop's next demo) draws on the setting from its first
+        // frame.
         let threads = crate::vid::render_threads(a);
         if let Some(wk) = a.walk.as_mut() {
             wk.key_move = km;
@@ -308,7 +310,7 @@ pub(crate) fn step(dt: f32) -> i32 {
         // like the Quit menu does.
         finish_menu_credits(a);
 
-        // The wasm_showfps setting (off in both profiles): QuakeWorld draws it with the
+        // The wasm_showfps setting (off in both presets): QuakeWorld draws it with the
         // rest of the play-screen 2-D (SCR_DrawFPS, before Sbar_Draw, the
         // console and M_Draw — so the menu's fade dims it) and not on the
         // intermission/finale screens. The port's sits in the top-left
@@ -512,15 +514,18 @@ mod tests {
         assert_eq!(clocks(), (host1, real1, walk1));
     }
 
-    // -- the frame gate: Classic, timedemo, wasm_uncapped; wasm_showfps -------
+    // -- the frame gate: id's 72, timedemo, the others; wasm_showfps ----------
 
     #[test]
-    fn the_frame_gate_is_ids_classic_and_every_refresh_uncapped() {
-        assert_eq!(FrameGate::new(false, false), FrameGate::Classic);
-        assert_eq!(FrameGate::new(true, true), FrameGate::Timedemo, "a timedemo runs back to back");
-        assert_eq!(FrameGate::new(true, false), FrameGate::Display);
+    fn the_frame_gate_is_ids_at_72_and_the_display_with_its_cap_otherwise() {
+        assert_eq!(FrameGate::new(FrameCap::ID, false), FrameGate::Classic, "72: id's own gate");
+        assert_eq!(FrameGate::new(FrameCap::NONE, true), FrameGate::Timedemo, "a timedemo runs back to back");
+        assert_eq!(FrameGate::new(FrameCap::ID, true), FrameGate::Timedemo, "in Classic too, as id's cls.timedemo");
+        for cap in [0, 60, 120, 144, 240].map(FrameCap::new) {
+            assert_eq!(FrameGate::new(cap, false), FrameGate::Display(cap), "{cap:?}: the slop timing");
+        }
         assert_eq!(
-            [FrameGate::Classic, FrameGate::Timedemo, FrameGate::Display].map(FrameGate::stepping),
+            [FrameGate::Classic, FrameGate::Timedemo, FrameGate::Display(FrameCap::NONE)].map(FrameGate::stepping),
             [Stepping::Classic, Stepping::Classic, Stepping::Uncapped],
             "only the uncapped host steps the game as 72 Hz runs"
         );
@@ -539,7 +544,7 @@ mod tests {
             let (mut realtime, mut old, mut game) = (0.0f64, 0.0f64, 0.0f64);
             for _ in 0..hz as usize * 2 {
                 realtime += (1.0 / hz) as f32 as f64;
-                let f = FrameGate::Display.frame_time(realtime, &mut old);
+                let f = FrameGate::Display(FrameCap::NONE).frame_time(realtime, &mut old);
                 game += f.expect("uncapped: every refresh is a host frame");
             }
             assert!((game - realtime).abs() < 1e-4, "{hz} Hz: game {game} vs real {realtime}");
@@ -548,19 +553,20 @@ mod tests {
         // next call rather than running ahead of the clock (a timedemo's
         // frame is clamped up to 1 ms, as id's).
         let mut old = 0.0;
-        assert_eq!(FrameGate::Display.frame_time(0.5, &mut old), Some(HOST_FRAMETIME_MAX));
-        assert_eq!(FrameGate::Display.frame_time(0.5001, &mut old), None);
+        let display = FrameGate::Display(FrameCap::NONE);
+        assert_eq!(display.frame_time(0.5, &mut old), Some(HOST_FRAMETIME_MAX));
+        assert_eq!(display.frame_time(0.5001, &mut old), None);
         assert_eq!(FrameGate::Timedemo.frame_time(0.5001, &mut old), Some(HOST_FRAMETIME_MIN));
         assert_eq!(old, 0.5001);
     }
 
-    /// The 2026 profile in the frame: the game stepped as 72 Hz runs, the
+    /// The slop preset in the frame: the game stepped as 72 Hz runs, the
     /// renderer's Hor+ and hires with native resolution, the 2-D layer at a
-    /// whole scale, and the 2026 cross centred on the view, over the view and
+    /// whole scale, and the slop cross centred on the view, over the view and
     /// under the rest (the fade of the menu dims it); Classic is none of
     /// them.
     #[test]
-    fn the_2026_profile_steps_uncapped_scales_2d_and_draws_the_crosshair() {
+    fn the_slop_preset_steps_uncapped_scales_2d_and_draws_the_crosshair() {
         use quake_rs::render::FovMode;
         let video_cvars = || APP.with(|c| crate::vid::vid(c.borrow().as_ref().unwrap()).video);
         assert_eq!(boot(), 1);
@@ -569,8 +575,8 @@ mod tests {
         let stepping = || APP.with(|c| c.borrow().as_ref().unwrap().walk.as_ref().unwrap().stepping);
         assert_eq!(stepping(), Stepping::Classic);
         assert_eq!((video_cvars().fov_mode, video_cvars().hires, quake_rs::draw::scaled_2d()), (FovMode::Classic, false, false));
-        use_2026();
-        crate::vid::set_window(1600, 1000, 1.0);
+        use_slop();
+        crate::vid::set_window(1600, 1000);
         step(0.0);
         assert_eq!(stepping(), Stepping::Uncapped);
         assert_eq!((video_cvars().fov_mode, video_cvars().hires, quake_rs::draw::scaled_2d()), (FovMode::HorPlus, true, true));
@@ -583,12 +589,12 @@ mod tests {
         crate::host_cmd::execute_console_command("crosshair 0");
         step(0.0);
         let without = APP.with(|c| c.borrow().as_ref().unwrap().present.rgba());
-        // The view above the scaled status bar (the 2026 profile's viewsize
+        // The view above the scaled status bar (the slop preset's viewsize
         // 110: 24 rows x 5), id's in either layout: the world drawn under it
-        // beside the bar (2026's scr_sbaroverlay) leaves its centre where it
+        // beside the bar (slop's scr_sbaroverlay) leaves its centre where it
         // was.
         let viewsize = crate::vid::viewsize();
-        assert_eq!(viewsize, 110.0, "2026's own start");
+        assert_eq!(viewsize, 110.0, "slop's own start");
         let vrect = render::calc_refdef(w, h, viewsize, false, render::SbarLayout::Overlay).vrect;
         assert_eq!(vrect, render::calc_refdef(w, h, viewsize, false, render::SbarLayout::Classic).vrect);
         let (cx, cy) = (vrect.x + vrect.w / 2, vrect.y + vrect.h / 2);
@@ -609,19 +615,36 @@ mod tests {
         );
     }
 
+    /// `host_maxfps 0` runs a frame every refresh, `host_maxfps 72` id's gate
+    /// again, `host_maxfps 60` every second refresh of a 120 Hz display and
+    /// `144` every one; the retired `wasm_uncapped` (and the checks' bit 1)
+    /// set the two ends.
     #[test]
-    fn step_with_wasm_uncapped_runs_one_frame_per_refresh_and_off_restores_72() {
+    fn step_with_no_cap_runs_one_frame_per_refresh_and_72_restores_ids_gate() {
         assert_eq!(boot(), 1);
         close_menu();
         let walk_clock = || APP.with(|c| c.borrow().as_ref().unwrap().walk.as_ref().unwrap().clock);
         let second_at_144hz = || (0..144).map(|_| step(1.0 / 144.0)).sum::<i32>();
-        assert_eq!(second_at_144hz(), 72, "default: id's 72 fps cap");
-        crate::menu::set_extras(1);
+        assert_eq!(second_at_144hz(), 72, "Classic: id's 72 fps cap");
+        crate::host_cmd::execute_console_command("host_maxfps 0");
         let w0 = walk_clock();
-        assert_eq!(second_at_144hz(), 144, "wasm_uncapped: every refresh");
+        assert_eq!(second_at_144hz(), 144, "none: every refresh");
         assert!((walk_clock() - w0 - 1.0).abs() < 1e-3, "the world still advances 1 s a second");
+        crate::host_cmd::execute_console_command("host_maxfps 72");
+        assert_eq!(second_at_144hz(), 72, "72 again: id's gate is back");
+        let refreshes_at_120hz = || (0..120).map(|_| step(1.0 / 120.0)).collect::<Vec<i32>>();
+        crate::host_cmd::execute_console_command("host_maxfps 60");
+        let w0 = walk_clock();
+        let ran = refreshes_at_120hz();
+        assert_eq!(ran.iter().sum::<i32>(), 60, "60: every second refresh of 120 Hz");
+        assert!(ran.windows(2).all(|w| w[0] != w[1]), "evenly: {ran:?}");
+        assert!((walk_clock() - w0 - 1.0).abs() < 1e-3, "the world still advances 1 s a second");
+        crate::host_cmd::execute_console_command("host_maxfps 144");
+        assert_eq!(refreshes_at_120hz().iter().sum::<i32>(), 120, "a cap above the display: every refresh");
+        crate::host_cmd::execute_console_command("wasm_uncapped 1");
+        assert_eq!(second_at_144hz(), 144, "the old name: none");
         crate::menu::set_extras(0);
-        assert_eq!(second_at_144hz(), 72, "off again: the cap is back");
+        assert_eq!(second_at_144hz(), 72, "the checks' bit off: id's 72");
     }
 
     #[test]
@@ -647,9 +670,9 @@ mod tests {
         assert!(run(100.0, 3, 2)[60..].iter().all(|&f| f == 50), "the cap's 50 at 100 Hz");
     }
 
-    /// 2026's status bar overlay end to end, at 1920x1080 (pixel
+    /// slop's status bar overlay end to end, at 1920x1080 (pixel
     /// size 1, the 2-D layer at 5x, the bar 240 rows at id's viewsize 100 and
-    /// 120 at 2026's own 110) and a wide frame (1315x535, 2x, 96 and 48
+    /// 120 at slop's own 110) and a wide frame (1315x535, 2x, 96 and 48
     /// rows), on frozen frames of e1m1 in turn — id's, the
     /// overlay's twice, id's again: every pixel above the world under the
     /// view (the whole view, id's projection) is byte for byte id's; the bar
@@ -658,10 +681,10 @@ mod tests {
     /// it is id's frame). Then the same under water (the view in a water
     /// leaf, wobbled), where the wobble runs on into the corners.
     #[test]
-    fn the_2026_overlay_draws_the_world_beside_the_bar_and_leaves_every_view_pixel_as_it_was() {
+    fn the_slop_overlay_draws_the_world_beside_the_bar_and_leaves_every_view_pixel_as_it_was() {
         assert_eq!(boot(), 1);
         close_menu();
-        use_2026();
+        use_slop();
         let grab = || APP.with(|c| c.borrow().as_ref().unwrap().present.rgba());
         let frame = |on: bool| {
             crate::host_cmd::execute_console_command(if on { "scr_sbaroverlay 1" } else { "scr_sbaroverlay 0" });
@@ -697,16 +720,16 @@ mod tests {
                 in_water();
             }
             // Each at id's 100 (the bar and its inventory strip) and at the
-            // 2026 profile's own 110 (the bar alone).
+            // slop preset's own 110 (the bar alone).
             for (ww, wh, viewsize) in [(1920, 1080, 100.0), (1920, 1080, 110.0), (1315, 535, 100.0), (1315, 535, 110.0)] {
                 crate::host_cmd::execute_console_command(&format!("viewsize {viewsize}"));
-                crate::vid::set_window(ww, wh, 1.0);
+                crate::vid::set_window(ww, wh);
                 step(0.0);
                 let (w, h) = APP.with(|c| {
                     let b = c.borrow();
                     (b.as_ref().unwrap().render_w, b.as_ref().unwrap().render_h)
                 });
-                assert_eq!((w, h), (ww as usize, wh as usize), "Auto: one device pixel a pixel");
+                assert_eq!((w, h), (ww as usize, wh as usize), "1x: one device pixel a pixel");
                 let refdef = render::calc_refdef(w, h, viewsize, false, render::SbarLayout::Overlay);
                 let below = refdef.below.expect("the view stands on the bar");
                 let bar = render::status_bar_rect(w, h, refdef.sb_lines).expect("a bar");

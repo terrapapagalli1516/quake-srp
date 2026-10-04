@@ -129,6 +129,24 @@ AudioWorklet (audio thread): plays the sound ring, moves its clock
   kinds of device, both ways and the switches, with frames made slow on
   purpose (`stall_ms`, a bench build).
 
+  *The frame-rate cap* (`host_maxfps`, Picture and sound > Frame rate cap:
+  60, id's 72, 120, 144, 240, none) is the program's, on top of all this:
+  the page posts a tick every refresh whatever the cap, and the program
+  answers a tick with a frame only on the first refresh at least 1/cap
+  after the last frame (5% less, for a refresh's time a hair early;
+  `client::host::host_filter_time_capped`), with no frame otherwise — a
+  tick answered at once, which the pacing does not count as a frame's time.
+  So 60 on a 120 Hz panel is every second refresh, evenly; a cap above the
+  display's rate draws every refresh; one that does not divide it runs
+  below itself (60 on 144 Hz: every third, 48). The time of the refreshes
+  skipped goes to the next frame, so the game keeps time, and a tick the
+  relaxed pacing posts between refreshes draws no sooner. 72 is id's own
+  gate (`Host_FilterTime`, Classic's), none a frame every refresh. A touch
+  screen starts at 60, anywhere else at none. `verify_pacing.py` counts the
+  gaps through the page's own tick at 120 and 144 Hz, and in the page's
+  loop at 120 Hz (its refreshes from a 120 Hz clock: a headless browser's
+  are 60) on a touch screen, waited for and relaxed.
+
   *Measure to the swap, not to the draw call.* The page's latency probe
   (`quake.latency`, `latency.py`) stops at its own draw call, and a draw
   call can be early without the picture being: `web/swap_trace.py DEPLOY
@@ -196,7 +214,7 @@ round-trip tests; `wasi.js` and `index.html` carry the same constants.
 | 6 | AUDIO_READY | `ready u8`, `0 ×3`, `rate u32` (the AudioContext's sample rate; 0 none yet) |
 | 7 | CALL | `id u32`, then the UTF-8 line |
 | 8 | END | — (written by the host, not the page: "nothing more queued") |
-| 9 | WINDOW | `w u32`, `h u32`: the page's box for the picture in device pixels (its CSS size x `devicePixelRatio`; the whole screen in fullscreen), sent at start and on every resize; `dpr f32`: that `devicePixelRatio` (an older page sends none: read as 1) |
+| 9 | WINDOW | `w u32`, `h u32`: the page's box for the picture in device pixels (its CSS size x `devicePixelRatio`; the whole screen in fullscreen), sent at start and on every resize (a page may send its `devicePixelRatio` after them, `f32`, which the program does not read: a touch screen is the command line's `-touch`, "Settings") |
 | 10 | AUDIO_CLOCK | `pos u32`: the sound ring's play position, in sample pairs (wrapping); sent before every TICK |
 | 11 | AUDIO_WAKE | `pos u32`: the same, written by the host between ticks while the worklet plays: "mix now" |
 | 12 | PRESENT | `format u8`: how the page shows frames from now on (0 RGBA8, 1 INDEXED8; RGBA8 until it says). The page sends it before the first tick |
@@ -423,8 +441,9 @@ path; there is no `fd_readdir`); anything else a newer `std` imports answers
 - **Saves and settings go through `std::fs`.** `save s0` writes
   `id1/s0.sav` (`Host_Savegame_f`), the Load and Save menus list the slots
   from the files (`M_ScanSaves`, when they open), and `config.cfg` holds the
-  settings the id way (`config.rs`, `Host_WriteConfiguration`): the profile,
-  then the `bind` lines and archived cvars that differ from it, written when
+  settings the id way (`config.rs`, `Host_WriteConfiguration`): the preset,
+  then the `bind` lines and archived cvars that differ from its values on this
+  machine, written when
   one of them changes and exec'd at startup as quake.rc does. When a written file is closed, `wasi.js` sends it
   to the page, which keeps it in IndexedDB (`quake-rs`, store `files`, keyed
   by path) and hands every kept file back at the next start. Without
@@ -435,8 +454,8 @@ path; there is no `fd_readdir`); anything else a newer `std` imports answers
   `id1/<name>`, the settings as the `config.cfg` lines the program would have
   written — and removes the keys. A migrated `viewsize 100` was the old page's
   default, not a choice, so it is dropped like the other restated defaults
-  (`LEGACY_DEFAULTS`): that player gets the profile's own Screen size, 110 in
-  2026. Any other size is kept.
+  (`LEGACY_DEFAULTS`): that player gets the preset's own Screen size, 110 in
+  slop. Any other size is kept.
 - A storage failure after the fact (quota) is printed on the console with
   `echo`, since the program's write already succeeded.
 
@@ -731,30 +750,40 @@ asked for; the element's time, loop and level; the output's RMS) and the
 ## Settings, and how the page shows the picture
 
 Every setting is the program's (`quake_rs::settings`: id's cvars and key
-bindings, and the port's departures, which the profiles **Classic** and
-**2026** switch — the engine; the controls are the player's, the same in both,
-and `idcontrols` is the console's one step to id's own). The page needs three of them, and hears
-them in the `STATE` record:
+bindings, and the port's slop options, which the presets **Classic** and
+**slop** set; the controls are the same in both, and `idcontrols` is the
+console's one step to id's own). A few are numbers the machine picks once, at
+start, from the command line (`settings::Machine`): `-touch`, a coarse pointer
+(a phone or a tablet: 2x, at most four threads, a 60 fps cap in slop), and
+`-hwthreads N`, the threads offered (all of them elsewhere, at 1x and no cap).
+The page passes `-touch` from `touchScreen` (`commandLine`), the one test the
+touch controls and the pacing's lines (`pacing.scarceCores`) use too, so the
+three never disagree about a device. The page needs three settings, and
+hears them in the `STATE` record:
 
-- **Native resolution** (`vid_native`, 2026). The page sends its box for the
-  picture in device pixels and its `devicePixelRatio` (`WINDOW`); the
-  program renders the box divided by a whole pixel size (`vid_pixelsize`:
-  1..4, or Auto, the smallest that keeps the frame within a 1080p frame's
-  pixels per whole square root of the renderer's threads, from 2 on a
-  phone: a ratio of 2 or more in a box whose shorter side is at most 540 CSS
-  pixels, since a phone's cores are several times slower than a desktop's
-  and slow further as it warms) and says the size in `pixel_size`; the page makes the canvas exactly `W x pixel_size` device
+- **Native resolution** (`vid_native`, slop). The page sends its box for the
+  picture in device pixels (`WINDOW`); the program renders the box divided
+  by a whole pixel size (`vid_pixelsize` 1..4, the machine's to start with;
+  past what the threads build's memory holds, 12 million pixels a frame,
+  the next size up: "What 512 MiB holds"; and in a box so small that the
+  size would make a frame under id's 320x200, the next size down, so the
+  picture never outgrows its box) and says the size in
+  `pixel_size`; the page makes the canvas exactly `W x pixel_size` device
   pixels wide and `H x pixel_size` tall (`fitCanvas`), `image-rendering:
   pixelated`, so every picture pixel is a whole square of screen pixels at
   the box's own aspect (the view is Hor+: `fov_adapt`). Off (Classic), the
   picture is the video mode (`_vid_resolution`, Options > Video Options)
   in the largest 4:3 box the window fits, as before.
-- **Alt+Enter toggles fullscreen** (`vid_altenter`, on in both profiles; with
+- **Alt+Enter toggles fullscreen** (`vid_altenter`, on in both presets; with
   `idcontrols` the chord is id's ALT `+strafe` and ENTER `+jump`): "Fullscreen", below.
-- **The profile from the address.** `?classic` and `?2026` add `+profile
-  classic` / `+profile 2026` to the program's command line (`wasi.js` hands
-  it `args`), which quake.rc's `stuffcmds` runs after `config.cfg`: the same
-  switch as the menu's, so it sticks.
+- **The preset from the address.** `?classic` and `?slop` (or the older
+  `?2026`) add `-preset classic` / `-preset slop` to the program's command
+  line (`wasi.js` hands it `args`). After `config.cfg` the program applies
+  it only when it is not the preset the stored settings were last set to
+  (`sys.rs`, `address_preset`): a first visit to a bookmarked `?classic`
+  gets Classic, and the player's own changes on top of it — the controls
+  too — survive every reload. The console's `preset` (and a `+preset` on
+  the command line) applies every time.
 - **A mission pack from the address.** `?game=hipnotic` / `?game=rogue` add
   `-hipnotic` / `-rogue` to the command line — `COM_InitFilesystem`'s own
   flags (`quake-rs`'s `common.rs`): the program layers that pack's own game
@@ -769,9 +798,10 @@ them in the `STATE` record:
   id's own engine would.
 
 `verify_settings.py` checks all of it in the browser (the window filled
-with whole pixels at devicePixelRatio 1 and 2, `?classic`, the switch, the
-reload); the checks that pin id's behaviour open the page as `?classic`,
-and `bench.py` does too, so its frames hash as `quaketool play`'s.
+with whole pixels at devicePixelRatio 1 and 2, `?classic`, Reset to Classic
+and `preset slop`, the reload), `verify_touch.py` a touch screen's numbers;
+the checks that pin id's behaviour open the page as `?classic`, and
+`bench.py` does too, so its frames hash as `quaketool play`'s.
 
 ## Input
 
@@ -1356,10 +1386,10 @@ The page only plays what it paints.
   upright does the same (the game waits behind the rotate prompt, "Touch"):
   `awayNow()` is the hidden tab or that.
 
-**Classic and 2026.** The setting is `snd_modern` (`Cvars::sound`, a
-`quake_rs::snd::SoundMode`; Options > Classic / 2026 > Picture and sound >
+**Classic and slop.** The setting is `snd_modern` (`Cvars::sound`, a
+`quake_rs::snd::SoundMode`; Options > Slop Options > Picture and sound >
 "Full-rate sound"),
-a departure: off in the Classic profile, on in 2026. Classic
+a slop option: off in the Classic preset, on in slop. Classic
 is id's mixer as written (`Fixes::NONE`) at id's `desired_speed`, 11025 Hz,
 mixing id's 0.1 s ahead. The 2026 mixer (`Fixes::ALL`: the loop seam, exact
 resampling steps, the ambient ramp at any frame rate, `S_StopSound`'s range;
@@ -1606,10 +1636,27 @@ through every map of a game, each looked all the way round, in Chromium:
 id1 (pak0 and pak1) 64 MB at 1886×996 and 153 MB at 3806×2076 (4K, pixel
 size 1); Scourge of Armagon 68 and 153; Dissolution of Eternity 68 and 154
 (this round's research measured 46 MiB at 1280×720 and 152 MiB at a 4K
-window). So 512 MiB is three times what the largest frame the page's Auto
-pixel size makes needs (4K's worth of pixels at 16 threads); only a
-pixel size of 1 forced on a display past about 6K would not fit (8K, about
-500 MB, is the renderer's limit). It is half the threads build's old
+window). With 1x the default on a desktop since 2026-10-03, the program
+holds a frame to what the memory holds (`quake-wasm/src/vid.rs`,
+`MAX_FRAME_PIXELS`, 12 million pixels; past it the next pixel size, the
+player's own pick too). Measured the same way (shareware maps e1m1, e1m3,
+e1m4 and e1m7, 1x on 8 threads): a page started at a size holds about 26 MB
+and 19 bytes a pixel (1920x920 56 MB, 3840x2000 145, 5120x2720 286,
+6400x3440 437, 7680x4160 623: 8K at 1x does not fit). 4K and a 5120x2160
+ultrawide draw at 1x; 5K, 6K and 8K at 2x. A frame's buffers that grew with
+the window did not hand the old frame's memory to the next, larger one (a
+grown buffer moves, and the hole it leaves is too small for the next one):
+4800x2880 then 5120x3200 took 618 MB where a page started at 5120x3200 takes
+333, and on e1m3 a window walked up to 4224x2656 through 4, 6 and 17 sizes
+held 307, 284 and 282 MB where a page opened there held 188 — by an amount
+no setting bounded. So the threads build allocates every frame-sized buffer
+(the frame pool's, the z-buffer, a presented frame's RGBA) once, for the
+largest frame there is (`render::reserve_frames`, from `main`): every one is
+one size, a hole fits the next, and the same walks hold 202 MB from the first
+frame at any size to the end. The reserve is address space in a memory
+already made whole; only the pixels a frame writes are touched.
+`verify_present.py` walks a window up through sixteen sizes to the largest
+frame on the fixed build, the game never stopped. It is half the threads build's old
 maximum: a fixed memory is committed whole when it is made — free on Linux
 and Android until a page is touched (here the page's resident memory with it
 fixed is the growable build's: Chromium, all processes, 984 MB against 972 at
@@ -1620,18 +1667,18 @@ cleanly on the main thread — `memory allocation of N bytes failed`, then
 `std`'s abort — and the page shows "The game stopped: out of memory ...: a
 larger pixel size, in Video Options, needs less" (a 96 MiB build at 4K).
 
-**The renderer's threads** are the cvar `r_threads` (quake-wasm `App::
-render_threads`, the typed `quake_rs::render::Threads`): 0, the default,
-takes every thread the host offers (`-hwthreads`; a `wasm32-wasip1` build,
-without threads, gets 1) — four of them at most on a phone's screen
-(`vid::render_threads`; "On an Android phone", below, has the measurements and
-the why) —, n takes n. `host::step` hands the resolved count
-to the renderer of whichever game draws the frame, every frame, so each
+**The renderer's threads** are the cvar `r_threads`, a number (at least 1;
+0 reads as 1): the presets start it at the machine's — every thread the host
+offers (`-hwthreads`; a `wasm32-wasip1` build, without threads, gets 1), at
+most four on a touch screen (`settings::Machine::render_threads`; "On an
+Android phone", below, has the measurements and the why) — and `vid::render_threads`
+is where the frame reads it. `host::step` hands the count to the renderer of
+whichever game draws the frame, every frame, so each
 `Walk` and `DemoPlay` the host builds (a boot, a load, the attract loop's
 next demo) draws with it from its first frame. A spawn the host refuses
 (more threads asked than workers) leaves its bands to the threads that did
 start, so any count draws the frame. The `render_threads` call reports the
-resolved count. The RGBA pack runs on the same threads.
+count. The RGBA pack runs on the same threads.
 
 **Measured.** `threadcheck`'s rounds of seven scoped threads (a round:
 spawn, run, join) take 25 µs with the workers kept, against 214 µs when
@@ -1862,8 +1909,8 @@ for a release. Hidden where a pad key would be wrong: while the menu asks
 y or n (STATE 256) and while Customize controls waits for a key to bind
 (STATE 8, `BIND_GRAB`) — every other mode, and Classic too (a phone still
 has no keys). Help pages already take ◀▶ (id's `M_Help_Key`); the pad's
-presses reach them the same way, and the settings hub and its pages
-(Options > Classic / 2026) take OK, ▲▼ and ◀▶ as Options does — ◀▶ step
+presses reach them the same way, and Slop Options and its pages
+(Options' 14th row) take OK, ▲▼ and ◀▶ as Options does — ◀▶ step
 Torch flicker's slider — and BACK backs out a screen at a time; so does a
 gamepad's A, B and D-pad (`joy_menukeys`). Taps and drags on the menu are unchanged;
 the pad is in addition.
@@ -1939,8 +1986,8 @@ fullscreen and `screen.orientation.lock('landscape')` where the browser has
 them (Android; a fullscreen button stays while not fullscreen). During a game a
 Screen Wake Lock keeps the display on. Every touch resumes audio if the
 browser suspended it (iOS "interrupts" it in the background). When the
-page is hidden the audio is suspended, and with the touch controls on (not
-in Classic, where the game only stops getting ticks, as on a desktop) a
+page is hidden the audio is suspended, and with the touch controls on (in
+both presets; off by hand, the game only stops getting ticks, as on a desktop) a
 live game pauses (`pause`, id's plaque; STATE 512) under its menu; back in
 the game — the menu closed, by the player — the pause ends. Haptics:
 `QuakeTouch.rumble(weak, strong, ms)` takes the Gamepad API's dual-rumble
@@ -1948,10 +1995,14 @@ magnitudes and buzzes `navigator.vibrate` (Android; iOS Safari has none)
 for longer the stronger it is; nothing calls it yet — it is the hook for
 the `input` agent's gamepad rumble events (damage, heavy weapons).
 
-**Phones.** On an iPhone in landscape (844×390 CSS px, devicePixelRatio 3,
-so a 2532×1170 box) Auto picks a pixel size of 2 with the single-threaded
-build: a 1266×585 frame, 2×2 device pixels a picture pixel (0.67 CSS px,
-finer than the eye resolves at arm's length), and the scaled 2-D layer at
+**Phones.** *(As of 2026-09-26; since 2026-10-04 a touch screen's pixel size,
+threads and frame cap are the machine's numbers — 2x, at most four threads,
+60 — from the page's `-touch`: "Settings, and how the page shows the
+picture".)* On
+an iPhone in landscape (844×390 CSS px, devicePixelRatio 3, so a 2532×1170
+box) Auto picked a pixel size of 2 with the single-threaded build: a
+1266×585 frame, 2×2 device pixels a picture pixel (0.67 CSS px, finer than
+the eye resolves at arm's length), and the scaled 2-D layer at
 2×. What that costs, measured on a desktop, not on a phone
 (`bench.py --video modern`, one thread, headless Chromium on an 8-core desktop CPU
 under load 6, median page ms per frame, demo1 / walk_e1m1): 1266×585
@@ -1967,9 +2018,9 @@ Auto's budget grows with them (4 and up: twice the pixels), so a 6-core
 phone would get the 1×1 picture, 3.4× the pixels, drawn in equal row
 bands on unequal cores (a phone's efficiency cores take ~3× as long, and
 every band waits for the slowest): hotter and not smoother. For a phone,
-deploy the single-threaded build, or set `vid_pixelsize 2`. (Since then
-Auto starts a phone's screen at 2×2 whatever its threads, `vid.rs`'s
-`phone_sized`, and a phone has been measured: "On an Android phone", below.)
+deploy the single-threaded build, or set `vid_pixelsize 2`. (Since then a
+touch screen starts at 2×2 on four threads whatever it offers, the machine's
+numbers, and a phone has been measured: "On an Android phone", below.)
 iOS Safari: `SharedArrayBuffer` needs iOS 15.2 and https (the page says so
 when it is missing); rAF runs at 60 Hz (Safari's default even on 120 Hz
 screens), 30 Hz in Low Power Mode; Web Audio follows the silent switch;
@@ -2013,7 +2064,17 @@ frame at a pixel size of 1, 1320×540 at Auto's 2. `hardwareConcurrency` is
   At 2640×1080 there is nothing to hold: a frame is longer than the gate
   (58 shown either way), and a page that asks only every second refresh
   shows 33, since with the gaps the cores clock down and the same frame
-  takes 24.6 ms instead of 14–17.
+  takes 24.6 ms instead of 14–17. And id's gate is not an even 60 on the
+  phone's 120 Hz: its 1/72 s lands between refreshes, and the panel's
+  refreshes and the relaxed pacing's back-to-back asks come unevenly, so
+  in touch play it showed about 270 gaps of more than 20 ms in 45 s, the fast
+  core 3–5% busy (2026-10-04). Since then a touch screen starts at the
+  frame-rate cap's 60 (`host_maxfps`, a slop option: "A frame"), a frame on
+  the first refresh at least 1/60 s after the last — every second refresh
+  of a 120 Hz panel, evenly. Whether a held 60 at 2640×1080 (1x) is a better
+  touch default than 2x is for a phone run to say: `with.sh phone NAME --
+  uv run --with playwright web/phone.py DEPLOY --fullscreen --touch --px
+  2,1 --threads 4 --cvar host_maxfps=60,0 --secs 45 --cool 120`.
 
 Back to back (`timedemo demo1`), cool, 8 / 6 / 4 threads: 323 / 375 / 367
 fps at 1320×540; 148 / 162 / 155 at 2640×1080 with exact perspective; 182 /
@@ -2052,8 +2113,8 @@ frame's 99th percentile at 1320×540 goes from 16–24 ms to 8.5–8.9.
 - **What changed it.** On a touch screen the page no longer spins for a
   frame of most of a refresh or more ("A frame"): the spin sat on the fast
   core, 97–99% busy, while the game drew on the others. The upload's order ("Presentation"): 2.3 → 0.3 ms of the
-  main thread at 2640×1080. And **Auto draws a phone on four threads, not
-  eight** (`vid.rs`, `PHONE_AUTO_THREADS`): in touch play, 8 → 4 threads
+  main thread at 2640×1080. And **a phone draws on four threads, not
+  eight** (`settings::Machine::TOUCH_THREADS`): in touch play, 8 → 4 threads
   took 2640×1080 from 67 to 70–74 frames shown a second and the late ones
   from 116 to 41–76, and at 1320×540 the frame's 99th percentile from 20.7
   ms to 9.5 — the 20 ms hitches twice a second were a band's thread put
@@ -2063,12 +2124,15 @@ frame's 99th percentile at 1320×540 goes from 16–24 ms to 8.5–8.9.
   frame needs some of them for the page's own thread, the compositor, the
   GPU process and the sound; a phone's cores are of two or three kinds, of
   which four or five are fast on any current one; and every busy core is
-  heat, which is paid back in clock. So on a phone's screen (the test Auto's
-  pixel size already makes: `devicePixelRatio` 2 or more in a box whose
-  shorter side is at most 540 CSS px) Auto takes four of the threads
-  offered at most; with fewer offered, those. Any other screen — a
-  desktop, a laptop, a tablet — draws on every thread offered, as before,
-  and `r_threads N` is N anywhere. A rule with no device in it would be
+  heat, which is paid back in clock. So on a touch screen (`-touch`, the
+  page's coarse-pointer test: a phone, and a tablet too) the machine starts
+  `r_threads` at four of the threads offered at most; with fewer offered,
+  those. Any other machine — a desktop, a laptop, a tablet whose primary
+  pointer is fine — starts on every thread offered, and `r_threads N` is N
+  anywhere. (Until 2026-10-04 the test was the screen's: `devicePixelRatio`
+  2 or more in a box whose shorter side is at most 540 CSS px, which left a
+  tablet on every thread; one test of the device now decides the touch
+  controls, the pacing's lines and these numbers alike.) A rule with no device in it would be
   "half the threads offered": the same four here, and eight on this
   16-thread desktop, where eight and sixteen measure the same; but it would
   halve the threads of machines whose cores are all fast and unshared (an

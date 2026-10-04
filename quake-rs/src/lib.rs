@@ -7,9 +7,9 @@
 //! crate's `quaketool` runs it natively, and `quake-wasm` runs it in a
 //! browser as a WASI program.
 //!
-//! With every extra off (the Classic profile) it is id's game — frames, game
+//! With every extra off (the Classic preset) it is id's game — frames, game
 //! state and timing are checked against id's C (`oracle/`, the goldens, the
-//! census). The 2026 profile's departures are typed settings ([`cvar`],
+//! census). The slop preset's departures are typed settings ([`cvar`],
 //! [`settings`]), each one a switch.
 //!
 //! ## Layout
@@ -23,7 +23,7 @@
 //! | [`client`], [`demo`], [`particles`], [`tent`], [`dlight`], [`stepping`] | `cl_*.c`, `view.c`, `host.c` | the game client: the live frame, demos, effects, the host clock |
 //! | [`render`] | `r_*.c`, `d_*.c` | the software renderer |
 //! | [`draw`], [`screen`], [`sbar`], [`menu`], [`console`], [`keys`] | `draw.c`, `screen.c`, `sbar.c`, `menu.c`, `console.c`, `keys.c` | the 2-D layer and the keys |
-//! | [`cvar`], [`cmd`], [`settings`] | `cvar.c`, `cmd.c` | variables, commands, the Classic and 2026 profiles |
+//! | [`cvar`], [`cmd`], [`settings`] | `cvar.c`, `cmd.c` | variables, commands, the Classic and slop presets |
 //! | [`snd`], [`cd_audio`] | `snd_*.c`, `cd_win.c` | the sound mixer and the CD player |
 //! | [`math`], [`qrand`], [`read`], [`error`] | `mathlib.c` | math, the random streams, byte decoding, errors |
 //!

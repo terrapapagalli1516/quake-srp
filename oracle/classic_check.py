@@ -4,7 +4,7 @@
 # dependencies = []
 # ///
 """The proof of Classic: every check that the port, with every departure off
-(the Classic profile), is still id's WinQuake — in one command.
+(the Classic preset), is still id's WinQuake — in one command.
 
     uv run oracle/classic_check.py                 # everything (about a minute once built), a report
     uv run oracle/classic_check.py --only play,goldens
@@ -30,7 +30,7 @@ Two kinds of check:
     3-D rows (e1m1/2/3/7, world and entities) at the page's aspect: every
     row 100.00%;
   - `screen2d`: `screen2d.py`, id's composited 2-D layer at 320x200 and
-    640x400, the port in its Classic profile: no shot below its recorded
+    640x400, the port in its Classic preset: no shot below its recorded
     `2d exact%` (the known residues, oracle/README.md, are recorded);
   - `demolerp`: `demo_lerp.py`, id's client playing the attract loop (17,500
     frames: demo1, demo2, demo3, demo1 again) against the port's, frame by

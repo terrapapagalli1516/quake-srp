@@ -446,7 +446,7 @@ mod tests {
     fn load_keeps_every_option_and_binding() {
         use crate::menu::{menu_bind_key, menu_down, menu_right, menu_select, menu_up};
         assert_eq!(boot(), 1); // menu open on Main
-        crate::test_util::use_2026(); // Always Run on, to toggle off
+        crate::test_util::use_slop(); // Always Run on, to toggle off
         set_resolution(320, 200);
         // Options through the real menu exports: Brightness and Always Run.
         menu_down();

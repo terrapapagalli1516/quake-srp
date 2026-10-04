@@ -325,7 +325,7 @@ impl Server {
         self.vm.max_edicts()
     }
 
-    /// Raise (or restore) the edict ceiling — the 2026-only `sv_max_edicts`
+    /// Raise (or restore) the edict ceiling — the slop-only `sv_max_edicts`
     /// cvar's engine side. Call before [`Self::spawn_entities`] (this is
     /// `SV_SpawnServer` sizing `sv.edicts`, just with a port whose edict
     /// storage already grows on demand — see `crate::vm::Vm::set_max_edicts`

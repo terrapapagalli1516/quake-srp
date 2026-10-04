@@ -68,7 +68,7 @@ pub(crate) mod fixtures;
 pub use crate::console::{draw_console, draw_notify, Console};
 pub use crate::draw::conchars_pic;
 pub use crate::menu::{
-    draw_menu, draw_menu_over_console, ExtrasPage, Menu, MenuAction, MenuClock, MenuPics, MenuScreen, MenuSound, RowKind,
+    draw_menu, draw_menu_over_console, SlopPage, Menu, MenuAction, MenuClock, MenuPics, MenuScreen, MenuSound, RowKind,
     SettingRow,
     BIND_ATTACK, BIND_BACK, BIND_CENTERVIEW, BIND_CHANGEWEAPON, BIND_FORWARD, BIND_JUMP,
     BIND_LEFT, BIND_LOOKDOWN, BIND_LOOKUP, BIND_MOVEDOWN, BIND_MOVELEFT, BIND_MOVERIGHT,
@@ -96,7 +96,6 @@ pub use view::{
     viewmodel_fudge, viewmodel_origin_ofs,
 };
 pub use vis::point_in_leaf;
-pub use band::Threads;
 pub use sky::SkyScroll;
 pub use torch::TorchFlicker;
 pub use video::{FovMode, VideoCvars, HIRES_MAXHEIGHT, HIRES_MAXWIDTH, MAXHEIGHT, MAXWIDTH};
@@ -157,7 +156,7 @@ impl Image {
     /// pixel, so the clear would be wasted.
     pub(crate) fn reused_uncleared(w: usize, h: usize) -> Image {
         let mut pixels = take_spare_pixels();
-        pixels.resize(w.saturating_mul(h), 0);
+        resize_frame_buffer(&mut pixels, w.saturating_mul(h), 1, 0);
         Image { w, h, pixels }
     }
 
@@ -261,6 +260,38 @@ pub fn recycle_pixels(pixels: Vec<u8>) {
 /// A spare pixel buffer (old contents and all), or an empty one.
 pub(crate) fn take_spare_pixels() -> Vec<u8> {
     SPARE_PIXELS.with(|s| s.borrow_mut().pop()).unwrap_or_default()
+}
+
+thread_local! {
+    /// The pixels every frame-sized buffer is first allocated for
+    /// ([`reserve_frames`]); 0: each as large as its frame.
+    static FRAME_RESERVE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Allocate every frame-sized buffer this thread's frames use — the frame
+/// pool's, the z-buffer, a presented frame's RGBA — for `pixels` pixels the
+/// first time it is needed, so no frame of any size up to that moves one.
+/// For a host whose memory is fixed (quake-wasm's threads build: 512 MiB
+/// from the start). There a buffer that grows is moved, and the hole it
+/// leaves is too small for the next larger frame's, so a window walked up
+/// through many sizes took another frame's worth of memory at each new
+/// largest one, by an amount no setting bounds; reserved, every buffer is
+/// one size, a hole fits the next one, and a walk ends where a page opened
+/// at the largest size begins. A reserve is address space: only the
+/// pixels a frame writes are ever touched.
+pub fn reserve_frames(pixels: usize) {
+    FRAME_RESERVE.with(|r| r.set(pixels));
+}
+
+/// `v` at `len` elements, any new ones `fill` — first grown to
+/// [`reserve_frames`]' pixels (`per_pixel` elements each) when it is too
+/// small, so it moves once at most.
+pub(crate) fn resize_frame_buffer<T: Clone>(v: &mut Vec<T>, len: usize, per_pixel: usize, fill: T) {
+    if len > v.capacity() {
+        let reserve = FRAME_RESERVE.with(std::cell::Cell::get).saturating_mul(per_pixel);
+        v.reserve_exact(len.max(reserve) - v.len());
+    }
+    v.resize(len, fill);
 }
 
 // ---------------------------------------------------------------------------
@@ -1217,11 +1248,12 @@ impl Renderer {
             self.begin_map(first.world);
         }
         // The z-buffers, one after the other in one buffer as large as the
-        // largest frame drawn. It never shrinks: growing back would fill
-        // megabytes with zeros that the spans overwrite.
+        // largest frame drawn (or the host's reserve: `reserve_frames`). It
+        // never shrinks: growing back would fill megabytes with zeros that
+        // the spans overwrite.
         let pixels: usize = views.iter().map(|v| v.size().0.saturating_mul(v.size().1)).sum();
         if self.zbuf.len() < pixels {
-            self.zbuf.resize(pixels, 0);
+            resize_frame_buffer(&mut self.zbuf, pixels, 1, 0);
         }
         self.zlen = views[0].size().0.saturating_mul(views[0].size().1);
         // EXTRA (r_torchflicker): the steady torches, found the first frame
@@ -1716,6 +1748,37 @@ pub fn demo_room() -> Bsp {
 mod tests {
     use super::*;
     use crate::render::fixtures::{render_once, synthetic_liquid_pixels, synthetic_sky_pixels};
+
+    /// Under a reserve, a frame's buffers — the pool's, a presented frame's
+    /// RGBA — are allocated once for the reserve and never move as frames
+    /// grow up to it; past it, or with none, a buffer grows as its frame.
+    #[test]
+    fn a_reserve_allocates_frame_buffers_once() {
+        let sizes = [(640, 400), (1920, 1080), (2560, 1440), (3000, 2000)];
+        reserve_frames(3000 * 2000);
+        let mut frame = Image::reused_uncleared(320, 200);
+        let mut rgba = Vec::new();
+        let palette = FramePalette::new(&[[0, 0, 0]; 256], &[], &std::array::from_fn(|i| i as u8));
+        let at = (frame.pixels.as_ptr().addr(), {
+            pack_rgba(&frame, &palette, &mut rgba, 1);
+            rgba.as_ptr().addr()
+        });
+        for (w, h) in sizes {
+            recycle_image(frame);
+            frame = Image::reused_uncleared(w, h);
+            pack_rgba(&frame, &palette, &mut rgba, 1);
+            assert_eq!((frame.pixels.as_ptr().addr(), rgba.as_ptr().addr()), at, "{w}x{h}: neither moved");
+            assert_eq!((frame.pixels.len(), rgba.len()), (w * h, w * h * 4));
+        }
+        frame = Image::reused_uncleared(4000, 2000);
+        assert_eq!(frame.pixels.len(), 4000 * 2000, "past the reserve: as large as the frame");
+        reserve_frames(0);
+        let mut v = Vec::new();
+        resize_frame_buffer(&mut v, 100, 4, 0u8);
+        assert_eq!(v.capacity(), 100, "no reserve: as large as the frame");
+        recycle_image(frame);
+        while take_spare_pixels().capacity() > 0 {}
+    }
 
     #[test]
     fn palette_parsing() {

@@ -40,7 +40,7 @@ fn the_nailguns_barrels_end_where_nailbarrels_says() {
     }
 }
 
-/// One of the 2026 picture's placements of the gun: Screen size, the wider
+/// One of the slop picture's placements of the gun: Screen size, the wider
 /// view, the status bar overlay.
 #[derive(Clone, Copy, Debug)]
 struct Look {

@@ -145,7 +145,7 @@ impl FramePalette {
 pub fn pack_rgba(image: &Image, palette: &FramePalette, out: &mut Vec<u8>, threads: usize) {
     let (w, h) = (image.w, image.h);
     let n = w.saturating_mul(h).min(image.pixels.len());
-    out.resize(n * 4, 255);
+    super::resize_frame_buffer(out, n * 4, 4, 255);
     super::band::map_rows(threads, h, out, w * 4, &image.pixels[..n], w, |out, pixels| {
         for (o, &px) in out.chunks_exact_mut(4).zip(pixels) {
             o.copy_from_slice(&palette.0[usize::from(px)]);

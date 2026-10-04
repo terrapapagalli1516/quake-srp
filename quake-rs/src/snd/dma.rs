@@ -87,7 +87,7 @@ const AMBIENT_MAX_FRAME: f64 = 0.1;
 // ---------------------------------------------------------------------------
 
 /// What the default mixer repairs in id's. Classic is [`Fixes::NONE`]; the
-/// 2026 default is [`Fixes::ALL`]. None of them changes the character of the
+/// slop default is [`Fixes::ALL`]. None of them changes the character of the
 /// sound: the samples stay 8-bit and point-resampled, the spatialization and
 /// attenuation stay id's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,7 +118,7 @@ pub struct Fixes {
 impl Fixes {
     /// id's mixer as written: Classic.
     pub const NONE: Fixes = Fixes { loop_seam: false, exact_resample: false, ambient_steps: false, stop_range: false };
-    /// Every fix: the 2026 default.
+    /// Every fix: the slop default.
     pub const ALL: Fixes = Fixes { loop_seam: true, exact_resample: true, ambient_steps: true, stop_range: true };
 }
 
@@ -129,7 +129,7 @@ impl Default for Fixes {
 }
 
 /// Which mixer the player hears: the typed setting a platform (and the
-/// settings' profiles) choose with. Each mode is a rate, a set of [`Fixes`]
+/// settings' presets) choose with. Each mode is a rate, a set of [`Fixes`]
 /// and a mix-ahead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SoundMode {
@@ -138,14 +138,14 @@ pub enum SoundMode {
     /// device, as a sound card's DAC and output filter did), mixing
     /// `_snd_mixahead`'s default 0.1 s ahead.
     Classic,
-    /// The 2026 mixer: [`Fixes::ALL`], at the device's own rate (id's
+    /// The slop mixer: [`Fixes::ALL`], at the device's own rate (id's
     /// algorithms at `-sspeed` rate: point-resampled 8-bit samples, id's
     /// spatialization), mixing [`MODERN_MIXAHEAD`] ahead.
     #[default]
     Modern,
 }
 
-/// The 2026 mixer's `_snd_mixahead`: how far ahead of the device it mixes.
+/// The slop mixer's `_snd_mixahead`: how far ahead of the device it mixes.
 /// A sound starts this long after its frame at the least (plus the device's
 /// own output latency). It must outlast the time between two host frames
 /// plus the device's callback, or the device runs dry: 50 ms holds at 30 fps

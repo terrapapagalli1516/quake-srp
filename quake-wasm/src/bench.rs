@@ -72,7 +72,7 @@ pub(crate) fn write_values(_out: &mut impl std::io::Write) -> std::io::Result<()
 }
 
 /// Hold the host frame about to run late, on purpose: a `verify_*.py`'s way
-/// to prove the 2026 mixer's lead adapts to a slow frame
+/// to prove the slop mixer's lead adapts to a slow frame
 /// (`quake-wasm/src/snd_dma.rs`'s `adapt_modern_ahead`). Chromium's CPU
 /// throttle (`Emulation.setCPUThrottlingRate`) reaches the page's main
 /// thread, not a Worker's, so there is no way from outside the program to

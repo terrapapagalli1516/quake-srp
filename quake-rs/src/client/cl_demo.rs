@@ -538,7 +538,7 @@ fn lerp_angles(from: [f32; 3], to: [f32; 3], frac: f32) -> [f32; 3] {
 /// `U_NOLERP` entity is drawn where the message put it in the frame that
 /// reads it, and lerps from the message before in the frames after — id's
 /// monsters (`U_NOLERP`) jump a message ahead for one frame and fall back.
-/// With [`LerpMove::Smooth`] (the 2026 extra) they glide instead.
+/// With [`LerpMove::Smooth`] (the slop extra) they glide instead.
 fn cl_relink_entities(d: &mut DemoPlay, frac: f32, first_read: usize, lerpmove: LerpMove) {
     let frames = &d.demo.frames;
     let f = &frames[d.idx];
@@ -579,7 +579,7 @@ fn cl_relink_entities(d: &mut DemoPlay, frac: f32, first_read: usize, lerpmove: 
     for e in &f.entities {
         let mut drawn = *e;
         if smooth && e.step && e.num >= 0 {
-            // r_lerpmove (the 2026 extra): a monster is relinked where its
+            // r_lerpmove (the slop extra): a monster is relinked where its
             // message put it (no U_NOLERP jump back), and glides from step
             // to step where it is drawn.
             let glide = d.glides.draw(e.num, e.modelindex, e.origin, e.angles, d.time);
@@ -674,7 +674,7 @@ fn render_demo_frame(
     for e in v.entities.iter() {
         if let Some(Some(mdl)) = d.models.get(e.modelindex) {
             let frame = e.frame.max(0) as usize;
-            // r_lerpmodels (the 2026 extra): blend this entity's animation,
+            // r_lerpmodels (the slop extra): blend this entity's animation,
             // like the live walk (`cl_main::walk_frame`); a static (`e.num <
             // 0`) never gets a new frame, so nothing to blend.
             let blend = if smooth_frames && e.num >= 0 {
@@ -982,7 +982,7 @@ fn render_demo_frame(
     // straight into it — or, submerged, into the warp buffer and then
     // D_WarpScreen'd over the rectangle while it wobbles: the warp applies to
     // the 3-D view FIRST; the content tint joins the deferred whole-screen
-    // blend below (V_UpdatePalette order). 2026's status bar overlay goes on
+    // blend below (V_UpdatePalette order). slop's status bar overlay goes on
     // drawing the world under the view, as live play does.
     let backtile = backtile_for(&vrect, render_w, render_h, d.gfx_wad.as_ref());
     let mut img = render::screen_with_backtile(vrect, render_w, render_h, backtile.as_ref());
@@ -1003,7 +1003,7 @@ fn render_demo_frame(
     // not over an intermission or finale, which id's GLQuake leaves it off
     // (gl_screen.c's SCR_UpdateScreen draws it only outside them): WinQuake
     // draws it there too, over the level's stats, with nothing to aim at.
-    // (`crosshair` is a 2026 setting; Classic draws none.)
+    // (`crosshair` is a slop setting; Classic draws none.)
     if f.intermission == 0 {
         render::draw_crosshair(&mut img, d.crosshair, d.conchars.as_ref(), &vrect);
     }
@@ -1402,7 +1402,7 @@ mod tests {
     }
 
     /// With `r_lerpmove` the same monster glides forward every frame
-    /// instead (the 2026 extra; `client::lerpmove`).
+    /// instead (the slop extra; `client::lerpmove`).
     #[test]
     fn with_lerpmove_a_nolerp_entity_glides() {
         let step = |time: f32, x: f32, prev_x: f32| DemoFrame {

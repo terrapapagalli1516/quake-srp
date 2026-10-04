@@ -262,7 +262,7 @@ const RUNAWAY: u32 = 100_000;
 /// a `run_error` from the QuakeC-reachable `PF_Spawn` (via [`Vm::spawn_checked`])
 /// so a runaway `spawn()` loop fails cleanly instead of growing memory unbounded.
 /// id's own number, and [`Vm::classic`][Vm]'s ceiling — in Classic this is
-/// still the only ceiling there is. In 2026 the `sv_max_edicts` cvar
+/// still the only ceiling there is. In slop the `sv_max_edicts` cvar
 /// ([`Vm::set_max_edicts`]) can raise the live ceiling past it (never below:
 /// see [`MAX_EDICTS_LIMIT`]).
 pub const MAX_EDICTS: usize = 600;
@@ -410,7 +410,7 @@ pub struct Vm {
     /// happened, until a harness resumes it ([`Vm::reset_execution`]).
     halted: Option<ProgramError>,
     /// The live `ED_Alloc` ceiling [`Vm::spawn_checked`] enforces: id's
-    /// [`MAX_EDICTS`] (600) unless a 2026-only extra raised it
+    /// [`MAX_EDICTS`] (600) unless a slop-only extra raised it
     /// ([`Vm::set_max_edicts`], the `sv_max_edicts` cvar). Never below
     /// [`MAX_EDICTS`] — this is a departure that only ever gives QuakeC more
     /// room, never less, so Classic's ceiling is untouched.
@@ -987,7 +987,7 @@ impl Vm {
 
     /// `ED_Alloc` with id's hard [`MAX_EDICTS`] ceiling (the C
     /// `Sys_Error("ED_Alloc: no free edicts")`) — [`Self::max_edicts`] in
-    /// 2026, where the `sv_max_edicts` cvar may have raised it past id's 600
+    /// slop, where the `sv_max_edicts` cvar may have raised it past id's 600
     /// (never below: [`Self::set_max_edicts`]). Reuses a slot like
     /// [`Self::spawn`], else grows — but returns `None` once the array is
     /// already at the ceiling, so the QuakeC-reachable `PF_Spawn` surfaces a
@@ -2286,7 +2286,7 @@ mod tests {
 
     #[test]
     fn set_max_edicts_raises_or_restores_the_ed_alloc_ceiling() {
-        // The 2026-only sv_max_edicts extra: spawn_checked (PF_Spawn) holds at
+        // The slop-only sv_max_edicts extra: spawn_checked (PF_Spawn) holds at
         // id's MAX_EDICTS until raised, then holds at the raised ceiling too
         // (room for a map past 600 edicts; none id or the packs shipped is).
         let mut b = Builder::new();

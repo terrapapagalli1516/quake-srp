@@ -629,7 +629,7 @@ mod tests {
             (160..320).any(|x| with_overlay.pixels[y * 320 + x] != without_overlay.pixels[y * 320 + x])
         });
         assert!(region_differs, "the intermission overlay painted the stats region");
-        // The crosshair (2026's `crosshair 1`) stays off the level-complete
+        // The crosshair (slop's `crosshair 1`) stays off the level-complete
         // screen, as id's GLQuake leaves it: the frozen frame is the same with
         // it on or off — and out of the intermission it does draw.
         let crosshair_changes = |intermission: u8| {

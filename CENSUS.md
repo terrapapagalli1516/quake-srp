@@ -98,7 +98,7 @@ Engineering, not faithfulness: `Vm::intern` never de-duplicates (every `setmodel
 
 *Settled on 2026-09-26 (`q26/settings`). Each is a setting of the 2026 profile:
 `freelook`, the WASD bindings, `vid_altenter` (`vid_fkey` until 2026-10-02), `cl_jumpswim`. Classic has none of them
-(`AUDIT.md`, "The profiles and the departures").*
+(`AUDIT.md`, "The slop options and the presets").*
 
 The rule: faithful by default, Always Run the only default departure. These are
 deliberate, documented in code, and each needs the user's decision (make opt-in,

@@ -356,7 +356,7 @@ mod tests {
         assert!((s2.lightstyle_scales(0.0, LerpLightStyles::Classic)[1] - 1.0).abs() < 1e-6, "new server style 1 normal");
     }
 
-    // ------------------------------------------- r_lerplightstyles (the 2026 extra)
+    // ------------------------------------------- r_lerplightstyles (the slop extra)
 
     /// world.qc's worldspawn: id's twelve animated patterns, styles 0..=11
     /// (style 63, "a", is its test slot).

@@ -232,15 +232,15 @@ with sync_playwright() as p:
     moved = pg2.evaluate("quake.kept('id1/migrated.sav')") == saved_text
     cfg = pg2.evaluate("quake.kept('id1/config.cfg')") or ""
     left = pg2.evaluate("Object.keys(localStorage).filter(k => k.startsWith('quake-rs.'))")
-    settings = pg2.evaluate("""Promise.all([quake.text('profile'), quake.text('cvar', '_vid_resolution'),
+    settings = pg2.evaluate("""Promise.all([quake.text('preset'), quake.text('cvar', '_vid_resolution'),
         exp.viewsize(), exp.extras()])""")
     print(f"migration: save moved {moved}; config.cfg {cfg.splitlines()[1:]}; keys left {left}; settings {settings}")
     if not (moved and "_vid_resolution" in cfg and "640x400" in cfg and "wasm_showfps" in cfg and not left):
         fails.append("the localStorage saves and settings were not moved into the game directory")
     # The player's choices kept (the mode, a Screen size of 80 that is not
-    # the old default 100, Show FPS), and the 2026 defaults the old page's
-    # file restated as off (uncapped 1, scaled 2-D 8; the span is 8, which
-    # is not the extras' exact bit 4) on: extras 11.
+    # the old default 100, Show FPS), and the slop values the old page's
+    # file restated as off (no cap 1, scaled 2-D 8; the span is 8, which is
+    # not the extras' exact bit 4) on: extras 11.
     if settings[1:] != ["640x400", 80, 11]:
         fails.append(f"the migrated settings did not apply: {settings}")
     boot_walk(pg2)

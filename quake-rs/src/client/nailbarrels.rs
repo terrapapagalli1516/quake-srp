@@ -1,5 +1,5 @@
-//! `r_nailbarrels`: the nailgun's nails are drawn leaving its barrels — the
-//! port's 2026 extra. No id file ports here: id's client draws a nail where
+//! `r_nailbarrels`: the nailgun's nails are drawn leaving its barrels — a
+//! slop option. No id file ports here: id's client draws a nail where
 //! the server has it ([`NailBarrels::Classic`]).
 //!
 //! **Why.** id's QuakeC launches the player's nail from

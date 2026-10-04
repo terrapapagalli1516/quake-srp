@@ -27,11 +27,13 @@ the reason: 3's stick, look, two thumbs, FIRE and JUMP, 2b's held arrow
      with YES / NO buttons; BACK backs out. The menu pad (▲▼◀▶, OK): shown
      only in menu mode, clear of the menu's own layout at three phone
      sizes; the arrows move the cursor and step a slider (held, several
-     notches), OK enters a submenu, Help's pages turn; the settings hub and
-     its pages as Options (OK opens the hub and Motion and light, ◀▶ step
+     notches), OK enters a submenu, Help's pages turn; Slop Options and its
+     pages as Options (OK opens Slop Options and Motion and light, ◀▶ step
      its Torch flicker slider, BACK backs out a screen at a time:
      verify_touch_settings.png); hidden while the menu asks y/n and while
-     Customize controls grabs a key.
+     Customize controls grabs a key. Options' Reset to Classic and Reset to
+     slop ask first, and YES and NO answer them; Reset to Classic keeps the
+     touch controls on.
   3. Play: the left stick walks (the player moves), a drag on the right
      turns the view, FIRE shoots (a shell spent), JUMP jumps, WEAPON cycles
      (shotgun to axe), MENU opens the menu.
@@ -47,7 +49,8 @@ the reason: 3's stick, look, two thumbs, FIRE and JUMP, 2b's held arrow
   12. A page that loads upright: the prompt is up, not a tick or a window
      size sent, the start prompt takes no tap; turned sideways it starts,
      fills the screen and answers a tap.
-  6. Classic (in_touch off): no game controls, the menu still a tap away.
+  6. Classic keeps the game controls; `in_touch 0` hides them, the menu
+     still a tap away.
   7. Offline: every file kept by the service worker; with the server gone,
      a reload plays from the cache.
   8. Any static host: served with no isolation headers, the page reloads
@@ -488,30 +491,54 @@ def main():
         pg.keyboard.press("Escape")                         # back to Options
         check("back on Options", wait("quake.state.menuScreen === 5"), str(screen_id()))
 
-        # The settings hub and its pages (Options > Classic / 2026) take the
-        # pad as Options does: OK opens the hub and a page, ◀▶ step a page's
+        # Slop Options and its pages (Options' 14th row) take the pad as
+        # Options does: OK opens Slop Options and a page, ◀▶ step a page's
         # slider (Torch flicker), BACK backs out a screen at a time.
-        goto_row(13)                                        # Classic / 2026
+        goto_row(13)                                        # Slop Options
         pad_tap("#tPadOk")
-        check("OK on Classic / 2026 opens the settings hub", wait("quake.state.menuScreen === 10"), str(screen_id()))
-        goto_row(2)                                         # Motion and light
+        check("OK on Slop Options opens it", wait("quake.state.menuScreen === 10"), str(screen_id()))
+        goto_row(1)                                         # Motion and light
         pad_tap("#tPadOk")
         check("OK on Motion and light opens its page", wait("quake.state.menuScreen === 13"), str(screen_id()))
         goto_row(5)                                         # Torch flicker: a slider row
         torch = lambda: pg.evaluate("quake.text('cvar', 'r_torchflicker')")
         t0 = torch()
         pad_tap("#tPadRight")
-        check("the pad's RIGHT steps the torch slider (2026's 1, a step)", (t0, torch()) == ("1", "1.2"), f"{t0} -> {torch()}")
+        check("the pad's RIGHT steps the torch slider (slop's 1, a step)", (t0, torch()) == ("1", "1.2"), f"{t0} -> {torch()}")
         pad_tap("#tPadLeft")
         pad_tap("#tPadLeft")
         check("...and LEFT steps it back down", torch() == "0.8", torch())
         pg.screenshot(path=os.path.join(WEB, "verify_touch_settings.png"))
         call("exec r_torchflicker 1")
         tap_el("#tBack")
-        check("BACK: the hub, on the page's row", wait("quake.state.menuScreen === 10") and cursor() == 2,
+        check("BACK: Slop Options, on the page's row", wait("quake.state.menuScreen === 10") and cursor() == 1,
               f"{screen_id()} {cursor()}")
         tap_el("#tBack")
         check("BACK: Options again", wait("quake.state.menuScreen === 5"), str(screen_id()))
+
+        # Options' two resets ask first, and the phone's YES and NO answer
+        # them (the y and n keys): NO keeps everything; YES to Reset to
+        # Classic sets every slop option to Classic's, and the touch
+        # controls stay (Classic must not leave a phone unplayable).
+        preset = lambda: pg.evaluate("quake.text('preset')")
+        call("exec r_torchflicker 1.4")                     # a slop option, changed
+        goto_row(14)                                        # Reset to Classic
+        pad_tap("#tPadOk")
+        check("Reset to Classic asks: YES and NO", wait("quake.state.flags & 256") and shown("#tYes") and shown("#tNo"))
+        tap_el("#tNo")
+        check("NO: nothing reset", wait("!(quake.state.flags & 256)") and preset() == "slop"
+              and pg.evaluate("quake.text('cvar', 'r_torchflicker')") == "1.4")
+        pad_tap("#tPadOk")
+        wait("quake.state.flags & 256")
+        tap_el("#tYes")
+        check("YES: the Classic preset, the menu on Options", wait("!(quake.state.flags & 256)") and preset() == "classic"
+              and pg.evaluate("quake.text('cvar', 'r_torchflicker')") == "0" and screen_id() == 5, preset())
+        check("...and the touch controls still on (STATE 128)", wait("quake.state.flags & 128"), str(flags()))
+        goto_row(2)                                         # Reset to slop
+        pad_tap("#tPadOk")
+        check("Reset to slop asks: YES and NO", wait("quake.state.flags & 256") and shown("#tYes"))
+        tap_el("#tYes")
+        check("YES: the slop preset again", wait("!(quake.state.flags & 256)") and preset() == "slop", preset())
 
         # Help pages (id's M_Help_Key) take the pad's ◀▶ too.
         pg.keyboard.press("Escape")                         # back to Main
@@ -634,15 +661,24 @@ def main():
             touches("touchEnd", [])
         time.sleep(0.3)
 
-        # --- 6. Classic ----------------------------------------------------------
+        # --- 6. Classic, and the touch controls off by hand ---------------------
+        # The Classic preset keeps them (input, not engine: a phone stays
+        # playable); `in_touch 0` turns them off, and the menu stays a tap
+        # away. (`profile`, the preset's old name, still runs it.)
         call("exec profile classic")
-        check("Classic: no game controls, MENU still there",
+        check("Classic: the game controls stay (mode play)",
+              wait("document.getElementById('touch').dataset.mode === 'play'") and shown("#tMenu") and shown("#tFire"))
+        call("exec in_touch 0")
+        deadline = time.time() + 5
+        while shown("#tFire") and time.time() < deadline:
+            time.sleep(0.05)
+        check("in_touch 0: no game controls (mode game), MENU still there",
               wait("document.getElementById('touch').dataset.mode === 'game'") and shown("#tMenu") and not shown("#tFire"))
         tap_el("#tMenu")
-        check("Classic: the menu is a tap away", wait("quake.state.flags & 1"))
+        check("...the menu is a tap away", wait("quake.state.flags & 1"))
         tap_menu(160, 82)
-        check("Classic: its menu taps", wait("quake.state.menuScreen === 5"))
-        call("exec profile 2026")
+        check("...its menu taps", wait("quake.state.menuScreen === 5"))
+        call("exec in_touch 1; preset slop")
 
         # --- 6b. The menu pad clears the menu's own layout ------------------------
         # PLATFORM.md "The menu pad": off to the right of the menu's centred
@@ -650,8 +686,8 @@ def main():
         # MENU_POINT above does): the left edge of `#tMenuPad`'s box must
         # never land inside it, at any of the three phone sizes checked.
         # (Classic's own menu tap above left the menu open, on Options, and
-        # switching profile does not close it — still true here.)
-        check("2026 again, the menu is still open on Options", wait("quake.state.menuScreen === 5"), str(screen_id()))
+        # applying a preset does not close it — still true here.)
+        check("slop again, the menu is still open on Options", wait("quake.state.menuScreen === 5"), str(screen_id()))
         MENU_EDGE_JS = """async () => {
           const [W, H] = quake.size();
           const scaled = await exp.scaled_2d();
