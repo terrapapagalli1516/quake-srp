@@ -27,7 +27,14 @@ does not wait for a slow one; where the line lies depends on the device:
   9. `?wait` in the address: slow frames are waited for too;
   10. the page takes a touch screen for one (`?touch`; an emulated phone in
       Chromium), and a desktop for none;
-  11. no console errors.
+  11. the frame-rate cap (`host_maxfps`): through the page's own tick, 60
+      against a 120 Hz refresh is every second refresh, evenly (the gaps
+      counted), and every third at 144 Hz; a cap above the refresh does
+      nothing; 72 is id's gate (every second refresh at 144 Hz and at 120).
+      Then the page's loop at 120 Hz (its refreshes come from a 120 Hz clock:
+      a headless browser's are 60): a touch screen starts at 60 and draws
+      every second refresh, waited for or relaxed; 144 draws every refresh;
+  12. no console errors.
 
 `stall_ms` makes a host frame slow on demand and exists only in a
 `--features bench` build (verify_audio_resilience.py says why and how to
@@ -73,9 +80,44 @@ WINDOW = """(secs) => new Promise(done => {
     const L = quake.live; quake.live = null;
     const S = L.filter(x => x.shown);
     done({ refreshes: L.length, shown: S.length, waits: L.map(x => x.wait), turns: S.map(x => x.turn),
-           relaxed: L.filter(x => x.relaxed).length, refresh: quake.pacing.refresh });
+           relaxed: L.filter(x => x.relaxed).length, refresh: quake.pacing.refresh, drew: L.map(x => x.shown) });
   }, secs * 1000);
 })"""
+
+# The refreshes of a 120 Hz panel: the page's requestAnimationFrame answered
+# on an exact 8.33 ms grid (every callback asked for before a refresh runs at
+# it, with its time; never two at one), where a headless browser's own run
+# at 60 Hz.
+REFRESH_120 = """(() => {
+  const period = 1000 / 120;
+  let queue = [], timer = null, last = 0;
+  window.requestAnimationFrame = cb => {
+    queue.push(cb);
+    if (timer === null) {
+      const now = performance.now(), at = Math.max(last + period, (Math.floor(now / period) + 1) * period);
+      timer = setTimeout(() => { const q = queue; queue = []; timer = null; last = at; for (const f of q) f(at); },
+                         Math.max(0, at - now));
+    }
+    return queue.length;
+  };
+})();"""
+
+# `n` ticks of `dt` through the page's own tick (its loop paused): which
+# ones drew a frame, after `warm` ticks for the cap to take.
+TICKS = """async ([n, dt, warm]) => {
+  quake.pause();
+  await new Promise(r => setTimeout(r, 50));
+  for (let i = 0; i < warm; i++) quake.tick(dt);
+  const drew = [];
+  for (let i = 0; i < n; i++) drew.push(quake.tick(dt).presented);
+  quake.resume();
+  return drew;
+}"""
+
+def gaps(drew):
+    """The refreshes between one frame and the next."""
+    at = [i for i, d in enumerate(drew) if d]
+    return [b - a for a, b in zip(at, at[1:])]
 
 # Twelve key presses, and the frames drawn meanwhile: each key's time to the
 # draw of the frame that consumed it, and every frame's own time.
@@ -91,7 +133,7 @@ KEYS = """async () => {
   return { lat, turns: L.filter(x => x.shown).map(x => x.turn) };
 }"""
 
-def boot(pg, query="?2026"):
+def boot(pg, query="?slop"):
     pg.goto(f"http://127.0.0.1:{PORT}/index.html{query}", wait_until="load")
     pg.wait_for_function("window.quake && quake.ready && quake.firstFrameAt > 0", timeout=120000)
     pg.evaluate("document.getElementById('overlay').click()")   # the first gesture
@@ -143,7 +185,7 @@ def keys(pg, name):
 with sync_playwright() as p:
     br = isolated.launch(p, ["--no-sandbox", "--autoplay-policy=no-user-gesture-required"])
     errs = []
-    def page(init=None, query="?2026", **context):
+    def page(init=None, query="?slop", **context):
         ctx = br.new_context(**{"viewport": {"width": 820, "height": 560}, **context})
         if init:
             ctx.add_init_script(init)
@@ -233,16 +275,56 @@ with sync_playwright() as p:
     always_waits("no Atomics.waitAsync", page("Atomics.waitAsync = undefined;"))
 
     # 9. ?wait: the old way by choice.
-    always_waits("?wait", page(query="?2026&wait"))
+    always_waits("?wait", page(query="?slop&wait"))
 
     # 10. A touch screen is taken for one.
-    pg = page(query="?2026&touch")
+    pg = page(query="?slop&touch")
     check("?touch: taken for a touch screen", pg.evaluate("quake.pacing.scarceCores") is True)
     pg.context.close()
     if CHROMIUM:
         pg = page(viewport={"width": 844, "height": 390}, device_scale_factor=3, is_mobile=True, has_touch=True)
         check("an emulated phone: taken for a touch screen", pg.evaluate("quake.pacing.scarceCores") is True)
         pg.context.close()
+
+    # 11. The frame-rate cap. Exactly, through the page's own tick.
+    pg = page()
+    def cadence(name, cap, hz, every):
+        pg.evaluate(f"quake.callLine('exec host_maxfps {cap}')")
+        g = gaps(pg.evaluate(TICKS, [int(hz) * 2, 1 / hz, 8]))
+        check(f"{name}: every {['', '', 'second ', 'third '][every] if every > 1 else ''}refresh, evenly",
+              len(g) >= int(hz) * 2 // every - 2 and all(x == every for x in g),
+              f"host_maxfps {cap} at {hz} Hz: {len(g) + 1} frames in {int(hz) * 2} refreshes, gaps {sorted(set(g))}")
+    cadence("60 against 120 Hz", 60, 120.0, 2)
+    cadence("60 against 144 Hz (48 a second: 60 does not divide 144)", 60, 144.0, 3)
+    cadence("a cap above the refresh does nothing (144 against 120 Hz)", 144, 120.0, 1)
+    cadence("id's 72 against 144 Hz: id's gate", 72, 144.0, 2)
+    cadence("id's 72 against 120 Hz", 72, 120.0, 2)
+    cadence("no cap", 0, 120.0, 1)
+    pg.context.close()
+
+    # The page's own loop at 120 Hz, a touch screen.
+    def evenly(w, every):
+        g = gaps(w["drew"])
+        share = sum(1 for x in g if x == every) / len(g) if g else 0.0
+        return share >= 0.9 and w["shown"] >= 0.85 * w["refreshes"] / every, \
+            f"{w['shown']} frames in {w['refreshes']} refreshes ({w['refresh']:.2f} ms), {share:.0%} of the gaps {every}"
+    pg = page(REFRESH_120, query="?slop&touch")
+    cap = pg.evaluate("quake.text('cvar', 'host_maxfps')")
+    check("a touch screen starts at a 60 fps cap (the machine's, the slop preset)", cap == "60", f"host_maxfps {cap}")
+    w = window(pg)
+    ok, detail = evenly(w, 2)
+    check("a touch screen at 120 Hz, waited for: every second refresh", ok and w["relaxed"] == 0, detail)
+    pg.evaluate("quake.pacing.force = true")
+    settle(pg, True)
+    w = window(pg)
+    ok, detail = evenly(w, 2)
+    check("...relaxed (not waited for): every second refresh still", ok and w["relaxed"] == w["refreshes"], detail)
+    pg.evaluate("quake.pacing.force = null")
+    pg.evaluate("quake.callLine('exec host_maxfps 144')")
+    time.sleep(0.5)
+    ok, detail = evenly(window(pg), 1)
+    check("...144, above the refresh: every refresh", ok, detail)
+    pg.context.close()
 
     check("no console errors", not errs, "; ".join(errs[:3]))
     br.close()
