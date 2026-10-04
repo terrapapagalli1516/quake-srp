@@ -3470,7 +3470,7 @@ mod tests {
             m.keydown(K_DOWNARROW, None, &mut s);
         }
         m.keydown(K_RIGHTARROW, None, &mut s);
-        assert_eq!(s.cvars.viewsize, VIEWSIZE_DEFAULT + VIEWSIZE_STEP);
+        assert_eq!(s.cvars.viewsize, Profile::Modern.viewsize() + VIEWSIZE_STEP);
         // Customize controls: Left moves like Up; Del unbinds; during a grab
         // every key is the grab's, Escape included.
         m.keydown(K_UPARROW, None, &mut s);
@@ -3954,10 +3954,8 @@ mod tests {
         m.select(&mut s); // -> Options
         m.set_cursor(ROW_SCREENSIZE);
         assert_eq!(m.screen(), MenuScreen::Options);
-        assert_eq!(s.cvars.viewsize, 100.0, "default.cfg: viewsize 100");
+        assert_eq!(s.cvars.viewsize, 110.0, "2026 starts one step past default.cfg's 100");
         let mode = m.resolution();
-        m.adjust(1, &mut s);
-        assert_eq!(s.cvars.viewsize, 110.0);
         m.adjust(1, &mut s);
         assert_eq!(s.cvars.viewsize, 120.0);
         m.adjust(1, &mut s);
@@ -3978,9 +3976,14 @@ mod tests {
         m.cancel(); // -> Main
         m.adjust(1, &mut s);
         assert_eq!(s.cvars.viewsize, 40.0, "adjust is a no-op off the Options screen");
-        // Reset to defaults: default.cfg's `viewsize 100`.
+        // Reset to defaults: the profile's own start, 2026's here; in
+        // Classic default.cfg's `viewsize 100`.
         s.reset_defaults();
-        assert_eq!(s.cvars.viewsize, 100.0);
+        assert_eq!(s.cvars.viewsize, 110.0);
+        let mut classic = Settings::new(Profile::Classic);
+        classic.cvars.viewsize = 40.0;
+        classic.reset_defaults();
+        assert_eq!(classic.cvars.viewsize, VIEWSIZE_DEFAULT, "default.cfg: viewsize 100");
     }
 
     #[test]
@@ -4003,7 +4006,9 @@ mod tests {
             draw_menu(&mut img, m, s, &MenuPics::default(), Some(&conchars), clock(0.0, 0.0));
             (0..320).find(|&x| img.pixels[56 * 320 + x] == 3).expect("knob drawn")
         };
-        assert_eq!(knob_x(&m, &s), 276, "viewsize 100: r = 70/90 -> 220 + 56");
+        assert_eq!(knob_x(&m, &s), 284, "viewsize 110, 2026's start: r = 80/90 -> 220 + 64");
+        s.cvars.set_viewsize(100.0);
+        assert_eq!(knob_x(&m, &s), 276, "viewsize 100, id's: r = 70/90 -> 220 + 56");
         s.cvars.set_viewsize(30.0);
         assert_eq!(knob_x(&m, &s), 220, "viewsize 30: the left end");
         s.cvars.set_viewsize(120.0);
@@ -4013,6 +4018,8 @@ mod tests {
     #[test]
     fn sizeup_sizedown_and_the_viewsize_cvar_bound_like_scr_calcrefdef() {
         let mut s = Settings::default();
+        s.cvars.size_down();
+        assert_eq!(s.cvars.viewsize, 100.0, "one step down from 2026's 110 is id's 100");
         s.cvars.size_up();
         assert_eq!(s.cvars.viewsize, 110.0);
         s.cvars.size_up();
@@ -4463,11 +4470,12 @@ mod tests {
         let console = cvar::find("crosshair").unwrap().get(&s.cvars);
         assert_eq!((s.cvars.crosshair, console.as_str()), (Crosshair::Glyph, "2"), "left wraps to id's +");
         assert_eq!(crosshair.console_hint(), "console: crosshair 0/1/2");
-        // And the perspective span: 64, 32, id's 16 (Classic's), 8, 4, exact
-        // (2026's), right the finer, wrapping; the console reads the span's
+        // And the perspective span: 64, 32, id's 16 (Classic's), 8 (2026's),
+        // 4, exact, right the finer, wrapping; the console reads the span's
         // pixels.
         let span = on_row(&mut m, "r_perspspan");
         assert_eq!((span.value(&s).as_str(), span.label.trim_start()), ("id's 16", "Perspective span"));
+        assert_eq!(span.value(&Settings::default()), "8", "2026 starts at 8: id's portable C loop");
         let steps: Vec<String> = (0..7).map(|_| { m.adjust(1, &mut s); span.value(&s) }).collect();
         assert_eq!(steps, ["8", "4", "exact", "64", "32", "id's 16", "8"]);
         m.adjust(-1, &mut s);
@@ -5090,7 +5098,8 @@ mod tests {
         m.set_cursor(2);
         m.select(&mut s); // Main > Options
         m.set_cursor(ROW_SCREENSIZE);
-        m.adjust(-1, &mut s); // viewsize 100 -> 90
+        m.adjust(-1, &mut s);
+        m.adjust(-1, &mut s); // viewsize 110 (2026's start) -> 90
         m.set_cursor(ROW_BRIGHTNESS);
         m.adjust(1, &mut s); // v_gamma 1.0 -> 0.95 (RIGHT brightens: -= 0.05)
         m.set_cursor(ROW_MOUSESPEED);

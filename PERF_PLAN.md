@@ -1288,9 +1288,10 @@ removed; see "Method" below):
 - Independently of the warp: `render/raster.rs`'s `turb16_span` (*since 2026-10-03
   `turb_span::<N>`, `Turbulent8` at any perspective span, 16 id's*; `Turbulent8`,
   `D_DrawTurbulent8Span`'s span sampler — the DEFAULT liquid renderer in both profiles,
-  `exact_perspective` is off by default; *since 2026-10-03 the 2026 profile draws exact
-  perspective (`r_perspspan 1`, `RenderOptions::persp_span`), so there the liquids take
-  `span_turb`'s exact branch, which has the mask too*) did two `i32::rem_euclid` divisions per liquid
+  `exact_perspective` is off by default; *since 2026-10-03 the 2026 profile draws
+  `r_perspspan 8` (`RenderOptions::persp_span`; it drew exact for part of that day), so
+  there the liquids take `turb_span::<8>`, and `r_perspspan 1` takes `span_turb`'s exact
+  branch, which has the mask too*) did two `i32::rem_euclid` divisions per liquid
   pixel to wrap into the 64x64 texture. Quake's liquid miptextures are always a power of
   two (64x64), and for a power-of-two modulus `n`, two's-complement `v & (n-1)` equals
   `v.rem_euclid(n)` for every `i32`, negative included — so the wrap is a mask, not a

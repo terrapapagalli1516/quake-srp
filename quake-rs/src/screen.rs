@@ -18,8 +18,15 @@ use crate::render::Image;
 /// `sizeup` / `sizedown` move it in steps of 10. 100 is the full-width view
 /// above the full status bar; 110 drops the inventory strip; 120 drops the
 /// status bar entirely; below 100 the view shrinks, centred, inside a
-/// `backtile` border.
+/// `backtile` border. `VIEWSIZE_DEFAULT` is id's and `default.cfg`'s: what
+/// Classic starts at.
 pub const VIEWSIZE_DEFAULT: f32 = 100.0;
+/// Where the 2026 profile starts `viewsize`, one step past id's: the
+/// inventory strip is gone and the status bar alone is drawn, so the HUD takes
+/// less of a 2026 screen ([`Cvars::modern`](crate::cvar::Cvars::modern)). The
+/// cvar is still id's own, not a `departure`; a profile switch moves it only
+/// while the player has not (`Settings::set_profile`).
+pub const VIEWSIZE_MODERN: f32 = 110.0;
 pub const VIEWSIZE_MIN: f32 = 30.0;
 pub const VIEWSIZE_MAX: f32 = 120.0;
 pub const VIEWSIZE_STEP: f32 = 10.0;

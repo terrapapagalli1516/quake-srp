@@ -5,7 +5,7 @@ Chromium. The page opens as `?classic` (every engine departure off):
 
   1. Options' 14th row, "Classic / 2026" (the port's): left/right switch the
      whole profile (the 2026 one turns wasm_uncapped and wasm_scaled2d on,
-     and r_perspspan to 1, exact),
+     and r_perspspan to 8, id's portable C loop),
      Enter opens the settings hub (menu_screen_id 10), whose rows open the
      pages (12 Picture and sound, 13 Motion and light, 14 Controls); their
      rows switch each setting (Picture: Uncapped framerate row 0, the
@@ -24,9 +24,9 @@ Chromium. The page opens as `?classic` (every engine departure off):
      72 host frames with the cap (id's), 144 without.
   3. On frozen frames: wasm_showfps changes only the box in the top-left
      corner, exact perspective redraws the walls, and switching either off
-     restores id's frame byte for byte (Classic). In 2026, where exact
-     perspective starts on, id's 16 redraws the walls and exact is the frame
-     again; 8 and 4 redraw them too, each nearer exact than the one before.
+     restores id's frame byte for byte (Classic). In 2026, where the span
+     starts at 8, exact, id's 16, 64, 32 and 4 redraw the walls, each nearer
+     exact the shorter its span, and `r_perspspan 8` is the default's frame.
   4. Persistence: config.cfg keeps the profile and what differs from it
      (`wasm_showfps "1"`, `viewsize "80"`, ...), and a plain reload (no
      `?classic`) comes back Classic with them.
@@ -141,6 +141,9 @@ with sync_playwright() as p:
     # 1. Options' 14th row switches the profile; Enter opens the page.
     prof = lambda: pg.evaluate("quake.text('profile')")
     check("?classic: the Classic profile, every setting off", prof() == "classic" and ext() == 0)
+    # The page starts 2026 and the address switches to Classic: Screen size,
+    # never moved, goes with it to id's 100 (and the inventory bar with it).
+    check("?classic: Screen size is id's 100", pg.evaluate("exp.viewsize()") == 100)
     frames(pg)
     check("config.cfg keeps the profile the address chose",
           cfg_has(pg, 'profile "classic"'), str(pg.evaluate(CFG)))
@@ -151,8 +154,10 @@ with sync_playwright() as p:
     time.sleep(0.3)
     pg.locator("#c").screenshot(path=os.path.join(WEB, "verify_extras_options.png"))
     key("ArrowRight")
-    # uncapped 1 + exact perspective 4 + scaled 2-D 8
-    check("...Classic / 2026: right switches to 2026", prof() == "2026" and ext() == 13, str(ext()))
+    # uncapped 1 + scaled 2-D 8; the span goes to 8, which is not the extras'
+    # bit 4 (that one is exact)
+    check("...Classic / 2026: right switches to 2026", prof() == "2026" and ext() == 9
+          and pg.evaluate("quake.text('cvar', 'r_perspspan')") == "8", str(ext()))
     key("ArrowLeft")
     check("left: back to Classic", prof() == "classic" and ext() == 0)
     cur = lambda: pg.evaluate("exp.menu_cursor()")
@@ -293,10 +298,11 @@ with sync_playwright() as p:
     pg.evaluate("exp.set_extras(2)")
     pg.evaluate("quake.resume()")
 
-    # 3b. The 2026 default has exact perspective on (a fresh context, its own
-    #     storage: the address chooses the profile and the section below
-    #     still finds Classic in this one's). Off is id's 16-pixel spans, which
-    #     redraw the walls; on again is the same frame.
+    # 3b. The 2026 default draws the perspective every 8 pixels (id's portable
+    #     C loop; a fresh context, its own storage: the address chooses the
+    #     profile and the section below still finds Classic in this one's).
+    #     Exact, id's 16 and the others redraw the walls, nearer exact the
+    #     shorter the span; back to 8 is the same frame as the default.
     ctx3 = br.new_context(viewport={"width": 820, "height": 560})
     pg3 = ctx3.new_page()
     pg3.on("console", lambda m: errs.append(m.text) if m.type == "error" else None)
@@ -308,34 +314,35 @@ with sync_playwright() as p:
     isolated.wait_until(pg3, "exp.menu_visible().then(v => !v)", 5)
     time.sleep(1.0)
     ext3 = pg3.evaluate("exp.extras()")
-    check("?2026: exact perspective starts on (uncapped, exact perspective, scaled 2-D)",
-          ext3 == 13 and pg3.evaluate("quake.text('cvar', 'r_perspspan')") == "1"
-          and pg3.evaluate("quake.text('cvar', 'wasm_exactpersp')") == "1", str(ext3))
+    check("?2026: Screen size starts at 110 (the status bar alone)", pg3.evaluate("exp.viewsize()") == 110)
+    check("?2026: the perspective span starts at 8 (uncapped, scaled 2-D; exact is off)",
+          ext3 == 9 and pg3.evaluate("quake.text('cvar', 'r_perspspan')") == "8"
+          and pg3.evaluate("quake.text('cvar', 'wasm_exactpersp')") == "0", str(ext3))
     pg3.evaluate("quake.pause()")
     pg3.evaluate(FROZEN)
-    pg3.evaluate(GRAB, "_x_on")
-    pg3.evaluate(f"exp.set_extras({ext3 & ~4})")
-    pg3.evaluate(FROZEN)
-    pg3.evaluate(GRAB, "_x_off")
-    d = pg3.evaluate(DIFF, ["_x_on", "_x_off"])
-    check("2026: id's 16-pixel spans redraw the walls", d is not None and d["n"] > 1000, str(d))
-    # 64 and 32 longer, 8 and 4 between: each redraws the walls, nearer exact
-    # the shorter its span.
-    near = {}
-    for span in (64, 32, 8, 4):
+    pg3.evaluate(GRAB, "_x_default")
+    # Exact, then id's 16, 64, 32 and 4: each redraws the walls, nearer exact
+    # the shorter its span; 8, the default, is between 16 and 4.
+    for span in (1, 64, 32, 16, 4):
         pg3.evaluate(f"quake.callLine('exec r_perspspan {span}')")
         pg3.evaluate(FROZEN)
         pg3.evaluate(GRAB, f"_x_{span}")
-        near[span] = pg3.evaluate(DIFF, ["_x_on", f"_x_{span}"])
-    n16 = d["n"] if d else 0
-    n64, n32, n8, n4 = ((near[k] or {}).get("n", 0) for k in (64, 32, 8, 4))
-    check("2026: r_perspspan 64, 32, 8 and 4 redraw the walls, nearer exact the shorter the span",
-          n64 > n32 > n16 > n8 > n4 > 0, f"pixels off exact: 64 {n64}, 32 {n32}, 16 {n16}, 8 {n8}, 4 {n4}")
-    pg3.evaluate(f"exp.set_extras({ext3})")
+    off = {k: pg3.evaluate(DIFF, ["_x_1", f"_x_{k}"]) for k in (64, 32, 16, 4)}
+    off["default"] = pg3.evaluate(DIFF, ["_x_1", "_x_default"])
+    n64, n32, n16, n8, n4 = ((off[k] or {}).get("n", 0) for k in (64, 32, 16, "default", 4))
+    check("2026: r_perspspan 64, 32, 16 and 4 redraw the walls, nearer exact the shorter the span, the default 8 between 16 and 4",
+          n64 > n32 > n16 > n8 > n4 > 0, f"pixels off exact: 64 {n64}, 32 {n32}, 16 {n16}, 8 (default) {n8}, 4 {n4}")
+    pg3.evaluate("quake.callLine('exec r_perspspan 8')")
     pg3.evaluate(FROZEN)
-    pg3.evaluate(GRAB, "_x_on2")
-    check("...and on again is the same frame, byte for byte",
-          pg3.evaluate(DIFF, ["_x_on", "_x_on2"]) is None)
+    pg3.evaluate(GRAB, "_x_8")
+    check("...and r_perspspan 8 is the default's frame, byte for byte",
+          pg3.evaluate(DIFF, ["_x_default", "_x_8"]) is None)
+    # wasm_exactpersp 1 is exact (the span's one end), a choice in 2026 now.
+    pg3.evaluate("quake.callLine('exec wasm_exactpersp 1')")
+    pg3.evaluate(FROZEN)
+    pg3.evaluate(GRAB, "_x_old1")
+    check("...and the retired wasm_exactpersp 1 is exact",
+          pg3.evaluate(DIFF, ["_x_1", "_x_old1"]) is None and pg3.evaluate("exp.extras()") == ext3 | 4)
     ctx3.close()
 
     # 4. Persistence across a plain reload (no ?classic): the profile,

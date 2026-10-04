@@ -15,7 +15,9 @@
 //! --origin x,y,z     put the player there first (noclip and god on, so walls and lava do not matter)
 //! --in-liquid K      or in the middle of the map's largest water, slime or lava leaf (K = water|slime|lava):
 //!                    the underwater warp and tint
-//! --viewsize V       the `viewsize` cvar (default 100: the view above the full status bar)
+//! --viewsize V       the `viewsize` cvar (default: the Screen size of the profile whose status-bar
+//!                    layout is drawn, [`default_viewsize`]: 100, the view above the full status bar,
+//!                    and with `--sbaroverlay 1` 2026's 110, the status bar alone)
 //! --fire N           hold +attack for the last N frames (muzzle flash, particles)
 //! --crosshair N      the `crosshair` cvar: 1 the 2026 cross, 2 id's + (default 0: none, the view alone)
 //! --sbaroverlay 0|1  `scr_sbaroverlay`: the world beside the status bar, as 2026 (default 0, id's)
@@ -27,6 +29,7 @@ use std::fmt::Write as _;
 use quake_rs::client::{cl_main, host_cmd, Vid};
 use quake_rs::pak::Pak;
 use quake_rs::render;
+use quake_rs::settings::Profile;
 
 use crate::video::VideoArgs;
 
@@ -40,7 +43,7 @@ pub fn cmd_shot(args: &[String]) -> Result<String, String> {
     let (mut zoom, mut frames, mut fire) = (1usize, 36u32, 0u32);
     let (mut yaw, mut pitch, mut origin): (Option<f32>, f32, Option<[f32; 3]>) = (None, 0.0, None);
     let mut liquid: Option<i32> = None;
-    let mut viewsize = render::VIEWSIZE_DEFAULT;
+    let mut viewsize: Option<f32> = None;
     let mut crosshair = render::Crosshair::Off;
     let mut sbar_layout = render::SbarLayout::Classic;
     let mut i = 3;
@@ -56,7 +59,7 @@ pub fn cmd_shot(args: &[String]) -> Result<String, String> {
                 "--fire" => fire = val.parse().map_err(|_| format!("--fire: bad count {val:?}"))?,
                 "--yaw" => yaw = Some(num(flag)?),
                 "--pitch" => pitch = num(flag)?,
-                "--viewsize" => viewsize = num(flag)?,
+                "--viewsize" => viewsize = Some(num(flag)?),
                 "--crosshair" => crosshair = render::Crosshair::from_cvar(num(flag)?),
                 "--sbaroverlay" => {
                     sbar_layout = if num(flag)? != 0.0 { render::SbarLayout::Overlay } else { render::SbarLayout::Classic }
@@ -88,7 +91,7 @@ pub fn cmd_shot(args: &[String]) -> Result<String, String> {
     let rand = std::rc::Rc::new(quake_rs::qrand::QRand::new());
     let mut wk = host_cmd::build_walk_map(pak, map, &rand, &mut sound, quake_rs::vm::MAX_EDICTS)
         .ok_or_else(|| format!("{map} would not load"))?;
-    wk.viewsize = viewsize;
+    wk.viewsize = viewsize.unwrap_or_else(|| default_viewsize(sbar_layout));
     wk.crosshair = crosshair;
     wk.sbar_layout = sbar_layout;
     wk.renderer.set_threads(video.threads());
@@ -158,6 +161,19 @@ pub fn cmd_shot(args: &[String]) -> Result<String, String> {
     Ok(o)
 }
 
+/// The Screen size a shot starts at when `--viewsize` is not given: the
+/// profile's whose status-bar layout it draws ([`Profile::viewsize`]), so a
+/// shot of the 2026 layout (`--sbaroverlay 1`, with `--scaled2d 1` and
+/// `--video modern` for the rest of its 2-D layer and picture) is the
+/// page's first frame, and one of id's layout stays id's. The other
+/// switches of the 2026 profile are separate flags and change nothing here.
+fn default_viewsize(layout: render::SbarLayout) -> f32 {
+    match layout {
+        render::SbarLayout::Classic => Profile::Classic.viewsize(),
+        render::SbarLayout::Overlay => Profile::Modern.viewsize(),
+    }
+}
+
 /// Where to stand for the eye to be well inside `contents` (water, slime or
 /// lava): the first point of a 7x7x7 grid over the largest leaves of that
 /// contents (by box volume; a leaf's box is looser than the leaf) whose
@@ -186,4 +202,15 @@ fn largest_leaf_centre(bsp: &quake_rs::bsp::Bsp, contents: i32) -> Option<[f32; 
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_shot_of_each_layout_starts_at_its_profiles_screen_size() {
+        assert_eq!(default_viewsize(render::SbarLayout::Classic), render::VIEWSIZE_DEFAULT, "id's 100, with the inventory bar");
+        assert_eq!(default_viewsize(render::SbarLayout::Overlay), 110.0, "the 2026 profile's: the status bar alone");
+    }
 }

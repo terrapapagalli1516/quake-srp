@@ -48,8 +48,9 @@ program for that target. The page runs the Classic profile (`?classic`: id's
 game, the frames `quaketool play` hashes); `--video modern` switches to the
 2026 profile's video settings first (`set_video`: native picture with square
 pixels, Hor+, sizes past 1280x800, the fluid sky, gliding lights, flickering
-torches, and since 2026-10-03 exact perspective: an earlier `--video modern`
-run drew id's 16-pixel spans), each --res then the size of the window it
+torches, and the profile's perspective span, 8 since 2026-10-03: earlier
+`--video modern` runs drew id's 16-pixel spans, or exact for part of that
+day), each --res then the size of the window it
 fills. The frames are the same at every count, but the runs of one page share
 the game's random stream (QuakeC's `random()`), so to compare hashes across
 counts run each count in a page of its own (one invocation per `--threads`
