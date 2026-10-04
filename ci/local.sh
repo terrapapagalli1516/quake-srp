@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# What .github/workflows/check.yml runs, on this checkout: both crates' tests
-# and clippy (warnings are errors), and the browser program's two builds.
+# What .github/workflows/check.yml runs, on this checkout: both crates'
+# formatting, tests and clippy (warnings are errors), and the browser
+# program's two builds.
 # With --oracle, also oracle.yml's Classic proof (it needs quake-c/WinQuake
 # and docker; oracle/README.md).
 #
@@ -19,6 +20,8 @@ case "$have" in "rustc $pin "*) ;; *) echo "   note: not the pinned toolchain; c
 
 step() { echo "== $*"; "$@"; }
 
+(cd quake-rs && step cargo fmt --check)
+(cd quake-wasm && step cargo fmt --check)
 step ci/fetch_shareware.sh
 (cd quake-rs && step cargo test --release)
 (cd quake-rs && step cargo clippy --release --all-targets -- -D warnings)

@@ -41,12 +41,13 @@ Also done, outside the numbered items:
 
 **What is left: the next session's menu.**
 
-- **W0a** (§5): pin the toolchain, edition 2024 for quake-rs, `rustfmt.toml` and one
-  format commit, and the `[lints]` tables.
+- **W0a** (§5): pin the toolchain, edition 2024 for quake-rs, and the `[lints]` tables
+  (the `rustfmt.toml` and the one format commit are done, 2026-10-04).
   - Nothing is pinned yet: there is no `rust-toolchain.toml`, and `rust-version` is still
     1.74.
   - quake-rs is on edition 2021.
-  - 117 files are not rustfmt-clean.
+  - Formatting is done: `rustfmt.toml`, one `cargo fmt` commit (in
+    `.git-blame-ignore-revs`), and `cargo fmt --check` in CI.
 - **W0b** (§5):
   - the 12 rustdoc warnings left in `server/` and the VM;
   - `missing_docs`, doctests (1 today);
@@ -115,7 +116,8 @@ from growing a port one feature at a time.
 - **Errors are swallowed in the frame loop.** `cl_main.rs:300` discards the server
   frame's `Result`, so a QuakeC runtime error vanishes silently.
 - **Housekeeping.**
-  - The tree is not rustfmt-formatted (1270 hunks in quake-rs, 309 in quake-wasm).
+  - The tree is not rustfmt-formatted (1270 hunks in quake-rs, 309 in quake-wasm). *Done
+    2026-10-04: `rustfmt.toml` and one format commit.*
   - `rustdoc` gives 38 warnings (53 with private items), and there are 0 doctests.
   - The crate doc still describes only the file loaders (`lib.rs`).
   - `rust-version = "1.74"` has never been tested.
@@ -234,7 +236,8 @@ Hand these to every agent, so that new work does not add to the debt below.
   it ports and why it departs where it does. Functions stay under ~120 lines; the
   exceptions are ported inner loops, marked `#[expect(clippy::too_many_lines, reason = "id's …")]`.
 - **Suppress lints with `#[expect(…, reason = "…")]`,** not `#[allow]`.
-- **Don't run rustfmt** on files you did not otherwise change (see W0a).
+- **Run `cargo fmt`** before committing: the tree is rustfmt-clean (`rustfmt.toml`) and CI
+  checks it.
 
 ---
 
