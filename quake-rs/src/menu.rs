@@ -280,7 +280,7 @@ pub const PICTURE_ROWS: [SettingRow; 10] = [
 const TORCH_SLIDER: RowKind = RowKind::Slider { min: 0.0, max: crate::render::TorchFlicker::MAX, step: 0.2 };
 
 /// [`ExtrasPage::Motion`]'s rows: the models, then the sky and the light.
-pub const MOTION_ROWS: [SettingRow; 5] = [
+pub const MOTION_ROWS: [SettingRow; 6] = [
     SettingRow {
         cvar: "r_lerpmove",
         label: "       Smooth monsters",
@@ -291,6 +291,12 @@ pub const MOTION_ROWS: [SettingRow; 5] = [
         cvar: "r_lerpmodels",
         label: "     Smooth animations",
         help: ["Walking and firing poses blend", "together, not 10 snaps a second"],
+        kind: RowKind::Toggle,
+    },
+    SettingRow {
+        cvar: "r_nailbarrels",
+        label: "    Nails from barrels",
+        help: ["The nailgun's nails leave its two", "barrels, not from beside your eye"],
         kind: RowKind::Toggle,
     },
     SettingRow {
