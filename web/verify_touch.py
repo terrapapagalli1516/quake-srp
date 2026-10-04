@@ -497,7 +497,7 @@ def main():
         goto_row(2)                                         # Motion and light
         pad_tap("#tPadOk")
         check("OK on Motion and light opens its page", wait("quake.state.menuScreen === 13"), str(screen_id()))
-        goto_row(4)                                         # Torch flicker: a slider row
+        goto_row(5)                                         # Torch flicker: a slider row
         torch = lambda: pg.evaluate("quake.text('cvar', 'r_torchflicker')")
         t0 = torch()
         pad_tap("#tPadRight")

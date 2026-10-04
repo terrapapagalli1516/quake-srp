@@ -10,8 +10,8 @@ Chromium. The page opens as `?classic` (every engine departure off):
      pages (12 Picture and sound, 13 Motion and light, 14 Controls); their
      rows switch each setting (Picture: Uncapped framerate row 0, the
      Perspective span row 6 stepping 64, 32, id's 16, 8, 4, exact, Show FPS row 8;
-     Motion: Fluid sky row 2, Gliding
-     lights row 3, the Torch flicker slider row 4, five steps to 1;
+     Motion: Nails from barrels row 2, Fluid sky row 3, Gliding
+     lights row 4, the Torch flicker slider row 5, five steps to 1;
      Controls: Wheel weapons row 1 binds and unbinds the wheel:
      left/right/Enter), Esc returns from a page to the hub on its row and
      from the hub to Options; the wasm_* console variables set the same
@@ -194,19 +194,21 @@ with sync_playwright() as p:
     check("Esc returns to the hub, on Picture and sound's row", scr() == EXTRAS and cur() == 1)
     key("ArrowDown"); key("Enter")
     check("row 2 opens Motion and light", scr() == MOTION and cur() == 0)
-    key("ArrowDown", 2); key("Enter")      # row 2: Fluid sky
-    key("ArrowDown"); key("ArrowRight")    # row 3: Gliding lights
+    key("ArrowDown", 2); key("Enter")      # row 2: Nails from barrels
+    check("Nails from barrels switches r_nailbarrels", cvar("r_nailbarrels") == "1", cvar("r_nailbarrels"))
+    key("ArrowDown"); key("Enter")         # row 3: Fluid sky
+    key("ArrowDown"); key("ArrowRight")    # row 4: Gliding lights
     check("Fluid sky and Gliding lights switch r_fluidsky and r_lerplightstyles",
           (cvar("r_fluidsky"), cvar("r_lerplightstyles")) == ("1", "1"))
-    key("ArrowDown"); key("ArrowRight", 5)  # row 4: Torch flicker, 0.2 a step
+    key("ArrowDown"); key("ArrowRight", 5)  # row 5: Torch flicker, 0.2 a step
     check("the Torch flicker slider: five steps right from Classic's 0 is 2026's 1",
           cvar("r_torchflicker") == "1", cvar("r_torchflicker"))
     time.sleep(0.3)
     pg.locator("#c").screenshot(path=os.path.join(WEB, "verify_extras_motion.png"))
     key("ArrowLeft", 6)
-    key("ArrowUp"); key("ArrowLeft"); key("ArrowUp"); key("Enter")
-    check("...and all three back to Classic's",
-          (cvar("r_fluidsky"), cvar("r_lerplightstyles"), cvar("r_torchflicker")) == ("0", "0", "0"))
+    key("ArrowUp"); key("ArrowLeft"); key("ArrowUp"); key("Enter"); key("ArrowUp"); key("Enter")
+    check("...and all four back to Classic's",
+          (cvar("r_nailbarrels"), cvar("r_fluidsky"), cvar("r_lerplightstyles"), cvar("r_torchflicker")) == ("0", "0", "0", "0"))
     key("Escape"); key("ArrowDown"); key("Enter")
     check("row 3 opens Controls", scr() == CONTROLS and cur() == 0)
     key("ArrowDown"); key("Enter")         # row 1: Wheel weapons

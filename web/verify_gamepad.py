@@ -146,8 +146,8 @@ with sync_playwright() as p:
     press(pg, A)
     check("   D-pad down twice, A: Motion and light", call(pg, "menu_screen_id") == 13)
     torch = lambda: pg.evaluate("quake.text('cvar', 'r_torchflicker')")
-    for _ in range(4):
-        press(pg, DDOWN)               # row 4, Torch flicker
+    for _ in range(5):
+        press(pg, DDOWN)               # row 5, Torch flicker
     t0 = torch()
     press(pg, DRIGHT)
     press(pg, DRIGHT)
