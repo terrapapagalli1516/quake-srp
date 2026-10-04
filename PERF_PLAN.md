@@ -1,7 +1,7 @@
 # quake-rust — performance plan
 
 *Status (2026-10-02): a working log. "Where it stands" sums it up; the numbered sections
-below are the rounds of work, each measured as it landed (§11 and §12 are the latest). The
+below are the rounds of work, each measured as it landed (§14 and §15 are the latest). The
 current figures are in `README.md`, "Numbers".*
 
 ## Where it stands (2026-09-26, the 2026 push)
@@ -1742,21 +1742,34 @@ than 512 texels, or a segment that would leave the block, is drawn by the divide
 In demo1 at 2640×1080 (counted): 93% of the segments clear, 5% with a pixel near an
 edge, 2% at the block's edge; 1.6% of the exact pixels in spans too short.
 
-**Size:** 160 lines of code and 70 of comments in `raster.rs`, and a 60-line fuzz.
+**Size:** about 210 lines of code and 130 of comments in `raster.rs` (the proof
+among them), and 270 lines of tests.
 
-**Proof.** The fuzz holds it to the divide at every pixel over random spans (level,
-near-level, oblique, grazing; blocks 4 to 512 texels; spans off the block; one in three
-steered so a pixel lands within 2 units of a texel's edge): 2,000,000 spans pass
-(`QUAKE_FUZZ_SPANS=2000000`; 30,000 by default). Mutations fail it: a guard slack of 1
-instead of 9, the last segment's pixels copied one off, the near pixels' second pass
-starting one late. (A slack of 4 and a 1-unit "near the edge" window pass 300,000
-spans: the fuzz does not reach the worst case the bound allows for; the slack is the
-bound's.) Against the branch without it: the view sweep at exact (nine maps, every
-size, 1 and 8 threads: 1,242 `view`s and `shot`s), the all-spans sweep (540) and
-`play` hashes at exact (16 runs), no difference; the wasm build's `play` hashes equal
-the native ones.
+**Proof.** A proof, in `raster.rs`'s comments (the review's, written down there): the
+reference's rounding is at most half `exact_plan`'s `noise`, so its value is within
+1.125 units of the true coordinate, and a knot's too; the knots' errors reach the
+parabola times at most 1.25; the interpolation error is at most `es` (the third
+derivative's bound, `z` largest at an outer knot); the fixed-point floors lose under
+2.0 units by a segment's last pixel. So the reference is within `es + 4.54` units of
+the parabola, under the guard `floor(es) + 9`: a pixel the guard test clears reads the
+reference's texel, inside the block, and a pixel it does not is drawn by the divide,
+where a 1-unit "near the edge" window would do (the code keeps 2). Tests: the fuzz
+against the divide at every pixel (30,000 random spans by default, 2,000,000 pass with
+`QUAKE_FUZZ_SPANS`); the proof's inequality checked at every pixel a parabola draws
+(worst `|R - y/128| - es` 2.98 units over 2,000,000 spans, the interpolation 0.998 of
+`es`, the rounding 0.457 of `noise`); and a steered fuzz that moves the worst pixel of
+a segment to just inside its guard on the side that would tip it: the smallest margin
+is 5.99 units, and with a guard slack of 3 instead of 9 it fails (at 4 it passes: the
+worst case seen needs 4, the proof 6). The random fuzz cannot tell 3 from 9. Against
+the branch without it: the view sweep at exact (nine maps, every size, 1 and 8 threads:
+1,242 `view`s and `shot`s), the all-spans sweep (540) and `play` hashes at exact (16
+runs), no difference; the wasm build's `play` hashes equal the native ones.
 
-**Speed** (demo1, exact, the frame-time change; as in the tables above):
+**Speed** (demo1, exact, the frame-time change; as in the tables above; measured on
+`94d3bf9`. The same arithmetic with its parts named, `c7a4ade`, draws the renderer's
+views at exact 1–3% faster natively and 0–2% in V8, while its native timedemo lost
+0.45 ms a frame to the RGBA pack's alignment, the lottery above: against `2997189`
+7.66 → 7.22 ms, where `94d3bf9` gave 6.87 in the same sitting):
 
 | | 2640×1080 | 1920×1080 |
 |---|---|---|
@@ -1766,7 +1779,9 @@ the native ones.
 | page, 1 thread | 10.08 → 8.50 (−16%) | not measured |
 | page, 8 threads | 2.84 → 2.60 (−9%) | −7% |
 
-Spans 8 and 16 do not move (±0.5% in the page).
+In the page spans 8 and 16 do not move (±0.5%). Natively the review measured span 8
+3.7% slower with it (5.07 → 5.26 ms, in both of its holds): not the span loops, which it
+does not touch, but where the code lands (the lottery above).
 
 The renderer's own views at exact, 2640×1080, one thread: e1m6's walls −13% natively,
 −22% in V8; e1m3 −3% / −9%; e1m4's lake −3% / −3%; e1m1's start 0% / −8%, and at
