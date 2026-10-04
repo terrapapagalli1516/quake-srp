@@ -596,10 +596,11 @@ frame:
 At most 0.23 ms a frame on one thread (e2m5 at 72 Hz, where nearly every
 frame rebakes every torch-lit block), 0.02–0.11 elsewhere; on eight, 0.05–0.12
 ms (before the bakes went to the threads, the same 0.22 ms as on one: up to
-25% of the frame at 72 Hz, now 13%). A frame bakes 0.08–0.38M texels here,
-two to eleven threads' worth at `BAKE_TEXELS_PER_THREAD`, so the thread
-starts are a good part of what is left. The worst frame stays well inside
-480 Hz's 2.08 ms.
+25% of the frame at 72 Hz, now 13%). A frame bakes 0.08–0.38M texels here.
+When this was measured the bakes had a round of threads of their own, two to
+eleven threads for these frames, and the thread starts were a good part of
+what is left; the bakes now run in the bands' round (PERF_PLAN.md §14). The
+worst frame stays well inside 480 Hz's 2.08 ms.
 
 ## Steady torches that flicker (`r_torchflicker`, `fleet/torchlight`)
 
@@ -773,8 +774,9 @@ and above they see the affine steps as a wobble along a wall seen at a grazing
 angle), and then asked for the steps between, and then for longer ones
 ("better for performance? a retro look?"): `r_perspspan 64|32|16|8|4|1`, the
 Picture and sound page's Perspective span row (`64`, `32`, `id's 16`, `8`,
-`4`, `exact`; right is the finer). Classic is 16; 2026 stays exact (1) until
-they have tried them. The old `wasm_exactpersp` is a view onto it: `1` sets exact, `0` id's
+`4`, `exact`; right is the finer). Classic is 16; 2026 was exact (1) until they had
+tried them, and then (2026-10-03) they chose 8, id's portable C loop, for every device.
+The old `wasm_exactpersp` is a view onto it: `1` sets exact, `0` id's
 16, and it reads 1 only while the span is 1; nothing writes it any more, so
 a saved `wasm_exactpersp "1"` (a Classic player who switched it on) draws
 exact perspective as before and the next save writes `r_perspspan "1"`.
@@ -1012,18 +1014,21 @@ tell.)
 
 **What moved besides.** `--video modern` (`quaketool`) and
 `set_video("modern")` (the page's checks, `bench.py --video modern`) are the
-2026 set and draw exact perspective; `--perspspan 16|8|4|1` (and the older
+2026 set and draw the profile's span, 8 (from 2026-10-03 to the day 8 became the
+default they drew exact); `--perspspan 16|8|4|1` (and the older
 `--exactpersp 0|1`, its ends) is a video option of `shot`, `view`, `play` and
 `timedemo`; `compare.py --perspspan N` hands it to the port. A number taken
 with `--video modern` before 2026-10-03 (PERF_PLAN.md §11, PLATFORM.md's
 measurements, the tables above for light styles and torches, whose harness
 draws `VideoCvars::MODERN` with id's spans in both columns) has id's spans
-and the slower 16. The page's settings checks (`verify_settings`,
-`verify_extras`, `verify_save`) expect the 2026 extras to be 13 (uncapped,
-exact perspective, scaled 2-D) or 15 with Show FPS; `extras()`'s bit 4 is
+and the slower 16 (the 2026 frames' hashes moved with the span: 16, then exact,
+then 8). The page's settings checks (`verify_settings`,
+`verify_extras`, `verify_save`) expect the 2026 extras to be 9 (uncapped,
+scaled 2-D; the span is 8) or 11 with Show FPS; `extras()`'s bit 4 is
 "the span is 1" (clearing it leaves a span other than exact as it is). And the Auto pixel size (`vid::AUTO_PIXEL_BUDGET`, "about
 6 ms" a 1080p frame a thread) was set against id's spans; with exact
-perspective a 1080p demo1 frame on one thread is 7-8 ms, at 64 about 5. Not changed.
+perspective a 1080p demo1 frame on one thread is 7-8 ms, at 64 about 5 (the 3-D
+view at 8, the default, costs 7-11% more than at 16). Not changed.
 
 ## Rerun it
 
@@ -1035,6 +1040,7 @@ cd quake-rs && cargo build --release
 ./target/release/quaketool framerate ../quake-data/ID1/PAK0.PAK --only jump,flash --rates 144,480
 ./target/release/quaketool framerate ../quake-data/ID1/PAK0.PAK --budget --res 1280x800
 ./target/release/quaketool framerate ../quake-data/ID1/PAK0.PAK --lerpmove  # monsters between steps (5 s)
+./target/release/quaketool framerate ../quake-data/ID1/PAK0.PAK --serial --threads 1,4,8 --res 2631x1071  # the page's 2026 frame and what it does on one thread (PERF_PLAN.md §14; --paced: at a display's rate)
 ./target/release/quaketool framerate ../quake-data/ID1/PAK0.PAK,PAK1.PAK --lightstyles --res 1920x1080  # gliding lights' cost (8 min)
 ./target/release/quaketool framerate ../quake-data/ID1/PAK0.PAK,PAK1.PAK --torchflicker 1 --res 1920x1080 --secs 3  # flickering torches' cost (7 min)
 ./target/release/quaketool framerate ../quake-data/ID1/PAK0.PAK,PAK1.PAK --bake --threads 1,2,4,8,16 --res 1920x1080  # the bakes on 1-16 threads (10 min)

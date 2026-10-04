@@ -13,7 +13,8 @@ use super::light::{
 };
 use super::stats::Profiler;
 use super::torch::FaceTorches;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 
 /// Reconstruct a face's world-space polygon into `out`. Returns false if any
 /// index is out of range (the caller then skips the face). Mirrors the
@@ -403,55 +404,87 @@ impl BakeJob<'_> {
     }
 }
 
-/// The texels of baking each thread of a frame's bakes must have: a texel
-/// costs about 0.7 ns, and a round of threads (spawn, run, join) 30–80 µs
-/// natively when threads ran a moment before — the bands' round, right
-/// after, is then the warm one — and 150–400 µs after an idle gap (the
-/// page's pooled workers: 10–40 µs warm, 160–265 cold; the bakes' review),
-/// so a few small bakes (a frame's usual: a dynamic light's few blocks, a
-/// light style's step) never start one.
-const BAKE_TEXELS_PER_THREAD: usize = 32 * 1024;
-
-/// The fewest threads worth starting for the bakes: with the display's
-/// real time between frames (`framerate --bake --paced`), two threads won
-/// nothing on any view measured and lost up to 0.2 ms (e1m3's flames at 72
-/// Hz: 5.81 ms baking on one, 6.02 on two), where four and eight won up to
-/// 0.7 and 1.3 ms; a larger per-thread share (64K, 128K texels) changed
-/// nothing beyond the noise (PERF_PLAN.md §13).
-const BAKE_MIN_THREADS: usize = 3;
-
-/// Bake `jobs` ([`BakeJob::bake`]) on up to `threads` threads — one per
-/// [`BAKE_TEXELS_PER_THREAD`] of their texels — the largest first so the
-/// threads end together; the blocks in the jobs' order. Each block is its
-/// job's alone, so they are the same for any thread count.
-pub(super) fn bake_all(jobs: &[BakeJob], threads: usize) -> Vec<Arc<Vec<u8>>> {
-    let threads = bake_threads(jobs.iter().map(BakeJob::texels).sum(), threads);
-    if threads == 1 {
-        return jobs.iter().map(BakeJob::bake).collect();
-    }
-    let mut order: Vec<usize> = (0..jobs.len()).collect();
-    order.sort_by_key(|&i| std::cmp::Reverse(jobs[i].texels()));
-    let baked = super::band::map_jobs(threads, &order, |&i| jobs[i].bake());
-    let mut blocks: Vec<Option<Arc<Vec<u8>>>> = vec![None; jobs.len()];
-    for (&i, block) in order.iter().zip(baked) {
-        blocks[i] = Some(block);
-    }
-    blocks.into_iter().map(|b| b.expect("every job baked")).collect()
+/// A frame's bakes, shared by the threads that draw it: the jobs, and each
+/// one's block once a thread has baked it.
+///
+/// The bakes have no round of threads of their own. Each thread of the
+/// frame's one round — the bands' — first takes jobs from here until none
+/// is left ([`Bakes::work`]), the largest first so the threads end
+/// together, and then draws bands; a span reads its block with
+/// [`Bakes::block`], which bakes it on the spot if no thread has yet and
+/// waits if one is at it, so a band never draws from a block that is not
+/// there. A block is its job's alone ([`BakeJob::bake`]), the same
+/// whichever thread bakes it and whenever: the frame and the cache are the
+/// same for any thread count. One thread bakes them all before its one band.
+///
+/// Nothing here depends on which thread came first, and no thread can wait
+/// for ever. The count of jobs taken only hands each job to one thread and
+/// carries nothing else (so `Relaxed` will do); a block reaches the other
+/// threads through its `OnceLock`, whole or not at all. A bake takes no
+/// lock and asks for no other block, and a thread waits only for the one
+/// thread baking the block it asked for, so no wait can close a circle. A
+/// bake that panics leaves its block unbaked — the next to ask bakes it —
+/// and the panic comes back on the calling thread at the round's end
+/// ([`super::band::Workers::run`]). The cache is not written during the
+/// round: the blocks go into it afterwards, in the jobs' order
+/// ([`Bakes::finish`], [`SurfaceCaches::baked`]).
+///
+/// (A round of threads — spawn, run, join — costs 30–80 µs natively when
+/// threads ran a moment before and 150–400 µs after an idle gap; on a phone
+/// each one wakes workers that slept since the last frame. A round for the
+/// bakes and another for the bands was two of them a frame; PERF_PLAN.md §14.)
+pub(super) struct Bakes<'a> {
+    jobs: Vec<BakeJob<'a>>,
+    /// The jobs' indices, the largest block first: the order they are taken in.
+    order: Vec<usize>,
+    /// How many of `order` have been taken.
+    taken: AtomicUsize,
+    blocks: Vec<OnceLock<Arc<Vec<u8>>>>,
 }
 
-/// The threads to bake `texels` of blocks on, of the renderer's `threads`:
-/// one per [`BAKE_TEXELS_PER_THREAD`], and none but the calling thread
-/// unless that makes [`BAKE_MIN_THREADS`].
-fn bake_threads(texels: usize, threads: usize) -> usize {
-    let n = threads.min(texels / BAKE_TEXELS_PER_THREAD);
-    if n >= BAKE_MIN_THREADS { n } else { 1 }
+impl<'a> Bakes<'a> {
+    /// The frame's `jobs`, none baked yet.
+    pub(super) fn new(jobs: Vec<BakeJob<'a>>) -> Bakes<'a> {
+        let mut order: Vec<usize> = (0..jobs.len()).collect();
+        order.sort_by_key(|&i| std::cmp::Reverse(jobs[i].texels()));
+        let blocks = jobs.iter().map(|_| OnceLock::new()).collect();
+        Bakes { jobs, order, taken: AtomicUsize::new(0), blocks }
+    }
+
+    /// Bake jobs, one at a time, until every one is taken: what each thread
+    /// of the frame does before its first band.
+    pub(super) fn work(&self) {
+        // (A thread that finds none left has still counted one: the count
+        // only ever passes the jobs by a thread's worth.)
+        while let Some(&job) = self.order.get(self.taken.fetch_add(1, Ordering::Relaxed)) {
+            self.block(job);
+        }
+    }
+
+    /// Job `job`'s block (empty for a job the frame does not have): baked
+    /// here and now if no thread has baked it; if one is baking it, once
+    /// that is done.
+    #[inline]
+    pub(super) fn block(&self, job: usize) -> &[u8] {
+        match (self.blocks.get(job), self.jobs.get(job)) {
+            (Some(block), Some(j)) => block.get_or_init(|| j.bake()),
+            _ => &[],
+        }
+    }
+
+    /// Every job's block, in the jobs' order, for the cache
+    /// ([`SurfaceCaches::baked`]).
+    pub(super) fn finish(self) -> Vec<Arc<Vec<u8>>> {
+        let Bakes { jobs, blocks, .. } = self;
+        blocks.into_iter().zip(&jobs).map(|(block, job)| block.into_inner().unwrap_or_else(|| job.bake())).collect()
+    }
 }
 
 /// What [`SurfaceCaches::surface`] found for a face.
 pub(super) enum Surface<'a> {
     /// A lit block: from the cache, or — with the index of its job in the
-    /// frame's bake list — to be baked before the frame is drawn (its
-    /// `block` empty until then).
+    /// frame's bake list — baked as the frame is drawn (its `block` is
+    /// empty: the frame's [`Bakes`] has it).
     Block(SurfBlock, Option<usize>),
     /// No block (no usable colormap, no texture, an empty or oversized
     /// block): the face is lit per pixel, with its lightmap given back.
@@ -505,9 +538,9 @@ impl SurfaceCaches {
     /// Find a face's lit+colormapped surface block at mip level `req.mip` —
     /// `D_CacheSurface` — or make the job that bakes it: [`Surface::Block`],
     /// with the job's index in `jobs` when it is to be baked. The frame's
-    /// jobs are baked together once every surface is looked up (on the
-    /// render threads, [`super::band::map_jobs`]), and handed back with
-    /// [`SurfaceCaches::baked`] before the frame is drawn. [`Surface::PerPixel`]
+    /// jobs are baked by the threads that draw it, before their bands
+    /// ([`Bakes`]), and handed back with [`SurfaceCaches::baked`] when the
+    /// frame is drawn. [`Surface::PerPixel`]
     /// (the caller keeps the per-pixel path) when there is no usable colormap,
     /// the texture is missing, or the block would be empty or exceed
     /// [`SURF_BLOCK_MAX`]. A texture without its levels 1..3 (the synthetic
@@ -725,51 +758,87 @@ pub(super) fn draw_surface_block(
     bw: usize,
     bh: usize,
 ) {
-    let blocksize = 16usize >> mip;
-    let shift = 4 - mip;
-    let (nh, nv) = (bw >> shift, bh >> shift);
-    if smax == 0 || tmax == 0 || tex.len() < smax * tmax || out.len() < bw * bh || colormap.len() < COLORMAP_LEN {
+    let Some(colormap) = colormap.get(..COLORMAP_LEN).and_then(|c| <&[u8; COLORMAP_LEN]>::try_from(c).ok()) else { return };
+    if smax == 0 || tmax == 0 || tex.len() < smax * tmax || out.len() < bw * bh {
         return;
     }
-    // `soffset`/`basetoffset`: where the surface's first texel falls in the tiled
-    // texture ("+ (smax << 16)" in the C only keeps the % positive).
-    let soffset = (texmins[0] >> mip).rem_euclid(smax as i32) as usize;
-    let toffset = (texmins[1] >> mip).rem_euclid(tmax as i32) as usize;
-    let lux = |x: usize, y: usize| light.get(y * lmw + x).copied().unwrap_or(1 << 6);
-    for v in 0..nv {
-        for u in 0..nh {
-            // r_lightptr[0], r_lightptr[1], and the same one lightmap row down.
-            let mut lightleft = lux(u, v);
-            let mut lightright = lux(u + 1, v);
-            let lightleftstep = (lux(u, v + 1) - lightleft) >> shift;
-            let lightrightstep = (lux(u + 1, v + 1) - lightright) >> shift;
-            // The block's first texture column (the C wraps `soffset` a block at a
-            // time; id's textures are 16-aligned, so this is the same column).
-            let s0 = (soffset + u * blocksize) % smax;
-            for i in 0..blocksize {
-                let y = v * blocksize + i;
-                let trow = (toffset + y) % tmax * smax;
-                let src = &tex[trow..trow + smax];
-                let dst = &mut out[y * bw + u * blocksize..y * bw + (u + 1) * blocksize];
-                let lightstep = (lightleft - lightright) >> shift;
-                let mut l = lightright;
-                // 0 < l <= 16320: the luxels are clamped to 64..=16320 and the
-                // floor steps overshoot the lower one by less than 15 per edge,
-                // so the index stays inside the 64 x 256 colormap.
-                if s0 + blocksize <= smax {
-                    let seg = &src[s0..s0 + blocksize];
-                    for b in (0..blocksize).rev() {
-                        dst[b] = colormap[(l & 0xFF00) as usize + seg[b] as usize];
-                        l += lightstep;
+    let level = Level { tex, smax, tmax, texmins, light, lmw, colormap };
+    // id has a routine per mip level too: the block size is each one's constant.
+    match mip {
+        0 => level.draw_blocks::<16>(out, bw, bh),
+        1 => level.draw_blocks::<8>(out, bw, bh),
+        2 => level.draw_blocks::<4>(out, bw, bh),
+        _ => level.draw_blocks::<2>(out, bw, bh),
+    }
+}
+
+/// What a surface block is baked from ([`draw_surface_block`]): a mip
+/// level's texels, the face's `blocklights` and the colormap.
+struct Level<'a> {
+    tex: &'a [u8],
+    smax: usize,
+    tmax: usize,
+    /// `texturemins`, at mip 0.
+    texmins: [i32; 2],
+    light: &'a [i32],
+    lmw: usize,
+    colormap: &'a [u8; COLORMAP_LEN],
+}
+
+impl Level<'_> {
+    /// `R_DrawSurfaceBlock8_mipN` over the whole surface, for the level whose
+    /// blocks are `N = 16 >> mip` texels a side (a constant, so the row of
+    /// `N` texels is a loop the compiler unrolls, as id wrote four routines).
+    fn draw_blocks<const N: usize>(&self, out: &mut [u8], bw: usize, bh: usize) {
+        let Level { tex, smax, tmax, texmins, light, lmw, colormap } = *self;
+        let mip = 4 - N.trailing_zeros();
+        let shift = 4 - mip;
+        let (nh, nv) = (bw / N, bh / N);
+        // `soffset`/`basetoffset`: where the surface's first texel falls in the tiled
+        // texture ("+ (smax << 16)" in the C only keeps the % positive).
+        let soffset = (texmins[0] >> mip).rem_euclid(smax as i32) as usize;
+        let toffset = (texmins[1] >> mip).rem_euclid(tmax as i32) as usize;
+        let lux = |x: usize, y: usize| light.get(y * lmw + x).copied().unwrap_or(1 << 6);
+        for v in 0..nv {
+            // The texture row under each of the blocks' rows, once for the
+            // whole row of blocks.
+            let trow: [usize; N] = std::array::from_fn(|i| (toffset + v * N + i) % tmax * smax);
+            for u in 0..nh {
+                // r_lightptr[0], r_lightptr[1], and the same one lightmap row down.
+                let mut lightleft = lux(u, v);
+                let mut lightright = lux(u + 1, v);
+                let lightleftstep = (lux(u, v + 1) - lightleft) >> shift;
+                let lightrightstep = (lux(u + 1, v + 1) - lightright) >> shift;
+                // The block's first texture column (the C wraps `soffset` a block at a
+                // time; id's textures are 16-aligned, so this is the same column).
+                let s0 = (soffset + u * N) % smax;
+                for (i, &trow) in trow.iter().enumerate() {
+                    let y = v * N + i;
+                    let src = &tex[trow..trow + smax];
+                    let at = y * bw + u * N;
+                    let Some(dst) = out.get_mut(at..at + N).and_then(|o| <&mut [u8; N]>::try_from(o).ok()) else { return };
+                    let lightstep = (lightleft - lightright) >> shift;
+                    let mut l = lightright;
+                    // 0 < l <= 16320: the luxels are clamped to 64..=16320 and the
+                    // floor steps overshoot the lower one by less than 15 per edge,
+                    // so `l & 0xFF00` is one of the colormap's 64 rows — and
+                    // masked to them (`ROWS`) the index is in the colormap for
+                    // the compiler too, with no test at every texel.
+                    const ROWS: usize = COLORMAP_LEN - 256;
+                    if let Some(seg) = src.get(s0..s0 + N).and_then(|s| <&[u8; N]>::try_from(s).ok()) {
+                        for b in (0..N).rev() {
+                            dst[b] = colormap[((l & 0xFF00) as usize & ROWS) | seg[b] as usize];
+                            l += lightstep;
+                        }
+                    } else {
+                        for b in (0..N).rev() {
+                            dst[b] = colormap[((l & 0xFF00) as usize & ROWS) | src[(s0 + b) % smax] as usize];
+                            l += lightstep;
+                        }
                     }
-                } else {
-                    for b in (0..blocksize).rev() {
-                        dst[b] = colormap[(l & 0xFF00) as usize + src[(s0 + b) % smax] as usize];
-                        l += lightstep;
-                    }
+                    lightright += lightrightstep;
+                    lightleft += lightleftstep;
                 }
-                lightright += lightrightstep;
-                lightleft += lightleftstep;
             }
         }
     }
@@ -1168,7 +1237,7 @@ mod tests {
         bsp
     }
 
-    // -- The frame's bakes on the render threads (bake_all, band::map_jobs) --
+    // -- The frame's bakes on the render threads (Bakes) --
 
     /// The bake test's scene at frame `k` of a run: the lightmapped room seen
     /// from a corner, its second style stepping, a light moving across it.
@@ -1211,7 +1280,7 @@ mod tests {
             (frames, r.surfaces.block_entries(), most)
         };
         let (one, cache, most) = run(1);
-        assert!(bake_threads(most, 8) > 1, "a frame bakes enough for the threads ({most} texels)");
+        assert!(most > 100_000, "a frame bakes enough to share out ({most} texels)");
         for threads in [2, 3, 8, 16] {
             let (frames, entries, _) = run(threads);
             for (k, (a, b)) in frames.iter().zip(&one).enumerate() {
@@ -1323,7 +1392,7 @@ mod tests {
             (frames, most)
         };
         let (one, most) = run(1);
-        assert!(bake_threads(most as usize, 16) >= 4, "the frames bake enough for several threads ({most} texels)");
+        assert!(most > 100_000, "the frames bake enough to share out ({most} texels)");
         for threads in [2, 3, 8, 16] {
             let (frames, _) = run(threads);
             for (k, (a, b)) in frames.iter().zip(&one).enumerate() {
@@ -1345,25 +1414,57 @@ mod tests {
         assert!(baked.contains(&0) && !baked.contains(&1), "{baked:?}");
     }
 
-    /// One thread, or work too small to pay for another, bakes on the calling
-    /// thread: no thread is started. The jobs' results come back in their
-    /// order however many threads ran them.
+    /// A frame's bakes shared by its threads: every job's block is its own
+    /// bake, in the jobs' order, whether the threads took the jobs
+    /// ([`Bakes::work`]), a span asked for one first ([`Bakes::block`]), or
+    /// nobody did; the largest are taken first; a job the frame does not
+    /// have reads as nothing.
     #[test]
-    fn small_bakes_stay_on_the_calling_thread() {
-        assert_eq!(bake_threads(0, 16), 1);
-        assert_eq!(bake_threads(BAKE_TEXELS_PER_THREAD * 3 - 1, 16), 1);
-        assert_eq!(bake_threads(BAKE_TEXELS_PER_THREAD * 3, 16), 3);
-        assert_eq!(bake_threads(BAKE_TEXELS_PER_THREAD * 100, 2), 1, "two threads: the calling one");
-        assert_eq!(bake_threads(BAKE_TEXELS_PER_THREAD * 100, 8), 8);
-        assert_eq!(bake_threads(BAKE_TEXELS_PER_THREAD * 100, 1), 1);
-        let me = std::thread::current().id();
-        let one = crate::render::band::map_jobs(8, &[7], |&j| (j, std::thread::current().id()));
-        assert_eq!(one, [(7, me)], "one job: the calling thread");
-        let all = crate::render::band::map_jobs(1, &[1, 2, 3], |&j| (j, std::thread::current().id()));
-        assert!(all.iter().all(|&(_, t)| t == me));
-        let jobs: Vec<u64> = (0..500).collect();
-        let squares = crate::render::band::map_jobs(8, &jobs, |&j| j * j);
-        assert_eq!(squares, jobs.iter().map(|j| j * j).collect::<Vec<_>>());
+    fn the_frames_bakes_are_each_jobs_own_whoever_bakes_them() {
+        let (cm, _) = ramp_colormap();
+        let tex: Vec<u8> = (0..64 * 64).map(|i| (i * 7 % 251) as u8).collect();
+        let luxels: Vec<u8> = (0..9 * 9).map(|i| (i * 3) as u8).collect();
+        let jobs = || -> Vec<BakeJob> {
+            (1..=8usize)
+                .map(|k| BakeJob {
+                    lightmap: LightMap { luxels: Luxels::Static(&luxels), lmw: k + 1, lmh: 9 - k + 1, texmins: [0.0; 2] },
+                    tex: &tex,
+                    smax: 64,
+                    tmax: 64,
+                    texmins: [16 * k as i32, 0],
+                    mip: 0,
+                    bw: 16 * k,
+                    bh: 16 * (9 - k),
+                    colormap: &cm,
+                })
+                .collect()
+        };
+        let want: Vec<Arc<Vec<u8>>> = jobs().iter().map(BakeJob::bake).collect();
+        assert!(want.iter().all(|b| !b.is_empty()) && want[0] != want[1]);
+        // Nobody baked: `finish` does.
+        assert!(Bakes::new(jobs()).finish() == want);
+        // One thread takes them all, the largest first.
+        let alone = Bakes::new(jobs());
+        assert_eq!(alone.order[..2], [3, 4], "8 x 5 and 5 x 4 lightmap cells: 4 x 5 blocks of 16 first");
+        alone.work();
+        assert!(alone.blocks.iter().all(|b| b.get().is_some()));
+        assert!(alone.block(2) == &want[2][..] && alone.block(8).is_empty());
+        assert!(alone.finish() == want);
+        // Several threads, some asking for blocks before the jobs are taken.
+        for threads in [2, 3, 8] {
+            let shared = Bakes::new(jobs());
+            std::thread::scope(|s| {
+                for t in 0..threads {
+                    let (shared, want) = (&shared, &want);
+                    s.spawn(move || {
+                        assert!(shared.block(t) == &want[t][..], "asked for first");
+                        shared.work();
+                        assert!((0..8).all(|j| shared.block(j) == &want[j][..]));
+                    });
+                }
+            });
+            assert!(shared.finish() == want, "{threads} threads");
+        }
     }
 
     #[test]
@@ -1666,6 +1767,106 @@ mod tests {
     /// reads back `light >> 8` per texel.
     fn row_colormap() -> Vec<u8> {
         (0..COLORMAP_LEN).map(|i| (i / 256) as u8).collect()
+    }
+
+    /// [`draw_surface_block`] as it was first written, the block size a
+    /// variable and every row finding its texture row: the reference the
+    /// unrolled one is held to.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_surface_block_as_written(
+        tex: &[u8],
+        smax: usize,
+        tmax: usize,
+        texmins: [i32; 2],
+        mip: u32,
+        light: &[i32],
+        lmw: usize,
+        colormap: &[u8],
+        out: &mut [u8],
+        bw: usize,
+        bh: usize,
+    ) {
+        let blocksize = 16usize >> mip;
+        let shift = 4 - mip;
+        let (nh, nv) = (bw >> shift, bh >> shift);
+        if smax == 0 || tmax == 0 || tex.len() < smax * tmax || out.len() < bw * bh || colormap.len() < COLORMAP_LEN {
+            return;
+        }
+        // `soffset`/`basetoffset`: where the surface's first texel falls in the tiled
+        // texture ("+ (smax << 16)" in the C only keeps the % positive).
+        let soffset = (texmins[0] >> mip).rem_euclid(smax as i32) as usize;
+        let toffset = (texmins[1] >> mip).rem_euclid(tmax as i32) as usize;
+        let lux = |x: usize, y: usize| light.get(y * lmw + x).copied().unwrap_or(1 << 6);
+        for v in 0..nv {
+            for u in 0..nh {
+                // r_lightptr[0], r_lightptr[1], and the same one lightmap row down.
+                let mut lightleft = lux(u, v);
+                let mut lightright = lux(u + 1, v);
+                let lightleftstep = (lux(u, v + 1) - lightleft) >> shift;
+                let lightrightstep = (lux(u + 1, v + 1) - lightright) >> shift;
+                // The block's first texture column (the C wraps `soffset` a block at a
+                // time; id's textures are 16-aligned, so this is the same column).
+                let s0 = (soffset + u * blocksize) % smax;
+                for i in 0..blocksize {
+                    let y = v * blocksize + i;
+                    let trow = (toffset + y) % tmax * smax;
+                    let src = &tex[trow..trow + smax];
+                    let dst = &mut out[y * bw + u * blocksize..y * bw + (u + 1) * blocksize];
+                    let lightstep = (lightleft - lightright) >> shift;
+                    let mut l = lightright;
+                    // 0 < l <= 16320: the luxels are clamped to 64..=16320 and the
+                    // floor steps overshoot the lower one by less than 15 per edge,
+                    // so the index stays inside the 64 x 256 colormap.
+                    if s0 + blocksize <= smax {
+                        let seg = &src[s0..s0 + blocksize];
+                        for b in (0..blocksize).rev() {
+                            dst[b] = colormap[(l & 0xFF00) as usize + seg[b] as usize];
+                            l += lightstep;
+                        }
+                    } else {
+                        for b in (0..blocksize).rev() {
+                            dst[b] = colormap[(l & 0xFF00) as usize + src[(s0 + b) % smax] as usize];
+                            l += lightstep;
+                        }
+                    }
+                    lightright += lightrightstep;
+                    lightleft += lightleftstep;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_unrolled_block_bake_is_the_one_as_written() {
+        // Every mip level, textures that are and are not 16-aligned (the
+        // wrap inside a block), texturemins either side of zero, lights
+        // across their whole range (64..=16320) and blocks at the tile's
+        // seams: the same bytes.
+        let (cm, _) = ramp_colormap();
+        let mut seed = 12345u32;
+        let mut next = move || {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            seed >> 8
+        };
+        let mut compared = 0;
+        for &(smax0, tmax0) in &[(64usize, 64usize), (16, 32), (128, 16), (24, 40), (48, 24)] {
+            for mip in 0..4u32 {
+                let (smax, tmax) = (smax0 >> mip, tmax0 >> mip);
+                let tex: Vec<u8> = (0..smax * tmax).map(|_| next() as u8).collect();
+                for &(lmw, lmh) in &[(2usize, 2usize), (5, 3), (9, 17)] {
+                    for &texmins in &[[0, 0], [-48, 16], [112, -160], [16 * 7, 16 * 3]] {
+                        let light: Vec<i32> = (0..lmw * lmh).map(|_| 64 + (next() % (16320 - 64 + 1)) as i32).collect();
+                        let (bw, bh) = (((lmw - 1) * 16) >> mip, ((lmh - 1) * 16) >> mip);
+                        let (mut want, mut got) = (vec![7u8; bw * bh], vec![7u8; bw * bh]);
+                        draw_surface_block_as_written(&tex, smax, tmax, texmins, mip, &light, lmw, &cm, &mut want, bw, bh);
+                        draw_surface_block(&tex, smax, tmax, texmins, mip, &light, lmw, &cm, &mut got, bw, bh);
+                        assert!(got == want, "{smax}x{tmax} mip {mip}, lightmap {lmw}x{lmh}, texturemins {texmins:?}");
+                        compared += bw * bh;
+                    }
+                }
+            }
+        }
+        assert!(compared > 500_000);
     }
 
     /// The C's stepping, hand-worked: one lightmap cell with (inverted) luxels

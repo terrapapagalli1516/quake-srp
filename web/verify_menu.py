@@ -179,8 +179,8 @@ with sync_playwright() as p:
     # 30..120) and the framebuffer size never changes.
     w0 = pg.evaluate("exp.width()")
     key("ArrowUp", 5)       # from row 8 back to row 3
-    check("viewsize defaults to 100", pg.evaluate("exp.viewsize()") == 100)
-    key("ArrowLeft", 2)
+    check("viewsize defaults to 110 in 2026 (one step past id's 100)", pg.evaluate("exp.viewsize()") == 110)
+    key("ArrowLeft", 3)
     check("Screen size row steps viewsize", pg.evaluate("exp.viewsize()") == 80,
           f"{pg.evaluate('exp.viewsize()')}")
     key("ArrowRight", 6)
@@ -192,8 +192,8 @@ with sync_playwright() as p:
     key("ArrowUp"); key("Enter")
     check("Reset to defaults restores sensitivity",
           abs(pg.evaluate("exp.mouse_sensitivity()") - 1.0) < 1e-5)
-    check("Reset to defaults restores viewsize 100 (default.cfg)",
-          pg.evaluate("exp.viewsize()") == 100)
+    check("Reset to defaults restores viewsize to the profile's own (2026's 110; Classic's is default.cfg's 100)",
+          pg.evaluate("exp.viewsize()") == 110)
 
     # Customize controls (row 0): the Keys screen + a bind grab that Escape
     # cancels (full rebinding is proven in walk mode below).
@@ -243,7 +243,7 @@ with sync_playwright() as p:
     kept = bool(isolated.wait_until(
         pg, "quake.kept('id1/config.cfg').then(t => !!t && t.includes('_vid_resolution \"800x500\"'))", 5, raising=False))
     check("config.cfg keeps it", kept, str(pg.evaluate("quake.kept('id1/config.cfg')")))
-    check("the mode never touches viewsize", pg.evaluate("exp.viewsize()") == 100)
+    check("the mode never touches viewsize", pg.evaluate("exp.viewsize()") == 110)
     # Reversible: wrapping Up from the first preset reaches a native row
     # (Enter there would turn native back on) — not pressed, so the applied
     # 800x500 survives for the reload check below (verify_settings.py's
@@ -403,7 +403,7 @@ with sync_playwright() as p:
     sens_set = pg.evaluate("exp.mouse_sensitivity()")
     key("Escape"); key("Escape")
     # default.cfg binds '-' to sizedown and '=' to sizeup (in the game only).
-    key("Minus", 2); key("Equal")
+    key("Minus", 3); key("Equal")                      # 110 -> 80 -> 90
     check("'-' / '=' step viewsize in the game", pg.evaluate("exp.viewsize()") == 90,
           f"{pg.evaluate('exp.viewsize()')}")
     pg.evaluate("document.getElementById('walkBtn').click()")  # re-boot e1m1

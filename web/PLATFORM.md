@@ -377,7 +377,10 @@ path; there is no `fd_readdir`); anything else a newer `std` imports answers
   settings as `quake-rs.resolution`/`.viewsize`/`.extras` in localStorage. At
   start the page moves them once into the game directory — the saves to
   `id1/<name>`, the settings as the `config.cfg` lines the program would have
-  written — and removes the keys.
+  written — and removes the keys. A migrated `viewsize 100` was the old page's
+  default, not a choice, so it is dropped like the other restated defaults
+  (`LEGACY_DEFAULTS`): that player gets the profile's own Screen size, 110 in
+  2026. Any other size is kept.
 - A storage failure after the fact (quota) is printed on the console with
   `echo`, since the program's write already succeeded.
 
@@ -1472,8 +1475,8 @@ stdout stay the main program's, and a thread cannot spawn threads yet.
 
 **A thread's stack** (1 MiB, malloc'd, no guard page) is what `std` asks
 wasi-libc's `pthread_create` for:
-1 MiB (`std::thread`'s wasip1 `DEFAULT_MIN_STACK_SIZE`; the bands' and the
-bakes' scoped threads ask nothing more), allocated from the program's own
+1 MiB (`std::thread`'s wasip1 `DEFAULT_MIN_STACK_SIZE`; the frame's scoped
+threads, which bake and draw the bands, ask nothing more), allocated from the program's own
 heap, with no guard below it — linear memory has no unmapped pages. A
 thread that recurses past it does not fault: it writes over whatever the
 heap holds below its stack (the review of the bakes measured 1500 KiB of
@@ -1738,8 +1741,9 @@ bottom-anchored, the status bar covers *this frame* — the same arithmetic
 `calc_refdef` uses to keep the 3-D view off the bar (in 2026 too: the
 "Status bar overlay", `scr_sbaroverlay`, only draws the world on under the
 view beside the bar), so it is exactly right for every `viewsize` (0, 24
-or 48 virtual rows), the "scaled 2-D" extra's whole-number blow-up, and an
-intermission (always full screen, so 0). The page turns that into a CSS
+or 48 virtual rows; 2026 starts at 110, the 24-row status bar alone, and
+Classic at id's 100, with the inventory strip over it), the "scaled 2-D"
+extra's whole-number blow-up, and an intermission (always full screen, so 0). The page turns that into a CSS
 custom property, `--bar` (`touch.js`'s
 `refreshBar`/`applyBar`): the frame rows at the canvas box's own CSS-pixel-
 per-frame-pixel ratio, re-read whenever that ratio or the bar might have
@@ -2102,12 +2106,13 @@ run here.
 ## Browser support
 
 The design needs cross-origin isolation (below) for `SharedArrayBuffer`, and
-`Atomics.wait` in a worker. Checked here (2026-10-03): headless Chromium 146
-and headless Firefox 155, each all 18 `verify_*.py` (Firefox:
+`Atomics.wait` in a worker. Checked here (2026-10-03): headless Chromium 153
+(Playwright's) and headless Firefox 155, each all 19 `verify_*.py` (Firefox:
 `QUAKE_BROWSER=firefox`; "Build, serve, deploy" lists what differs and why),
-`verify_threads.py` in both, the benchmark in Chromium; Firefox's 16
-deploy-dir checks on the threads build with a display for its WebGL2 and
-without, and on `wasm32-wasip1` with one. Headed, on the desktop's Wayland compositor's virtual output with real input
+`verify_threads.py` in both, the benchmark in Chromium; Firefox's 17
+deploy-dir checks on the threads build, and 16 of them (all but
+`verify_crash.py`, which is about the threads build's own refusals) with a
+display for its WebGL2 too, and on `wasm32-wasip1` with one. Headed, on the Wayland compositor's virtual output with real input
 through XTEST: Chromium 146 (2026-10-02) and Firefox 155 ("Fullscreen",
 "Input"); in Firefox also the wheel, a save across a reload, and the sound's
 start: under
@@ -2225,11 +2230,11 @@ assembles one under `quake-wasm/target/bench-web`.
 
 **Firefox.** `QUAKE_BROWSER=firefox` runs any `verify_*.py` in Playwright's
 Firefox (`isolated.launch`, which also gives it the autoplay preferences
-Chromium takes as a flag; `webkit` does not start here). All 18 pass
+Chromium takes as a flag; `webkit` does not start here). All 19 pass
 (Firefox 155, 2026-10-03). What differs, each said by the script that
 differs:
 
-- `verify_extras` skips the Keyboard Lock checks, 17 of Chromium's 56: Firefox
+- `verify_extras` skips the Keyboard Lock checks, 17 of Chromium's 70: Firefox
   has no such API (its own no-API half runs).
 - `verify_present` tests WebGL2 only where Firefox has one, and a headless
   Firefox has one only with a display to ask: set `DISPLAY` (here
@@ -2240,7 +2245,7 @@ differs:
 - `verify_settings` skips its devicePixelRatio 2 section (3 checks): Playwright's
   Firefox loses a context's `device_scale_factor` on a cross-origin isolated
   page (a plain page keeps it), which is every page served here.
-- `verify_touch` runs on taps only: 95 checks pass and 7 are skipped, each saying
+- `verify_touch` runs on taps only: 137 checks pass and 8 are skipped, each saying
   why (the stick, the look drag, two thumbs, FIRE, JUMP, a held menu-pad
   arrow: Playwright's Firefox touchscreen taps and does nothing else, and has
   no `isMobile`), at devicePixelRatio 1 (so its "@3" and "@2.6" checks are

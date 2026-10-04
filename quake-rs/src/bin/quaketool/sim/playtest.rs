@@ -548,8 +548,10 @@ pub fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> CmdRes
     Ok(Out::Text(o))
 }
 
-/// The screen `playtest`'s POV shot is: the game's default viewsize (100),
-/// the 3-D view framed ABOVE the status bar by SCR_CalcRefdef — the framing
+/// The screen `playtest`'s POV shot is: id's default viewsize (100; the
+/// 2026 profile starts higher, but this draws id's layout, the unscaled
+/// 2-D layer and `SbarLayout::Classic`), the 3-D view framed ABOVE the
+/// status bar by SCR_CalcRefdef — the framing
 /// V_CalcRefdef's gun fudge for that viewsize assumes, so the gun sits on the
 /// bar as in the game.
 fn pov_screen(vid_w: usize, vid_h: usize) -> (f32, quake_rs::screen::Refdef) {

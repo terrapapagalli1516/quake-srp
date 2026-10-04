@@ -32,7 +32,7 @@ const WALK_MAP: &str = "maps/e1m1.bsp";
 /// both now, so a test that specifically wants id's 1996 ones, not just
 /// Classic's engine, names them: `Settings::id(Profile::Classic)`, or the
 /// console's `idcontrols`.)
-const START_PROFILE: Profile = if cfg!(test) { Profile::Classic } else { Profile::Modern };
+pub(crate) const START_PROFILE: Profile = if cfg!(test) { Profile::Classic } else { Profile::Modern };
 
 /// quake.rc's `startdemos demo1 demo2 demo3`: the attract loop.
 pub(crate) const QUAKE_RC_DEMOS: [&str; 3] = ["demo1", "demo2", "demo3"];

@@ -33,7 +33,7 @@ use super::view::{
     BONUS_PERCENT, FACE_ANIM_TIME, V_KICKTIME,
 };
 use super::{
-    backtile_for, color_for_name, draw_world_below, lap, render_options, s_update, warp_below, ClientFrame, DemoPlay, Listener,
+    backtile_for, color_for_name, draw_view, lap, render_options, s_update, warp_below, ClientFrame, DemoPlay, Listener,
     Phase, SoundCall, Vid,
 };
 
@@ -992,8 +992,7 @@ fn render_demo_frame(
         lap(Phase::Render3d);
         d.renderer.warp_into(view, &mut img, vrect, below, v.time, vid.video.hires);
     } else {
-        d.renderer.render_into(&scene, &mut img);
-        draw_world_below(&mut d.renderer, &scene, &refdef, &mut img);
+        draw_view(&mut d.renderer, &scene, &refdef, &mut img);
         lap(Phase::Render3d);
     }
     // Host_Frame runs CL_DecayLights after SCR_UpdateScreen: `radius -=

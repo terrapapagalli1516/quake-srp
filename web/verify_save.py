@@ -237,10 +237,11 @@ with sync_playwright() as p:
     print(f"migration: save moved {moved}; config.cfg {cfg.splitlines()[1:]}; keys left {left}; settings {settings}")
     if not (moved and "_vid_resolution" in cfg and "640x400" in cfg and "wasm_showfps" in cfg and not left):
         fails.append("the localStorage saves and settings were not moved into the game directory")
-    # The player's choices kept (the mode, Screen size, Show FPS), and the
-    # 2026 defaults the old page's file restated as off (uncapped 1, exact
-    # perspective 4, scaled 2-D 8) on: extras 15.
-    if settings[1:] != ["640x400", 80, 15]:
+    # The player's choices kept (the mode, a Screen size of 80 that is not
+    # the old default 100, Show FPS), and the 2026 defaults the old page's
+    # file restated as off (uncapped 1, scaled 2-D 8; the span is 8, which
+    # is not the extras' exact bit 4) on: extras 11.
+    if settings[1:] != ["640x400", 80, 11]:
         fails.append(f"the migrated settings did not apply: {settings}")
     boot_walk(pg2)
     console_line(pg2, "load migrated")

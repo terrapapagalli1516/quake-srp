@@ -45,7 +45,7 @@ use super::sky::{draw_sky_span, sky_dome_scale, sky_texture, SkyView};
 use super::stats::Profiler;
 use super::torch::FaceTorches;
 use super::surf::{
-    bake_all, classify_surface, face_world_poly, texture_animation, BakeJob, MipView, SurfBlock, SurfKind, Surface,
+    classify_surface, face_world_poly, texture_animation, BakeJob, Bakes, MipView, SurfBlock, SurfKind, Surface,
     SurfaceCaches, SurfaceRequest,
 };
 use super::vis::point_in_leaf;
@@ -109,7 +109,10 @@ struct Edge {
     /// The surface on the edge's left (it is that surface's trailing edge) and
     /// on its right (leading); 0 = none.
     surfs: [u32; 2],
-    nextremove: u32,
+    /// The last scanline it is active on (id links the edges that end on a
+    /// scanline into `removeedges[v2]`, `nextremove`; here each knows its
+    /// own: [`EdgeState::step_edge`]).
+    last: i32,
     nearzi: f32,
     /// The world `medge_t` it was made from (the edge cache's owner test), or
     /// [`NONE`] for a brush model's.
@@ -118,7 +121,7 @@ struct Edge {
 
 impl Edge {
     const ZERO: Edge =
-        Edge { u: 0, u_step: 0, prev: NONE, next: NONE, surfs: [0, 0], nextremove: NONE, nearzi: 0.0, owner: NONE };
+        Edge { u: 0, u_step: 0, prev: NONE, next: NONE, surfs: [0, 0], last: i32::MAX, nearzi: 0.0, owner: NONE };
 }
 
 /// `surf_t` (`r_shared.h`).
@@ -126,8 +129,9 @@ impl Edge {
 struct Surf {
     next: u32,
     prev: u32,
-    /// Head of this surface's span list (`espan_t.pnext` links).
-    spans: u32,
+    /// Whether the scan gave it a span (id's `surf_t.spans` list is not
+    /// kept: [`ESpan`]).
+    has_spans: bool,
     /// Front-to-back order: smaller is nearer.
     key: i32,
     last_u: i32,
@@ -147,7 +151,7 @@ impl Surf {
     const ZERO: Surf = Surf {
         next: 0,
         prev: 0,
-        spans: NONE,
+        has_spans: false,
         key: 0,
         last_u: 0,
         spanstate: 0,
@@ -162,13 +166,19 @@ impl Surf {
     };
 }
 
-/// `espan_t`: `count` pixels from `(u, v)`.
+/// `espan_t`: `count` pixels from `u` of its row, of surface `surf`. id links
+/// each surface's spans into a list (`pnext`) and `D_DrawSurfaces` draws
+/// surface after surface; here the spans stay in the order the scan makes
+/// them, row after row and left to right, each naming its surface, and
+/// [`WorldDraw::rows`] says where each row's begin — so a band's spans are
+/// one run of the list, and its pixels are written in memory order. Every
+/// pixel is in exactly one span, so the order they are drawn in changes
+/// nothing.
 #[derive(Clone, Copy)]
 struct ESpan {
     u: i32,
-    v: i32,
     count: i32,
-    pnext: u32,
+    surf: u32,
 }
 
 /// `bedge_t` (`r_bsp.c`): a brush-model edge being clipped into the world's
@@ -296,9 +306,13 @@ pub(super) struct EdgeState {
     /// The frame's buffers.
     edges: Vec<Edge>,
     surfs: Vec<Surf>,
+    /// The scan's spans, and the index of each row's first (one more entry
+    /// than rows: the end): the frame's [`WorldDraw`] takes both.
     spans: Vec<ESpan>,
+    row_spans: Vec<u32>,
+    /// Span buffers handed back by drawn frames ([`EdgeState::recycle`]).
+    spare_spans: Vec<(Vec<ESpan>, Vec<u32>)>,
     newedges: Vec<u32>,
-    removeedges: Vec<u32>,
     bedges: Vec<BEdge>,
     dlight_bits: Vec<u32>,
     poly: Vec<Vec3>,
@@ -370,8 +384,9 @@ impl EdgeState {
         edges: Vec::new(),
         surfs: Vec::new(),
         spans: Vec::new(),
+        row_spans: Vec::new(),
+        spare_spans: Vec::new(),
         newedges: Vec::new(),
-        removeedges: Vec::new(),
         bedges: Vec::new(),
         dlight_bits: Vec::new(),
         poly: Vec::new(),
@@ -489,8 +504,9 @@ impl EdgeState {
     /// The world and the brush entities of `frame` as id sorts them
     /// (`R_EdgeDrawing`: `R_RenderWorld`, `R_DrawBEntitiesOnList`,
     /// `R_ScanEdges`), and `D_DrawSurfaces`' choice for each surface that
-    /// owns a span — the surface cache consulted, any block baked — so that
-    /// [`EdgeState::draw_band`] can draw any rows of the view from them. The
+    /// owns a span — the surface cache consulted, the bake of any block it
+    /// does not have added to the frame's `jobs` — so that
+    /// [`WorldDraw::draw_band`] can draw any rows of the view from them. The
     /// world is the one [`EdgeState::begin_map`] was last called for. `None`
     /// for a view larger than any setting allows (the caller clamps to the
     /// cvars' limit; this refuses the 8K limit's past).
@@ -498,8 +514,8 @@ impl EdgeState {
         &mut self,
         frame: &Frame<'_, 'a>,
         caches: &mut SurfaceCaches,
+        jobs: &mut Vec<BakeJob<'a>>,
         prof: &mut Profiler,
-        threads: usize,
     ) -> Option<WorldDraw<'a>> {
         let (w, h) = (frame.w, frame.h);
         if w == 0 || h == 0 || w > super::HIRES_MAXWIDTH || h > super::HIRES_MAXHEIGHT {
@@ -568,21 +584,21 @@ impl EdgeState {
         let t2 = lap();
         self.scan_edges();
         let t3 = lap();
-        let world = self.prepare_surfaces(frame, caches, prof, &ents, &bits, threads);
+        let world = self.prepare_surfaces(frame, caches, jobs, prof, &ents, &bits);
         self.dlight_bits = bits;
         if prof.on() {
             let t4 = lap();
             let (edges, surfs, spans) = (
                 self.edges.len() as u64 - FIRST_EDGE as u64,
                 self.surfs.len() as u64 - 2,
-                self.spans.len() as u64,
+                world.spans.len() as u64,
             );
             prof.add(|s| {
                 // world = the whole pass but the brush entities' edge setup,
                 // which goes to `submodel` (their spans are drawn with the
                 // world's); `sort` = the world walk to edges, `setup` = the scan,
                 // `surf` = D_DrawSurfaces (here its per-surface setup; the
-                // bands add their spans).
+                // bands add their bakes and spans).
                 s.world_ns += t1 + (t4 - t2);
                 s.submodel_ns += t2 - t1;
                 s.world_sort_ns += t1;
@@ -754,9 +770,16 @@ impl EdgeState {
         self.r_currentkey = 0;
         self.newedges.clear();
         self.newedges.resize(self.h, NONE);
-        self.removeedges.clear();
-        self.removeedges.resize(self.h, NONE);
+        if let Some((spans, rows)) = self.spare_spans.pop() {
+            (self.spans, self.row_spans) = (spans, rows);
+        }
         self.spans.clear();
+        self.row_spans.clear();
+    }
+
+    /// Take back a drawn frame's span buffers for the next one.
+    pub(super) fn recycle(&mut self, world: WorldDraw) {
+        self.spare_spans.push((world.spans, world.rows));
     }
 
     // -----------------------------------------------------------------------
@@ -800,7 +823,7 @@ impl EdgeState {
 
     /// `R_RecursiveWorldNode`.
     fn recursive_world_node(&mut self, bsp: &Bsp, node: i32, mut clipflags: u32, depth: u32) {
-        if depth > MAX_DEPTH {
+        if depth > MAX_DEPTH || self.visframe_of(node) != self.visframecount {
             return;
         }
         let (minmaxs, leaf) = if node < 0 {
@@ -817,9 +840,6 @@ impl EdgeState {
             let Some(n) = bsp.nodes.get(node as usize) else { return };
             ([n.mins[0], n.mins[1], n.mins[2], n.maxs[0], n.maxs[1], n.maxs[2]].map(|v| v as f32), None)
         };
-        if self.visframe_of(node) != self.visframecount {
-            return;
-        }
         // Cull against the clip planes unless trivially accepted.
         if clipflags != 0 {
             for i in 0..4 {
@@ -1009,7 +1029,7 @@ impl EdgeState {
             prev: NONE,
             next: NONE,
             surfs,
-            nextremove: NONE,
+            last: v2,
             nearzi: lzi0,
             owner: self.r_pedge_owner,
         });
@@ -1018,7 +1038,7 @@ impl EdgeState {
         if surfs[0] != 0 {
             u_check = u_check.wrapping_add(1); // sort trailers after leaders
         }
-        let (v, v2) = (v as usize, v2 as usize);
+        let v = v as usize;
         let head = self.newedges[v];
         if head == NONE || self.edges[head as usize].u >= u_check {
             self.edges[e as usize].next = head;
@@ -1035,8 +1055,6 @@ impl EdgeState {
             self.edges[e as usize].next = self.edges[pcheck as usize].next;
             self.edges[pcheck as usize].next = e;
         }
-        self.edges[e as usize].nextremove = self.removeedges[v2];
-        self.removeedges[v2] = e;
     }
 
     /// `R_ClipEdge`: clip `pv0 -> pv1` against the planes of `chain`, noting
@@ -1220,7 +1238,7 @@ impl EdgeState {
         self.surfs.push(Surf {
             next: 0,
             prev: 0,
-            spans: NONE,
+            has_spans: false,
             key,
             last_u: 0,
             spanstate: 0,
@@ -1588,10 +1606,46 @@ impl EdgeState {
     // -----------------------------------------------------------------------
 
     /// `R_ScanEdges` (without its span-pool flush: the pool grows): every
-    /// scanline's spans, from the edges `newedges` / `removeedges` hold.
+    /// scanline's spans, from the edges `newedges` holds.
+    ///
+    /// id walks the active edges three times a scanline: `R_GenerateSpans`,
+    /// then `R_RemoveEdges` (those that end on it), then `R_StepActiveU`
+    /// (step each to the next scanline and move back any that passed the
+    /// one before it). Here it is one walk: an edge is removed or stepped
+    /// ([`EdgeState::step_edge`]) as soon as its spans are generated. The
+    /// spans come out the same: an edge's spans read its own `u` and the
+    /// surfaces, never another edge's `u`, and the walk goes on from the
+    /// edge that followed this one before it was stepped. The table comes
+    /// out the same too. Stepping an edge only looks at, and moves it
+    /// among, the edges before it, which id's third walk had stepped by
+    /// then and this one has too; the edges before it that end here are
+    /// already out, as id's second walk had them (taking a set of edges out
+    /// of a list leaves the same list in any order); and what is left of
+    /// the scanline's own walk lies after it, untouched.
+    ///
+    /// One thing id's third walk does and this one does not: it steps
+    /// `edge_tail` as well, and would move the tail back before an edge
+    /// that had run past it. None does. `R_EmitEdge`'s clamps start every
+    /// edge half a pixel or more left of the tail — 2^19 of `u`'s units —
+    /// and an edge's steps carry it a few thousand units past its clamp at
+    /// the most, so the tail stays last in id's walk as it does here. (The
+    /// tests hold this walk to id's three, written out, line by line over
+    /// random tables and the maps' own; the scan is the largest thing a
+    /// frame does on one thread: PERF_PLAN.md §14.)
     fn scan_edges(&mut self) {
-        let h = self.h as i32;
-        // clear active edges to just the background edges around the screen
+        self.begin_scan();
+        let bottom = self.h as i32 - 1;
+        for iv in 0..bottom {
+            self.scan_line(iv, true);
+        }
+        // the last scan (no need to step or sort or remove on the last scan)
+        self.scan_line(bottom, false);
+        self.row_spans.push(self.spans.len() as u32);
+    }
+
+    /// `R_ScanEdges`' sentinels: the active edges cleared to just the
+    /// background edges around the screen.
+    fn begin_scan(&mut self) {
         let head_u = 0i64;
         self.edges[EDGE_HEAD as usize] =
             Edge { u: head_u, u_step: 0, prev: NONE, next: EDGE_TAIL, surfs: [0, BACKGROUND], ..Edge::ZERO };
@@ -1608,26 +1662,14 @@ impl EdgeState {
         // every walk first)
         self.edges[EDGE_SENTINEL as usize] =
             Edge { u: i64::MAX, u_step: 0, prev: EDGE_AFTERTAIL, ..Edge::ZERO };
-        let bottom = h - 1;
-        for iv in 0..bottom {
-            self.scan_line(iv);
-            let re = self.removeedges[iv as usize];
-            if re != NONE {
-                self.remove_edges(re);
-            }
-            let first = self.edges[EDGE_HEAD as usize].next;
-            if first != EDGE_TAIL {
-                self.step_active_u(first);
-            }
-        }
-        // the last scan (no need to step or sort or remove on the last scan)
-        self.scan_line(bottom);
     }
 
-    /// One scanline of `R_ScanEdges`: add the new edges, generate the spans.
-    fn scan_line(&mut self, iv: i32) {
+    /// One scanline of `R_ScanEdges`: add the new edges, generate the spans
+    /// and, with `step`, leave the active edges as the next scanline's.
+    fn scan_line(&mut self, iv: i32, step: bool) {
         self.current_iv = iv;
         self.fv = iv as f32;
+        self.row_spans.push(self.spans.len() as u32);
         // mark that the head (background start) span is pre-included
         self.surfs[BACKGROUND as usize].spanstate = 1;
         let ne = self.newedges[iv as usize];
@@ -1635,7 +1677,7 @@ impl EdgeState {
             let first = self.edges[EDGE_HEAD as usize].next;
             self.insert_new_edges(ne, first);
         }
-        self.generate_spans();
+        self.generate_spans(step);
     }
 
     /// `R_InsertNewEdges`: merge the u-sorted list `toadd` into the active
@@ -1657,18 +1699,76 @@ impl EdgeState {
         }
     }
 
-    /// `R_RemoveEdges`.
-    fn remove_edges(&mut self, mut pedge: u32) {
-        while pedge != NONE {
-            let Edge { prev, next, nextremove, .. } = self.edges[pedge as usize];
+    /// `R_RemoveEdges` and `R_StepActiveU` for one active edge, its spans on
+    /// the current scanline generated: out of the table if this is its last
+    /// scanline; else stepped to the next one, and moved back if it passed
+    /// the edge before it.
+    #[inline]
+    fn step_edge(&mut self, pedge: u32) {
+        let e = &mut self.edges[pedge as usize];
+        let (prev, next) = (e.prev, e.next);
+        if e.last == self.current_iv {
             self.edges[next as usize].prev = prev;
             self.edges[prev as usize].next = next;
-            pedge = nextremove;
+            return;
         }
+        e.u = e.u.wrapping_add(e.u_step);
+        let u = e.u;
+        if u >= self.edges[prev as usize].u {
+            return;
+        }
+        // push it back to keep it sorted: pull the edge out of the edge list
+        self.edges[next as usize].prev = prev;
+        self.edges[prev as usize].next = next;
+        // find out where the edge goes in the edge list (id would walk
+        // past `edge_head` for an edge left of the screen, which its
+        // clamps never make; stop there)
+        let mut pwedge = self.edges[prev as usize].prev;
+        if pwedge == NONE {
+            pwedge = EDGE_HEAD;
+        }
+        while pwedge != EDGE_HEAD && self.edges[pwedge as usize].u > u {
+            pwedge = self.edges[pwedge as usize].prev;
+        }
+        // put the edge back into the edge list
+        let after = self.edges[pwedge as usize].next;
+        self.edges[pedge as usize].next = after;
+        self.edges[pedge as usize].prev = pwedge;
+        self.edges[after as usize].prev = pedge;
+        self.edges[pwedge as usize].next = pedge;
+    }
+
+    /// `R_ScanEdges` as id walks it — the spans, then `R_RemoveEdges`, then
+    /// `R_StepActiveU`, three walks a scanline: what [`EdgeState::scan_edges`]
+    /// is held to.
+    #[cfg(test)]
+    fn scan_edges_in_ids_walks(&mut self) {
+        self.begin_scan();
+        let bottom = self.h as i32 - 1;
+        for iv in 0..bottom {
+            self.scan_line(iv, false);
+            // R_RemoveEdges (id's list of them is the `last` of each here).
+            let mut pedge = self.edges[EDGE_HEAD as usize].next;
+            while pedge != EDGE_TAIL {
+                let Edge { prev, next, last, .. } = self.edges[pedge as usize];
+                if last == iv {
+                    self.edges[next as usize].prev = prev;
+                    self.edges[prev as usize].next = next;
+                }
+                pedge = next;
+            }
+            let first = self.edges[EDGE_HEAD as usize].next;
+            if first != EDGE_TAIL {
+                self.step_active_u(first);
+            }
+        }
+        self.scan_line(bottom, false);
+        self.row_spans.push(self.spans.len() as u32);
     }
 
     /// `R_StepActiveU`: step every active edge to the next scanline, moving
     /// back any that passed the one before it.
+    #[cfg(test)]
     fn step_active_u(&mut self, mut pedge: u32) {
         let mut budget = self.edges.len() * 2 + 8;
         loop {
@@ -1693,9 +1793,6 @@ impl EdgeState {
             let next = pnext_edge;
             self.edges[next as usize].prev = prev;
             self.edges[prev as usize].next = next;
-            // find out where the edge goes in the edge list (id would walk
-            // past `edge_head` for an edge left of the screen, which its
-            // clamps never make; stop there)
             let mut pwedge = self.edges[prev as usize].prev;
             if pwedge == NONE {
                 pwedge = EDGE_HEAD;
@@ -1719,16 +1816,15 @@ impl EdgeState {
     /// Add a span of `surf`: `count` pixels from `u` on the current scanline.
     #[inline]
     fn emit_span(&mut self, surf: u32, u: i32, count: i32) {
-        let idx = self.spans.len() as u32;
-        let s = &mut self.surfs[surf as usize];
-        self.spans.push(ESpan { u, v: self.current_iv, count, pnext: s.spans });
-        s.spans = idx;
+        self.surfs[surf as usize].has_spans = true;
+        self.spans.push(ESpan { u, count, surf });
     }
 
     /// `R_GenerateSpans`: walk the active edges left to right, keeping the
     /// stack of surfaces under the pixel, and emit a span wherever the top
-    /// changes.
-    fn generate_spans(&mut self) {
+    /// changes. With `step`, each edge is then removed or stepped for the
+    /// next scanline ([`EdgeState::step_edge`]), in the same walk.
+    fn generate_spans(&mut self, step: bool) {
         // clear active surfaces to just the background surface
         let bg = &mut self.surfs[BACKGROUND as usize];
         bg.next = BACKGROUND;
@@ -1736,17 +1832,18 @@ impl EdgeState {
         bg.last_u = self.edge_head_u_shift20;
         let mut edge = self.edges[EDGE_HEAD as usize].next;
         while edge != EDGE_TAIL {
-            let surfs = self.edges[edge as usize].surfs;
+            let Edge { surfs, next, .. } = self.edges[edge as usize];
             if surfs[0] != 0 {
                 // it has a left surface, so a surface is going away for this span
                 self.trailing_edge(surfs[0], edge);
-                if surfs[1] == 0 {
-                    edge = self.edges[edge as usize].next;
-                    continue;
-                }
             }
-            self.leading_edge(edge);
-            edge = self.edges[edge as usize].next;
+            if surfs[0] == 0 || surfs[1] != 0 {
+                self.leading_edge(edge);
+            }
+            if step {
+                self.step_edge(edge);
+            }
+            edge = next;
         }
         self.cleanup_span();
     }
@@ -1878,17 +1975,17 @@ impl EdgeState {
 
     /// `D_DrawSurfaces`' per-surface setup: for each surface that owns a
     /// span, how its spans are painted and its `1/z` plane, the surface cache
-    /// consulted and any block baked (`D_CacheSurface`) — everything the
-    /// bands need, decided once.
+    /// consulted (`D_CacheSurface`) and a block it does not have added to the
+    /// frame's bakes, `jobs` — everything the bands need, decided once.
     #[allow(clippy::too_many_arguments)]
     fn prepare_surfaces<'a>(
         &mut self,
         frame: &Frame<'_, 'a>,
         caches: &mut SurfaceCaches,
+        jobs: &mut Vec<BakeJob<'a>>,
         prof: &mut Profiler,
         ents: &[Ent<'a>],
         bits: &[u32],
-        threads: usize,
     ) -> WorldDraw<'a> {
         let (cam, opts) = (&frame.cam, &frame.scene.options);
         let Projection { cx, cy, xscale, yscale } = Projection::new(cam, &frame.geom, opts.aspect());
@@ -1913,16 +2010,15 @@ impl EdgeState {
         let pass = FacePass { frame, sview: &sview, mipview: &mipview, ents, bits, light_dir, clear };
         let mut faces = 0u64;
         let mut surfs = Vec::with_capacity(self.surfs.len());
-        // The blocks to bake, and the surfaces waiting for one.
-        caches.begin_frame();
-        let (mut jobs, mut waiting) = (Vec::new(), Vec::new());
+        let t_lookup = prof.now();
         for si in 0..self.surfs.len() {
             let s = self.surfs[si];
-            if si == 0 || s.spans == NONE {
+            if si == 0 || !s.has_spans {
                 surfs.push(None);
                 continue;
             }
-            let (paint, zi) = if s.flags & SURF_DRAWBACKGROUND != 0 {
+            let background = s.flags & SURF_DRAWBACKGROUND != 0;
+            let (paint, zi) = if background {
                 // the background: effectively at infinity
                 (Paint::Fill(clear), [BACKGROUND_ZI, 0.0, 0.0])
             } else {
@@ -1930,38 +2026,33 @@ impl EdgeState {
                 let paint = if s.flags & SURF_DRAWSKY != 0 {
                     sky_tex.map_or(Paint::Fill(clear), Paint::Sky)
                 } else {
-                    let (paint, job) = self.prepare_face(&s, &pass, caches, &mut jobs, prof);
-                    if let Some(job) = job {
-                        waiting.push((surfs.len(), job));
-                    }
-                    paint
+                    self.prepare_face(&s, &pass, caches, jobs, prof)
                 };
                 (paint, [s.d_ziorigin, s.d_zistepu, s.d_zistepv])
             };
-            surfs.push(Some(SurfDraw { paint, zi }));
+            // D_DrawZSpans' step along a row, the plane's for every span.
+            let izistep = c_ftoi((zi[1] * 32768.0 * 65536.0) as f64);
+            surfs.push(Some(SurfDraw { paint, zi, izistep, background }));
         }
         prof.add(|st| st.faces_drawn += faces);
-        // The frame's bakes, on the render threads; then each waiting
-        // surface and cache entry takes its block.
-        let t = prof.now();
-        let blocks = bake_all(&jobs, threads);
-        if let Some(t) = t {
-            prof.add(|st| st.surf_bake_ns += t.elapsed().as_nanos() as u64);
+        if let Some(t) = t_lookup {
+            prof.add(|st| st.surf_lookup_ns += t.elapsed().as_nanos() as u64);
         }
-        caches.baked(&blocks);
-        for (si, job) in waiting {
-            if let Some(Some(SurfDraw { paint: Paint::Cached { block, .. }, .. })) = surfs.get_mut(si) {
-                block.block = blocks[job].clone();
-            }
+        WorldDraw {
+            surfs,
+            spans: std::mem::take(&mut self.spans),
+            rows: std::mem::take(&mut self.row_spans),
+            w: self.w,
+            sky,
+            persp: opts.persp_span,
         }
-        WorldDraw { surfs, sky, persp: opts.persp_span }
     }
 
     /// How one wall or liquid surface is painted (`D_DrawSurfaces`' turbulent
     /// and cached branches, and the port's fallbacks for textureless or unlit
     /// faces), its lightmap built and its block found in the cache — or its
-    /// bake added to `jobs`, the index given with the paint, whose block is
-    /// put in once the frame's bakes are done.
+    /// bake added to `jobs`, the paint naming the job, whose block the
+    /// frame's [`Bakes`] has when the spans are drawn.
     fn prepare_face<'a>(
         &mut self,
         s: &Surf,
@@ -1969,7 +2060,7 @@ impl EdgeState {
         caches: &mut SurfaceCaches,
         jobs: &mut Vec<BakeJob<'a>>,
         prof: &mut Profiler,
-    ) -> (Paint<'a>, Option<usize>) {
+    ) -> Paint<'a> {
         let FacePass { frame, sview, mipview, ents, bits, light_dir, clear } = *pass;
         let scene = frame.scene;
         let (light_styles, colormap, time) = (scene.light_styles, scene.colormap, scene.time);
@@ -1998,7 +2089,7 @@ impl EdgeState {
             ..*sview
         };
         let Some(grads) = face_grads(bsp, face, &local_sview, eye, ti) else {
-            return (Paint::Fill(clear), None);
+            return Paint::Fill(clear);
         };
         let face_bits = if e.world_bsp { bits.get(fi).copied().unwrap_or(0) } else { 0 };
         // The steady torches lighting it (`r_torchflicker`): the world's
@@ -2030,7 +2121,7 @@ impl EdgeState {
         match tex {
             Some((tex_index, mt)) if !mt.pixels.is_empty() && mt.width > 0 && mt.height > 0 => {
                 if turbulent {
-                    return (Paint::Turb { grads, mt }, None);
+                    return Paint::Turb { grads, mt };
                 }
                 let found = match (lightmap, colormap) {
                     (Some(lightmap), Some(colormap)) => caches.surface(
@@ -2057,11 +2148,11 @@ impl EdgeState {
                         prof.add(|st| st.surf_hits += 1);
                         let grads = grads.mip_scaled(block.mip);
                         let fixed = BlockFixed::new(&grads, block.texmins, block.bw, block.bh);
-                        (Paint::Cached { grads, fixed, block }, job)
+                        Paint::Cached { grads, fixed, block, job }
                     }
                     Surface::PerPixel(lightmap) => {
                         prof.add(|st| st.surf_misses += 1);
-                        (Paint::Texels { grads, texture: Some(mt), shade, lightmap }, None)
+                        Paint::Texels { grads, texture: Some(mt), shade, lightmap }
                     }
                 }
             }
@@ -2071,55 +2162,49 @@ impl EdgeState {
                 // texture lit by the lightmap when there is one.
                 let key = ti.map(|t| t.miptex as i64).unwrap_or(face.texinfo as i64);
                 let colour = hash_index(key);
-                let paint = match lightmap {
+                match lightmap {
                     Some(lm) => Paint::Flat { grads, colour, shade, lightmap: lm },
                     None => Paint::Fill(shade_index(scene.palette, colour, shade)),
-                };
-                (paint, None)
+                }
             }
         }
     }
+}
 
-    /// `D_DrawSurfaces` and `D_DrawZSpans` for the rows of `band`: each
-    /// surface's spans in those rows, painted as [`EdgeState::build`] decided,
-    /// and their `1/z`. Returns the pixels drawn (the background's not
-    /// counted).
-    pub(super) fn draw_band(&self, band: &mut Band, frame: &Frame, world: &WorldDraw) -> u64 {
-        let (w, h) = (self.w, self.h);
-        let rows = band.rows();
+impl WorldDraw<'_> {
+    /// `D_DrawSurfaces` and `D_DrawZSpans` for the rows of `band`: the spans
+    /// of those rows, each painted as [`EdgeState::build`] decided for its
+    /// surface — a block the frame bakes from `bakes` — and their `1/z`.
+    /// Returns the pixels drawn (the background's not counted).
+    pub(super) fn draw_band(&self, band: &mut Band, frame: &Frame, bakes: &Bakes) -> u64 {
+        let w = self.w as i32;
         let scene = frame.scene;
-        let (palette, colormap, persp) = (scene.palette, scene.colormap, world.persp);
+        let (palette, colormap, persp) = (scene.palette, scene.colormap, self.persp);
         let mut drawn = 0u64;
-        for (si, draw) in world.surfs.iter().enumerate() {
-            let Some(SurfDraw { paint, zi: [ziorigin, zistepu, zistepv] }) = draw else { continue };
-            let izistep = c_ftoi((zistepu * 32768.0 * 65536.0) as f64);
-            // A surface's spans run bottom to top (each new one is pushed on
-            // its list): skip those below the band, stop above it.
-            let mut p = self.surfs[si].spans;
-            while let Some(sp) = self.spans.get(p as usize) {
-                p = sp.pnext;
-                // clamp to the row (id's stepping keeps it there)
-                let v = sp.v.clamp(0, h as i32 - 1) as usize;
-                if v >= rows.end {
+        for v in band.rows() {
+            let (Some(&first), Some(&end)) = (self.rows.get(v), self.rows.get(v + 1)) else { break };
+            for sp in self.spans.get(first as usize..end as usize).unwrap_or(&[]) {
+                let Some(Some(SurfDraw { paint, zi: [ziorigin, zistepu, zistepv], izistep, background })) =
+                    self.surfs.get(sp.surf as usize)
+                else {
                     continue;
-                }
-                if v < rows.start {
-                    break;
-                }
-                let u = sp.u.clamp(0, w as i32) as usize;
-                let n = ((sp.u + sp.count).clamp(0, w as i32) as usize).saturating_sub(u);
+                };
+                // clamp to the row (id's stepping keeps it there)
+                let u = sp.u.clamp(0, w) as usize;
+                let n = ((sp.u + sp.count).clamp(0, w) as usize).saturating_sub(u);
                 let Some((row, zrow)) = band.span(u, v, n).filter(|_| n > 0) else { continue };
                 match paint {
                     Paint::Fill(c) => row.fill(*c),
                     Paint::Sky(mt) => {
-                        draw_sky_span(row, u as i32, v as i32, n as i32, &mt.pixels, mt.width as usize, &world.sky);
+                        draw_sky_span(row, u as i32, v as i32, n as i32, &mt.pixels, mt.width as usize, &self.sky);
                     }
                     Paint::Turb { grads, mt } => {
                         let (tw, th) = (mt.width as usize, mt.height as usize);
                         span_turb(row, &span_at(grads, u, v), grads, &mt.pixels, tw, th, &frame.turb, scene.time, persp);
                     }
-                    Paint::Cached { grads, fixed, block } => {
-                        span_cached(row, &span_at(grads, u, v), fixed, &block.block, block.bw, block.bh, persp);
+                    Paint::Cached { grads, fixed, block, job } => {
+                        let texels = job.map_or(&block.block[..], |job| bakes.block(job));
+                        span_cached(row, &span_at(grads, u, v), fixed, texels, block.bw, block.bh, persp);
                     }
                     Paint::Texels { grads, texture, shade, lightmap } => {
                         let (pixels, tw, th) = texture.map_or((&[][..], 0, 0), |mt| (&mt.pixels[..], mt.width as usize, mt.height as usize));
@@ -2129,7 +2214,7 @@ impl EdgeState {
                         span_tex(row, &span_at(grads, u, v), grads, std::slice::from_ref(colour), 1, 1, palette, *shade, Some(lightmap), colormap);
                     }
                 }
-                if self.surfs[si].flags & SURF_DRAWBACKGROUND == 0 {
+                if !background {
                     drawn += n as u64;
                 }
                 // D_DrawZSpans
@@ -2137,7 +2222,7 @@ impl EdgeState {
                 let mut izi = c_ftoi(zi * 32768.0 * 65536.0);
                 for z in zrow {
                     *z = (izi >> 16) as i16;
-                    izi = izi.wrapping_add(izistep);
+                    izi = izi.wrapping_add(*izistep);
                 }
             }
         }
@@ -2157,8 +2242,9 @@ enum Paint<'a> {
     /// A liquid (`Turbulent8`), the raw texel.
     Turb { grads: PolyGrads, mt: &'a MipTex },
     /// A wall from its lit surface-cache block (`D_DrawSpans16`); the
-    /// gradients are the block's mip level's.
-    Cached { grads: PolyGrads, fixed: BlockFixed, block: SurfBlock },
+    /// gradients are the block's mip level's. With `job`, the block is one
+    /// the frame bakes ([`Bakes::block`]), and `block` has only its shape.
+    Cached { grads: PolyGrads, fixed: BlockFixed, block: SurfBlock, job: Option<usize> },
     /// A wall with no block, lit per pixel (no colormap, or a block past the
     /// size cap — never in id's maps).
     Texels { grads: PolyGrads, texture: Option<&'a MipTex>, shade: f32, lightmap: Option<LightMap<'a>> },
@@ -2167,17 +2253,26 @@ enum Paint<'a> {
     Flat { grads: PolyGrads, colour: u8, shade: f32, lightmap: LightMap<'a> },
 }
 
-/// One surface ready for the bands: its paint and its `1/z` plane
-/// (`d_ziorigin`, `d_zistepu`, `d_zistepv`).
+/// One surface ready for the bands: its paint, its `1/z` plane
+/// (`d_ziorigin`, `d_zistepu`, `d_zistepv`) with `D_DrawZSpans`' step along
+/// a row, and whether it is the background.
 struct SurfDraw<'a> {
     paint: Paint<'a>,
     zi: [f32; 3],
+    izistep: i32,
+    background: bool,
 }
 
-/// The world's surfaces as the bands draw them ([`EdgeState::build`]):
-/// indexed like the edge state's surfaces, `None` for one without a span.
+/// The world as the bands draw it ([`EdgeState::build`]), the frame's own:
+/// the scan's spans row after row, and the surfaces they name (indexed like
+/// the edge state's, `None` for one without a span).
 pub(super) struct WorldDraw<'a> {
     surfs: Vec<Option<SurfDraw<'a>>>,
+    spans: Vec<ESpan>,
+    /// The index in `spans` of each row's first span, and their count last.
+    rows: Vec<u32>,
+    /// The view's width.
+    w: usize,
     sky: SkyView,
     persp: super::raster::PerspSpan,
 }
@@ -2290,7 +2385,7 @@ mod tests {
         let mut edge = EdgeState::new();
         edge.begin_map(&world);
         let (mut caches, mut prof) = (SurfaceCaches::default(), Profiler::default());
-        assert!(edge.build(&Frame::new(&scene, w, h), &mut caches, &mut prof, 1).is_none());
+        assert!(edge.build(&Frame::new(&scene, w, h), &mut caches, &mut Vec::new(), &mut prof).is_none());
     }
 
     #[test]
@@ -2368,6 +2463,78 @@ mod tests {
         }
     }
 
+    /// The world of `scene` up to the scan, then the scan in one walk a
+    /// scanline or in id's three: the spans (column, count, surface) and
+    /// each row's first.
+    fn scan(scene: &Scene, w: usize, h: usize, ids_walks: bool) -> (Vec<(i32, i32, u32)>, Vec<u32>) {
+        let mut edge = EdgeState::new();
+        edge.begin_map(scene.world);
+        edge.setup_frame(&Frame::new(scene, w, h));
+        edge.mark_leaves(scene.world);
+        edge.begin_edge_frame();
+        edge.render_world(scene.world);
+        if ids_walks {
+            edge.scan_edges_in_ids_walks();
+        } else {
+            edge.scan_edges();
+        }
+        (edge.spans.iter().map(|sp| (sp.u, sp.count, sp.surf)).collect(), edge.row_spans)
+    }
+
+    #[test]
+    fn the_scan_in_one_walk_a_scanline_is_ids_three() {
+        // R_GenerateSpans with each edge removed or stepped as it goes
+        // against R_GenerateSpans, R_RemoveEdges, R_StepActiveU: the same
+        // spans in the same order — the demo room from all round, and (when
+        // id's pak is here) four maps from many eyes, level and tilted and
+        // rolled, at three sizes.
+        let pal = palette();
+        let room = demo_room();
+        let mut compared = 0;
+        let mut check = |world: &Bsp, cam: Camera, w: usize, h: usize| {
+            let scene = Scene::new(world, cam, w, h, &pal);
+            let (one, ids) = (scan(&scene, w, h, false), scan(&scene, w, h, true));
+            assert!(one == ids, "{cam:?} at {w}x{h}");
+            assert_eq!(one.1.len(), h + 1);
+            compared += one.0.len();
+        };
+        for k in 0..48 {
+            let a = k as f32 * 0.37;
+            let eye = [200.0 * a.cos(), 200.0 * a.sin(), -100.0 + 4.0 * k as f32];
+            let cam = Camera { roll: (k % 5) as f32 * 3.0 - 6.0, ..Camera::looking_at(eye, [0.0, 0.0, 0.0], 90.0) };
+            check(&room, cam, 97 + k, 61 + k % 7);
+        }
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../quake-data/ID1/PAK0.PAK");
+        if let Ok(pak) = crate::pak::Pak::open(&path) {
+            for (map, eyes) in [
+                ("e1m1", [[480.0, -352.0, 110.0], [544.0, 288.0, 50.0], [600.0, 140.0, 88.0]]),
+                ("e1m2", [[1496.0, 1664.0, 288.0], [1788.0, 296.0, 180.0], [1488.0, 1240.0, 296.0]]),
+                ("e1m3", [[-1352.0, -720.0, -50.0], [-1352.0, -600.0, -40.0], [-1300.0, -400.0, -40.0]]),
+                ("e1m4", [[998.0, 2246.0, 944.0], [320.0, 1284.0, 950.0], [320.0, 1284.0, 700.0]]),
+            ] {
+                let world = Bsp::parse(&pak.read_file(&format!("maps/{map}.bsp")).expect("read").expect("the map")).expect("a bsp");
+                for (k, pos) in eyes.into_iter().enumerate() {
+                    for (j, (w, h)) in [(320, 200), (701, 397), (1315, 535)].into_iter().enumerate() {
+                        for turn in 0..6 {
+                            let cam = Camera {
+                                pos,
+                                yaw: 60.0 * turn as f32 + 7.0 * k as f32,
+                                pitch: [0.0, -25.0, 40.0][(turn + j) % 3],
+                                roll: [0.0, 2.0, -80.0][(turn + k) % 3],
+                                fov_deg: 90.0,
+                            };
+                            check(&world, cam, w, h);
+                        }
+                    }
+                }
+            }
+            assert!(compared > 500_000, "{compared} spans compared");
+        } else {
+            eprintln!("id's maps skipped: no shareware pak at {}", path.display());
+        }
+        assert!(compared > 5_000, "{compared} spans compared");
+    }
+
     #[test]
     fn c_ftoi_is_the_x86_conversion() {
         assert_eq!(c_ftoi(1.9), 1);
@@ -2377,3 +2544,8 @@ mod tests {
         assert_eq!(c_ftoi(f64::NAN), i32::MIN);
     }
 }
+
+// The scan held to a transcription of id's three walks, table by table.
+#[cfg(test)]
+#[path = "edge_scan_tests.rs"]
+mod scan_tests;

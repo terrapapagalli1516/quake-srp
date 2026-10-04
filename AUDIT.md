@@ -36,8 +36,23 @@ Options idiom: the Profile row and a row for each of three pages, the departures
 **Picture and sound**, **Motion and light**, **Controls** (`quake_rs::menu::ExtrasPage`;
 Escape goes back a screen, onto the row it came from). Each row can also be set alone, on
 its page or as its console variable. Switching profile resets the departures (and binds or
-unbinds the wheel), and keeps the controls and id's own settings (Screen size, Brightness,
-the volumes, the mouse).
+unbinds the wheel), and keeps the controls and id's own settings (Brightness, the volumes,
+the mouse, and a Screen size the player moved).
+
+**Screen size starts one step larger in 2026.** Since 2026-10-03 the 2026 profile starts
+`viewsize` at 110 (`screen::VIEWSIZE_MODERN`, in `Cvars::modern`): the inventory strip
+goes and the status bar alone is drawn, so the HUD takes less of a 2026 screen. Classic
+stays at id's 100, `default.cfg`'s. It is id's own cvar, not a `departure`, so it has no
+row above: `config.cfg` writes it only when it differs from the profile's start (a
+returning player who never moved it gets 110; one who chose a size keeps it, a 2026
+player's chosen 100 included). Options > Reset to defaults sets the current profile's
+start (`Profile::viewsize`; Classic's is still `default.cfg`'s 100). A profile switch
+takes the new profile's start only if the size still equals the old profile's, so a
+visitor who only switches to Classic gets id's inventory bar and a chosen size is kept.
+The one case it cannot tell from "never moved" is a player who chose the other profile's
+start (100 in 2026): the next switch treats that as unmoved. A flag in `config.cfg` to
+tell them apart would cost more than the gap does. The tools keep id's 100 unless asked for the 2026 layout (`quaketool shot --sbaroverlay 1`
+starts at 110); `play` and `timedemo` draw Classic's screen.
 
 | departure | setting (its page and row) | 2026 | why |
 |---|---|---|---|
@@ -60,7 +75,7 @@ the volumes, the mouse).
 | A gamepad as a twin-stick pad: in_win.c's advanced joystick layout (`joystick 1`, `joyadvanced 1`, the axis maps and sensitivities), a round dead zone, a look curve, the pad in the menus, and the 2026 pad bindings | `joystick` (Controls > Gamepad), `joyadv*`, `joy*sensitivity`, `joy*threshold`, `joy_deadzone`, `joy_exponent`, `joy_menukeys` | both | id's `joystick 0` reads no pad. ("Input") |
 | Rumble on damage and on the big guns (the pad, or a phone's vibration) | `joy_rumble` (Controls > Rumble) | both | |
 | QuakeWorld's frame-rate readout, in the top-left corner (QuakeWorld's sat bottom right, just above the status bar); the notify lines start a text row lower while it shows | `wasm_showfps` (Picture and sound > Show FPS) | off | Clutter. |
-| The perspective span (`RenderOptions::persp_span`, `render::PerspSpan`): how often the walls and liquids find their texel exactly, where id's x86 `D_DrawSpans16` and `Turbulent8` do it every 16 pixels and step affinely between — every 64 or 32 (`D_DrawSpans8`'s arithmetic, longer), every 8 (id's portable C `D_DrawSpans8`, ported as written: 100.00% against id's C on the oracle's eight rows), every 4 (the same arithmetic), or at every pixel. On liquids `Turbulent8`'s arithmetic at the same length: at 64, 32, 8 and 4 not id's (`Turbulent8` is 16 in both id builds) | `r_perspspan 64\|32\|16\|8\|4\|1` (Picture and sound > Perspective span: `64`, `32`, `id's 16`, `8`, `4`, `exact`); the retired `wasm_exactpersp` sets its ends (1 exact, 0 id's 16) and reads 1 only at 1 | 1 (exact) | The user's call: at 1080p and above id's affine steps show as a wobble on walls seen at a grazing angle, which at 320x200 they did not; the user chose exact, asked for 8 and 4 and then 64 and 32 to try, and decides the default after trying them. The error grows as the square of the span's angle: id's 16 at 320x200 spanned what about 36 pixels do on a wide 1315x535 frame (Hor+) and 72 at 1080p, so 32 at 1315x535 and 64 at 1080p are about 1996's look (pixels off exact over ten views: 1996 8.9%, 1315x535 at 32 9.7%, 1080p at 64 10.9%), and 16 at 1080p a fifth of 1996's angle (2.1%). At 1080p 22 / 10 / 3.7 / 1.3 / 0.4% of e1m6's corridor's pixels differ from exact at 64 / 32 / 16 / 8 / 4; floors hardly at all (a level view crosses a floor at one depth a row). The cost, 3-D view at 1080p on one thread against 16: 64 −12-17%, 32 −7-10%, 8 +7-11%, 4 +26-29%, exact +71-96%; on eight threads −4-6%, −4-+4%, +6-15%, +14-30%, +42-69%; demo1 in the browser at 1080p on eight threads 358 / 344 / 324 / 310 / 314 / 278 fps. `screenshots/perspspan-*.png`; `FRAMERATE.md`, "The perspective span". `quaketool --video modern`, `bench.py --video modern` and `set_video("modern")` carry exact. |
+| The perspective span (`RenderOptions::persp_span`, `render::PerspSpan`): how often the walls and liquids find their texel exactly, where id's x86 `D_DrawSpans16` and `Turbulent8` do it every 16 pixels and step affinely between — every 64 or 32 (`D_DrawSpans8`'s arithmetic, longer), every 8 (id's portable C `D_DrawSpans8`, ported as written: 100.00% against id's C on the oracle's eight rows), every 4 (the same arithmetic), or at every pixel. On liquids `Turbulent8`'s arithmetic at the same length: at 64, 32, 8 and 4 not id's (`Turbulent8` is 16 in both id builds) | `r_perspspan 64\|32\|16\|8\|4\|1` (Picture and sound > Perspective span: `64`, `32`, `id's 16`, `8`, `4`, `exact`); the retired `wasm_exactpersp` sets its ends (1 exact, 0 id's 16) and reads 1 only at 1 | 8 (id's portable C loop; Classic 16) | The user's call: at 1080p and above id's affine steps show as a wobble on walls seen at a grazing angle, which at 320x200 they did not. The user first chose exact (2026-10-03), asked for 8 and 4 and then 64 and 32 to try, and then chose 8 for every device, phones included (having asked for span 8 by default on desktop). Exact is one setting away, and a choice now: `config.cfg` writes `r_perspspan "1"`, and writes nothing for 8, so a returning player who never touched the span moves from exact to 8 and one who chose a value keeps it. The error grows as the square of the span's angle: id's 16 at 320x200 spanned what about 36 pixels do on a wide 1315x535 frame (Hor+) and 72 at 1080p, so 32 at 1315x535 and 64 at 1080p are about 1996's look (pixels off exact over ten views: 1996 8.9%, 1315x535 at 32 9.7%, 1080p at 64 10.9%), and 16 at 1080p a fifth of 1996's angle (2.1%). At 1080p 22 / 10 / 3.7 / 1.3 / 0.4% of e1m6's corridor's pixels differ from exact at 64 / 32 / 16 / 8 / 4; floors hardly at all (a level view crosses a floor at one depth a row). The cost, 3-D view at 1080p on one thread against 16: 64 −12-17%, 32 −7-10%, 8 +7-11%, 4 +26-29%, exact +71-96%; on eight threads −4-6%, −4-+4%, +6-15%, +14-30%, +42-69%; demo1 in the browser at 1080p on eight threads 358 / 344 / 324 / 310 / 314 / 278 fps. `screenshots/perspspan-*.png`; `FRAMERATE.md`, "The perspective span". `quaketool --video modern`, `bench.py --video modern` and `set_video("modern")` carry the profile's span (8; they carried exact from 2026-10-03 to the day 8 became the default). |
 | The sky's clouds glide: the cloud layer is offset by the exact `skytime*skyspeed`, not `R_MakeSky`'s whole texels (`SkyScroll::Fluid`); still the nearest texel, palette-true, and id's frame at every whole texel | `r_fluidsky` (Motion and light > Fluid sky) | on | id's back layer already glides (`D_Sky_uv_To_st` adds the float scroll), but the clouds' extra 8 texels a second come as `(int)(skytime*skyspeed)`: eight one-texel jumps a second, a pixel at 320x200, 6 at 1080p looking up, 11 at 4K. At 240 Hz, looking up at e1m3's sky, id's frames change 3% of the view each and 39% at every jump; the fluid ones a steady 5%. No cost: the port already reads both layers per pixel, so only where the offset is added moves (the sky-heavy view at 1080p, 1 and 8 threads: +0.3%, within noise). (`render::sky`) |
 | The `ED_Alloc` edict ceiling past id's 600 (`Vm::max_edicts`) | `sv_max_edicts` (console only, no settings row — nothing to choose until a map needs it) | on, 8192 | id's own number, kept for Classic. No map of id1 or the mission packs needs more: Rogue's `r2m6`, which seemed to, overflowed only while the port kept its statics' edicts ("`makestatic` frees its edict"). Room for bigger maps. |
 | Animated lights glide: a light style moves from each letter of its pattern to the next across its tenth of a second (`R_AnimateLight`'s letter `k` to `k+1` by `frac(cl.time*10)`), in steps of two of id's light units (`server::GLIDE_STEP`); id's value at every whole tenth; a one-letter style (steady, or a switched light) and a pattern QuakeC replaces still change at once (`LerpLightStyles::Smooth`), in live play and demos alike (of the attract loop only demo3's views hold an animated light) | `r_lerplightstyles` (Motion and light > Gliding lights) | on | id's lights snap ten times a second: at 240 Hz a flickering torch holds each brightness for 24 frames, then one frame changes 11% of the view (e2m2's torch-lit start, `cl.time` 5.0–5.1, 640x400) or half of it (e1m1's fluorescent flicker going 'm' to 'a', 5.1–5.2). The glide changes at most 0.65% a frame there (15% on e1m1's, a fade; `FRAMERATE.md`'s table). The strobes become ramps, as DarkPlaces' `r_lerplightstyles` makes them. A lit block rebakes whenever its value changes, so the cost is the bakes, on the render threads (PERF_PLAN.md §13): at 1920x1080, 8 threads, the most torch-lit view found (e2m5, 46 styled surfaces) +0.12 ms a frame at 72 Hz, +0.08 ms at 480 (0.22 and 0.11 with the bakes on one thread); 0.02–0.08 ms elsewhere (`FRAMERATE.md`, "Light styles between their letters"). |
@@ -1578,9 +1593,10 @@ world, e1m1/e1m2/e1m3/e1m7 unless stated).
     `PerspSpan::Exact`, `--perspspan 1`): byte-identical to before (the oracle's exact
     rows are unchanged). The uncached per-pixel wall path (faces over the
     surface-cache size cap, or no colormap — never in id's maps) stays exact.
-- ✅ **`wasm_exactpersp 0|1`** (an extra, not id; default 0 — and on in the 2026 profile since
-  2026-10-03, the user's call; see the departures table. Since 2026-10-03 the setting
-  is `r_perspspan 64|32|16|8|4|1`, Classic 16 and 2026 exact (1); `wasm_exactpersp` is
+- ✅ **`wasm_exactpersp 0|1`** (an extra, not id; default 0. In the 2026 profile it was on
+  from 2026-10-03 until the user chose a span of 8 instead the same day: see the
+  departures table. Since then the setting
+  is `r_perspspan 64|32|16|8|4|1`, Classic 16 and 2026 8; `wasm_exactpersp` is
   a retired name for its two ends, read by an old `config.cfg`). The browser
   reaches the exact-perspective renderer option through a console variable.
   All of the port's opt-in extras live in one place, `quake-wasm/src/
@@ -1639,7 +1655,7 @@ earlier verify scripts).
 |---|---|---|---|
 | Uncapped framerate | `wasm_uncapped 0\|1` | `Host_FilterTime` without its 72 fps gate (same [0.001, 0.1] clamps): a host frame per display refresh (120/144 Hz run 120/144 fps). The gate itself is unchanged. | departure, opt-in via Web extras, default off |
 | Show FPS | `wasm_showfps 0\|1` | QuakeWorld's `SCR_DrawFPS`: `"%3d FPS"` in white conchars at `vid.width - len*8 - 8`, `vid.height - sb_lines - 8`, not on intermission screens. The rate is presented frames over a window of at least 1 s of `realtime` (QW shows the raw count; count/window reads a steady 60 instead of 60/61). | departure, opt-in via Web extras, default off |
-| Exact perspective | `wasm_exactpersp 0\|1` (since 2026-10-03 `r_perspspan 64\|32\|16\|8\|4\|1`, the old name its two ends) | exact perspective at every pixel of the textured walls and liquids instead of id's 16-pixel spans (`RenderOptions::exact_perspective`, `quake/w2b`'s; now `RenderOptions::persp_span`, which also has 64, 32, 8 and 4). | departure, opt-in via Web extras, default off (since 2026-10-03 Classic 16 and 2026 exact: "The profiles and the departures") |
+| Exact perspective | `wasm_exactpersp 0\|1` (since 2026-10-03 `r_perspspan 64\|32\|16\|8\|4\|1`, the old name its two ends) | exact perspective at every pixel of the textured walls and liquids instead of id's 16-pixel spans (`RenderOptions::exact_perspective`, `quake/w2b`'s; now `RenderOptions::persp_span`, which also has 64, 32, 8 and 4). | departure, opt-in via Web extras, default off (since 2026-10-03 Classic 16 and 2026 8, exact one setting away: "The profiles and the departures") |
 | Scaled 2-D layer | `wasm_scaled2d 0\|1` | the status bar, menus, console and text blown up from a 320x200 screen, the port's old layout, instead of WinQuake's 1:1 2-D layer (`draw::set_scaled_2d`, `quake/fid2d`'s). Added by the chair after this branch (`dafa2c7`, extras bit 8). | departure, opt-in via Web extras, default off |
 
 Faithful, same branch:
@@ -2579,7 +2595,7 @@ Both off is **Classic**, id's: views clamped to `MAXWIDTH`x`MAXHEIGHT`, `fov` ac
   0xFFFFF` wraps from 2048 wide. The port's `Edge::u`/`u_step` are 44.20 in an `i64`
   with id's values wherever the `int` holds them (an edge that is stepped spans two or more
   rows, so `|u_step| < w`). Every other table the C sizes by `MAXWIDTH`/`MAXHEIGHT` was
-  already a run-time `Vec` (`newedges`, `removeedges`, `DPS_MAXSPANS`, the warp's `rowptr`
+  already a run-time `Vec` (`newedges`, `DPS_MAXSPANS`, the warp's `rowptr`
   and `column`, `intsintable`); `r_maxedges`/`r_maxsurfs`/`MAXSPANS` are growable, and demo1
   at 3840x2160 peaks at 1112 edges and 392 surfaces (id's pools: 2400, 800), about what it
   needs at 640x400 (950, 378). Texture, lightmap, sky and z fixed point are in texel or
@@ -2600,7 +2616,7 @@ Both off is **Classic**, id's: views clamped to `MAXWIDTH`x`MAXHEIGHT`, `fov` ac
   faint shimmer; with hires it is 320x200's wobble at full resolution (id's to the pixel at
   320x200).
 - **Kept as they are (the look, or already fine at 4K).** The 16-pixel perspective spans
-  *(since 2026-10-03 the 2026 profile draws exact perspective instead; Classic keeps the
+  *(since 2026-10-03 the 2026 profile draws them every 8 pixels instead; Classic keeps the
   spans — the departures table)*:
   they differ from exact perspective on 8.84 / 1.20 / 0.20% of the pixels of an e1m1 view at
   320x200 / 1280x800 / 3840x2400, so affine swim fades as the resolution grows.

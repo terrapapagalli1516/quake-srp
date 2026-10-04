@@ -15,7 +15,11 @@
 //! which `Cvar_Command`'s `"viewsize" is "100"`, Tab completion and
 //! `Cvar_WriteVariables` go through.
 //!
-//! Two kinds of field. **id's cvars**, with id's defaults. And **the port's
+//! Two kinds of field. **id's cvars**, with id's defaults (one exception:
+//! `viewsize` starts one step larger in [`Cvars::modern`], so the HUD takes
+//! less of a 2026 screen; it stays id's own cvar, and
+//! [`crate::settings::Settings::set_profile`] moves it with the profile only
+//! while the player has not moved it). And **the port's
 //! departures** from id's game, each marked [`Cvar::departure`]
 //! ([`crate::settings::Profile`] switches them: off in [`Cvars::classic`],
 //! on in [`Cvars::modern`]) — `crosshair`, the renderer and stepping
@@ -37,7 +41,7 @@ use crate::client::lerpmodels::LerpModels;
 use crate::client::lerpmove::LerpMove;
 use crate::render::{Crosshair, PerspSpan, SkyScroll, Threads, TorchFlicker};
 use crate::snd::SoundMode;
-use crate::screen::{SbarLayout, VIEWSIZE_DEFAULT, VIEWSIZE_MAX, VIEWSIZE_MIN, VIEWSIZE_STEP};
+use crate::screen::{SbarLayout, VIEWSIZE_DEFAULT, VIEWSIZE_MAX, VIEWSIZE_MIN, VIEWSIZE_MODERN, VIEWSIZE_STEP};
 use crate::server::LerpLightStyles;
 use crate::vm::{MAX_EDICTS, MAX_EDICTS_LIMIT};
 
@@ -106,9 +110,9 @@ pub struct Cvars {
     /// `r_perspspan`: how often the walls and liquids find their texel
     /// exactly ([`PerspSpan`]): every 16 pixels and affine between, id's
     /// `D_DrawSpans16` (Classic); 64 or 32, longer, about 1996's look on a
-    /// 1080p or a phone's frame; 8, id's portable C; 4; or 1, exact at every
-    /// pixel (2026). The retired `wasm_exactpersp` still sets and reads it
-    /// ([`RETIRED`]).
+    /// 1080p or a phone's frame; 8, id's portable C `D_DrawSpans8` (2026);
+    /// 4; or 1, exact at every pixel. The retired `wasm_exactpersp` still
+    /// sets and reads it ([`RETIRED`]).
     pub persp_span: PerspSpan,
     /// `wasm_scaled2d`: the 2-D layer (status bar, menus, console) at the
     /// largest whole multiple of id's 320x200 that fits, where id draws it
@@ -262,20 +266,27 @@ impl Cvars {
     /// the crosshair, monsters that glide between their steps and whose
     /// animation blends between frames, clouds that glide across the sky,
     /// flickering lights that glide between their brightnesses, and touch
-    /// controls on a phone, and perspective exact at every pixel of the
-    /// walls and liquids. That one is on because of the resolution: id's
-    /// 16-pixel affine spans were a pixel or so off at 320x200, but at
-    /// 1080p and above they show as a wobble along a wall seen at a grazing
-    /// angle. Show FPS stays off: the readout is clutter. (Always Run, mouse look, the gamepad and Space-swims-up are
+    /// controls on a phone, and perspective found exactly every 8 pixels
+    /// along the walls and liquids (id's own portable-C loop, `D_DrawSpans8`:
+    /// the user's call, 2026-10-03, for every device). That one is not
+    /// Classic's because of the resolution: id's 16-pixel affine spans were a
+    /// pixel or so off at 320x200, but at 1080p and above they show as a
+    /// wobble along a wall seen at a grazing angle; 8 is much nearer exact
+    /// than 16 for +7-11% of the 3-D view's cost (AUDIT.md, "The profiles and
+    /// the departures"), and every value up to exact (1) stays one setting
+    /// away. Show FPS stays off: the readout is clutter. (Always Run, mouse look, the gamepad and Space-swims-up are
     /// [`Cvars::classic`]'s too now — they are controls, not engine.) The
     /// edict pool grows past id's 600 (`max_edicts`, QuakeSpasm's own
     /// default) — invisible on every map id or the mission packs shipped,
-    /// room for bigger ones.
+    /// room for bigger ones. Screen size (`viewsize`, id's own cvar) starts at
+    /// [`VIEWSIZE_MODERN`], one step past id's 100: the inventory strip goes
+    /// and the status bar stays, so the HUD takes less of a 2026 screen.
     pub fn modern() -> Cvars {
         Cvars {
+            viewsize: VIEWSIZE_MODERN,
             crosshair: Crosshair::Cross,
             uncapped: true,
-            persp_span: PerspSpan::Exact,
+            persp_span: PerspSpan::Spans8,
             scaled_2d: true,
             sbar_layout: SbarLayout::Overlay,
             native: true,
@@ -644,13 +655,19 @@ mod tests {
     }
 
     #[test]
-    fn the_profiles_differ_only_in_departures() {
+    fn the_profiles_differ_only_in_departures_and_the_screen_size() {
         let (id, modern) = (Cvars::classic(), Cvars::modern());
         for c in CVARS {
             if c.get(&id) != c.get(&modern) {
-                assert!(c.departure, "{} differs between the profiles, so it is a departure", c.name);
+                // Screen size is id's own cvar, started one step larger in
+                // 2026: not a departure (a profile switch keeps the
+                // player's own value, `Settings::set_profile`).
+                assert!(c.departure || c.name == "viewsize", "{} differs between the profiles, so it is a departure", c.name);
             }
         }
+        assert_eq!((id.viewsize, modern.viewsize), (VIEWSIZE_DEFAULT, VIEWSIZE_DEFAULT + VIEWSIZE_STEP));
+        assert_eq!(modern.viewsize, VIEWSIZE_MODERN);
+        assert!(!find("viewsize").unwrap().departure, "id's own cvar");
         for c in CVARS.iter().filter(|c| c.departure) {
             assert!(c.archive, "{}: a departure is kept in config.cfg", c.name);
         }
@@ -714,17 +731,19 @@ mod tests {
         assert_eq!(out, "cl_forwardspeed \"200\"\ncl_backspeed \"200\"\nm_pitch \"-0.022\"\n");
     }
 
-    /// The perspective span is 2026's exact (1), Classic's id's 16: the
-    /// departure a player changes in 2026 is the one `config.cfg` then
-    /// writes. Its values are the four spans; any other number is the
-    /// longest span not longer than it, and below 1 (0, a word) id's 16.
-    /// (Show FPS, the other old "extra", is the one 2026 leaves off.)
+    /// The perspective span is 2026's 8 (id's portable C), Classic's id's 16:
+    /// the departure a player changes in 2026 is the one `config.cfg` then
+    /// writes — exact (1) included, which is a choice now. Its values are the
+    /// six spans; any other number is the longest span not longer than it,
+    /// and below 1 (0, a word) id's 16. (Show FPS, the other old "extra", is
+    /// the one 2026 leaves off.)
     #[test]
-    fn the_perspective_span_is_exact_in_2026_and_ids_16_in_classic() {
+    fn the_perspective_span_is_8_in_2026_and_ids_16_in_classic() {
         let (id, modern) = (Cvars::classic(), Cvars::modern());
         let c = find("r_perspspan").expect("the cvar");
         assert!(c.departure && c.archive);
-        assert_eq!((c.get(&id), c.get(&modern)), ("16".into(), "1".into()));
+        assert_eq!((c.get(&id), c.get(&modern)), ("16".into(), "8".into()));
+        assert_eq!(modern.persp_span, PerspSpan::Spans8, "id's own D_DrawSpans8");
         let fps = find("wasm_showfps").expect("the cvar");
         assert_eq!((fps.get(&id), fps.get(&modern)), ("0".into(), "0".into()));
         let mut spans = Cvars::modern();
@@ -737,6 +756,14 @@ mod tests {
         let mut out = String::new();
         write_changes(&spans, &Cvars::modern(), &mut out);
         assert_eq!(out, "r_perspspan \"4\"\n");
+        c.set(&mut spans, "1");
+        out.clear();
+        write_changes(&spans, &Cvars::modern(), &mut out);
+        assert_eq!(out, "r_perspspan \"1\"\n", "exact is a choice in 2026 now: written");
+        c.set(&mut spans, "8");
+        out.clear();
+        write_changes(&spans, &Cvars::modern(), &mut out);
+        assert_eq!(out, "", "2026's own 8 is not written: a player who never touched it gets the profile's");
         assert_eq!(complete("r_persp"), Some("r_perspspan"));
     }
 
@@ -754,8 +781,11 @@ mod tests {
         write_changes(&c, &Cvars::classic(), &mut out);
         assert_eq!(out, "r_perspspan \"1\"\n", "the next save writes the span");
         let mut c = Cvars::modern();
+        assert_eq!(old.get(&c), "0", "2026's own 8 is not exact");
         old.set(&mut c, "0");
         assert_eq!((c.persp_span, old.get(&c).as_str()), (PerspSpan::Spans16, "0"), "a 2026 player's saved 0: id's spans, as before");
+        old.set(&mut c, "1");
+        assert_eq!((c.persp_span, old.get(&c).as_str()), (PerspSpan::Exact, "1"), "a saved 1: exact");
         for (span, reads) in [(PerspSpan::Spans64, "0"), (PerspSpan::Spans32, "0"), (PerspSpan::Spans8, "0"), (PerspSpan::Spans4, "0"), (PerspSpan::Exact, "1")] {
             c.persp_span = span;
             assert_eq!(old.get(&c), reads, "{span:?}");

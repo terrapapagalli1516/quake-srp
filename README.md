@@ -15,13 +15,16 @@ not a fallback).
 | ![E1M1 in the Classic profile](screenshots/classic-e1m1.png) | ![E1M1 in the 2026 profile](screenshots/2026-e1m1.png) |
 | 320x200 in a 4:3 frame, id's status bar, id's 72 fps cap | the window's shape and size in whole pixels (here 960x540 shown at 2x), no frame-rate cap |
 
-Both are stills from `quaketool shot`, so the 2026 crosshair isn't drawn.
+Both are stills from `quaketool shot`, so the 2026 crosshair isn't drawn. The 2026 one is
+`quaketool shot quake-data/ID1/PAK0.PAK maps/e1m1.bsp out.ppm --res 960x540 --zoom 2 --video modern --scaled2d 1 --sbaroverlay 1`,
+which draws the profile's defaults: Screen size 110 (no inventory bar) and perspective every 8 pixels.
 
 id Software's *Quake* (1996), ported to Rust from the WinQuake C source, with only the
 standard library and no `unsafe` code. With every extra switched off it is id's game,
-checked against id's own C: 100.00% of the pixels in id's standard 3-D views, the sound
-mixer sample for sample, and demo playback frame for frame over 17,500 frames. Every check
-is one command. By default it is the same software renderer given a 2026 machine. It plays
+checked against id's own C: every pixel but two in id's standard 3-D views, the sound
+mixer sample for sample, and in demo playback the camera, every entity and every dynamic
+light, frame by frame over 17,500 frames. What is known to differ still is a list
+([AUDIT.md](AUDIT.md), "Open"). Every check is one command. By default it is the same software renderer given a 2026 machine. It plays
 in a browser; natively, `quaketool` runs the same engine without a window.
 
 **How it was built.** Claude, Anthropic's model, wrote the code and the docs in Claude
@@ -49,7 +52,8 @@ dependencies, no `unsafe`, and Classic is id's game, proven for anything touched
   - the status bar, menus and console, apart from a few explained differences (the version
     string, the video-mode list, the port's own Options rows);
   - the mixer's output, sample for sample, on 28 scripted cases;
-  - demo playback, frame by frame.
+  - demo playback, frame by frame: the camera, the entities and the dynamic lights (the
+    game's state; a demo frame's pixels are compared on a sample of frames).
 
   One command re-runs all of it; see [Proof](#proof).
 - **A 2026 profile.** It shows what software-rendered Quake looks like when the hardware is
@@ -149,14 +153,14 @@ play with the same ones, and a switch leaves them as they are.
 
 | | Classic | 2026 |
 |---|---|---|
-| frame rate | id's 72 fps cap | a frame every display refresh; jumps, lifts, flashes and trails are stepped to match 72 Hz ([FRAMERATE.md](FRAMERATE.md)) |
+| frame rate | id's 72 fps cap | a frame every display refresh; jumps, lifts, flashes and trails are stepped to match 72 Hz, within the tolerances [FRAMERATE.md](FRAMERATE.md) states |
 | picture | a fixed mode (960x600 by default) in a 4:3 frame, id's 90° field of view | the window's own size and shape in whole pixels (pixel size Auto or 1–4), a wider view on wide screens |
-| status bar, menus, console | 1:1, as id drew them | scaled up by a whole number |
+| status bar, menus, console | 1:1, as id drew them; Screen size 100: the status bar with the inventory bar above it | scaled up by a whole number; Screen size starts one step larger, 110: the status bar without the inventory bar, so the HUD takes less of the screen |
 | monsters | move in id's 0.1 s steps, and change pose ten times a second | glide between the steps, and blend between poses (the gun too) |
 | lights | the flickering ones snap ten times a second; most torches and flames steady, as the map baked them | the flickering ones glide; the steady torches and flames flicker gently about their light (`r_torchflicker`, a strength) |
 | controls | WASD, mouse look, Always Run, a twin-stick gamepad with rumble (the same in both; `idcontrols` is id's `default.cfg`) | the same, plus the mouse wheel for weapons, a crosshair and touch controls |
 | sound | id's mixer at 11025 Hz | id's mixer at the device's rate, with four of id's bugs fixed |
-| perspective | id's spans: exact every 16 pixels, affine in between | exact at every pixel of walls and liquids (or every 64, 32, 8 or 4: Perspective span, `r_perspspan`; 32 on a phone and 64 at 1080p are about what 1996 looked like) |
+| perspective | id's spans: exact every 16 pixels, affine in between | exact every 8 pixels along walls and liquids, id's own portable-C loop (Perspective span, `r_perspspan`: 64, 32, 16, 8, 4 or exact at every pixel; 32 on a phone and 64 at 1080p are about what 1996 looked like) |
 
 In both profiles the renderer splits each frame across all CPU cores, and the picture is the
 same on any number of them.
@@ -241,10 +245,11 @@ Beyond Classic:
   both browser builds, on every push (`.github/workflows/check.yml`; `ci/local.sh` runs
   the same commands on a checkout).
 - `quake-rs/target/release/quaketool framerate quake-data/ID1/PAK0.PAK --check` runs 22
-  gameplay scenarios at high frame rates and compares them with id's 72 Hz.
-- 18 headless-browser checks (`web/verify_*.py`) cover everything from walking and the
+  gameplay scenarios at high frame rates and compares them with id's 72 Hz, each within a
+  stated tolerance ([FRAMERATE.md](FRAMERATE.md)).
+- 19 headless-browser checks (`web/verify_*.py`) cover everything from walking and the
   menus to the gamepad, touch, quitting, sound through late frames, and reading back the
-  canvas. All 18 pass in Chromium and in Firefox (`QUAKE_BROWSER=firefox`; Firefox's touch
+  canvas. All 19 pass in Chromium and in Firefox (`QUAKE_BROWSER=firefox`; Firefox's touch
   check runs on taps, and the Keyboard Lock checks are skipped there: `web/PLATFORM.md`,
   "Build, serve, deploy").
 
@@ -255,7 +260,8 @@ not the last digit.
 
 - **Classic, against id's own C:** on one core, `timedemo demo1` runs 1.35–1.44x as fast as
   id's portable C built from the same source, from 320x200 to 960x600
-  ([PERF_PLAN.md](PERF_PLAN.md)).
+  ([PERF_PLAN.md](PERF_PLAN.md)). That is id's C without id's x86 assembly, which the 1996
+  game used for its inner loops and which is not compared here.
 - **2026 video, natively** (`timedemo demo1`, frames per second):
 
   | threads | 1920x1080 | 2560x1440 | 3840x2160 |

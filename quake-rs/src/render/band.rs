@@ -12,14 +12,22 @@
 //! for any thread count.
 //!
 //! What must be decided for the whole frame first — the edge scan, the
-//! surface cache (`D_CacheSurface`), the alias models' vertices and clipping,
-//! the particles' projection — is done once, before the bands, and handed to
-//! them read-only. The surface cache's bakes, the blocks the frame finds
-//! stale, are independent of one another, and run on the threads too, as
-//! jobs ([`map_jobs`]), once every block is looked up and before the bands.
-//! One thread is the same code with one band, drawn on the calling thread.
+//! surface cache's lookups (`D_CacheSurface`), the alias models' vertices and
+//! clipping, the particles' projection — is done once, before the bands, and
+//! handed to them read-only. The surface cache's bakes, the blocks the frame
+//! finds stale, are independent of one another and run on the threads too,
+//! in the same round: each thread takes bakes until none is left and then
+//! bands (`surf::Bakes`; what a thread does first is [`Workers::run`]'s
+//! `start`). One thread is the same code with one band, drawn on the calling
+//! thread.
 //! A band's pixels are the view's own rows or, drawn straight into the
 //! screen, the screen's rows under the view ([`Band::placed`]).
+//!
+//! A frame may be several views — the 2026 status bar overlay draws the
+//! world on in the corners beside the bar, as windows onto the view — and
+//! they share the one round: each is a [`Target`] on the frame's rows, the
+//! rows cut into strips with a band of each view lying in them, all taken
+//! from one queue ([`Workers::run`]).
 //!
 //! The threads are `std::thread::scope`'s, spawned for the bands of a frame
 //! and joined before [`Renderer::render`](super::Renderer::render) returns:
@@ -34,7 +42,6 @@
 //! against milliseconds of pixels at the sizes where threads pay.
 
 use std::ops::Range;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, PoisonError};
 
 /// Rows `y0..` of a `w`-wide view: their pixels and their 16-bit `1/z`,
@@ -67,6 +74,7 @@ impl<'a> Band<'a> {
     }
 
     /// `self` cut into bands of `rows` rows (the last one shorter).
+    #[cfg(test)]
     pub(super) fn split(self, rows: usize) -> Vec<Band<'a>> {
         let (w, y0, stride, x0) = (self.w, self.y0, self.stride, self.x0);
         let rows = rows.max(1);
@@ -184,6 +192,97 @@ impl Default for Workers {
 /// free, so a band that is all gun or all sky does not hold the frame up.
 const BANDS_PER_THREAD: usize = 4;
 
+/// One view of a frame as [`Workers::run`] draws it: a `w x h` rectangle
+/// with its top-left corner at column `x0`, row `y0` of the rows the frame
+/// is drawn into, and its own `1/z` (`w * h`, row after row).
+pub(super) struct Target<'a> {
+    pub(super) w: usize,
+    pub(super) h: usize,
+    pub(super) x0: usize,
+    pub(super) y0: usize,
+    pub(super) z: &'a mut [i16],
+}
+
+impl Target<'_> {
+    /// Whether the view lies within rows `stride` pixels wide and `height`
+    /// rows tall, and has the `1/z` for it. One that does not is not drawn.
+    fn fits(&self, stride: usize, height: usize) -> bool {
+        self.w > 0 && self.x0 + self.w <= stride && self.y0 + self.h <= height && self.z.len() >= self.w * self.h
+    }
+
+    /// Whether this view and `other` can be drawn in one round: they share
+    /// no pixel. (Views that overlap are drawn one after the other, the
+    /// later over the earlier, in rounds of their own.)
+    pub(super) fn bands_with(&self, other: &Target) -> bool {
+        let apart = |a0: usize, an: usize, b0: usize, bn: usize| a0 + an <= b0 || b0 + bn <= a0;
+        apart(self.y0, self.h, other.y0, other.h) || apart(self.x0, self.w, other.x0, other.w)
+    }
+}
+
+/// A run of the frame's rows and the views' bands in it: what one thread
+/// takes from the queue. The views of a strip lie side by side on the same
+/// rows, so one thread draws them one after the other.
+struct Strip<'a> {
+    rows: &'a mut [u8],
+    parts: Vec<Part<'a>>,
+}
+
+/// One view's band in a [`Strip`]: which view (its place in the targets),
+/// where it lies, and the band's `1/z`.
+struct Part<'a> {
+    view: usize,
+    w: usize,
+    x0: usize,
+    /// The view row of the band's first row.
+    y0: usize,
+    z: &'a mut [i16],
+}
+
+/// `targets` on `rows` (`stride` pixels a row) as strips of at most
+/// `band_rows` rows, top to bottom: the rows are cut wherever a target
+/// begins or ends, so every strip's targets cover all its rows, side by
+/// side. A target that does not fit the rows is left out. (The targets
+/// share no pixel, [`Target::bands_with`]: of two that did, a strip's
+/// thread would draw one and then the other.)
+fn strips<'a>(mut rows: &'a mut [u8], stride: usize, targets: Vec<Target<'a>>, band_rows: usize) -> Vec<Strip<'a>> {
+    let (stride, band_rows) = (stride.max(1), band_rows.max(1));
+    let height = rows.len() / stride;
+    // Each target with its place in the list and the `1/z` of its rows not
+    // yet handed out.
+    let mut left: Vec<(usize, Target)> = targets.into_iter().enumerate().filter(|(_, t)| t.fits(stride, height)).collect();
+    let mut cuts: Vec<usize> = left.iter().flat_map(|(_, t)| [t.y0, t.y0 + t.h]).collect();
+    cuts.sort_unstable();
+    cuts.dedup();
+    let mut out = Vec::new();
+    // `rows` begins at row `top` of the frame's.
+    let mut top = 0;
+    for cut in cuts.windows(2) {
+        let (a, b) = (cut[0], cut[1]);
+        // The targets on rows `a..b`, each with those rows of its `1/z` in bands.
+        let mut bands: Vec<_> = (left.iter_mut())
+            .filter(|(_, t)| t.y0 <= a && b <= t.y0 + t.h)
+            .map(|(view, t)| {
+                let (z, rest) = std::mem::take(&mut t.z).split_at_mut((b - a) * t.w);
+                t.z = rest;
+                (*view, t.w, t.x0, a - t.y0, z.chunks_mut(band_rows * t.w))
+            })
+            .collect();
+        if bands.is_empty() {
+            continue; // rows between views
+        }
+        let (front, rest) = std::mem::take(&mut rows).split_at_mut((b - top) * stride);
+        let mine = &mut front[(a - top) * stride..];
+        (rows, top) = (rest, b);
+        for (k, strip) in mine.chunks_mut(band_rows * stride).enumerate() {
+            let parts = (bands.iter_mut())
+                .filter_map(|(view, w, x0, y, z)| Some(Part { view: *view, w: *w, x0: *x0, y0: *y + k * band_rows, z: z.next()? }))
+                .collect();
+            out.push(Strip { rows: strip, parts });
+        }
+    }
+    out
+}
+
 impl Workers {
     /// `threads` workers (at least 1).
     pub(super) fn new(threads: usize) -> Workers {
@@ -194,33 +293,48 @@ impl Workers {
         self.threads
     }
 
-    /// Cut `whole` (an `h`-row view) into bands and run `draw` on each, on
-    /// up to [`Workers::threads`] threads, the calling thread one of them.
-    /// Each thread starts from `init()` (its own counters, say) and the
-    /// values come back, the calling thread's first. With one thread, one
-    /// band: `draw` on the calling thread. The threads take the bands from
-    /// one queue, so a thread the system will not start (no threads on this
-    /// target, say) only leaves its share to the others: the frame is drawn
-    /// whatever the count.
-    pub(super) fn run<T, I, D>(self, whole: Band, h: usize, init: I, draw: D) -> Vec<T>
+    /// Draw a frame's views, `targets` on `rows` (`stride` pixels a row):
+    /// each cut into bands, and `draw` run on each band (with its view's
+    /// place in `targets`) on up to [`Workers::threads`] threads, the
+    /// calling thread one of them. Each thread begins with `start()` — the
+    /// frame's work that is not rows, shared out between the threads as
+    /// they arrive (the bakes), and the thread's own state (its counters)
+    /// — and the states come back, the calling thread's first. With one
+    /// thread, one band a view, in the targets' order: `start` and `draw`
+    /// on the calling thread. The threads take the bands from one queue,
+    /// so a thread the system will not start (no threads on this target,
+    /// say) only leaves its share to the others: the frame is drawn
+    /// whatever the count. The targets share no pixel
+    /// ([`Target::bands_with`]).
+    pub(super) fn run<T, I, D>(self, rows: &mut [u8], stride: usize, targets: Vec<Target>, start: I, draw: D) -> Vec<T>
     where
         T: Send,
         I: Fn() -> T + Sync,
-        D: Fn(&mut Band, &mut T) + Sync,
+        D: Fn(usize, &mut Band, &mut T) + Sync,
     {
-        let threads = self.threads.min(h.max(1));
+        // The frame's rows: from the first view's top to the last one's end.
+        let top = targets.iter().map(|t| t.y0).min().unwrap_or(0);
+        let total = targets.iter().map(|t| t.y0 + t.h).max().unwrap_or(0) - top;
+        let threads = self.threads.min(total.max(1));
         if threads <= 1 {
-            let (mut band, mut t) = (whole, init());
-            draw(&mut band, &mut t);
+            let mut t = start();
+            let height = rows.len() / stride.max(1);
+            // (A view that does not fit is left out, as `strips` leaves it.)
+            for (view, target) in targets.into_iter().enumerate().filter(|(_, t)| t.fits(stride, height)) {
+                let Target { w, h, x0, y0, z } = target;
+                draw(view, &mut Band::placed(w, &mut rows[y0 * stride..(y0 + h) * stride], stride, x0, z), &mut t);
+            }
             return vec![t];
         }
-        let bands = threads * BANDS_PER_THREAD;
-        let queue = Mutex::new(whole.split(h.div_ceil(bands)).into_iter());
+        let band_rows = total.div_ceil(threads * BANDS_PER_THREAD);
+        let queue = Mutex::new(strips(rows, stride, targets, band_rows).into_iter());
         let next = || queue.lock().unwrap_or_else(PoisonError::into_inner).next();
         let work = || {
-            let mut t = init();
-            while let Some(mut band) = next() {
-                draw(&mut band, &mut t);
+            let mut t = start();
+            while let Some(Strip { rows, parts }) = next() {
+                for Part { view, w, x0, y0, z } in parts {
+                    draw(view, &mut Band { w, y0, pixels: &mut *rows, stride, x0, z }, &mut t);
+                }
             }
             t
         };
@@ -233,50 +347,6 @@ impl Workers {
             out
         })
     }
-}
-
-/// `f` of each of `jobs`, in the jobs' order, run on up to `threads`
-/// threads, the calling thread one of them: the frame's independent pieces
-/// of work that are not rows (the lit-surface blocks the frame bakes,
-/// `surf::BakeJob`), each result a function of its job alone, so any split
-/// gives the same results. The threads take the jobs one at a time from a
-/// shared counter as they come free, so the caller orders them largest
-/// first to end together; a thread that does not start leaves its jobs to
-/// the others. One thread (or one job) is `f` on each in turn on the
-/// calling thread: no spawn.
-pub(crate) fn map_jobs<J, R, F>(threads: usize, jobs: &[J], f: F) -> Vec<R>
-where
-    J: Sync,
-    R: Send,
-    F: Fn(&J) -> R + Sync,
-{
-    let threads = threads.clamp(1, jobs.len().max(1));
-    if threads == 1 {
-        return jobs.iter().map(f).collect();
-    }
-    // Each thread's results with the indices of the jobs it took.
-    let next = AtomicUsize::new(0);
-    let work = || {
-        let mut done = Vec::new();
-        loop {
-            let i = next.fetch_add(1, Ordering::Relaxed);
-            let Some(job) = jobs.get(i) else { break };
-            done.push((i, f(job)));
-        }
-        done
-    };
-    let ran: Vec<Vec<(usize, R)>> = std::thread::scope(|s| {
-        let helpers: Vec<_> = (1..threads).filter_map(|_| std::thread::Builder::new().spawn_scoped(s, work).ok()).collect();
-        let mut out = vec![work()];
-        // A worker that panicked panics the frame, as one thread would.
-        out.extend(helpers.into_iter().map(|h| h.join().unwrap_or_else(|e| std::panic::resume_unwind(e))));
-        out
-    });
-    let mut slots: Vec<Option<R>> = std::iter::repeat_with(|| None).take(jobs.len()).collect();
-    for (i, r) in ran.into_iter().flatten() {
-        slots[i] = Some(r);
-    }
-    slots.into_iter().map(|r| r.expect("every job ran")).collect()
 }
 
 /// Run `f` on runs of rows of `dst` — `dst_row` elements a row, `rows` rows
@@ -430,10 +500,11 @@ mod tests {
             let mut pixels = vec![0u8; w * h];
             let mut z = vec![0i16; w * h];
             let counts = Workers::new(threads).run(
-                Band::whole(w, &mut pixels, &mut z),
-                h,
+                &mut pixels,
+                w,
+                vec![Target { w, h, x0: 0, y0: 0, z: &mut z }],
                 || 0usize,
-                |band, n| {
+                |_, band, n| {
                     for v in band.rows() {
                         if let Some((px, _)) = band.span(0, v, w) {
                             for p in px {
@@ -448,5 +519,72 @@ mod tests {
             assert_eq!(counts.iter().sum::<usize>(), h);
             assert_eq!(counts.len(), threads.min(h));
         }
+    }
+
+    #[test]
+    fn the_views_of_a_frame_are_each_drawn_once_in_one_round() {
+        // A 9x5 view at (2, 1) of a 16-wide screen, and under it two windows
+        // side by side — 4x7 at (1, 6), 5x7 at (9, 6) — and a third between
+        // them on their first two rows, 3x2 at (5, 6), as the overlay's
+        // corners lie beside the status bar and its strip above the bar:
+        // every pixel of each is drawn once, with its view's own row,
+        // column and z; the rest of the screen is not touched; on any
+        // thread count.
+        let (stride, screen_h) = (16usize, 14usize);
+        let views = [(9usize, 5usize, 2usize, 1usize), (4, 7, 1, 6), (5, 7, 9, 6), (3, 2, 5, 6)];
+        for threads in [1, 2, 3, 8, 64] {
+            let mut screen = vec![0u8; stride * screen_h];
+            let mut zs: Vec<Vec<i16>> = views.iter().map(|&(w, h, ..)| vec![0; w * h]).collect();
+            let targets: Vec<Target> =
+                views.iter().zip(&mut zs).map(|(&(w, h, x0, y0), z)| Target { w, h, x0, y0, z }).collect();
+            assert!(targets.iter().enumerate().all(|(i, a)| targets[i + 1..].iter().all(|b| a.bands_with(b))));
+            let rows = Workers::new(threads).run(&mut screen, stride, targets, Vec::new, |view, band, seen| {
+                let (w, h, ..) = views[view];
+                assert_eq!(band.width(), w);
+                for v in band.rows() {
+                    assert!(v < h);
+                    let (px, z) = band.span(0, v, w).expect("the band's row");
+                    for (u, (p, z)) in px.iter_mut().zip(z).enumerate() {
+                        *p += 1 + view as u8;
+                        *z += (v * w + u) as i16 + 1;
+                    }
+                    let last = band.at(v * w + w - 1).expect("the row's last pixel");
+                    *last.0 += 10;
+                    seen.push((view, v));
+                }
+            });
+            let mut rows: Vec<(usize, usize)> = rows.into_iter().flatten().collect();
+            rows.sort_unstable();
+            let want: Vec<(usize, usize)> = views.iter().enumerate().flat_map(|(i, &(_, h, ..))| (0..h).map(move |v| (i, v))).collect();
+            assert_eq!(rows, want, "{threads} threads: every row of every view once");
+            for (i, p) in screen.iter().enumerate() {
+                let (x, y) = (i % stride, i / stride);
+                let inside = views.iter().position(|&(w, h, x0, y0)| (x0..x0 + w).contains(&x) && (y0..y0 + h).contains(&y));
+                let want = inside.map_or(0, |view| {
+                    let (w, _, x0, _) = views[view];
+                    1 + view as u8 + if x == x0 + w - 1 { 10 } else { 0 }
+                });
+                assert_eq!(*p, want, "{threads} threads: screen ({x}, {y})");
+            }
+            for (z, &(w, h, ..)) in zs.iter().zip(&views) {
+                assert!(z.iter().enumerate().all(|(i, &v)| v as usize == i + 1) && z.len() == w * h, "{threads} threads: z");
+            }
+        }
+    }
+
+    #[test]
+    fn views_that_overlap_do_not_band_together() {
+        let mut z = [0i16; 64];
+        let (a, rest) = z.split_at_mut(16);
+        let (b, c) = rest.split_at_mut(16);
+        let view = Target { w: 4, h: 4, x0: 0, y0: 0, z: a };
+        let lower = Target { w: 4, h: 4, x0: 4, y0: 2, z: b };
+        let over = Target { w: 4, h: 4, x0: 2, y0: 2, z: c };
+        assert!(view.bands_with(&lower), "rows 2..4 shared, no column");
+        assert!(!view.bands_with(&over) && !lower.bands_with(&over), "pixels shared");
+        // A view past the rows it is handed is left out, not drawn wrong.
+        let mut screen = vec![0u8; 8 * 4];
+        let drawn = Workers::new(4).run(&mut screen, 8, vec![view, lower], Vec::new, |view, _, seen| seen.push(view));
+        assert!(drawn.into_iter().flatten().all(|view| view == 0));
     }
 }

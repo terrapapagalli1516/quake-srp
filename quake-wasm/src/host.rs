@@ -581,11 +581,14 @@ mod tests {
         crate::host_cmd::execute_console_command("crosshair 0");
         step(0.0);
         let without = APP.with(|c| c.borrow().as_ref().unwrap().present.rgba());
-        // The view above the scaled status bar (viewsize 100: 48 rows x 5),
-        // id's in either layout: the world drawn under it beside the bar
-        // (2026's scr_sbaroverlay) leaves its centre where it was.
-        let vrect = render::calc_refdef(w, h, 100.0, false, render::SbarLayout::Overlay).vrect;
-        assert_eq!(vrect, render::calc_refdef(w, h, 100.0, false, render::SbarLayout::Classic).vrect);
+        // The view above the scaled status bar (the 2026 profile's viewsize
+        // 110: 24 rows x 5), id's in either layout: the world drawn under it
+        // beside the bar (2026's scr_sbaroverlay) leaves its centre where it
+        // was.
+        let viewsize = crate::vid::viewsize();
+        assert_eq!(viewsize, 110.0, "2026's own start");
+        let vrect = render::calc_refdef(w, h, viewsize, false, render::SbarLayout::Overlay).vrect;
+        assert_eq!(vrect, render::calc_refdef(w, h, viewsize, false, render::SbarLayout::Classic).vrect);
         let (cx, cy) = (vrect.x + vrect.w / 2, vrect.y + vrect.h / 2);
         let differing: Vec<(usize, usize)> = (0..w * h)
             .filter(|&i| with[i * 4..i * 4 + 3] != without[i * 4..i * 4 + 3])
@@ -643,8 +646,9 @@ mod tests {
     }
 
     /// 2026's status bar overlay end to end, at 1920x1080 (pixel
-    /// size 1, the 2-D layer at 5x, the bar 240 rows) and a wide frame
-    /// (1315x535, 2x, 96 rows), on frozen frames of e1m1 in turn — id's, the
+    /// size 1, the 2-D layer at 5x, the bar 240 rows at id's viewsize 100 and
+    /// 120 at 2026's own 110) and a wide frame (1315x535, 2x, 96 and 48
+    /// rows), on frozen frames of e1m1 in turn — id's, the
     /// overlay's twice, id's again: every pixel above the world under the
     /// view (the whole view, id's projection) is byte for byte id's; the bar
     /// is the same bar; each part beside it shows the world where id has the
@@ -690,7 +694,10 @@ mod tests {
             if underwater {
                 in_water();
             }
-            for (ww, wh) in [(1920, 1080), (1315, 535)] {
+            // Each at id's 100 (the bar and its inventory strip) and at the
+            // 2026 profile's own 110 (the bar alone).
+            for (ww, wh, viewsize) in [(1920, 1080, 100.0), (1920, 1080, 110.0), (1315, 535, 100.0), (1315, 535, 110.0)] {
+                crate::host_cmd::execute_console_command(&format!("viewsize {viewsize}"));
                 crate::vid::set_window(ww, wh, 1.0);
                 step(0.0);
                 let (w, h) = APP.with(|c| {
@@ -698,11 +705,11 @@ mod tests {
                     (b.as_ref().unwrap().render_w, b.as_ref().unwrap().render_h)
                 });
                 assert_eq!((w, h), (ww as usize, wh as usize), "Auto: one device pixel a pixel");
-                let refdef = render::calc_refdef(w, h, 100.0, false, render::SbarLayout::Overlay);
+                let refdef = render::calc_refdef(w, h, viewsize, false, render::SbarLayout::Overlay);
                 let below = refdef.below.expect("the view stands on the bar");
                 let bar = render::status_bar_rect(w, h, refdef.sb_lines).expect("a bar");
                 let (id, over, over2, id2) = (frame(false), frame(true), frame(true), frame(false));
-                let what = format!("{w}x{h}{}", if underwater { " under water" } else { "" });
+                let what = format!("{w}x{h} at viewsize {viewsize}{}", if underwater { " under water" } else { "" });
                 assert_eq!(id2, id, "{what}: id's frame after the overlay's is id's");
                 assert_eq!(over2, over, "{what}: the overlay's frame again is the same");
                 let px = |img: &[u8], x: usize, y: usize| img[(y * w + x) * 4..(y * w + x) * 4 + 3].to_vec();

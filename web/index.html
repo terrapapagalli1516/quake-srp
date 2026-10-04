@@ -470,6 +470,7 @@ let worker = null, ctl = null, ring = null;
 let frameSlots = null, slotBytes = 0, slotsGen = 0;
 let exp = null;                    // the automation proxy (window.quake.call by name), set once running
 let engineError = '';              // the program's last "quake: ..." line (the Sys_Error it stopped on)
+let exited = false;                // the program's exit has been told (gameExited)
 // The program's UI state as of its last turn (the STATE record).
 const gameState = { flags: 0, menuScreen: 0, pixelSize: 0 };
 // touch.js, on a touch screen: { state() on every STATE record, rumble(),
@@ -627,6 +628,7 @@ function handleOutput(b) {
   }
 }
 function gameExited(m) {
+  exited = true;
   for (const pc of pendingCalls.values()) pc.reject(new Error('the game ended: ' + m.why));
   pendingCalls.clear();
   if (m.run !== 2) {
@@ -2403,13 +2405,27 @@ async function main() {
   sendWindow();
 
   // Up when the program's startup (quake.rc: config.cfg, the attract demos)
-  // ends in its first Sync.
+  // ends in its first Sync. A program that stopped instead shows it at once
+  // in the shared run state, and says why in messages that come after: its
+  // last "quake: ..." line, then its exit. The wait ends on the exit's
+  // message, not on the run state, so the reason is here and this error is
+  // the status line's last word whichever of this timer and the messages a
+  // browser runs first (Firefox often ran the timer first; a second is
+  // given to an exit that is never told).
   await new Promise((resolve, reject) => {
+    let stopped = 0;
     const wait = () => {
-      const run = Atomics.load(ctl, C.RUN);
-      if (run > 1) reject(new Error(engineError ? 'the game did not start: ' + engineError : 'the engine stopped while starting'));
-      else if (Atomics.load(ctl, C.SYNCS) > 0) resolve();
-      else setTimeout(wait, 5);
+      if (Atomics.load(ctl, C.RUN) > 1) {
+        stopped ||= performance.now();
+        if (exited || performance.now() - stopped > 1000) {
+          reject(new Error(engineError ? 'the game did not start: ' + engineError : 'the engine stopped while starting'));
+          return;
+        }
+      } else if (Atomics.load(ctl, C.SYNCS) > 0) {
+        resolve();
+        return;
+      }
+      setTimeout(wait, 5);
     };
     wait();
   });

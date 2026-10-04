@@ -688,7 +688,8 @@ def main():
         # rect here independently of touch.js's own `--bar` (so a bug in its
         # arithmetic cannot hide from this check) and compared against every
         # static control's actual box, at several phone sizes and every
-        # Screen size (viewsize 100/110/120).
+        # Screen size (viewsize 100/110/120). 2026 starts at 110, the status
+        # bar alone, so the default case is the first one checked at each size.
         BAR_RECT_JS = """async () => {
           const rows = (await quake.callLine('sbar_height')).value;
           const [, H] = quake.size();
@@ -724,16 +725,18 @@ def main():
             check(f"{label}: FIRE/JUMP/WEAPON/the hint clear the status bar", not bad,
                   f"bar {bar}" + (f" overlaps {bad}" if bad else ""))
 
+        check("the touch controls start at 2026's Screen size, 110 (never moved)",
+              pg.evaluate("exp.viewsize()") == 110, str(pg.evaluate("exp.viewsize()")))
         for w, h in [(844, 390), (1012, 412), (748, 360)]:
             pg.set_viewport_size({"width": w, "height": h})
             pg.evaluate("window.dispatchEvent(new Event('resize'))")
             time.sleep(0.3)
-            for vs in (100, 110, 120):
+            for vs in (110, 100, 120):                    # the default first
                 set_viewsize(pg, call, vs)
-                safe_zone_check(pg, f"{w}x{h}@3 viewsize {vs}")
+                safe_zone_check(pg, f"{w}x{h}@3 viewsize {vs}" + (" (the default)" if vs == 110 else ""))
             if (w, h) == (748, 360):
                 pg.screenshot(path=os.path.join(WEB, "verify_touch_safezone_748x360.png"))
-        set_viewsize(pg, call, 100)
+        set_viewsize(pg, call, 110)
         pg.set_viewport_size({"width": 844, "height": 390})
         pg.evaluate("window.dispatchEvent(new Event('resize'))")
         time.sleep(0.3)
@@ -759,7 +762,12 @@ def main():
         pg3.keyboard.press("Escape")                       # close the menu it lands on
         check("1012x412@2.6: reaches play",
               wait("document.getElementById('touch').dataset.mode === 'play'", 20000, pg3), mode(pg3))
-        for vs in (100, 110, 120):
+        # A fresh `?2026` page: Screen size is 2026's start, 110, and the
+        # controls clear that bar as it is, before any size is set.
+        check("1012x412@2.6: Screen size starts at 110", pg3.evaluate("exp.viewsize()") == 110, str(pg3.evaluate("exp.viewsize()")))
+        isolated.wait_until(pg3, BAR_SETTLED_JS, 5)
+        safe_zone_check(pg3, "1012x412@2.6 viewsize 110 (the default, nothing set)")
+        for vs in (110, 100, 120):
             set_viewsize(pg3, call3, vs)
             safe_zone_check(pg3, f"1012x412@2.6 viewsize {vs}")
         pg3.screenshot(path=os.path.join(WEB, "verify_touch_safezone_1012x412.png"))
@@ -786,10 +794,10 @@ def main():
         pg3.set_viewport_size({"width": 915, "height": 412})
         pg3.evaluate("window.dispatchEvent(new Event('resize'))")
         time.sleep(0.3)
-        for vs in (100, 110, 120):
+        for vs in (110, 100, 120):
             set_viewsize(pg3, call3, vs)
             safe_zone_check(pg3, f"915x412@2.6 viewsize {vs}")
-        set_viewsize(pg3, call3, 100)
+        set_viewsize(pg3, call3, 110)
 
         # The phone profile held upright, mid-game (412x1012 at 2.6): the
         # "turn sideways" prompt is all there is — no play layout, no MENU,
