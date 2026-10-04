@@ -141,6 +141,9 @@ with sync_playwright() as p:
     # 1. Options' 14th row switches the profile; Enter opens the page.
     prof = lambda: pg.evaluate("quake.text('profile')")
     check("?classic: the Classic profile, every setting off", prof() == "classic" and ext() == 0)
+    # The page starts 2026 and the address switches to Classic: Screen size,
+    # never moved, goes with it to id's 100 (and the inventory bar with it).
+    check("?classic: Screen size is id's 100", pg.evaluate("exp.viewsize()") == 100)
     frames(pg)
     check("config.cfg keeps the profile the address chose",
           cfg_has(pg, 'profile "classic"'), str(pg.evaluate(CFG)))
@@ -308,6 +311,7 @@ with sync_playwright() as p:
     isolated.wait_until(pg3, "exp.menu_visible().then(v => !v)", 5)
     time.sleep(1.0)
     ext3 = pg3.evaluate("exp.extras()")
+    check("?2026: Screen size starts at 110 (the status bar alone)", pg3.evaluate("exp.viewsize()") == 110)
     check("?2026: exact perspective starts on (uncapped, exact perspective, scaled 2-D)",
           ext3 == 13 and pg3.evaluate("quake.text('cvar', 'r_perspspan')") == "1"
           and pg3.evaluate("quake.text('cvar', 'wasm_exactpersp')") == "1", str(ext3))

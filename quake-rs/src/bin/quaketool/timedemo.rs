@@ -7,8 +7,10 @@
 //! The same [`quake_rs::client`] code the page runs for the console's
 //! `timedemo` ([`cl_demo::build_timedemo`], [`cl_demo::timedemo_frame`],
 //! [`cl_demo::TimeDemoClock`]), with the page's Classic screen (its 4:3
-//! display, id's video) and the host's defaults (viewsize 100, the menu and console
-//! closed — `key_dest == key_game`, as `quake +timedemo demo1` runs it).
+//! display, id's video) and id's host defaults (viewsize 100, the menu and console
+//! closed — `key_dest == key_game`, as `quake +timedemo demo1` runs it; the
+//! 2026 profile starts Screen size at 110, but this is id's measure on a
+//! Classic screen).
 //! `realtime` is the wall clock (`Sys_FloatTime`), read at the top of every
 //! host frame. A host frame is what the page's `step` does for a frame: the
 //! demo message, the 3-D view, the status bar and text, and the finished

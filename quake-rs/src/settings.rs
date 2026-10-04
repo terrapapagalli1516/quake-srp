@@ -11,9 +11,16 @@
 //! - **2026** ([`Profile::Modern`], the default): the best experience of an
 //!   idealized software-rendered Quake in 2026 ([`Cvars::modern`]).
 //!
+//! **Screen size follows the profile only while it is the profile's.** It is
+//! id's own cvar (`viewsize`), not a departure, but the two profiles start it
+//! apart: Classic at id's 100, 2026 one step larger at 110, so the HUD takes
+//! less of a 2026 screen. [`Settings::set_profile`] moves it to the new
+//! profile's start if it still equals the old profile's (the player never
+//! moved it), and keeps it otherwise, like id's other settings.
+//!
 //! **The controls are the player's**, not the engine's, so a profile switch
-//! leaves them alone, like id's own settings (Screen size, Brightness, the
-//! volumes, the mouse): WASD and the gamepad ([`Bindings::with_wasd`],
+//! leaves them alone, like id's own settings (Brightness, the volumes, the
+//! mouse): WASD and the gamepad ([`Bindings::with_wasd`],
 //! [`Bindings::with_gamepad`] — [`Profile::bindings`] applies both to
 //! *either* profile), mouse look, Space-swims-up, Alt+Enter and Always Run
 //! (`freelook`, `cl_jumpswim`, `vid_altenter`, `cl_forwardspeed`/
@@ -44,7 +51,6 @@
 
 use crate::cvar::{self, Cvars};
 use crate::keys::Bindings;
-use crate::screen::VIEWSIZE_DEFAULT;
 
 /// The two profiles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -89,6 +95,14 @@ impl Profile {
             Profile::Classic => Cvars::classic(),
             Profile::Modern => Cvars::modern(),
         }
+    }
+
+    /// The profile's Screen size (`viewsize`): `default.cfg`'s 100 in
+    /// Classic, one step larger in 2026. What a new session starts at, what
+    /// Options > "Reset to defaults" sets, and what the tools that draw the
+    /// 2026 frame use ([`Cvars::modern`]).
+    pub fn viewsize(self) -> f32 {
+        self.cvars().viewsize
     }
 
     /// The profile's bindings: `default.cfg`, with WASD and the gamepad
@@ -147,9 +161,15 @@ impl Settings {
     /// module docs). The wheel is the controls' one exception, a 2026-only
     /// departure of its *binding*, so it alone follows the profile; every
     /// other binding (WASD, the gamepad, any rebind) and id's own settings
-    /// are kept.
+    /// are kept — but for Screen size, which takes the new profile's start
+    /// if it still is the old profile's (never moved by the player), so a
+    /// visitor who has only switched to Classic gets id's inventory bar
+    /// back, and a player who chose a size keeps it.
     pub fn set_profile(&mut self, profile: Profile) {
         let defaults = profile.cvars();
+        if self.cvars.viewsize == self.profile.viewsize() {
+            self.cvars.viewsize = defaults.viewsize;
+        }
         for c in cvar::CVARS.iter().filter(|c| c.departure) {
             c.set(&mut self.cvars, &c.get(&defaults));
         }
@@ -161,14 +181,16 @@ impl Settings {
     }
 
     /// Options > "Reset to defaults", `exec default.cfg`: `unbindall`, the
-    /// profile's bindings, and `default.cfg`'s four cvars — `viewsize 100`,
-    /// `gamma 1.0`, `volume 0.7`, `sensitivity 3`. Nothing else: the rest of
-    /// the Options (Always Run, Invert Mouse, the look toggles, CD volume),
-    /// the video mode and the departures keep their values, as in WinQuake.
+    /// profile's bindings, and `default.cfg`'s four cvars — `viewsize`
+    /// ([`Profile::viewsize`]: id's 100 in Classic, 2026's own start in
+    /// 2026), `gamma 1.0`, `volume 0.7`, `sensitivity 3`. Nothing else: the
+    /// rest of the Options (Always Run, Invert Mouse, the look toggles, CD
+    /// volume), the video mode and the departures keep their values, as in
+    /// WinQuake.
     pub fn reset_defaults(&mut self) {
         self.binds = self.profile.bindings();
         let c = &mut self.cvars;
-        c.viewsize = VIEWSIZE_DEFAULT;
+        c.viewsize = self.profile.viewsize();
         c.gamma = 1.0;
         c.volume = 0.7;
         c.sensitivity = 3.0;
@@ -198,12 +220,14 @@ mod tests {
         assert_eq!(s.profile, Profile::Modern);
         assert!(s.cvars.uncapped && s.cvars.native && s.cvars.always_run());
         assert_eq!(s.cvars.crosshair, crate::render::Crosshair::Cross);
+        assert_eq!(s.cvars.viewsize, 110.0, "2026 starts Screen size one step past id's 100");
         assert_eq!(s.binds.command(b'w'), Some(BIND_FORWARD));
 
         // Classic: the engine off, but the controls (the module docs'
         // "the user's call") are the shared 2026 ones by default too.
         let classic = Settings::new(Profile::Classic);
         assert_eq!(classic.cvars, Cvars::classic());
+        assert_eq!(classic.cvars.viewsize, 100.0, "Classic: default.cfg's, with id's inventory bar");
         assert!(!classic.cvars.uncapped && !classic.cvars.native, "the engine: id's");
         assert!(classic.cvars.freelook && classic.cvars.jumpswim && classic.cvars.alt_enter && classic.cvars.always_run());
         assert_eq!(classic.binds.command(b'w'), Some(BIND_FORWARD), "WASD by default in Classic too");
@@ -245,10 +269,65 @@ mod tests {
         assert!(s.binds.get(K_MWHEELUP).is_some(), "the wheel is back");
     }
 
+    /// Screen size is id's own setting, but the profiles start it apart (110
+    /// and 100): a switch moves it only while it still is the old profile's
+    /// start, in both directions.
+    #[test]
+    fn screen_size_follows_the_profile_only_while_the_player_has_not_moved_it() {
+        // Never moved: the visitor who only switches profile gets each one's own.
+        let mut s = Settings::default();
+        assert_eq!(s.cvars.viewsize, 110.0);
+        s.set_profile(Profile::Classic);
+        assert_eq!(s.cvars, Cvars::classic(), "Classic is id's, inventory bar included");
+        assert_eq!(s.cvars.viewsize, 100.0);
+        s.set_profile(Profile::Modern);
+        assert_eq!(s.cvars.viewsize, 110.0, "and back");
+        s.set_profile(Profile::Modern);
+        assert_eq!(s.cvars.viewsize, 110.0, "the profile it is already in changes nothing");
+
+        // Moved in 2026 (Screen size 80, or the Options slider's 90): kept both ways.
+        for moved in [80.0, 90.0, 120.0] {
+            let mut s = Settings::default();
+            s.cvars.viewsize = moved;
+            s.set_profile(Profile::Classic);
+            assert_eq!(s.cvars.viewsize, moved, "2026 -> Classic keeps a chosen size");
+            s.set_profile(Profile::Modern);
+            assert_eq!(s.cvars.viewsize, moved, "and back");
+        }
+
+        // Moved in Classic: kept going the other way, too.
+        let mut s = Settings::new(Profile::Classic);
+        s.cvars.viewsize = 70.0;
+        s.set_profile(Profile::Modern);
+        assert_eq!(s.cvars.viewsize, 70.0, "Classic -> 2026 keeps a chosen size");
+        s.set_profile(Profile::Classic);
+        assert_eq!(s.cvars.viewsize, 70.0);
+
+        // The one case the value cannot tell from "never moved": a player
+        // who chose the *other* profile's start (here 100 in 2026) is, to
+        // the next switch, a player who never moved it. An accepted gap;
+        // the alternative is a flag that `config.cfg` would have to keep.
+        let mut s = Settings::default();
+        s.cvars.viewsize = 100.0;
+        s.set_profile(Profile::Classic);
+        assert_eq!(s.cvars.viewsize, 100.0, "it is Classic's start anyway");
+        s.set_profile(Profile::Modern);
+        assert_eq!(s.cvars.viewsize, 110.0, "taken for unmoved: 2026's start again");
+    }
+
     #[test]
     fn config_cfg_keeps_the_profile_and_what_differs_from_it() {
         let s = Settings::default();
         assert_eq!(s.config_text(), "// generated by quake, do not modify\nprofile \"2026\"\n", "nothing changed");
+        // 2026's own 110 is not written, so a player who never touched Screen
+        // size gets whatever the profile starts at by then; 100 is a choice.
+        let mut t = Settings::default();
+        t.cvars.viewsize = 100.0;
+        assert_eq!(t.config_text(), "// generated by quake, do not modify\nprofile \"2026\"\nviewsize \"100\"\n");
+        let mut t = Settings::new(Profile::Classic);
+        assert_eq!(t.config_text(), "// generated by quake, do not modify\nprofile \"classic\"\n", "Classic's 100 is not written");
+        t.cvars.viewsize = 110.0;
+        assert_eq!(t.config_text(), "// generated by quake, do not modify\nprofile \"classic\"\nviewsize \"110\"\n");
         let mut s = Settings::new(Profile::Classic);
         s.cvars.viewsize = 110.0;
         s.cvars.show_fps = true;
@@ -269,10 +348,17 @@ mod tests {
         s.cvars.set_always_run(false);
         s.binds.unbind_all();
         s.reset_defaults();
-        assert_eq!(s.cvars.viewsize, 100.0);
+        assert_eq!(s.cvars.viewsize, 110.0, "2026's own start");
         assert_eq!(s.cvars.bgmvolume, 0.3, "not in default.cfg");
         assert!(!s.cvars.always_run(), "not in default.cfg");
         assert_eq!(s.binds, Profile::Modern.bindings());
+        // Classic: default.cfg's viewsize 100, as in WinQuake.
+        let mut c = Settings::new(Profile::Classic);
+        c.cvars.viewsize = 50.0;
+        c.reset_defaults();
+        assert_eq!(c.cvars.viewsize, 100.0);
+        // ...and a reset leaves the profile as it was (it is not a switch).
+        assert_eq!((c.profile, s.profile), (Profile::Classic, Profile::Modern));
         assert_eq!((Profile::parse("Classic"), Profile::parse("2026"), Profile::parse("x")), (Some(Profile::Classic), Some(Profile::Modern), None));
     }
 }

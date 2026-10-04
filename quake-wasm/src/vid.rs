@@ -25,7 +25,7 @@ use quake_rs::cvar::Cvars;
 use quake_rs::render::{self, FovMode, MipCvars, SkyScroll, TorchFlicker, VideoCvars};
 use quake_rs::server::LerpLightStyles;
 
-use crate::app::{ensure_app, App, APP};
+use crate::app::{ensure_app, App, APP, START_PROFILE};
 
 /// The default (boot) render resolution. A crisp `960x600` (preset index 4 — must
 /// stay a member of [`render::RESOLUTION_PRESETS`] so the Video Options list
@@ -269,11 +269,10 @@ pub(crate) fn mode_vid(w: usize, h: usize) -> Vid {
 }
 
 /// The `viewsize` cvar (Options "Screen size", `sizeup`/`sizedown`), 30..=120.
-/// Read-only, for the page/verification harness.
+/// Read-only, for the page/verification harness. Before the App exists, the
+/// start profile's ([`START_PROFILE`]: 2026's one step past id's 100).
 pub(crate) fn viewsize() -> f32 {
-    APP.with(|c| {
-        c.borrow().as_ref().map(|a| a.settings.cvars.viewsize).unwrap_or(render::VIEWSIZE_DEFAULT)
-    })
+    APP.with(|c| c.borrow().as_ref().map_or_else(|| START_PROFILE.viewsize(), |a| a.settings.cvars.viewsize))
 }
 
 /// Set the `viewsize` cvar, bounded to 30..=120 (the console's `viewsize n`).

@@ -25,11 +25,14 @@
   5. The one switch: Options > "Classic / 2026", left and right, flips the
      profile, and the canvas goes from the window to the 4:3 box and back;
      the controls are kept across it (a control set by hand stays as set, WASD
-     stays bound) and only the wheel follows the profile.
+     stays bound) and only the wheel follows the profile. Screen size starts
+     at 110 in 2026 (the status bar alone) and 100 in Classic (id's, with the
+     inventory bar), and goes with the switch while the player has not moved it.
   6. The settings survive a reload: a 2026 session's pixel size, a binding
      and Screen size; a `?classic` visit sticks for a plain reload after it;
      a returning visitor's old localStorage settings keep their choice (Show
-     FPS) and get the 2026 defaults (uncapped, exact perspective, scaled 2-D).
+     FPS) and get the 2026 defaults (uncapped, exact perspective, scaled 2-D,
+     and Screen size 110: the old page's viewsize 100 was its default).
   7. Video Options is honest about native resolution (review: it used to show
      960x600 as current and a pick silently turned Native off): opened while
      actually native, the cursor lands on the live native row (not a stale
@@ -164,22 +167,28 @@ with sync_playwright() as p:
     pg.evaluate(GRAB, "_x0")
     pg.evaluate("quake.callLine('exec crosshair 1')")
     d = pg.evaluate(DIFF, ["_x1", "_x0"])
-    # The view is above the status bar (viewsize 100, the 2-D layer at 3x on
-    # a 1246x716 screen: 144 rows): its centre pixel (623, 286). The cross on
-    # 716 rows: 1-pixel arms 5 long, 1 from the open centre pixel, so
-    # 617..629 x 280..292, and its black outline one further (where the
-    # scene is not already black).
-    ok = d is not None and 616 <= d["x0"] <= 617 and 629 <= d["x1"] <= 630 and 279 <= d["y0"] <= 280 and 292 <= d["y1"] <= 293
-    check("the crosshair: the 2026 cross about the view's centre, and nothing else", ok, str(d))
+    # 2026 starts Screen size at 110: the status bar alone, 24 rows at the
+    # 2-D layer's 3x on a 1246x716 screen, 72 rows, and no inventory strip.
+    bar = pg.evaluate("quake.callLine('sbar_height').then(r => r.value)")
+    check("Screen size starts at 110 in 2026: the status bar alone, 24 rows at 3x",
+          cvar(pg, "viewsize") == "110" and bar == 72, f"viewsize {cvar(pg, 'viewsize')}, {bar} rows")
+    # The view is above the status bar: its centre pixel (623, cy) with cy
+    # = (716 - 72) / 2 = 322 (at id's 100 the bar is 144 rows and cy 286).
+    # The cross on 716 rows: 1-pixel arms 5 long, 1 from the open centre
+    # pixel, so 617..629 x cy-6..cy+6, and its black outline one further
+    # (where the scene is not already black).
+    cy = (716 - bar) // 2
+    ok = d is not None and 616 <= d["x0"] <= 617 and 629 <= d["x1"] <= 630 and cy - 7 <= d["y0"] <= cy - 6 and cy + 6 <= d["y1"] <= cy + 7
+    check("the crosshair: the 2026 cross about the view's centre, and nothing else", ok, f"{d}; centre row {cy}")
     # crosshair 2: id's + at the 2-D scale (3), its crossing on the centre:
-    # the 8x8 cell's corner at (623 - 4*3, 286 - 4.5*3) = (611, 273), the
-    # glyph's grey texels (columns 1-6, rows 2-6) 614..632 x 279..293, its
-    # dark shadow to 634 x 296.
+    # the 8x8 cell's corner at (623 - 4*3, cy - 4.5*3) = (611, cy - 13), the
+    # glyph's grey texels (columns 1-6, rows 2-6) 614..632 x cy-7..cy+7, its
+    # dark shadow to 634 x cy+10.
     pg.evaluate("quake.callLine('exec crosshair 2')")
     pg.evaluate(GRAB, "_x2")
     pg.evaluate("quake.callLine('exec crosshair 1')")
     d = pg.evaluate(DIFF, ["_x2", "_x0"])
-    ok = d is not None and (d["x0"], d["y0"]) == (614, 279) and 632 <= d["x1"] <= 634 and 293 <= d["y1"] <= 296
+    ok = d is not None and (d["x0"], d["y0"]) == (614, cy - 7) and 632 <= d["x1"] <= 634 and cy + 7 <= d["y1"] <= cy + 10
     check("crosshair 2: id's + at the 2-D scale, crossing the view's centre", ok, str(d))
     # Exact perspective is on in 2026 (at 1080p and above id's 16-pixel spans
     # wobble along a wall seen at a grazing angle); off is id's spans, which
@@ -216,11 +225,15 @@ with sync_playwright() as p:
     check("...the controls kept: the hand-set one still off, mouse look and WASD still on, the wheel off",
           cvar(pg, "cl_jumpswim") == "0" and cvar(pg, "freelook") == "1" and bind_of(pg, "w") == '"w" = "+forward"'
           and bind_of(pg, "MWHEELUP") == '"MWHEELUP" is not bound')
+    check("...Screen size, never moved, follows to id's 100 (the inventory bar is back)",
+          cvar(pg, "viewsize") == "100" and pg.evaluate("quake.callLine('sbar_height').then(r => r.value)") == 48,
+          cvar(pg, "viewsize"))
     pg.keyboard.press("ArrowRight")
     pg.wait_for_function("quake.state.flags & 32", timeout=5000)
     frames(pg)
     c = pg.evaluate(CANVAS)
     check("right: 2026 again, the window filled", text(pg, "profile") == "2026" and c["w"] == 1246, str(c))
+    check("...Screen size follows back to 2026's 110", cvar(pg, "viewsize") == "110", cvar(pg, "viewsize"))
     check("...the controls kept, the wheel back (impulse 10)",
           cvar(pg, "cl_jumpswim") == "0" and bind_of(pg, "w") == '"w" = "+forward"'
           and bind_of(pg, "MWHEELUP") == '"MWHEELUP" = "impulse 10"')
@@ -279,6 +292,8 @@ with sync_playwright() as p:
     controls = ["freelook", "cl_jumpswim", "vid_altenter", "joystick"]
     vals = {n: cvar(pg, n) for n in departures + controls + ["cl_forwardspeed"]}
     check("every engine departure off", all(vals[n] == "0" for n in departures) and cvar(pg, "r_perspspan") == "16", str(vals))
+    check("Screen size is id's 100 (the page started 2026; the address switched it, never moved)",
+          cvar(pg, "viewsize") == "100", cvar(pg, "viewsize"))
     check("the controls are 2026's: mouse look, Space swims up, Alt+Enter, the gamepad, Always Run (400)",
           all(vals[n] == "1" for n in controls) and vals["cl_forwardspeed"] == "400", str(vals))
     pg.evaluate("quake.callLine('exec bind w; bind a; bind MWHEELUP')")
@@ -355,6 +370,11 @@ with sync_playwright() as p:
     ext = pg.evaluate("exp.extras()")
     check("old settings: the choice kept (Show FPS), the 2026 defaults on (uncapped, exact perspective, scaled 2-D)",
           text(pg, "profile") == "2026" and ext == 15, f"extras {ext}; {text(pg, 'config_text')!r}")
+    # The old page's viewsize 100 was its default, not a choice (verify_save.py
+    # migrates a chosen 80, which stays): the player who never moved Screen
+    # size gets 2026's own start.
+    check("old settings: their viewsize 100 was the old default, so Screen size is 2026's 110",
+          cvar(pg, "viewsize") == "110", cvar(pg, "viewsize"))
     ctx.close()
 
     # 7. Video Options is honest about native resolution, and reversible.

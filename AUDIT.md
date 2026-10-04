@@ -36,8 +36,23 @@ Options idiom: the Profile row and a row for each of three pages, the departures
 **Picture and sound**, **Motion and light**, **Controls** (`quake_rs::menu::ExtrasPage`;
 Escape goes back a screen, onto the row it came from). Each row can also be set alone, on
 its page or as its console variable. Switching profile resets the departures (and binds or
-unbinds the wheel), and keeps the controls and id's own settings (Screen size, Brightness,
-the volumes, the mouse).
+unbinds the wheel), and keeps the controls and id's own settings (Brightness, the volumes,
+the mouse, and a Screen size the player moved).
+
+**Screen size starts one step larger in 2026.** Since 2026-10-03 the 2026 profile starts
+`viewsize` at 110 (`screen::VIEWSIZE_MODERN`, in `Cvars::modern`): the inventory strip
+goes and the status bar alone is drawn, so the HUD takes less of a 2026 screen. Classic
+stays at id's 100, `default.cfg`'s. It is id's own cvar, not a `departure`, so it has no
+row above: `config.cfg` writes it only when it differs from the profile's start (a
+returning player who never moved it gets 110; one who chose a size keeps it, a 2026
+player's chosen 100 included). Options > Reset to defaults sets the current profile's
+start (`Profile::viewsize`; Classic's is still `default.cfg`'s 100). A profile switch
+takes the new profile's start only if the size still equals the old profile's, so a
+visitor who only switches to Classic gets id's inventory bar and a chosen size is kept.
+The one case it cannot tell from "never moved" is a player who chose the other profile's
+start (100 in 2026): the next switch treats that as unmoved. A flag in `config.cfg` to
+tell them apart would cost more than the gap does. The tools keep id's 100 unless asked for the 2026 layout (`quaketool shot --sbaroverlay 1`
+starts at 110); `play` and `timedemo` draw Classic's screen.
 
 | departure | setting (its page and row) | 2026 | why |
 |---|---|---|---|

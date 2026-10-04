@@ -327,7 +327,10 @@ path; there is no `fd_readdir`); anything else a newer `std` imports answers
   settings as `quake-rs.resolution`/`.viewsize`/`.extras` in localStorage. At
   start the page moves them once into the game directory — the saves to
   `id1/<name>`, the settings as the `config.cfg` lines the program would have
-  written — and removes the keys.
+  written — and removes the keys. A migrated `viewsize 100` was the old page's
+  default, not a choice, so it is dropped like the other restated defaults
+  (`LEGACY_DEFAULTS`): that player gets the profile's own Screen size, 110 in
+  2026. Any other size is kept.
 - A storage failure after the fact (quota) is printed on the console with
   `echo`, since the program's write already succeeded.
 
@@ -1686,8 +1689,9 @@ bottom-anchored, the status bar covers *this frame* — the same arithmetic
 `calc_refdef` uses to keep the 3-D view off the bar (in 2026 too: the
 "Status bar overlay", `scr_sbaroverlay`, only draws the world on under the
 view beside the bar), so it is exactly right for every `viewsize` (0, 24
-or 48 virtual rows), the "scaled 2-D" extra's whole-number blow-up, and an
-intermission (always full screen, so 0). The page turns that into a CSS
+or 48 virtual rows; 2026 starts at 110, the 24-row status bar alone, and
+Classic at id's 100, with the inventory strip over it), the "scaled 2-D"
+extra's whole-number blow-up, and an intermission (always full screen, so 0). The page turns that into a CSS
 custom property, `--bar` (`touch.js`'s
 `refreshBar`/`applyBar`): the frame rows at the canvas box's own CSS-pixel-
 per-frame-pixel ratio, re-read whenever that ratio or the bar might have

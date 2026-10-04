@@ -15,7 +15,11 @@
 //! which `Cvar_Command`'s `"viewsize" is "100"`, Tab completion and
 //! `Cvar_WriteVariables` go through.
 //!
-//! Two kinds of field. **id's cvars**, with id's defaults. And **the port's
+//! Two kinds of field. **id's cvars**, with id's defaults (one exception:
+//! `viewsize` starts one step larger in [`Cvars::modern`], so the HUD takes
+//! less of a 2026 screen; it stays id's own cvar, and
+//! [`crate::settings::Settings::set_profile`] moves it with the profile only
+//! while the player has not moved it). And **the port's
 //! departures** from id's game, each marked [`Cvar::departure`]
 //! ([`crate::settings::Profile`] switches them: off in [`Cvars::classic`],
 //! on in [`Cvars::modern`]) — `crosshair`, the renderer and stepping
@@ -37,7 +41,7 @@ use crate::client::lerpmodels::LerpModels;
 use crate::client::lerpmove::LerpMove;
 use crate::render::{Crosshair, PerspSpan, SkyScroll, Threads, TorchFlicker};
 use crate::snd::SoundMode;
-use crate::screen::{SbarLayout, VIEWSIZE_DEFAULT, VIEWSIZE_MAX, VIEWSIZE_MIN, VIEWSIZE_STEP};
+use crate::screen::{SbarLayout, VIEWSIZE_DEFAULT, VIEWSIZE_MAX, VIEWSIZE_MIN, VIEWSIZE_MODERN, VIEWSIZE_STEP};
 use crate::server::LerpLightStyles;
 use crate::vm::{MAX_EDICTS, MAX_EDICTS_LIMIT};
 
@@ -270,9 +274,12 @@ impl Cvars {
     /// [`Cvars::classic`]'s too now — they are controls, not engine.) The
     /// edict pool grows past id's 600 (`max_edicts`, QuakeSpasm's own
     /// default) — invisible on every map id or the mission packs shipped,
-    /// room for bigger ones.
+    /// room for bigger ones. Screen size (`viewsize`, id's own cvar) starts at
+    /// [`VIEWSIZE_MODERN`], one step past id's 100: the inventory strip goes
+    /// and the status bar stays, so the HUD takes less of a 2026 screen.
     pub fn modern() -> Cvars {
         Cvars {
+            viewsize: VIEWSIZE_MODERN,
             crosshair: Crosshair::Cross,
             uncapped: true,
             persp_span: PerspSpan::Exact,
@@ -644,13 +651,19 @@ mod tests {
     }
 
     #[test]
-    fn the_profiles_differ_only_in_departures() {
+    fn the_profiles_differ_only_in_departures_and_the_screen_size() {
         let (id, modern) = (Cvars::classic(), Cvars::modern());
         for c in CVARS {
             if c.get(&id) != c.get(&modern) {
-                assert!(c.departure, "{} differs between the profiles, so it is a departure", c.name);
+                // Screen size is id's own cvar, started one step larger in
+                // 2026: not a departure (a profile switch keeps the
+                // player's own value, `Settings::set_profile`).
+                assert!(c.departure || c.name == "viewsize", "{} differs between the profiles, so it is a departure", c.name);
             }
         }
+        assert_eq!((id.viewsize, modern.viewsize), (VIEWSIZE_DEFAULT, VIEWSIZE_DEFAULT + VIEWSIZE_STEP));
+        assert_eq!(modern.viewsize, VIEWSIZE_MODERN);
+        assert!(!find("viewsize").unwrap().departure, "id's own cvar");
         for c in CVARS.iter().filter(|c| c.departure) {
             assert!(c.archive, "{}: a departure is kept in config.cfg", c.name);
         }

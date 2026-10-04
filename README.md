@@ -151,7 +151,7 @@ play with the same ones, and a switch leaves them as they are.
 |---|---|---|
 | frame rate | id's 72 fps cap | a frame every display refresh; jumps, lifts, flashes and trails are stepped to match 72 Hz ([FRAMERATE.md](FRAMERATE.md)) |
 | picture | a fixed mode (960x600 by default) in a 4:3 frame, id's 90° field of view | the window's own size and shape in whole pixels (pixel size Auto or 1–4), a wider view on wide screens |
-| status bar, menus, console | 1:1, as id drew them | scaled up by a whole number |
+| status bar, menus, console | 1:1, as id drew them; Screen size 100: the status bar with the inventory bar above it | scaled up by a whole number; Screen size starts one step larger, 110: the status bar without the inventory bar, so the HUD takes less of the screen |
 | monsters | move in id's 0.1 s steps, and change pose ten times a second | glide between the steps, and blend between poses (the gun too) |
 | lights | the flickering ones snap ten times a second; most torches and flames steady, as the map baked them | the flickering ones glide; the steady torches and flames flicker gently about their light (`r_torchflicker`, a strength) |
 | controls | WASD, mouse look, Always Run, a twin-stick gamepad with rumble (the same in both; `idcontrols` is id's `default.cfg`) | the same, plus the mouse wheel for weapons, a crosshair and touch controls |
