@@ -322,6 +322,10 @@ const statusPlaying = () => touch ? 'playing — the MENU button for the menu'
                                   : 'playing — Esc for the menu · click the view to capture the mouse';
 const canvas = document.getElementById('c');
 const wrap = document.getElementById('wrap');
+// A touch screen: a coarse primary pointer (a phone, a tablet), or `?touch`
+// in the address. The touch controls go up there (startTouch), and such a
+// device is one whose few fast cores the game needs (`pacing`).
+const touchScreen = new URLSearchParams(location.search).has('touch') || matchMedia('(pointer: coarse)').matches;
 const overlay = document.getElementById('overlay');
 const fsBtn = document.getElementById('fs');
 const sndBtn = document.getElementById('sndBtn');
@@ -2559,12 +2563,21 @@ document.addEventListener('fullscreenchange', () => { windowDirty = true; fitCan
 // the upload and draw.
 let framesShown = 0;
 function present() {
-  const n = Atomics.load(ctl, C.FRAMES);
-  if (n === framesShown || Atomics.load(ctl, C.SLOTS_GEN) !== slotsGen) return null;
-  let s;
-  do { s = Atomics.load(ctl, C.LATEST); Atomics.store(ctl, C.READING, s); } while (Atomics.load(ctl, C.LATEST) !== s);
+  if (Atomics.load(ctl, C.FRAMES) === framesShown || Atomics.load(ctl, C.SLOTS_GEN) !== slotsGen) return null;
+  // The frame count is read before the slot is claimed: the program names a
+  // frame's slot (LATEST) before it counts it (FRAMES), so the claimed frame
+  // is that one or a newer one, never an older — a frame published during
+  // the claim is not taken for shown. (Read after, as it was, it could be:
+  // that frame then waited for the next one to be drawn at all.) At worst
+  // the same frame is drawn twice.
+  let s, n;
+  do {
+    n = Atomics.load(ctl, C.FRAMES);
+    s = Atomics.load(ctl, C.LATEST);
+    Atomics.store(ctl, C.READING, s);
+  } while (Atomics.load(ctl, C.LATEST) !== s);
   if (s < 0 || Atomics.load(ctl, C.SLOTS_GEN) !== slotsGen) { release(); return null; }
-  framesShown = Atomics.load(ctl, C.FRAMES);
+  framesShown = n;
   Atomics.store(ctl, C.SHOWN, framesShown);
   if (!quake.firstFrameAt) quake.firstFrameAt = performance.now();
   const frame = claimedFrame(s);
@@ -2754,10 +2767,20 @@ class GlPresenter {
   draw(frame, done) {
     if (this.lost || !frame.indexed) { done(); return { copy: 0, put: 0 }; }
     const gl = this.gl, t0 = performance.now();
-    gl.activeTexture(gl.TEXTURE1);
-    let copy = viaStaging(this, frame.palette, (v) => gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 256, 1, gl.RGBA, gl.UNSIGNED_BYTE, v));
+    // The frame first, then the palette: the order is worth 2 ms a frame on
+    // a phone. Chromium sends a context's uploads through one transfer
+    // buffer and resizes it by what is in use when an upload asks: a 1 KB
+    // palette asked for first, with last frame's megabytes already
+    // consumed, looks like a buffer far too large, so it is freed for a
+    // small one, and the frame behind it frees that for a large one again —
+    // fresh shared memory, faulted in page by page, twice a frame. Asked for
+    // right after the frame, the palette finds the buffer in use and nothing
+    // is resized (web/PLATFORM.md, "Presentation": 2.3 ms -> 0.3 for a
+    // 2640x1080 frame).
     gl.activeTexture(gl.TEXTURE0);
-    copy += viaStaging(this, frame.pixels, (v) => gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, frame.w, frame.h, gl.RED_INTEGER, gl.UNSIGNED_BYTE, v));
+    let copy = viaStaging(this, frame.pixels, (v) => gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, frame.w, frame.h, gl.RED_INTEGER, gl.UNSIGNED_BYTE, v));
+    gl.activeTexture(gl.TEXTURE1);
+    copy += viaStaging(this, frame.palette, (v) => gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 256, 1, gl.RGBA, gl.UNSIGNED_BYTE, v));
     done();
     this.last = { w: frame.w, h: frame.h };
     gl.drawArrays(gl.TRIANGLES, 0, 3);
@@ -2829,23 +2852,36 @@ function waitAck(seq, ms) {
 // time from each key, mouse or pad event — its timeStamp, when the browser
 // got it, so the wait for the next refresh counts — to the present of the
 // first frame that consumed it (web/latency.py).
-let inputTimes = [], inFlightTimes = [];
+let inputTimes = [], inFlightTimes = [];     // inFlightTimes: [tick, time] pairs
 function noteInput(at) {
   if (!quake.latency) return;
   const now = performance.now();
   inputTimes.push(at > 0 ? at : now);
   if (at > 0) quake.dispatch.push(now - at);   // the event's wait for the page's handler
 }
-// A tick is posted: the input sent so far is what its frame consumes.
-function latencyTick() {
-  if (quake.latency) { inFlightTimes = inFlightTimes.concat(inputTimes); inputTimes = []; }
+// Tick `seq` is posted: the input sent so far is what its frame consumes.
+function latencyTick(seq) {
+  if (quake.latency) { for (const t of inputTimes) inFlightTimes.push([seq, t]); inputTimes = []; }
 }
-// A frame is presented: the input its tick consumed is on the canvas.
-function latencyPresent() {
+// A frame is presented: the input of every tick the program had answered
+// when the frame was claimed is on the canvas. `ack` is the program's ACK
+// read BEFORE present() (a turn's frame comes before its Sync, so an
+// answered tick's frame is the one claimed or an older one); a tick
+// answered since, or still in flight, keeps its input for its own frame.
+function latencyPresent(ack) {
   if (!quake.latency) return;
-  const t = performance.now();
-  for (const e of inFlightTimes) quake.latency.push(t - e);
-  inFlightTimes = [];
+  const t = performance.now(), later = [];
+  for (const e of inFlightTimes) {
+    if (((ack - e[0]) | 0) >= 0) quake.latency.push(t - e[1]); else later.push(e);
+  }
+  inFlightTimes = later;
+}
+// present(), and the latency probe's samples for the frame it drew.
+function presentNow() {
+  const ack = Atomics.load(ctl, C.ACK);
+  const shown = present();
+  if (shown) latencyPresent(ack);
+  return shown;
 }
 
 let tickSeq = 0, lastTick = null, pendingTick = 0;
@@ -2853,10 +2889,140 @@ let tickSeq = 0, lastTick = null, pendingTick = 0;
 // frame inside the refresh, however long it took; past this the frame shows
 // on the next refresh instead).
 const WAIT_MS = 30;
+
+// How a refresh gets its frame, which depends on what a frame costs here.
+// - A quick frame is waited for inside the refresh that asked for it
+//   (waitAck: a spin, the main thread may not block) and drawn at once: the
+//   least delay there is, for a few milliseconds of one core.
+// - A slow frame is not waited for ("relaxed"): the refresh draws what has
+//   come and asks for the next frame; and when a frame comes back after a
+//   refresh has gone by without it, the next one is asked for at that
+//   moment (Atomics.waitAsync), not at the next refresh, so the program
+//   draws back to back while it is behind.
+// Not waiting has a price, and where the line between the two lies depends
+// on who pays what (web/PLATFORM.md, "A frame", has the measurements):
+// - A frame drawn at the next refresh instead of the moment it is done
+//   reaches the compositor's swap at the same refresh while it takes under
+//   a refresh, and a refresh later once it takes more — until WAIT_MS,
+//   where the wait gives up and shows the frame a whole wait late.
+// - The wait is a spin, a busy core. On a phone or a tablet that core is
+//   one of the few fast ones, and the game's threads need it (an Android
+//   phone at 2640x1080, warm: 18.3 ms a frame and 50 shown a second with
+//   the wait, 14.6 and 57 without). On a desktop it is one core of many,
+//   and waiting costs the game nothing.
+// So on a touch screen a frame over 0.8 of a refresh is not waited for (it
+// misses its own refresh's swap either way); elsewhere only a frame the
+// wait would give up on. Each line has a second one below it to come back
+// by, so a frame time that sits on a line does not flap. The frame's time
+// is a moving average of the program's time to answer a tick with a frame;
+// the display's period is the refreshes' shortest spacing lately. Without
+// Atomics.waitAsync every refresh waits, as before; `?wait` in the address
+// keeps the wait too (to compare by feel).
+const pacing = {
+  refresh: 1000 / 60,      // the display's period, ms
+  turn: 0,                 // the program's time to answer a tick with a frame, ms (moving average)
+  lastTurn: 0,             // ...and the last such answer's
+  relaxed: false,          // the refresh does not wait for its frame
+  // true/false holds `relaxed` there: the checks', and `?wait` (false).
+  force: new URLSearchParams(location.search).has('wait') ? false : null,
+  // The wait's spin takes a core the game needs: a touch screen's device.
+  // (The one place this is decided: a fact the program learns of the
+  // device, "a touch screen", belongs here.)
+  scarceCores: touchScreen,
+  at: 0,                   // the last refresh's time
+  postedAt: 0,             // when the tick in flight was posted, and FRAMES then
+  frames: 0,
+  overdue: false,          // a refresh has found the tick in flight unanswered
+  armed: false,            // an answer is awaited (awaitAnswer)
+};
+const canAwait = typeof Atomics.waitAsync === 'function';
+
+// The frame time above which a refresh stops waiting for its frame, and the
+// one below which it waits again: [above, below], ms.
+function pacingLines() {
+  return pacing.scarceCores ? [0.8 * pacing.refresh, 0.6 * pacing.refresh]
+                            : [0.9 * WAIT_MS, 0.75 * WAIT_MS];
+}
+
 function startPresenting() {
   lastTick = performance.now();
   requestAnimationFrame(frame);
 }
+
+// Post a tick: the time since the last one, the pad, the sound's clock.
+function postTick(now) {
+  const dt = Math.max(0, (now - lastTick) / 1000);
+  lastTick = now;
+  pendingTick = ++tickSeq;
+  pollGamepad();
+  latencyTick(pendingTick);
+  sendAudioClock();
+  sendTick(pendingTick, dt);
+  pacing.postedAt = performance.now();
+  pacing.frames = Atomics.load(ctl, C.FRAMES);
+  pacing.overdue = false;
+}
+
+// A refresh came at `now`: the display's period is the refreshes' shortest
+// spacing lately (a refresh held up by a long frame comes late; none comes
+// early).
+function noteRefresh(now) {
+  const spacing = now - pacing.at;
+  pacing.at = now;
+  if (spacing > 0.5 && spacing < 100) {
+    pacing.refresh = spacing < pacing.refresh ? spacing : pacing.refresh + (spacing - pacing.refresh) * 0.02;
+  }
+}
+
+// Whether the tick in flight was answered with a frame (a tick
+// Host_FilterTime skips is answered at once, with none: it says nothing of
+// what a frame costs).
+function frameCame() { return Atomics.load(ctl, C.FRAMES) !== pacing.frames; }
+
+// A frame took `ms` from its tick to its answer (WAIT_MS when the wait gave
+// up on it): into the moving average, in which one long frame (a level
+// load) counts as two and a half times the upper line at most, so it alone
+// crosses nothing.
+function noteFrameTime(ms) {
+  pacing.lastTurn = ms;
+  pacing.turn += (Math.min(ms, 2.5 * pacingLines()[0]) - pacing.turn) * 0.1;
+  choosePacing();
+}
+
+// Whether the next refresh waits for its frame: by the frame's time against
+// the lines (between them, as it was), or as `force` says.
+function choosePacing() {
+  const [above, below] = pacingLines();
+  if (pacing.force !== null) pacing.relaxed = pacing.force && canAwait;
+  else if (pacing.turn > above) pacing.relaxed = canAwait;
+  else if (pacing.turn < below) pacing.relaxed = false;
+}
+
+// Relaxed: note when the tick in flight is answered, and if a refresh went
+// by without its frame meanwhile, ask for the next frame now.
+function awaitAnswer() {
+  if (pacing.armed) return;
+  pacing.armed = true;
+  const seq = pendingTick;
+  const check = () => {
+    const syncs = Atomics.load(ctl, C.SYNCS);
+    const running = Atomics.load(ctl, C.RUN) === 1;
+    if (running && ((Atomics.load(ctl, C.ACK) - seq) | 0) < 0) {
+      const w = Atomics.waitAsync(ctl, C.SYNCS, syncs);
+      if (w.async) w.value.then(check); else check();   // (a Sync landed in between)
+      return;
+    }
+    pacing.armed = false;
+    if (!running || pendingTick !== seq) return;         // ended, or the checks ticked meanwhile
+    if (frameCame()) noteFrameTime(performance.now() - pacing.postedAt);
+    if (pacing.overdue && pacing.relaxed && !quake.paused && !held && Atomics.load(ctl, C.WAIT) === 1) {
+      postTick(performance.now());
+      awaitAnswer();
+    }
+  };
+  check();
+}
+
 // The phone is turned upright (touch.js's prompt covers the page): the game
 // waits as it does in a hidden tab — and not by id's `pause`, which a demo
 // ignores, a server may refuse (`pausable 0`) and a menu or the console
@@ -2882,6 +3048,7 @@ function releaseGame(now) {
   sendWindow();
   fitCanvas();
 }
+
 function frame(now) {
   requestAnimationFrame(frame);
   if (portraitNow() !== held) {
@@ -2895,6 +3062,7 @@ function frame(now) {
   audioT = now;
   if (quake.audioLead && actl) quake.audioLead.push(ringState().leadMs);
   if (quake.paused || Atomics.load(ctl, C.RUN) !== 1) return;
+  noteRefresh(now);
   // One tick in flight: a refresh that finds the last one unanswered posts
   // none (its time goes to the next tick's dt). The tick carries the RAW
   // elapsed time since the last one: the engine runs it through
@@ -2904,25 +3072,30 @@ function frame(now) {
   // While a timedemo runs the program does not wait for ticks at all: its
   // frames come back to back, and each refresh shows the newest.
   // The refresh that posts a tick waits for its frame, as the old page
-  // computed its frame inside the refresh; a later refresh only shows what
-  // has come (a frame slower than WAIT_MS, a level load, a long call).
+  // computed its frame inside the refresh — unless frames are slow here
+  // (`pacing`, above); a later refresh only shows what has come (a level
+  // load, a long call).
   let posted = false;
   if (((Atomics.load(ctl, C.ACK) - pendingTick) | 0) >= 0) {
-    const dt = Math.max(0, (now - lastTick) / 1000);
-    lastTick = now;
-    pendingTick = ++tickSeq;
-    pollGamepad();
-    latencyTick();
-    sendAudioClock();
-    sendTick(pendingTick, dt);
+    postTick(now);
     posted = true;
+  } else {
+    pacing.overdue = true;
   }
   const t0 = performance.now();
-  if (posted && Atomics.load(ctl, C.WAIT) === 1) waitAck(pendingTick, WAIT_MS);
+  if (Atomics.load(ctl, C.WAIT) === 1) {
+    if (pacing.relaxed) awaitAnswer();
+    else if (posted) {
+      if (!waitAck(pendingTick, WAIT_MS)) noteFrameTime(WAIT_MS);
+      else if (frameCame()) noteFrameTime(performance.now() - pacing.postedAt);
+    }
+  }
   const t1 = performance.now();
-  const shown = present();
-  if (quake.live) quake.live.push({ t: now, wait: t1 - t0, shown: !!shown, copy: shown ? shown.copy : 0, put: shown ? shown.put : 0 });
-  if (shown) latencyPresent();
+  const shown = presentNow();
+  if (quake.live) {
+    quake.live.push({ t: now, wait: t1 - t0, shown: !!shown, copy: shown ? shown.copy : 0, put: shown ? shown.put : 0,
+                      turn: pacing.lastTurn, relaxed: pacing.relaxed });
+  }
 }
 
 // ===========================================================================
@@ -2935,6 +3108,7 @@ const quake = window.quake = {
   dispatch: [],              // ...and each input's wait for its handler (while latency is collected)
   audioLead: null,           // an array to collect the ring's lead (ms) into, a refresh at a time
   live: null,                // an array to collect the page loop's per-refresh times into
+  pacing,                    // how a refresh gets its frame: the display's period, the frame's time, waited for or not
   onBench: null,             // (values) per frame, --features bench builds
   state: gameState,
   call,                      // call('menu_visible') -> Promise<number>
@@ -2952,13 +3126,12 @@ const quake = window.quake = {
     pendingTick = ++tickSeq;
     advanceAudioClock(dt * 1000);
     pollGamepad();
-    latencyTick();
+    latencyTick(pendingTick);
     sendAudioClock();
     sendTick(pendingTick, dt);
     const ok = waitAck(pendingTick, 5000);
     const t1 = performance.now();
-    const p = present();
-    if (p) latencyPresent();
+    const p = presentNow();
     return { ok, wait: t1 - t0, copy: p ? p.copy : 0, put: p ? p.put : 0, presented: !!p };
   },
   // The canvas's pixels, read back from it (RGBA, top row first), and their
@@ -3022,7 +3195,7 @@ const quake = window.quake = {
 // page's entry points below and nothing else (PLATFORM.md, "Touch").
 // ===========================================================================
 function startTouch() {
-  if (!new URLSearchParams(location.search).has('touch') && !matchMedia('(pointer: coarse)').matches) return;
+  if (!touchScreen) return;
   const s = document.createElement('script');
   s.src = 'touch.js';
   s.onload = () => {

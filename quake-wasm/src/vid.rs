@@ -130,10 +130,27 @@ pub(crate) fn picture_size(cvars: &Cvars, window: Option<(u32, u32)>, dpr: f32, 
     }
 }
 
+/// The most threads Auto (`r_threads 0`) draws on for a [`phone_sized`]
+/// screen. The browser offers every core it sees, but a phone's are of two
+/// or three kinds (four or five fast ones on any current phone), the page's
+/// own thread, the compositor, the GPU process and the sound need some of
+/// them each frame, and every busy core is heat, which a phone pays back in
+/// clock. Measured on an Android phone (one fast core, four middle, three
+/// small; 8 offered), warmed up: four threads against eight
+/// showed 70-74 frames a second against 67 at 2640x1080 with a third of the
+/// late ones, and at 1320x540 took the frame's 99th percentile from 20.7 ms
+/// to 9.5 (a band's thread put off its core); three were worse, five and six
+/// no better (web/PLATFORM.md, "On an Android phone"). Other screens draw on
+/// every thread offered, and `r_threads N` on N anywhere.
+pub(crate) const PHONE_AUTO_THREADS: usize = 4;
+
 /// The threads the renderer draws with: `r_threads` against what the host
-/// offers.
+/// offers — of which Auto takes at most [`PHONE_AUTO_THREADS`] on a phone's
+/// screen.
 pub(crate) fn render_threads(a: &App) -> usize {
-    a.settings.cvars.threads.resolve(a.hw_threads)
+    let phone = a.window.is_some_and(|win| phone_sized(win, a.dpr));
+    let offered = if phone { a.hw_threads.min(PHONE_AUTO_THREADS) } else { a.hw_threads };
+    a.settings.cvars.threads.resolve(offered)
 }
 
 /// Whether the picture is shown native (the page fills its box, square
@@ -434,6 +451,34 @@ mod tests {
         // An older page sends no ratio (0): a desktop's 1.
         set_window(2640, 1080, 0.0);
         assert_eq!(APP.with(|a| a.borrow().as_ref().map(|a| a.dpr)), Some(1.0));
+    }
+
+    /// Auto draws a phone's screen on four threads at most, any other screen
+    /// on every thread the host offers; a count asked for is that count
+    /// anywhere.
+    #[test]
+    fn auto_draws_a_phone_on_four_threads() {
+        assert_eq!(boot(), 1);
+        let threads = |hw: usize| {
+            APP.with(|c| {
+                let mut b = c.borrow_mut();
+                let a = b.as_mut().unwrap();
+                a.hw_threads = hw;
+                render_threads(a)
+            })
+        };
+        // A phone-sized landscape viewport, fullscreen: 880x360 CSS at 3x.
+        set_window(2640, 1080, 3.0);
+        assert_eq!((threads(8), threads(6), threads(2), threads(1)), (PHONE_AUTO_THREADS, 4, 2, 1));
+        crate::host_cmd::execute_console_command("r_threads 8");
+        assert_eq!(threads(8), 8, "asked for by number: that many");
+        crate::host_cmd::execute_console_command("r_threads 0");
+        set_window(1920, 1080, 1.0);
+        assert_eq!(threads(8), 8, "a desktop: every thread offered");
+        set_window(2048, 1536, 2.0);
+        assert_eq!(threads(16), 16, "a tablet too");
+        APP.with(|c| c.borrow_mut().as_mut().unwrap().window = None);
+        assert_eq!(threads(6), 6, "no window known: every thread offered");
     }
 
     // -- dynamic render resolution (set_resolution + clamp + reallocation) ----

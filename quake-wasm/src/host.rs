@@ -206,11 +206,11 @@ pub(crate) fn step(dt: f32) -> i32 {
         if a.demoplayback() && !a.cls.timedemo && dt > 0.0 && a.demo.as_ref().is_some_and(|d| d.at_end()) {
             host_end_game(a);
         }
-        // The renderer's threads (`r_threads` against what the host offers),
-        // to whichever game draws: every Walk and DemoPlay the host builds (a
-        // boot, a load, the attract loop's next demo) draws on the setting
-        // from its first frame.
-        let threads = a.settings.cvars.threads.resolve(a.hw_threads);
+        // The renderer's threads (`r_threads` against what the host offers:
+        // vid.rs), to whichever game draws: every Walk and DemoPlay the host
+        // builds (a boot, a load, the attract loop's next demo) draws on the
+        // setting from its first frame.
+        let threads = crate::vid::render_threads(a);
         if let Some(wk) = a.walk.as_mut() {
             wk.key_move = km;
             wk.viewsize = viewsize;
