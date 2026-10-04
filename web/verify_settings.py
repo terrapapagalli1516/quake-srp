@@ -24,13 +24,12 @@
      the mouse looks, the wheel does nothing (it is slop's alone).
      `idcontrols` is the one step to id's own (`w` unbound, `a` +lookup,
      Always Run off).
-  5. Options > "Reset to Classic" (its 15th row, up from the first) asks,
-     and yes sets every slop option to Classic's: the canvas goes from the
-     window to the 4:3 box, a slop control set by hand goes back to the
-     preset's, the keys stay (WASD bound, a rebind kept) but the wheel,
-     Screen size goes with it while the player has not moved it (110 in
-     slop, the status bar alone; id's 100 in Classic, with the inventory
-     bar). The console's `preset slop` brings slop back, keys kept.
+  5. Options > "Reset to Classic" (the row above the last, two up from the
+     first) asks, and yes sets everything to Classic's: the canvas goes from
+     the window to the 4:3 box, a slop control set by hand goes back to the
+     preset's, the keys too (WASD bound, a rebind gone, the wheel unbound),
+     Screen size to id's 100 (the inventory bar is back). The console's
+     `preset slop` brings slop back, the gentler way: keys kept.
   6. The settings survive a reload: a slop session's pixel size, a binding
      and Screen size; a `?classic` visit sticks for a plain reload after it;
      a returning visitor's old localStorage settings keep their choice (Show
@@ -64,7 +63,7 @@ httpd = isolated.serve(WEB, PORT)
 URL = f"http://127.0.0.1:{PORT}/index.html"
 OPTIONS, EXTRAS = 5, 10
 NATIVE, ALT_ENTER = 32, 64
-ROW_VIDEO = 12
+ROW_VIDEO = 11  # Options: id's row 12, one higher without "Reset to defaults"
 VIDEO_PRESETS = 7  # quake_rs::menu::RESOLUTION_PRESETS.len(): the native rows follow these
 
 passed, failed = 0, 0
@@ -223,7 +222,8 @@ with sync_playwright() as p:
     pg.evaluate("quake.callLine('exec cl_jumpswim 0; bind j \"+jump\"')")   # a slop control by hand; a key
     pg.keyboard.press("Escape")
     pg.keyboard.press("ArrowDown"); pg.keyboard.press("ArrowDown"); pg.keyboard.press("Enter")
-    pg.keyboard.press("ArrowUp")          # row 0 wraps to the 15th: Reset to Classic
+    pg.keyboard.press("ArrowUp")          # row 0 wraps to the last: Reset to slop,
+    pg.keyboard.press("ArrowUp")          # and the one above it: Reset to Classic
     time.sleep(0.2)
     pg.keyboard.press("Enter")
     pg.wait_for_function("quake.state.flags & 256", timeout=5000)    # ST.ASK: the question
@@ -235,14 +235,14 @@ with sync_playwright() as p:
     check("yes: Classic, the 960x600 mode in the 4:3 box",
           text(pg, "preset") == "classic" and (c["w"], c["h"]) == (960, 600)
           and abs(c["cssW"] / c["cssH"] - 4 / 3) < 0.01, str(c))
-    check("...the slop control back to the preset's, the keys kept (WASD, the rebind), the wheel off",
+    check("...the slop control back to the preset's, the keys too (WASD bound, the rebind gone), the wheel off",
           cvar(pg, "cl_jumpswim") == "1" and cvar(pg, "freelook") == "1" and bind_of(pg, "w") == '"w" = "+forward"'
-          and bind_of(pg, "j") == '"j" = "+jump"' and bind_of(pg, "MWHEELUP") == '"MWHEELUP" is not bound')
-    check("...Screen size, never moved, follows to id's 100 (the inventory bar is back)",
+          and bind_of(pg, "j") == '"j" is not bound' and bind_of(pg, "MWHEELUP") == '"MWHEELUP" is not bound')
+    check("...Screen size id's 100 (the inventory bar is back)",
           cvar(pg, "viewsize") == "100" and pg.evaluate("quake.callLine('sbar_height').then(r => r.value)") == 48,
           cvar(pg, "viewsize"))
     check("...and id's own 72 fps cap", cvar(pg, "host_maxfps") == "72" and 71 <= pg.evaluate(second_at_144) <= 73)
-    pg.evaluate("quake.callLine('exec preset slop')")
+    pg.evaluate("quake.callLine('exec bind j \"+jump\"; preset slop')")
     pg.wait_for_function("quake.state.flags & 32", timeout=5000)
     frames(pg)
     c = pg.evaluate(CANVAS)

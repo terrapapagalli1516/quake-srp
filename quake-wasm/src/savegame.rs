@@ -452,15 +452,15 @@ mod tests {
         menu_down();
         menu_down();
         menu_select(); // Main > Options
+        for _ in 0..3 {
+            menu_down();
+        }
+        menu_right(); // Brightness (row 3): v_gamma 1.0 -> 0.95
         for _ in 0..4 {
             menu_down();
         }
-        menu_right(); // Brightness: v_gamma 1.0 -> 0.95
-        for _ in 0..4 {
-            menu_down();
-        }
-        menu_right(); // Always Run: on -> off
-        for _ in 0..8 {
+        menu_right(); // Always Run (row 7): on -> off
+        for _ in 0..7 {
             menu_up();
         }
         menu_select(); // Customize controls

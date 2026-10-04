@@ -138,8 +138,9 @@ with sync_playwright() as p:
     check("   B backs out to Main", call(pg, "menu_visible") == 1 and call(pg, "menu_screen_id") == 0)
     press(pg, DDOWN)
     press(pg, A)                       # Options (Main's row 2)
-    press(pg, DUP)                     # row 0 wraps to the 15th, Reset to Classic,
-    press(pg, DUP)                     # and up again: the 14th, Slop Options
+    press(pg, DUP)                     # row 0 wraps to the last, Reset to slop,
+    press(pg, DUP)                     # then Reset to Classic,
+    press(pg, DUP)                     # then Slop Options (row 12)
     press(pg, A)
     check("   Options > Slop Options, A: opens it", call(pg, "menu_screen_id") == 10)
     press(pg, DDOWN)

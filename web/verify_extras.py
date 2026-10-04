@@ -3,14 +3,13 @@
 across reloads, and Esc in fullscreen, end-to-end in headless Chromium. The
 page opens as `?classic` (every slop option off):
 
-  1. Options' 14th row, "Slop Options" (the port's; the 15th is Reset to
-     Classic): left and right change nothing, Enter opens it
+  1. Options' row 12, "Slop Options" (the port's; Reset to Classic and
+     Reset to slop under it): left and right change nothing, Enter opens it
      (menu_screen_id 10), whose rows open the pages (12 Picture and sound,
      13 Motion and light, 14 Controls); their rows switch each setting
      (Picture: the Frame rate cap row 0 stepping id's 72, 120, 144, 240,
-     none, 60, the Resolution row 1 opening Video Options and back, the
-     Perspective span row 5 stepping 64, 32, id's 16, 8, 4, exact, Show FPS
-     row 7; Motion: Nails from barrels row 2, Fluid sky row 3, Gliding
+     none, 60, the Perspective span row 4 stepping 64, 32, id's 16, 8, 4,
+     exact, Show FPS row 6; Motion: Nails from barrels row 2, Fluid sky row 3, Gliding
      lights row 4, the Torch flicker slider row 5, five steps to 1;
      Controls: Wheel weapons row 1 binds and unbinds the wheel:
      left/right/Enter), Esc returns from a page
@@ -157,8 +156,8 @@ with sync_playwright() as p:
     key("Escape")                      # the menu over the attract demo
     key("ArrowDown", 2); key("Enter")
     check("Options opens", scr() == OPTIONS)
-    key("ArrowUp", 2)                  # up from row 0 wraps to the 15th, then the 14th
-    check("...its 14th row, Slop Options", cur() == 13)
+    key("ArrowUp", 3)                  # up from row 0 wraps to Reset to slop, then Reset to Classic, then Slop Options
+    check("...its row 12, Slop Options", cur() == 12)
     time.sleep(0.3)
     pg.locator("#c").screenshot(path=os.path.join(WEB, "verify_extras_options.png"))
     key("ArrowRight"); key("ArrowLeft")
@@ -178,15 +177,11 @@ with sync_playwright() as p:
     check("...none is the extras' old bit 1", cvar("host_maxfps") == "0" and ext() == 1)
     key("ArrowLeft", 4)
     check("...and Left back to id's 72", cvar("host_maxfps") == "72" and ext() == 0)
-    key("ArrowDown"); key("Enter")         # row 1: Resolution
-    check("the Resolution row opens Video Options", scr() == VIDEO)
-    key("Escape")
-    check("...and Esc comes back to it", scr() == PICTURE and cur() == 1, f"{scr()} {cur()}")
-    key("ArrowDown", 6); key("Enter")      # row 7: Show FPS
+    key("ArrowDown", 6); key("Enter")      # row 6: Show FPS (no Resolution row: Video Options alone)
     check("Enter toggles Show FPS", ext() == 2)
     key("ArrowLeft")
     check("Left toggles it back: all off again", ext() == 0)
-    key("ArrowUp", 2)                      # row 5: Perspective span, id's 16
+    key("ArrowUp", 2)                      # row 4: Perspective span, id's 16
     spans = []
     for _ in range(6):
         key("ArrowRight"); spans.append(cvar("r_perspspan"))

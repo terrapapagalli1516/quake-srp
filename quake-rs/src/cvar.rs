@@ -108,8 +108,7 @@ pub struct Cvars {
     /// game's frames too. Otherwise a host frame on every display refresh,
     /// the game stepped as id's 72 Hz frames
     /// ([`crate::stepping::Stepping::Uncapped`]), and only the pictures held
-    /// to the cap (none: every one drawn); a touch screen's slop preset
-    /// starts at 60 ([`crate::settings::Machine::frame_cap`]).
+    /// to the cap (none, slop's on every machine: every one drawn).
     /// The retired `wasm_uncapped` still sets and reads it ([`RETIRED`]).
     pub max_fps: FrameCap,
     /// `wasm_showfps`: QuakeWorld's frame-rate readout.

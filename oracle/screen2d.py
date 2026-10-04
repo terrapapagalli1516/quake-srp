@@ -72,7 +72,8 @@ ALL_WEAPONS = (IT_AXE | IT_SHOTGUN | IT_SUPER_SHOTGUN | IT_NAILGUN | IT_SUPER_NA
 # Scenarios: lists of abstract steps, each played on both sides.
 #   ("viewsize", n) ("frames", n) ("field", name, *vals) ("serverflags", n)
 #   ("impulse", n) ("console",) ("type", text: typed into the console, no Enter)
-#   ("key", NAME) ("showscores", 0|1)
+#   ("key", NAME) ("id_key", NAME: id's side alone, for a row the port's
+#   menu does not have) ("showscores", 0|1)
 #   ("centerprint", text) ("print", text) ("intermission", n, t, text)
 #   ("faceanim",) ("quitmsg", n) ("cmd", line) ("shot", name)
 # Every scenario starts on e1m1 after 30 frames (id's startup console has retracted, even at 960x600), at viewsize 100.
@@ -161,9 +162,12 @@ SCENARIOS: dict[str, list] = {
     "menu_options": [("frames", 1), ("key", "ESCAPE"), ("key", "DOWNARROW"), ("key", "DOWNARROW"),
                      ("key", "ENTER"), ("frames", 1), ("shot", "options"),
                      ("key", "ENTER"), ("frames", 1), ("shot", "keys"),
-                     # Video Options is row 12 on both sides; UP from row 0 wraps
-                     # to the port's 15th row (Reset to Classic) but id's 13th (Video)
-                     ("key", "ESCAPE")] + [("key", "DOWNARROW")] * 12
+                     # Video Options is id's row 12 and the port's 11 (id's
+                     # "Reset to defaults", row 2, is not the port's: its resets
+                     # are last), so id's side takes one press more; UP from row
+                     # 0 wraps to the port's last row (Reset to slop) but id's
+                     # 13th (Video)
+                     ("key", "ESCAPE"), ("id_key", "DOWNARROW")] + [("key", "DOWNARROW")] * 11
                     + [("key", "ENTER"), ("frames", 1), ("shot", "video")],
     "menu_help": [("frames", 1), ("key", "ESCAPE"), ("key", "DOWNARROW"), ("key", "DOWNARROW"),
                   ("key", "DOWNARROW"), ("key", "ENTER"), ("frames", 1), ("shot", "help1"),
@@ -277,7 +281,7 @@ def c_lines(steps, out: Path, name: str, mapname: str = "e1m1", game: str | None
             # no Enter: a line id's console submits goes to the END of the command
             # buffer (Cbuf_AddText), behind the rest of this script
             lines += [f"oracle_key {'SPACE' if ch == ' ' else ch}" for ch in args[0]]
-        elif op == "key":
+        elif op in ("key", "id_key"):
             lines.append(f"oracle_key {args[0]}")
         elif op == "showscores":
             lines.append("+showscores" if args[0] else "-showscores")
@@ -317,6 +321,8 @@ def port_lines(steps, out: Path, name: str, res, metas: dict, mapname: str = "e1
             lines.append(f"{op} {args[0]}")
         elif op == "console":
             lines.append("console")
+        elif op == "id_key":
+            pass  # id's side alone
         elif op == "print":
             # echo prints each argument and a space, then a newline
             lines.append(f"print {' '.join(args[0].split())} \\n")

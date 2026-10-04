@@ -811,15 +811,15 @@ mod tests {
         menu_down();
         menu_down();
         menu_select(); // Main row 2 -> Options (cursor 0 = Customize controls)
+        for _ in 0..3 {
+            menu_down();
+        }
+        menu_right(); // Brightness row (3): v_gamma 1.0 -> 0.95
         for _ in 0..4 {
             menu_down();
         }
-        menu_right(); // Brightness row: v_gamma 1.0 -> 0.95
-        for _ in 0..4 {
-            menu_down();
-        }
-        menu_right(); // Always Run row: toggle OFF (this port defaults it on)
-        for _ in 0..8 {
+        menu_right(); // Always Run row (7): toggle OFF (this port defaults it on)
+        for _ in 0..7 {
             menu_up();
         }
         menu_select(); // Customize controls -> Keys screen

@@ -20,11 +20,11 @@ marks each one `departure`, and two fixed presets set them all at once
   oracle/classic_check.py` (`oracle/README.md`, "Classic").
 - **slop** is the default: an idealized software-rendered Quake on a 2026 machine.
 
-**The machine picks the numbers.** The threads, the pixel size and slop's frame-rate cap
-are built from what the host knows at start (`settings::Machine`: a touch screen, the
-threads offered), never re-read in a session and never "auto": a touch screen starts at
-2x, four threads at most and a 60 fps cap; anything else at 1x, every thread offered and
-no cap; Classic's cap is id's 72 everywhere. `config.cfg` writes a number only when it
+**The machine picks the numbers.** The threads and the pixel size are built from what the
+host knows at start (`settings::Machine`: a touch screen, the threads offered), never
+re-read in a session and never "auto": a touch screen starts at 2x and four threads at
+most; anything else at 1x on every thread offered. The frame-rate cap is the preset's on
+every machine: none in slop (a touch screen too, since 2026-10-04), id's 72 in Classic. `config.cfg` writes a number only when it
 differs from this machine's. (The page passes `-touch` from its one touch-screen test,
 `touchScreen`, which also puts up the touch controls and draws the pacing's lines.)
 
@@ -37,36 +37,42 @@ draws with `default.cfg`'s keys). The one step to id's 1996 controls — arrows,
 `+lookup`, no mouse look, no gamepad, Always Run off — is the console's `idcontrols`;
 it is never a preset. The mouse wheel's weapon cycle is slop's alone: Classic unbinds it.
 
-**The two actions** (Options, after a question each; `quake_rs::menu::Question`):
-**Reset to slop** (row 2, id's "Reset to defaults") sets everything to the slop preset
-on this machine — every slop option, the key bindings, id's Options, the video mode — and
-`config.cfg` becomes its one line; **Reset to Classic** (the 15th row) sets every slop
-option to Classic's, the controls on the Slop Options pages and the pad's layout
-included, and keeps the player's keys (but the wheel) and id's Options (Brightness, the
-volumes, the mouse, Always Run, the look toggles). The console's `preset slop|classic`
-(its old name `profile` still runs it, and `2026`/`modern`, `id` still name a preset)
-does what Reset to Classic does, without asking. The page's `?classic` / `?slop` (or
-`?2026`) apply their preset at load only when the stored settings were last set to the
-other one, so a bookmarked `?classic` keeps the player's own changes on top of it. Options'
-14th row, **Slop Options**, shows where the settings stand (`Settings::standing`: slop,
-classic or custom) and opens a screen in id's Video Options idiom — a row for each of
-three pages, the slop options by kind — **Picture and sound**, **Motion and light**,
-**Controls** (`quake_rs::menu::SlopPage`; Escape goes back a screen, onto the row it came
-from) — and the line "Your settings are the slop preset" or "Yours differ from Classic in
-2 rows". On the pages a value that differs from the preset is white, as Video Options
-whitens its mode (where a row has no value to whiten, its label: a slider; a page's row
-on Slop Options). Each row can also be set alone, as its console variable.
+**The two actions** (Options' last two rows, after a question each, in like words:
+`quake_rs::menu::Question`): **Reset to Classic** and **Reset to slop** set everything to
+that preset on this machine (`Settings::reset`) — every slop option, the key bindings, id's
+Options (Screen size, Brightness, the volumes, the mouse, Always Run, the look toggles),
+the video mode, the name and colours — and `config.cfg` becomes the preset's one line; the
+saved games and the player's own files stay. The console's `preset slop|classic` (its old
+name `profile` still runs it, and `2026`/`modern`, `id` still name a preset) is the gentler
+switch (`Settings::apply_preset`): every slop option to the preset's, the player's keys
+(but the wheel) and id's Options kept. The page's `?classic` / `?slop` (or `?2026`) do the
+same at load, only when the stored settings were last set to the other one, so a
+bookmarked `?classic` keeps the player's own changes on top of it.
+
+**Options and Slop Options** (the user's order, 2026-10-04): id's rows from Customize
+controls to Video Options, without id's "Reset to defaults" (so from Screen size on they
+sit one row higher than in id's game), then the port's: **Slop Options**, **Reset to
+Classic**, **Reset to slop** — the resets last, where no stray press from the top lands.
+Slop Options opens a screen in id's Video Options idiom — a row for each of three pages,
+the slop options by kind — **Picture and sound**, **Motion and light**, **Controls**
+(`quake_rs::menu::SlopPage`; Escape goes back a screen, onto the row it came from). The
+picture's size is chosen in Video Options alone (no row on the pages). Each row can also
+be set alone, as its console variable. The menus do not say where the settings stand, nor
+mark a value that differs from a preset (every label and value bronze, as id's Options;
+Video Options' white current mode is id's): the console's `preset` says it, naming the
+slop options that differ (`Settings::standing`), and `version` adds ", custom".
 
 **Screen size starts one step larger in slop.** Since 2026-10-03 the slop preset starts
 `viewsize` at 110 (`screen::VIEWSIZE_MODERN`, in `Cvars::slop`): the inventory strip
 goes and the status bar alone is drawn, so the HUD takes less of a slop screen. Classic
 stays at id's 100, `default.cfg`'s. It is id's own cvar, not a slop option, so it has no
-row above and the standing does not count it: `config.cfg` writes it only when it differs
-from the preset's start (a returning player who never moved it gets 110; one who chose a
-size keeps it, a slop player's chosen 100 included). Reset to slop sets 110. Applying a
-preset (Reset to Classic) takes the new preset's start only if the size still equals the
-old preset's — so Reset to Classic turns slop's unmoved 110 into id's 100, `default.cfg`'s,
-even though it keeps id's other Options, and a chosen size is kept. The one case it cannot
+row on the Slop Options pages and the standing does not count it: `config.cfg` writes it
+only when it differs from the preset's start (a returning player who never moved it gets
+110; one who chose a size keeps it, a slop player's chosen 100 included). The resets set
+their preset's (110, 100). Applying a preset (the console's `preset`, the address) takes
+the new preset's start only if the size still equals the old preset's — so `preset
+classic` turns slop's unmoved 110 into id's 100, `default.cfg`'s, even though it keeps
+id's other Options, and a chosen size is kept. The one case it cannot
 tell from "never moved" is a player who chose the other preset's start (100 in slop):
 the next preset treats that as unmoved. A flag in `config.cfg` to tell them apart would
 cost more than the gap does. The tools keep id's 100 unless asked for the slop layout
@@ -75,8 +81,8 @@ screen.
 
 | slop option | setting (its page and row) | slop | why |
 |---|---|---|---|
-| No 72 fps cap: a host frame on every display refresh, with the game stepped as id's 72 Hz frames step it (`Stepping::Uncapped`); or a cap of 60 to 240 on that timing | `host_maxfps` (QuakeSpasm's name; Picture and sound > Frame rate cap: 60, id's 72, 120, 144, 240, none); the retired `wasm_uncapped` sets its ends (1 none, 0 72) | none (60 on a touch screen; Classic id's 72, `Host_FilterTime`'s own gate exactly) | The game must play the same from 60 to 480 Hz. id's gate caps the game at 72 fps, so a 120 Hz display runs at 60. The stepping keeps jumps, flashes, trails and clocks on id's 72 Hz values (`FRAMERATE.md`). A cap other than 72 holds the frames drawn, not the game: a host frame runs on every refresh, and the picture is drawn on the first refresh at least 1/cap after the last one (`FrameCap::picture_due`; the others run undrawn, `cl_main::walk_frame_undrawn`): 60 on a 120 Hz display draws every second refresh, evenly; a cap above the display's rate draws every refresh; one that does not divide it draws below itself (60 on 144 Hz: 48 pictures a second) while the game runs at 144 (`quaketool framerate --cap 60 --check`). |
-| The picture fills the window at the window's aspect, at its device pixels divided by a whole pixel size, with square pixels; the renderer's `hires` (views past 1280x1024, particles and the underwater warp in proportion). Video Options lists Native 1x..4x below `RESOLUTION_PRESETS`, each with the size it gives, the live one white, and Enter switches back to it after a fixed mode, with a line that a mode above draws in a 4:3 box; the rows show in slop or whenever the picture is native (Classic with `vid_native 1`), else the screen is `VID_MenuDraw`'s alone. No frame bigger than the threads build's 512 MiB holds (`vid::MAX_FRAME_PIXELS`, 12 million pixels, measured): past it the next pixel size, the player's pick included | `vid_native`, `vid_pixelsize` 1..4 (Picture and sound > Resolution, which shows the size and opens Video Options, the one place it is chosen) | on, 1x (2x on a touch screen) | id's modes stop at 1280x1024 and are shown in a 4:3 box. Whole pixels keep the chunky software look. A phone at 1x drew 13-19 ms frames against 60 Hz's 16.7, at 2x 8-9 ms. ("High resolutions and Hor+"; "Slop Options, two presets" for the memory) |
+| No 72 fps cap: a host frame on every display refresh, with the game stepped as id's 72 Hz frames step it (`Stepping::Uncapped`); or a cap of 60 to 240 on that timing | `host_maxfps` (QuakeSpasm's name; Picture and sound > Frame rate cap: 60, id's 72, 120, 144, 240, none); the retired `wasm_uncapped` sets its ends (1 none, 0 72) | none (on every machine; Classic id's 72, `Host_FilterTime`'s own gate exactly) | The game must play the same from 60 to 480 Hz. id's gate caps the game at 72 fps, so a 120 Hz display runs at 60. The stepping keeps jumps, flashes, trails and clocks on id's 72 Hz values (`FRAMERATE.md`). A cap other than 72 holds the frames drawn, not the game: a host frame runs on every refresh, and the picture is drawn on the first refresh at least 1/cap after the last one (`FrameCap::picture_due`; the others run undrawn, `cl_main::walk_frame_undrawn`): 60 on a 120 Hz display draws every second refresh, evenly; a cap above the display's rate draws every refresh; one that does not divide it draws below itself (60 on 144 Hz: 48 pictures a second) while the game runs at 144 (`quaketool framerate --cap 60 --check`). |
+| The picture fills the window at the window's aspect, at its device pixels divided by a whole pixel size, with square pixels; the renderer's `hires` (views past 1280x1024, particles and the underwater warp in proportion). Video Options lists Native 1x..4x below `RESOLUTION_PRESETS`, each with the size it gives, the live one white, and Enter switches back to it after a fixed mode, with a line that a mode above draws in a 4:3 box; the rows show in slop or whenever the picture is native (Classic with `vid_native 1`), else the screen is `VID_MenuDraw`'s alone. No frame bigger than the threads build's 512 MiB holds (`vid::MAX_FRAME_PIXELS`, 12 million pixels, measured): past it the next pixel size, the player's pick included | `vid_native`, `vid_pixelsize` 1..4 (Options > Video Options, the one place it is chosen) | on, 1x (2x on a touch screen) | id's modes stop at 1280x1024 and are shown in a 4:3 box. Whole pixels keep the chunky software look. A phone at 1x drew 13-19 ms frames against 60 Hz's 16.7, at 2x 8-9 ms. ("High resolutions and Hor+"; "Slop Options, two presets" for the memory) |
 | Hor+: `fov` spans a 4:3 screen, and a wider screen sees more at the sides | `fov_adapt` (Picture and sound > Widescreen FOV) | on | id spreads `fov` over any width, so a wide screen loses the top and bottom. |
 | The 2-D layer (status bar, menus, console) at the largest whole multiple of 320x200 that fits; on its screen, wider than 320 on most frames (384 at 16:9), the level-complete screen centred as the status bar is (`Sbar_DrawPic`'s `(vid.width - 320)>>1`, `Screen2d::centred_320_x`) | `wasm_scaled2d` (Picture and sound > Scaled 2-D layer) | on | id draws it 1:1, so at 1440p the status bar is a 24-pixel strip. `Sbar_IntermissionOverlay` draws at fixed coordinates laid out for 320 columns, so on a wider screen it sits left of the centred bar, menus and finale ("The 2-D layer on a wide screen", below). |
 | The world beside the status bar: id's view, its projection and every pixel of it unchanged (the gun, the crosshair, the horizon where they were), and the world drawn on under it, down to the screen's bottom, wherever the bar leaves it uncovered — the corner either side of the bar, and the row or two id leaves between an even-height view and the bar. Each part is a window onto the view (`render::ViewWindow`: the view's centre and scales, the frustum cut to the part's sides; id's `R_ViewChanged` can centre a view off its rectangle, `xOrigin`/`yOrigin`); underwater (with hires) the view is drawn with the rows under it and the wobble runs on into them. From viewsize 100 (below it the view is inside a border); none with id's warp buffer (hires off: the corners keep the backtile while underwater) | `scr_sbaroverlay` (Picture and sound > Status bar overlay) | on | On any frame whose 2-D screen is wider than the bar's 320 columns (384 at 16:9) id's layout leaves a brown strip either side of it. The corners are extra renders: at 1080p two windows of 160x240 (measured +7% on a frame's time; underwater +23%, the rows under the view drawn across its width for the warp to read), on a wide 1315x535 frame three, its corners 337 columns wide (+25%); a part's spans start their 16-pixel steps at its own edge, so a texel by the corners' inner edges can sit a shade off where a taller view would put it, and each part picks its surfaces' mip levels for itself (id picks one per surface for the view), so a surface crossing from the view into a corner can change level at the seam. |
@@ -3862,3 +3868,28 @@ at the top, is the result; here what changed, and what moved against id.
 - **Names.** `SoundMode::Slop` ("slop"; `2026` and `modern` still parse), `JoyCvars::twin_stick`
   (both presets' pad); the cvar `snd_modern` and the checks' `set_video modern` keep their
   first names, which files and scripts carry.
+
+### The user's simpler menus (2026-10-04, branch `fleet/slopmenu`)
+
+After trying them, the user asked for fewer indicators and resets that reset:
+- **No standing in the menus**: no value beside Slop Options, no "Yours differ…" line under
+  its list, nothing white for differing from a preset (labels and values bronze, as id's
+  Options). The console's `preset` is the one place that says where the settings stand,
+  by name ("Yours differ from Classic in:" and the slop options that do).
+- **Both resets reset everything** to their preset on this machine (`Settings::reset`):
+  keys, id's Options, the video mode, every slop option, the name and colours; the boxes
+  read alike ("Reset everything to the Classic / preset: keys, Options, video? / Saved
+  games stay."). The console's `preset` and the address keep the gentler switch.
+- **Options' order**: id's rows without "Reset to defaults", then Slop Options, Reset to
+  Classic, Reset to slop. id's rows from Screen size on sit one higher than in id's game, so
+  the 2-D oracle's shots of this screen differ more: `menu_options.options` 97.38 -> 88.71
+  (320x200) and 99.28 -> 96.87 (640x400), 6398 px at both, was 1473;
+  `menu_disconnected.options` 97.10 -> 89.53 and 98.82 -> 96.95, 6699 / 7820 px, was
+  1854 / 3015 — re-recorded, those four values alone. The `menu_options` scenario reaches
+  Video Options in eleven presses on the port's side and id's twelve on the C's
+  (`screen2d.py`'s `id_key`); its keys and video shots compare the same screens as before
+  (0 and 2422 px), and every other expected value is unchanged.
+- **No Resolution row** on Picture and sound (8 rows): the picture's size is chosen in Video
+  Options alone, from id's row, and Escape goes back to Options.
+- **The frame-rate cap starts at none on every machine** (a touch screen too); Classic's is
+  id's 72.

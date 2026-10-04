@@ -881,13 +881,13 @@ mod tests {
         let dist = ((listener().pos[0] - x0).powi(2) + (listener().pos[1] - y0).powi(2)).sqrt();
         assert!(dist > 100.0, "held +forward displaces the player (moved {dist:.1}u)");
 
-        // Always Run (Options row 8) swaps cl_forwardspeed 400 -> 200.
+        // Always Run (Options row 7) swaps cl_forwardspeed 400 -> 200.
         menu_cancel(); // open the menu
         menu_down();
         menu_down();
         menu_select(); // -> Options (Main cursor 2)
-        for _ in 0..8 {
-            menu_down(); // ROW_ALWAYSRUN (M_AdjustSliders case 8)
+        for _ in 0..7 {
+            menu_down(); // ROW_ALWAYSRUN (id's M_AdjustSliders case 8)
         }
         menu_right(); // toggle OFF
         menu_cancel(); // Options -> Main
@@ -1005,13 +1005,13 @@ mod tests {
         let p = player_pitch();
         assert!(p > 0.0, "non-inverted mouse-down looks down (pitch {p})");
 
-        // Toggle Invert Mouse (Options row 9): the m_pitch sign flips.
+        // Toggle Invert Mouse (Options row 8): the m_pitch sign flips.
         menu_cancel();
         menu_down();
         menu_down();
         menu_select(); // -> Options
-        for _ in 0..9 {
-            menu_down(); // ROW_INVERTMOUSE (M_AdjustSliders case 9)
+        for _ in 0..8 {
+            menu_down(); // ROW_INVERTMOUSE (id's M_AdjustSliders case 9: no "Reset to defaults" above it)
         }
         menu_right();
         menu_cancel();
@@ -1225,14 +1225,14 @@ mod tests {
         assert!(walk_mut(|w| w.yaw) < yaw0, "mouse-right turns right (yaw -= m_yaw*mx)");
         assert_eq!(walk_mut(|w| w.mouse_side), 0.0);
 
-        // Lookstrafe ON (Options row 11): in mouse look, mouse X strafes
+        // Lookstrafe ON (Options row 10): in mouse look, mouse X strafes
         // instead (in_win.c: `lookstrafe.value && (in_mlook.state & 1)`).
         menu_cancel();
         menu_down();
         menu_down();
         menu_select();
-        for _ in 0..11 {
-            menu_down(); // ROW_LOOKSTRAFE (M_AdjustSliders case 11)
+        for _ in 0..10 {
+            menu_down(); // ROW_LOOKSTRAFE (id's M_AdjustSliders case 11)
         }
         menu_right();
         menu_cancel();

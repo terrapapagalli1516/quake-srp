@@ -29,14 +29,16 @@
 //! new preset's start if it still equals the old preset's (the player never
 //! moved it), and keeps it otherwise, like id's other settings.
 //!
-//! **The two actions.** Applying a preset ([`Settings::apply_preset`]:
-//! Options > "Reset to Classic", the console's `preset`, the address's
-//! `?classic`) sets every slop option and leaves the rest as the player has
-//! it: his key bindings and id's own Options (Brightness, the volumes, the
-//! mouse, Always Run, the look toggles) — but for the wheel's weapon cycle,
-//! a slop option of a *binding* ([`Bindings::with_wheel`]), and Screen
-//! size, above. "Reset to slop" ([`Settings::reset`]) sets everything: the
-//! slop preset on this machine, its bindings and id's defaults.
+//! **The two actions.** Options > "Reset to Classic" and "Reset to slop"
+//! ([`Settings::reset`]) set everything to that preset on this machine:
+//! every slop option, the key bindings, id's own Options (Screen size,
+//! Brightness, the volumes, the mouse, Always Run, the look toggles), the
+//! video mode, the name and colours — as a first session in that preset
+//! has them. Applying a preset ([`Settings::apply_preset`]: the console's
+//! `preset`, the address's `?classic` and `?slop`) is the gentler one: it
+//! sets every slop option and leaves the rest as the player has it — but
+//! for the wheel's weapon cycle, a slop option of a *binding*
+//! ([`Bindings::with_wheel`]), and Screen size, above.
 //!
 //! **The controls are shared.** Both presets have the same ones: WASD and
 //! the gamepad ([`Bindings::with_wasd`], [`Bindings::with_gamepad`] —
@@ -49,9 +51,9 @@
 //!
 //! **Where the settings stand** ([`Settings::standing`]): every slop option
 //! (and the wheel) against the preset applied last — the preset, or "yours
-//! differ in N rows". The menus show it (the Options row's value, the
-//! white values on the Slop Options pages, their line) and so does the
-//! console (`preset`, `version`).
+//! differ in N rows". The console says it (`preset`, `version`); the menus
+//! do not, nor mark a setting that differs from a preset (the user's call,
+//! 2026-10-04: no indicator of a change from the default).
 
 //! **Persistence, the id way.** [`Settings::config_text`] is
 //! `Host_WriteConfiguration`'s `config.cfg`: `bind` lines and archived cvars,
@@ -63,7 +65,6 @@
 //! they changed stays as they left it. (id's file lists every value: id's
 //! defaults never changed after release.)
 
-use crate::client::host::FrameCap;
 use crate::cvar::{self, Cvars};
 use crate::keys::Bindings;
 
@@ -106,12 +107,6 @@ impl Machine {
     /// under a CSS pixel there, finer than the eye resolves at arm's length.
     pub const TOUCH_PIXEL_SIZE: u8 = 2;
 
-    /// The frame-rate cap a touch screen's slop preset starts at: 60 pictures
-    /// a second, which is what a phone's cores sustain warm and every second
-    /// refresh of the 120 Hz a finger brings its panel to (web/PLATFORM.md,
-    /// "On an Android phone"); the game itself still runs every refresh.
-    pub const TOUCH_FRAME_CAP: FrameCap = FrameCap::new(60);
-
     /// The renderer's threads to start at (`r_threads`): every thread
     /// offered, or at most [`Machine::TOUCH_THREADS`] on a touch screen.
     pub fn render_threads(self) -> usize {
@@ -123,13 +118,6 @@ impl Machine {
     /// [`Machine::TOUCH_PIXEL_SIZE`] on a touch screen.
     pub fn pixel_size(self) -> u8 {
         if self.touch { Machine::TOUCH_PIXEL_SIZE } else { 1 }
-    }
-
-    /// The slop preset's frame-rate cap (`host_maxfps`): none, a frame every
-    /// display refresh, or [`Machine::TOUCH_FRAME_CAP`] on a touch screen
-    /// (the Classic preset's is id's 72 on any machine).
-    pub fn frame_cap(self) -> FrameCap {
-        if self.touch { Machine::TOUCH_FRAME_CAP } else { FrameCap::NONE }
     }
 }
 
@@ -176,14 +164,15 @@ impl Preset {
     /// The preset's cvars on `machine`: [`Cvars::classic`] or
     /// [`Cvars::slop`], with the numbers the machine picks — the renderer's
     /// threads and the pixel size, the same in both presets (Classic's
-    /// picture is a video mode, so its pixel size waits for `vid_native`),
-    /// and slop's frame-rate cap (Classic's is id's 72 everywhere).
+    /// picture is a video mode, so its pixel size waits for `vid_native`).
+    /// The frame-rate cap is the preset's on any machine: id's 72 in
+    /// Classic, none in slop (a touch screen too, since 2026-10-04).
     pub fn cvars(self, machine: Machine) -> Cvars {
-        let (values, max_fps) = match self {
-            Preset::Classic => (Cvars::classic(), FrameCap::ID),
-            Preset::Slop => (Cvars::slop(), machine.frame_cap()),
+        let values = match self {
+            Preset::Classic => Cvars::classic(),
+            Preset::Slop => Cvars::slop(),
         };
-        Cvars { threads: machine.render_threads(), pixel_size: machine.pixel_size(), max_fps, ..values }
+        Cvars { threads: machine.render_threads(), pixel_size: machine.pixel_size(), ..values }
     }
 
     /// The preset's Screen size (`viewsize`): `default.cfg`'s 100 in
@@ -272,14 +261,15 @@ impl Settings {
         self.preset = preset;
     }
 
-    /// Options > "Reset to slop": everything to the slop preset on this
-    /// machine — every slop option, the key bindings, id's own Options and
-    /// the video mode — as a first session has them. Nothing is deleted:
-    /// the next `config.cfg` written is the preset's one line, and the
-    /// player's other files (the saves, his own paks and CD tracks) are the
-    /// host's, untouched.
-    pub fn reset(&mut self) {
-        *self = Settings::new(Preset::Slop, self.machine);
+    /// Options > "Reset to slop" and "Reset to Classic": everything to
+    /// `preset` on this machine — every slop option, the key bindings, id's
+    /// own Options, the video mode, the name and colours — as a first
+    /// session in that preset has them. Nothing is deleted: the next
+    /// `config.cfg` written is the preset's one line, and the player's other
+    /// files (the saves, his own paks and CD tracks) are the host's,
+    /// untouched.
+    pub fn reset(&mut self, preset: Preset) {
+        *self = Settings::new(preset, self.machine);
     }
 
     /// `Cvar_Set` for the session: `value` into `c` — but 0 for a number the
@@ -324,12 +314,6 @@ impl Settings {
     }
 }
 
-/// The slop options with no row on the Slop Options pages, set on the console
-/// alone: `sv_max_edicts`, which a player has nothing to choose in (the
-/// menu's tests keep this list and the pages in step). The standing counts
-/// them apart from the rows ([`Standing::line`]).
-pub const CONSOLE_ONLY: &[&str] = &["sv_max_edicts"];
-
 /// Where the settings stand against the preset applied last
 /// ([`Settings::standing`]): what the menus and the console say of them.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -342,63 +326,20 @@ pub struct Standing {
 }
 
 impl Standing {
-    /// The row a slop option is shown on, by the name of its row's own
-    /// setting: its own, but for the pixel size, which shares Video
-    /// Options' choice with `vid_native` (one picture size to a player),
-    /// and the pad's layout, tuned on the console under `joystick`'s row.
-    fn row(name: &str) -> &str {
-        match name {
-            "vid_pixelsize" => "vid_native",
-            n if n.starts_with("joy") && n != "joy_rumble" => "joystick",
-            n => n,
-        }
-    }
-
-    /// Whether the row of setting `name` (a cvar, or `bind` for the wheel)
-    /// differs from the preset: a value the menus show white.
-    pub fn differs(&self, name: &str) -> bool {
-        self.changed.iter().any(|&c| Standing::row(c) == Standing::row(name))
-    }
-
     /// Whether nothing differs: the settings are the preset.
     pub fn is_preset(&self) -> bool {
         self.changed.is_empty()
     }
 
-    /// How many rows of the Slop Options pages differ (the pixel size and
-    /// `vid_native` one, the pad one): each a white value to find.
-    pub fn rows(&self) -> usize {
-        let mut rows: Vec<&str> =
-            self.changed.iter().filter(|c| !CONSOLE_ONLY.contains(c)).map(|&c| Standing::row(c)).collect();
-        rows.sort_unstable();
-        rows.dedup();
-        rows.len()
-    }
-
-    /// How many of the slop options with no row ([`CONSOLE_ONLY`]) differ:
-    /// the console's `preset` names them.
-    pub fn console(&self) -> usize {
-        self.changed.iter().filter(|c| CONSOLE_ONLY.contains(c)).count()
-    }
-
-    /// The Options row's value: the preset's name, or `custom`.
-    pub fn word(&self) -> &'static str {
-        if self.is_preset() { self.preset.name() } else { "custom" }
-    }
-
-    /// The line under the Slop Options list, at most 36 characters (a menu
-    /// help line's width): "Your settings are the slop preset", "Yours
-    /// differ from Classic in 2 rows", and for the slop options set on the
-    /// console alone, which no row shows, "Yours differ in 1 console setting"
-    /// or "Yours: 2 rows, 1 console setting" — no count without a white
-    /// value or the console's `preset` to point at.
+    /// The console's line for it (`preset`): "Your settings are the slop
+    /// preset", or "Yours differ from Classic in:", the names
+    /// ([`Standing::changed`]) following — each under a 320-wide console's
+    /// 38 columns.
     pub fn line(&self) -> String {
-        let plural = |n: usize, one: &str| if n == 1 { format!("1 {one}") } else { format!("{n} {one}s") };
-        match (self.rows(), self.console()) {
-            (0, 0) => format!("Your settings are the {} preset", self.preset.title()),
-            (rows, 0) => format!("Yours differ from {} in {}", self.preset.title(), plural(rows, "row")),
-            (0, console) => format!("Yours differ in {}", plural(console, "console setting")),
-            (rows, console) => format!("Yours: {}, {}", plural(rows, "row"), plural(console, "console setting")),
+        if self.is_preset() {
+            format!("Your settings are the {} preset", self.preset.title())
+        } else {
+            format!("Yours differ from {} in:", self.preset.title())
         }
     }
 }
@@ -406,6 +347,7 @@ impl Standing {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::client::host::FrameCap;
     use crate::keys::{BIND_ATTACK, BIND_FORWARD, BIND_LOOKUP, K_MWHEELUP};
 
     #[test]
@@ -468,78 +410,66 @@ mod tests {
         assert!(s.binds.get(K_MWHEELUP).is_some(), "the wheel is back");
     }
 
-    /// Reset to slop: everything, keys and id's Options too, as a first
-    /// session on this machine has them.
+    /// Reset to slop and Reset to Classic: everything, keys and id's
+    /// Options too (Screen size, Brightness, the name), the video mode,
+    /// every slop option, as a first session in that preset on this machine
+    /// has them; `config.cfg` is the preset's one line again.
     #[test]
-    fn reset_is_the_slop_preset_whole() {
+    fn a_reset_is_its_preset_whole() {
         let phone = Machine { touch: true, threads: 8 };
-        let mut s = Settings::new(Preset::Classic, phone);
-        s.cvars.viewsize = 50.0;
-        s.cvars.gamma = 0.6;
-        s.cvars.set_name("ranger");
-        s.cvars.vid_resolution = (640, 400);
-        s.cvars.threads = 2;
-        s.binds.unbind_all();
-        s.reset();
-        assert_eq!(s, Settings::new(Preset::Slop, phone));
-        assert_eq!(s.config_text(), "// generated by quake, do not modify\npreset \"slop\"\n");
+        for (from, to) in [(Preset::Classic, Preset::Slop), (Preset::Slop, Preset::Classic), (Preset::Slop, Preset::Slop)] {
+            let mut s = Settings::new(from, phone);
+            s.cvars.viewsize = 50.0;
+            s.cvars.gamma = 0.6;
+            s.cvars.set_name("ranger");
+            s.cvars.vid_resolution = (640, 400);
+            s.cvars.threads = 2;
+            s.cvars.show_fps = true;
+            s.binds.unbind_all();
+            s.reset(to);
+            assert_eq!(s, Settings::new(to, phone), "{from:?} -> {to:?}");
+            assert_eq!(s.config_text(), format!("// generated by quake, do not modify\npreset \"{}\"\n", to.name()));
+        }
     }
 
     /// The standing: the preset while every slop option is its, else the
-    /// rows that differ — one for the picture's size and one for the pad
-    /// however many of their cvars, none for Screen size or id's Options.
+    /// slop options that differ, by name — none for Screen size or id's
+    /// Options. The console's `preset` says it; no menu does.
     #[test]
-    fn the_standing_counts_the_rows_that_differ_from_the_preset() {
+    fn the_standing_names_the_slop_options_that_differ_from_the_preset() {
         let mut s = Settings::default();
         let st = s.standing();
-        assert_eq!((st.word(), st.rows(), st.line().as_str()), ("slop", 0, "Your settings are the slop preset"));
+        assert!(st.is_preset());
+        assert_eq!(st.line(), "Your settings are the slop preset");
         s.cvars.show_fps = true;
         let st = s.standing();
-        assert_eq!((st.word(), st.rows(), st.line().as_str()), ("custom", 1, "Yours differ from slop in 1 row"));
-        assert!(st.differs("wasm_showfps") && !st.differs("crosshair"));
+        assert_eq!((st.changed.as_slice(), st.line().as_str()), (&["wasm_showfps"][..], "Yours differ from slop in:"));
         s.cvars.show_fps = false;
-        assert_eq!(s.standing().rows(), 0, "and back: the preset again");
+        assert!(s.standing().is_preset(), "and back: the preset again");
 
         // Not slop options: Screen size, id's Options, the threads.
         s.cvars.viewsize = 80.0;
         s.cvars.gamma = 0.7;
         s.cvars.set_always_run(false);
         s.cvars.threads = 3;
-        assert_eq!(s.standing().word(), "slop");
+        assert!(s.standing().is_preset());
 
-        // One row for the picture's size and one for the pad.
+        // Every one by its console name, the wheel as `bind`.
         s.cvars.native = false;
         s.cvars.pixel_size = 3;
         s.cvars.joy.enabled = false;
         s.cvars.joy.deadzone = 0.1;
-        s.cvars.joy.exponent = 1.0;
         s.binds = std::mem::take(&mut s.binds).without_wheel();
         s.cvars.max_edicts = 600;
         let st = s.standing();
-        assert_eq!(st.changed, ["joystick", "vid_native", "vid_pixelsize", "sv_max_edicts", "joy_deadzone", "joy_exponent", "bind"]);
-        assert_eq!((st.rows(), st.console()), (3, 1), "the picture, the pad, the wheel; the edicts on the console");
-        assert_eq!(st.line(), "Yours: 3 rows, 1 console setting");
-        assert!(st.differs("vid_native") && st.differs("vid_pixelsize") && st.differs("joystick") && st.differs("bind"));
-        assert!(!st.differs("joy_rumble"), "the rumble is its own row");
-        // A console setting alone: no row to count, the console to point at.
-        let mut edicts = Settings::default();
-        edicts.cvars.max_edicts = 600;
-        let st = edicts.standing();
-        assert_eq!((st.word(), st.rows(), st.console(), st.is_preset()), ("custom", 0, 1, false));
-        assert_eq!(st.line(), "Yours differ in 1 console setting");
+        assert_eq!(st.changed, ["joystick", "vid_native", "vid_pixelsize", "sv_max_edicts", "joy_deadzone", "bind"]);
 
         // Classic's words.
         let mut c = Settings::new(Preset::Classic, Machine::default());
         assert_eq!(c.standing().line(), "Your settings are the Classic preset");
-        c.cvars.crosshair = crate::render::Crosshair::Glyph;
         c.cvars.show_fps = true;
-        assert_eq!((c.standing().word(), c.standing().line().as_str()), ("custom", "Yours differ from Classic in 2 rows"));
-        // Every line fits a menu help line's 36 columns.
-        let mut all = Settings::new(Preset::Classic, Machine::default());
-        all.cvars = Cvars::slop().with_id_controls();
-        assert!(all.standing().rows() >= 10 && all.standing().line().len() <= 36, "{}", all.standing().line());
-        assert_eq!("Yours differ from Classic in 99 rows".len(), 36);
-        assert!(format!("Yours: 99 rows, {} console settings", CONSOLE_ONLY.len().max(2)).len() <= 36);
+        assert_eq!(c.standing().line(), "Yours differ from Classic in:");
+        assert!(Settings::new(Preset::Classic, Machine::default()).standing().line().len() <= 38, "a 320-wide console's line");
     }
 
     /// A Classic `config.cfg` lists no slop option: its `preset "classic"`
@@ -549,7 +479,7 @@ mod tests {
         let mut s = Settings::default(); // what a session starts with, before config.cfg
         s.apply_preset(Preset::Classic); // the file's first line
         assert_eq!(s, Settings::new(Preset::Classic, Machine::default()), "every slop option, the new ones too");
-        assert_eq!(s.standing().word(), "classic");
+        assert!(s.standing().is_preset());
     }
 
     /// Screen size is id's own setting, but the presets start it apart (110
@@ -663,7 +593,7 @@ mod tests {
             let c = preset.cvars(desktop);
             assert_eq!((c.pixel_size, c.threads), (1, 16), "{preset:?} on a desktop");
         }
-        assert_eq!((Preset::Slop.cvars(phone).max_fps, Preset::Slop.cvars(desktop).max_fps), (FrameCap::new(60), FrameCap::NONE));
+        assert_eq!((Preset::Slop.cvars(phone).max_fps, Preset::Slop.cvars(desktop).max_fps), (FrameCap::NONE, FrameCap::NONE), "no cap, a phone too");
         assert_eq!((Preset::Classic.cvars(phone).max_fps, Preset::Classic.cvars(desktop).max_fps), (FrameCap::ID, FrameCap::ID));
         assert_eq!(Machine { touch: true, threads: 2 }.render_threads(), 2, "four at most, not four at least");
         assert_eq!(Machine { touch: false, threads: 0 }.render_threads(), 1, "always one");
@@ -679,9 +609,9 @@ mod tests {
         let mut at_1x = on_phone.clone();
         at_1x.cvars.pixel_size = 1;
         at_1x.cvars.threads = 8;
-        at_1x.cvars.max_fps = FrameCap::NONE;
-        assert_eq!(at_1x.config_text(), format!("{head}host_maxfps \"0\"\nvid_pixelsize \"1\"\nr_threads \"8\"\n"),
-            "and 1x on eight with no cap choices on a phone");
+        at_1x.cvars.max_fps = FrameCap::new(60);
+        assert_eq!(at_1x.config_text(), format!("{head}host_maxfps \"60\"\nvid_pixelsize \"1\"\nr_threads \"8\"\n"),
+            "and 1x on eight, capped at 60, choices on a phone");
 
         // Applying a preset sets the machine's numbers where they are slop
         // options, and never touches the threads (no slop option).

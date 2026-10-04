@@ -9,8 +9,9 @@
      backs out);
   3. Options rows act: sliders move real cvars (mouse_sensitivity / volume /
      viewsize — Screen size is id's viewsize, it never resizes the
-     framebuffer), Go-to-console opens the console, Reset to slop asks and
-     restores, Customize controls opens the Keys screen (bind grab works),
+     framebuffer), Go-to-console opens the console, Reset to slop (the last
+     row) asks and restores, Customize controls opens the Keys screen (bind
+     grab works),
      Video Options applies a resolution (WinQuake's M_Video mode list);
   4. walk-mode behaviors: BRIGHTNESS visibly brightens the canvas (gamma LUT)
      and restores byte-fair at 1.0; ALWAYS RUN (on by default in this port)
@@ -147,27 +148,28 @@ with sync_playwright() as p:
     key("ArrowUp", 2); key("Enter")
     check("Options opens", scr() == OPTIONS)
 
-    # Mouse Speed (row 5) moves the sensitivity cvar.
+    # Mouse Speed (row 4: id's rows sit one higher, no "Reset to defaults")
+    # moves the sensitivity cvar.
     sens0 = pg.evaluate("exp.mouse_sensitivity()")
-    key("ArrowDown", 5); key("ArrowRight", 2)
+    key("ArrowDown", 4); key("ArrowRight", 2)
     sens1 = pg.evaluate("exp.mouse_sensitivity()")
     check("Mouse Speed slider moves the cvar", sens1 > sens0, f"{sens0:.2f} -> {sens1:.2f}")
-    # Sound Volume (row 7).
+    # Sound Volume (row 6).
     key("ArrowDown", 2)
     vol0 = pg.evaluate("exp.volume()")
     key("ArrowLeft", 2)
     vol1 = pg.evaluate("exp.volume()")
     check("Sound Volume slider moves the cvar", vol1 < vol0, f"{vol0:.2f} -> {vol1:.2f}")
-    # CD Music Volume (row 6) + the four checkboxes (rows 8-11) all respond
+    # CD Music Volume (row 5) + the four checkboxes (rows 7-10) all respond
     # (each adjust queues menu3 — count the sounds).
     sndA = pg.evaluate("window.__menuSounds")
-    key("ArrowUp")          # row 6 (CD volume)
+    key("ArrowUp")          # row 5 (CD volume)
     key("ArrowLeft")
-    key("ArrowDown", 2)     # row 8 always run
+    key("ArrowDown", 2)     # row 7 always run
     key("ArrowRight")
-    key("ArrowDown"); key("ArrowRight")   # row 9 invert
-    key("ArrowDown"); key("ArrowRight")   # row 10 lookspring
-    key("ArrowDown"); key("ArrowRight")   # row 11 lookstrafe
+    key("ArrowDown"); key("ArrowRight")   # row 8 invert
+    key("ArrowDown"); key("ArrowRight")   # row 9 lookspring
+    key("ArrowDown"); key("ArrowRight")   # row 10 lookstrafe
     # ...and toggle the four back off for a clean slate.
     key("ArrowRight"); key("ArrowUp"); key("ArrowRight")
     key("ArrowUp"); key("ArrowRight"); key("ArrowUp"); key("ArrowRight")
@@ -175,10 +177,10 @@ with sync_playwright() as p:
     sndB = pg.evaluate("window.__menuSounds")
     check("every slider/checkbox row responds audibly", sndB - sndA >= 12, f"+{sndB - sndA}")
 
-    # Screen size (row 3) is viewsize: left/right step it by 10 (clamped
+    # Screen size (row 2) is viewsize: left/right step it by 10 (clamped
     # 30..120) and the framebuffer size never changes.
     w0 = pg.evaluate("exp.width()")
-    key("ArrowUp", 5)       # from row 8 back to row 3
+    key("ArrowUp", 5)       # from row 7 back to row 2
     check("viewsize defaults to 110 in slop (one step past id's 100)", pg.evaluate("exp.viewsize()") == 110)
     key("ArrowLeft", 3)
     check("Screen size row steps viewsize", pg.evaluate("exp.viewsize()") == 80,
@@ -188,9 +190,9 @@ with sync_playwright() as p:
     check("...and never resizes the framebuffer", pg.evaluate("exp.width()") == w0)
     key("ArrowLeft", 3)     # 90
 
-    # Reset to slop (row 2, id's Reset to defaults) asks first; yes restores
-    # the cvars (everything: the slop preset whole).
-    key("ArrowUp"); key("Enter")
+    # Reset to slop (the last row, 14, in place of id's Reset to defaults)
+    # asks first; yes restores the cvars (everything: the slop preset whole).
+    key("ArrowUp", 3); key("Enter")         # row 2 -> 1 -> 0 -> wraps to 14
     check("Reset to slop asks first", bool(isolated.wait_until(pg, "quake.state.flags & 256", 5, raising=False))
           and pg.evaluate("exp.viewsize()") == 90)
     key("y")
@@ -201,7 +203,7 @@ with sync_playwright() as p:
 
     # Customize controls (row 0): the Keys screen + a bind grab that Escape
     # cancels (full rebinding is proven in walk mode below).
-    key("ArrowUp", 2); key("Enter")
+    key("ArrowDown"); key("Enter")          # row 14 wraps to 0
     check("Customize controls opens the Keys screen", scr() == KEYS)
     key("ArrowDown", 2)
     check("not grabbing before Enter", pg.evaluate("exp.menu_bind_grabbing()") == 0)
@@ -223,14 +225,14 @@ with sync_playwright() as p:
     key("Escape")
     check("Esc on Keys returns to Options", scr() == OPTIONS)
 
-    # Video Options (row 12): honest about native resolution (review: it used
+    # Video Options (row 11): honest about native resolution (review: it used
     # to show 960x600 as current no matter what the screen actually was). In
     # this real browser the picture is already native by the time the menu
     # reaches here (the page reports its box on layout, no gesture needed),
     # so the list opens on the live native row (1x), not a stale preset.
     # Four Ups reach 800x500 (preset index 3); applying it is kept for the
     # reload check at the end.
-    key("ArrowDown", 12); key("Enter")
+    key("ArrowDown", 11); key("Enter")
     check("Video Options opens the mode list", scr() == VIDEO)
     cur0 = pg.evaluate("exp.menu_cursor()")
     check("...on the live native row (1x), not a stale preset", cur0 == VIDEO_PRESETS, f"cursor={cur0}")
@@ -259,9 +261,9 @@ with sync_playwright() as p:
     check("Esc on Video returns to Options", scr() == OPTIONS)
 
     # Go to console (row 1) opens the drop-down console. (Esc from Video left
-    # options_cursor on Video Options, row 12: down past Slop Options and
-    # Reset to Classic wraps to 1.)
-    key("ArrowDown", 4)
+    # options_cursor on Video Options, row 11: down past Slop Options and the
+    # two resets wraps to 0, then 1.)
+    key("ArrowDown", 5)
     key("Enter")
     check("Go to console opens the console",
           pg.evaluate("exp.console_visible()") == 1 and vis() == 0)
@@ -286,7 +288,7 @@ with sync_playwright() as p:
     lum1 = pg.evaluate(grab_lum)
     key("Escape")           # open menu
     key("ArrowDown", 2); key("Enter")     # Options
-    key("ArrowDown", 4)                   # Brightness row
+    key("ArrowDown", 3)                   # Brightness row (3)
     key("ArrowRight", 8)                  # gamma 1.0 -> 0.6
     key("Escape"); key("Escape")          # close
     time.sleep(0.3)
@@ -315,7 +317,7 @@ with sync_playwright() as p:
         x1, y1 = pg.evaluate("Promise.all([exp.listener_x(), exp.listener_y()])")
         return ((x1 - x0) ** 2 + (y1 - y0) ** 2) ** 0.5
     d_run = walk_dist(1.0)
-    key("Escape"); key("Enter")                   # Options, on Brightness (4)
+    key("Escape"); key("Enter")                   # Options, on Brightness (3)
     key("ArrowDown", 4); key("ArrowRight")        # Always Run off
     key("Escape"); key("Escape")
     turn_around()
@@ -328,7 +330,7 @@ with sync_playwright() as p:
     pg.evaluate("exp.mouse_move(0, 300)")
     p1 = pg.evaluate("exp.player_pitch()")
     check("mouse-down looks down by default", p1 > p0, f"{p0:.1f} -> {p1:.1f}")
-    key("Escape"); key("Enter")                   # Options, on Always Run (8)
+    key("Escape"); key("Enter")                   # Options, on Always Run (7)
     key("ArrowDown"); key("ArrowRight")           # Invert Mouse on
     key("Escape"); key("Escape")
     pg.evaluate("exp.mouse_move(0, 300)")
@@ -338,7 +340,7 @@ with sync_playwright() as p:
     # LOOKSPRING: pointer unlock recentres the pitch (the page calls
     # pointer_unlocked from pointerlockchange; headless can't lock, so drive
     # the same hook directly).
-    key("Escape"); key("Enter")                   # Options, on Invert Mouse (9)
+    key("Escape"); key("Enter")                   # Options, on Invert Mouse (8)
     key("ArrowDown"); key("ArrowRight")           # Lookspring on
     key("Escape"); key("Escape")
     pg.evaluate("exp.mouse_move(0, -400)")        # look well off-centre
@@ -352,8 +354,8 @@ with sync_playwright() as p:
           f"{pp:.1f} -> {pr:.1f}")
 
     # REBIND: Customize controls really rebinds +forward (row 3) to 'o'.
-    key("Escape"); key("Enter")                   # Options, on Lookspring (10)
-    key("ArrowDown", 5); key("Enter")             # past Slop Options and Reset to Classic to Customize controls
+    key("Escape"); key("Enter")                   # Options, on Lookspring (9)
+    key("ArrowDown", 6); key("Enter")             # past Lookstrafe, Video, Slop Options and the resets to Customize controls
     key("ArrowDown", 3); key("Enter")             # grab on +forward
     pg.keyboard.press("o"); time.sleep(0.1)
     check("the grab bound the new key", pg.evaluate("exp.menu_bind_grabbing()") == 0)
@@ -404,7 +406,7 @@ with sync_playwright() as p:
     #     rebind, and the unbinding of 'w' must all survive (WinQuake's
     #     `map start` never resets cvars or keybindings).
     key("Escape"); key("ArrowDown", 2); key("Enter")   # Options
-    key("ArrowDown", 5); key("ArrowRight", 2)          # Mouse speed +2 steps
+    key("ArrowDown", 4); key("ArrowRight", 2)          # Mouse speed (row 4) +2 steps
     sens_set = pg.evaluate("exp.mouse_sensitivity()")
     key("Escape"); key("Escape")
     # default.cfg binds '-' to sizedown and '=' to sizeup (in the game only).

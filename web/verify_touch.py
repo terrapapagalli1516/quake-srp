@@ -32,8 +32,8 @@ the reason: 3's stick, look, two thumbs, FIRE and JUMP, 2b's held arrow
      its Torch flicker slider, BACK backs out a screen at a time:
      verify_touch_settings.png); hidden while the menu asks y/n and while
      Customize controls grabs a key. Options' Reset to Classic and Reset to
-     slop ask first, and YES and NO answer them; Reset to Classic keeps the
-     touch controls on.
+     slop, its last rows, ask first, and YES and NO answer them; Reset to
+     Classic leaves the touch controls on (both presets have them).
   3. Play: the left stick walks (the player moves), a drag on the right
      turns the view, FIRE shoots (a shell spent), JUMP jumps, WEAPON cycles
      (shotgun to axe), MENU opens the menu.
@@ -451,11 +451,11 @@ def main():
         check("Options by a tap", wait("quake.state.menuScreen === 5"))
         speed = lambda: pg.evaluate("quake.callLine('cvar cl_forwardspeed').then(r => r.value)")
         s0 = speed()
-        tap_menu(100, 32 + 8.5 * 8)
+        tap_menu(100, 32 + 7.5 * 8)                       # Always Run, row 7
         s1 = speed()
-        tap_menu(100, 32 + 8.5 * 8)
+        tap_menu(100, 32 + 7.5 * 8)
         check("Always Run: the first tap points, the second flips", s0 == s1 and speed() != s0, f"{s0} {s1} {speed()}")
-        tap_menu(100, 32 + 8.5 * 8)                       # back as it was
+        tap_menu(100, 32 + 7.5 * 8)                       # back as it was
         pg.screenshot(path=os.path.join(WEB, "verify_touch_options.png"))
 
         # --- 2b. The menu pad ----------------------------------------------------
@@ -466,7 +466,7 @@ def main():
         c0 = cursor()
         pad_tap("#tPadUp")
         check("the pad's UP moves the cursor", cursor() == c0 - 1, f"{c0} -> {cursor()}")
-        goto_row(4)                                       # Brightness (gamma): a slider row
+        goto_row(3)                                       # Brightness (gamma): a slider row
         gamma = lambda: pg.evaluate("quake.callLine('cvar gamma').then(r => r.value)")
         g0 = gamma()
         pad_tap("#tPadRight")
@@ -491,10 +491,10 @@ def main():
         pg.keyboard.press("Escape")                         # back to Options
         check("back on Options", wait("quake.state.menuScreen === 5"), str(screen_id()))
 
-        # Slop Options and its pages (Options' 14th row) take the pad as
+        # Slop Options and its pages (Options' row 12) take the pad as
         # Options does: OK opens Slop Options and a page, ◀▶ step a page's
         # slider (Torch flicker), BACK backs out a screen at a time.
-        goto_row(13)                                        # Slop Options
+        goto_row(12)                                        # Slop Options
         pad_tap("#tPadOk")
         check("OK on Slop Options opens it", wait("quake.state.menuScreen === 10"), str(screen_id()))
         goto_row(1)                                         # Motion and light
@@ -516,13 +516,14 @@ def main():
         tap_el("#tBack")
         check("BACK: Options again", wait("quake.state.menuScreen === 5"), str(screen_id()))
 
-        # Options' two resets ask first, and the phone's YES and NO answer
-        # them (the y and n keys): NO keeps everything; YES to Reset to
-        # Classic sets every slop option to Classic's, and the touch
-        # controls stay (Classic must not leave a phone unplayable).
+        # Options' two resets, its last rows, ask first, and the phone's YES
+        # and NO answer them (the y and n keys): NO keeps everything; YES to
+        # Reset to Classic sets everything to Classic's, and the touch
+        # controls stay on (both presets have them: Classic must not leave a
+        # phone unplayable).
         preset = lambda: pg.evaluate("quake.text('preset')")
         call("exec r_torchflicker 1.4")                     # a slop option, changed
-        goto_row(14)                                        # Reset to Classic
+        goto_row(13)                                        # Reset to Classic
         pad_tap("#tPadOk")
         check("Reset to Classic asks: YES and NO", wait("quake.state.flags & 256") and shown("#tYes") and shown("#tNo"))
         tap_el("#tNo")
@@ -534,7 +535,7 @@ def main():
         check("YES: the Classic preset, the menu on Options", wait("!(quake.state.flags & 256)") and preset() == "classic"
               and pg.evaluate("quake.text('cvar', 'r_torchflicker')") == "0" and screen_id() == 5, preset())
         check("...and the touch controls still on (STATE 128)", wait("quake.state.flags & 128"), str(flags()))
-        goto_row(2)                                         # Reset to slop
+        goto_row(14)                                        # Reset to slop
         pad_tap("#tPadOk")
         check("Reset to slop asks: YES and NO", wait("quake.state.flags & 256") and shown("#tYes"))
         tap_el("#tYes")

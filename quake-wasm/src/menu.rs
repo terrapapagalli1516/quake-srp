@@ -406,12 +406,12 @@ mod tests {
         assert_eq!(menu_tap(160.0 + 100.0, 32.0 + 2.5 * 20.0), 1, "Main's item 2");
         assert_eq!(menu_screen(), render::MenuScreen::Options);
         let run = || APP.with(|c| c.borrow().as_ref().unwrap().settings.cvars.always_run());
-        let (before, always_run_row) = (run(), 32.0 + 8.5 * 8.0);
+        let (before, always_run_row) = (run(), 32.0 + 7.5 * 8.0); // row 7
         assert_eq!(menu_tap(260.0, always_run_row), 1);
         assert_eq!(run(), before, "the first tap points");
         assert_eq!(menu_tap(260.0, always_run_row), 1);
         assert_ne!(run(), before, "the second flips it");
-        assert_eq!(menu_point(260.0, 32.0 + 3.5 * 8.0), 1, "a finger on Screen size");
+        assert_eq!(menu_point(260.0, 32.0 + 2.5 * 8.0), 1, "a finger on Screen size, row 2");
         assert_eq!(menu_tap(100.0, 190.0), 0, "under the list");
         menu_cancel();
         menu_cancel();
@@ -425,11 +425,11 @@ mod tests {
         assert_eq!(boot(), 1);
         set_resolution(320, 200); // preset 0
         // boot() opened the menu on Main. Navigate: Options (cursor 2) ->
-        // Video Options (row 12) -> down one mode -> Enter applies it.
+        // Video Options (row 11) -> down one mode -> Enter applies it.
         menu_down();
         menu_down();
         menu_select(); // -> Options
-        for _ in 0..12 {
+        for _ in 0..11 {
             menu_down(); // ROW_VIDEO
         }
         menu_select(); // -> Video mode list (cursor on the current preset, 0)
@@ -486,11 +486,11 @@ mod tests {
         assert!(player_field("health") > 0.0);
     }
 
-    /// Options' Reset to Classic (asks; y: every slop option Classic's,
-    /// the keys and id's Options kept), then Slop Options and a row of each
-    /// page, the Resolution row opening Video Options and back.
+    /// Options' Reset to Classic, the row above the last (asks; y:
+    /// everything Classic's, the keys and id's Options too), then Slop
+    /// Options and a row of each page.
     #[test]
-    fn reset_to_classic_keeps_the_keys_and_slop_options_sets_each_row() {
+    fn reset_to_classic_resets_everything_and_slop_options_sets_each_row() {
         use quake_rs::keys::BIND_JUMP;
         use quake_rs::settings::{Machine, Preset, Settings};
         let settings = || APP.with(|c| c.borrow().as_ref().unwrap().settings.clone());
@@ -501,7 +501,8 @@ mod tests {
         menu_down();
         menu_down();
         menu_select(); // -> Options
-        menu_up(); // row 0 wraps to the 15th: Reset to Classic
+        menu_up(); // row 0 wraps to the last, Reset to slop,
+        menu_up(); // and the one above it: Reset to Classic
         menu_select();
         let asking = || APP.with(|c| c.borrow().as_ref().unwrap().menu.asking());
         assert_eq!(asking(), Some(quake_rs::menu::Question::ResetClassic), "it asks");
@@ -509,24 +510,17 @@ mod tests {
         assert_eq!((asking(), settings().preset), (None, Preset::Slop), "n: nothing changed");
         menu_select();
         menu_quit_yes(); // the y key, as the page's YES button presses it
-        let mut want = Settings::new(Preset::Classic, Machine::default());
-        want.binds.bind(b'j', BIND_JUMP);
-        want.cvars.sensitivity = 7.0;
-        assert_eq!(settings(), want, "every slop option Classic's; his key and Mouse Speed kept");
-        assert_eq!((menu_screen_id(), menu_cursor()), (5, 14), "Options, on its row");
+        assert_eq!(settings(), Settings::new(Preset::Classic, Machine::default()), "everything Classic's");
+        assert!(settings().binds.command(b'j') != Some(BIND_JUMP) && settings().cvars.sensitivity != 7.0, "his key and Mouse Speed too");
+        assert_eq!((menu_screen_id(), menu_cursor()), (5, 13), "Options, on its row");
 
-        menu_up(); // row 13, Slop Options
+        menu_up(); // row 12, Slop Options
         menu_select();
         assert_eq!(menu_screen_id(), 10, "Enter opens Slop Options");
         menu_select();
         assert_eq!(menu_screen_id(), 12, "...and its first row Picture and sound, that page");
         menu_right(); // Frame rate cap: id's 72 -> 120
         assert_eq!(settings().cvars.max_fps, FrameCap::new(120));
-        menu_down(); // Resolution
-        menu_select();
-        assert_eq!(menu_screen_id(), 7, "the Resolution row opens Video Options");
-        menu_cancel();
-        assert_eq!((menu_screen_id(), menu_cursor()), (12, 1), "and Escape comes back to it");
         menu_cancel();
         assert_eq!(menu_screen_id(), 10, "Esc returns to Slop Options");
         menu_down();
@@ -546,7 +540,7 @@ mod tests {
         assert_eq!(menu_screen_id(), 5, "Esc Esc returns to Options");
         menu_select(); // ...on its row
         assert_eq!(menu_screen_id(), 10);
-        assert_eq!(settings().standing().rows(), 2, "the frame-rate cap and the torches");
+        assert_eq!(settings().standing().changed, ["host_maxfps", "r_torchflicker"], "the console's preset says so");
         // The checks' shorthand for the first four; other bits are dropped.
         set_extras(-1);
         assert_eq!(extras(), 15);
@@ -582,8 +576,7 @@ mod tests {
         menu_down();
         menu_down();
         menu_select(); // -> Options
-        menu_down();
-        menu_down(); // row 2, Reset to slop
+        menu_up(); // row 0 wraps to the last, Reset to slop
         menu_select();
         assert_eq!(APP.with(|c| c.borrow().as_ref().unwrap().menu.asking()), Some(quake_rs::menu::Question::ResetSlop));
         menu_quit_yes();
