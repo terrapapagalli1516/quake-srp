@@ -219,10 +219,7 @@ fn substitute(fmt: &str, args: &[String], loc: &LocTable) -> String {
 /// Double-barrelled Shotgun"), or the argument's own text when it isn't a
 /// key the table has.
 fn resolve_arg(arg: &str, loc: &LocTable) -> String {
-    arg.strip_prefix('$')
-        .and_then(|k| loc.get(k))
-        .map(str::to_string)
-        .unwrap_or_else(|| arg.to_string())
+    arg.strip_prefix('$').and_then(|k| loc.get(k)).map(str::to_string).unwrap_or_else(|| arg.to_string())
 }
 
 #[cfg(test)]
@@ -251,7 +248,11 @@ mod tests {
         );
         assert_eq!(t.get("qc_ok"), Some("fine"));
         assert_eq!(t.get("m_gamepad_restricted"), None);
-        assert_eq!(t.get("m_monsters"), None, "a trailing comment breaks the same way mission_paks.py's own parser does");
+        assert_eq!(
+            t.get("m_monsters"),
+            None,
+            "a trailing comment breaks the same way mission_paks.py's own parser does"
+        );
     }
 
     #[test]
@@ -283,10 +284,7 @@ mod tests {
     fn format_substitutes_positional_and_nested_key_arguments() {
         // bprint(other, "$qc_got_item", "$qc_double_shotgun") -> the AUDIT
         // P6/B3 proof case.
-        let loc = table(&[
-            ("qc_got_item", "You got {0}\\n"),
-            ("qc_double_shotgun", "the Double-barrelled Shotgun"),
-        ]);
+        let loc = table(&[("qc_got_item", "You got {0}\\n"), ("qc_double_shotgun", "the Double-barrelled Shotgun")]);
         let args = vec!["$qc_got_item".to_string(), "$qc_double_shotgun".to_string()];
         assert_eq!(format(Some(&loc), &args), "You got the Double-barrelled Shotgun\n");
     }

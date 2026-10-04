@@ -208,7 +208,6 @@ pub fn host_filter_time_display(realtime: f64, oldrealtime: &mut f64) -> Option<
     Some(elapsed.min(HOST_FRAMETIME_MAX))
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,15 +219,37 @@ mod tests {
     #[test]
     fn a_frame_cap_is_none_or_60_to_240() {
         let caps = |vs: &[f32]| vs.iter().map(|&v| FrameCap::from_cvar(v).cvar()).collect::<Vec<_>>();
-        assert_eq!(caps(&[0.0, -5.0, f32::NAN, 0.4, 1.0, 30.0, 60.0, 72.0, 99.6, 240.0, 1000.0, 1e30]), [0, 0, 0, 0, 60, 60, 60, 72, 100, 240, 240, 240]);
-        assert_eq!((FrameCap::new(0), FrameCap::new(72), FrameCap::new(500)), (FrameCap::NONE, FrameCap::ID, FrameCap::new(240)));
+        assert_eq!(
+            caps(&[0.0, -5.0, f32::NAN, 0.4, 1.0, 30.0, 60.0, 72.0, 99.6, 240.0, 1000.0, 1e30]),
+            [0, 0, 0, 0, 60, 60, 60, 72, 100, 240, 240, 240]
+        );
+        assert_eq!(
+            (FrameCap::new(0), FrameCap::new(72), FrameCap::new(500)),
+            (FrameCap::NONE, FrameCap::ID, FrameCap::new(240))
+        );
         let mut cap = FrameCap::new(60);
-        let right: Vec<u32> = (0..6).map(|_| { cap = cap.stepped(1); cap.cvar() }).collect();
+        let right: Vec<u32> = (0..6)
+            .map(|_| {
+                cap = cap.stepped(1);
+                cap.cvar()
+            })
+            .collect();
         assert_eq!(right, [72, 120, 144, 240, 0, 60]);
-        let left: Vec<u32> = (0..6).map(|_| { cap = cap.stepped(-1); cap.cvar() }).collect();
+        let left: Vec<u32> = (0..6)
+            .map(|_| {
+                cap = cap.stepped(-1);
+                cap.cvar()
+            })
+            .collect();
         assert_eq!(left, [0, 240, 144, 120, 72, 60]);
-        assert_eq!((FrameCap::new(130).stepped(1), FrameCap::new(130).stepped(-1)), (FrameCap::new(144), FrameCap::new(120)));
-        assert_eq!((FrameCap::new(200).stepped(1), FrameCap::new(61).stepped(-1)), (FrameCap::new(240), FrameCap::new(60)));
+        assert_eq!(
+            (FrameCap::new(130).stepped(1), FrameCap::new(130).stepped(-1)),
+            (FrameCap::new(144), FrameCap::new(120))
+        );
+        assert_eq!(
+            (FrameCap::new(200).stepped(1), FrameCap::new(61).stepped(-1)),
+            (FrameCap::new(240), FrameCap::new(60))
+        );
     }
 
     // -- Host_Error ---------------------------------------------------------
@@ -262,16 +283,25 @@ mod tests {
     #[test]
     fn a_quakec_error_in_the_frame_is_host_error() {
         use crate::progs::{Op, Progs, Statement};
-        use crate::server::testutil::{floor_bsp, player_progs_with_prethink, prime_player_globals};
         use crate::server::Server;
+        use crate::server::testutil::{floor_bsp, player_progs_with_prethink, prime_player_globals};
         // PlayerPreThink calls the function in global 57, which holds 0.
         let call_null = Statement { op: Op::Call0, a: 57, b: 0, c: 0 };
         let (img, g_const100, g_origin) = player_progs_with_prethink(vec![call_null]);
         let mut server = Server::new(floor_bsp(), Progs::parse(&img).expect("parse")).expect("server");
         prime_player_globals(&mut server, g_const100, g_origin);
         let player = server.connect_client().expect("connect");
-        let mut w = super::super::assemble_walk(palette_pak(), "maps/t.bsp".into(), server, player, [0.0; 16], floor_bsp(), 0.0, 0.0)
-            .expect("walk");
+        let mut w = super::super::assemble_walk(
+            palette_pak(),
+            "maps/t.bsp".into(),
+            server,
+            player,
+            [0.0; 16],
+            floor_bsp(),
+            0.0,
+            0.0,
+        )
+        .expect("walk");
         let vid = super::super::Vid {
             width: 64,
             height: 40,
@@ -345,16 +375,12 @@ mod tests {
             (360.0, 5), // 72 fps
         ];
         for (hz, k) in cases {
-            let stamps: Vec<f64> = (1..=(hz as usize) * 10)
-                .map(|i| ((i as f64 * 1000.0 / hz) * 10.0).round() / 10.0)
-                .collect();
+            let stamps: Vec<f64> =
+                (1..=(hz as usize) * 10).map(|i| ((i as f64 * 1000.0 / hz) * 10.0).round() / 10.0).collect();
             let runs = gate_run(&stamps);
             let at = ran_at(&runs);
             assert_eq!(at[0], k - 1, "{hz} Hz: the first frame runs after {k} vsyncs");
-            assert!(
-                at.windows(2).all(|w| w[1] - w[0] == k),
-                "{hz} Hz: every host frame is exactly {k} vsyncs apart"
-            );
+            assert!(at.windows(2).all(|w| w[1] - w[0] == k), "{hz} Hz: every host frame is exactly {k} vsyncs apart");
             let fps = at.len() as f64 / 10.0;
             assert!((fps - hz / k as f64).abs() < 0.2, "{hz} Hz: {fps} fps");
             // The game clock loses nothing: host_frametime sums to real time.

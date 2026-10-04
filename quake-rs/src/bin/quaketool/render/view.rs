@@ -61,14 +61,17 @@ use quake_rs::spr::Sprite;
 use super::color_for_name;
 use crate::entities::player_start;
 use crate::video::VideoArgs;
-use crate::{parse_res, CmdResult, Out};
+use crate::{CmdResult, Out, parse_res};
 
 pub fn cmd_view(args: &[String]) -> CmdResult {
     use std::collections::HashMap;
 
     let (pak_path, map_name, out) = (&args[0], &args[1], &args[2]);
     let parse_vec3 = |flag: &str, s: &str| -> Result<[f32; 3], String> {
-        let v: Vec<f32> = s.split(',').map(|p| p.trim().parse::<f32>()).collect::<Result<_, _>>()
+        let v: Vec<f32> = s
+            .split(',')
+            .map(|p| p.trim().parse::<f32>())
+            .collect::<Result<_, _>>()
             .map_err(|_| format!("{flag}: expected x,y,z, got {s:?}"))?;
         if v.len() != 3 {
             return Err(format!("{flag}: expected 3 comma-separated numbers, got {s:?}"));
@@ -102,7 +105,10 @@ pub fn cmd_view(args: &[String]) -> CmdResult {
             "--time" => time = Some(val.parse::<f32>().map_err(|_| format!("--time: bad number {val:?}"))?),
             "--fov" => fov = val.parse().map_err(|_| format!("--fov: bad number {val:?}"))?,
             "--vrect" => {
-                let v: Vec<usize> = val.split(',').map(|p| p.trim().parse::<usize>()).collect::<Result<_, _>>()
+                let v: Vec<usize> = val
+                    .split(',')
+                    .map(|p| p.trim().parse::<usize>())
+                    .collect::<Result<_, _>>()
                     .map_err(|_| format!("--vrect: expected x,y,w,h, got {val:?}"))?;
                 let [x, y, vw, vh] = v[..] else {
                     return Err(format!("--vrect: expected 4 numbers, got {val:?}").into());
@@ -121,7 +127,10 @@ pub fn cmd_view(args: &[String]) -> CmdResult {
                 particles = parse_particles(&text).map_err(|e| format!("--particles {val}: {e}"))?;
             }
             "--dlight" => {
-                let v: Vec<f32> = val.split(',').map(|p| p.trim().parse::<f32>()).collect::<Result<_, _>>()
+                let v: Vec<f32> = val
+                    .split(',')
+                    .map(|p| p.trim().parse::<f32>())
+                    .collect::<Result<_, _>>()
                     .map_err(|_| format!("--dlight: expected x,y,z,radius[,minlight], got {val:?}"))?;
                 if v.len() != 4 && v.len() != 5 {
                     return Err(format!("--dlight: expected 4 or 5 numbers, got {val:?}").into());
@@ -133,13 +142,19 @@ pub fn cmd_view(args: &[String]) -> CmdResult {
             "--style-values" => {
                 // id's `d_lightstylevalue[]` of the frame (the oracle's .json), in place of the
                 // styles the map's own animation gives at --time.
-                let v: Vec<f32> = val.split(',').map(|p| p.trim().parse::<f32>()).collect::<Result<_, _>>()
+                let v: Vec<f32> = val
+                    .split(',')
+                    .map(|p| p.trim().parse::<f32>())
+                    .collect::<Result<_, _>>()
                     .map_err(|_| format!("--style-values: expected comma-separated integers, got {val:?}"))?;
                 style_values = Some(v);
             }
             "--viewmodel" => viewmodel_arg = Some(val.as_str()),
             "--viewent" => {
-                let v: Vec<f32> = val.split(',').map(|p| p.trim().parse::<f32>()).collect::<Result<_, _>>()
+                let v: Vec<f32> = val
+                    .split(',')
+                    .map(|p| p.trim().parse::<f32>())
+                    .collect::<Result<_, _>>()
                     .map_err(|_| format!("--viewent: expected x,y,z,p,y,r, got {val:?}"))?;
                 viewent = Some(v.try_into().map_err(|_| format!("--viewent: expected 6 numbers, got {val:?}"))?);
             }
@@ -175,15 +190,13 @@ pub fn cmd_view(args: &[String]) -> CmdResult {
         .reduce(|under, over| over.over(under))
         .ok_or_else(|| format!("{pak_path}: empty pak list"))?;
     let read_pak = |name: &str| -> Result<Vec<u8>, String> {
-        pak.read_file(name)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("{name} not found in {pak_path}"))
+        pak.read_file(name).map_err(|e| e.to_string())?.ok_or_else(|| format!("{name} not found in {pak_path}"))
     };
     let bsp_bytes = read_pak(map_name)?;
     let bsp = Bsp::parse(&bsp_bytes)?;
     let bsp_sim = Bsp::parse(&bsp_bytes)?;
-    let palette = render::parse_palette(&read_pak("gfx/palette.lmp")?)
-        .ok_or_else(|| "bad/short gfx/palette.lmp".to_string())?;
+    let palette =
+        render::parse_palette(&read_pak("gfx/palette.lmp")?).ok_or_else(|| "bad/short gfx/palette.lmp".to_string())?;
     let colormap = pak.read_file("gfx/colormap.lmp").ok().flatten();
     let progs = Progs::parse(&read_pak("progs.dat")?)?;
     let mut server = Server::with_pak(bsp_sim, progs, Some(pak.clone()))?;
@@ -303,8 +316,8 @@ pub fn cmd_view(args: &[String]) -> CmdResult {
         }
         None => None,
     };
-    let unresolved = alias_descs.len() + ext_descs.len() + sprite_descs.len()
-        - instances.len() - externals.len() - sprites.len();
+    let unresolved =
+        alias_descs.len() + ext_descs.len() + sprite_descs.len() - instances.len() - externals.len() - sprites.len();
     // The view: the whole screen, or r_refdef.vrect placed on it.
     let (view_w, view_h) = match vrect {
         Some((x, y, vw, vh)) => {
@@ -382,7 +395,12 @@ pub fn cmd_view(args: &[String]) -> CmdResult {
     let _ = writeln!(
         o,
         "view {map_name} {w}x{h} origin [{} {} {}] angles [{} {} {}] fov {fov} time {time}{}{}{}{}",
-        origin[0], origin[1], origin[2], angles[0], angles[1], angles[2],
+        origin[0],
+        origin[1],
+        origin[2],
+        angles[0],
+        angles[1],
+        angles[2],
         if opts.pixel_aspect != 1.0 { format!(" aspect {}", opts.pixel_aspect) } else { String::new() },
         match opts.persp_span {
             render::PerspSpan::Spans16 => String::new(),
@@ -395,7 +413,12 @@ pub fn cmd_view(args: &[String]) -> CmdResult {
     let _ = writeln!(
         o,
         "  entities: {} alias, {} submodel, {} external, {} sprite ({} unresolved, {} unknown kind)",
-        instances.len(), bmodels.len(), externals.len(), sprites.len(), unresolved, skipped
+        instances.len(),
+        bmodels.len(),
+        externals.len(),
+        sprites.len(),
+        unresolved,
+        skipped
     );
     if let Some((n, per)) = bench {
         let _ = writeln!(o, "  bench {n} warm frames -> {per:.4} ms/frame ({:.1} fps)", 1000.0 / per);

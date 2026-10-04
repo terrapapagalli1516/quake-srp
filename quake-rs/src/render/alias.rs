@@ -5,12 +5,12 @@
 //! lighting), `WinQuake/r_aclip.c` (`R_AliasClipTriangle`), `WinQuake/anorms.h`,
 //! and `R_DrawViewModel` (`r_main.c`).
 
-use crate::bsp::Bsp;
-use crate::math::{dot, Vec3};
-use super::{nearest_index, Camera, Frame, ViewGeom};
-use super::light::{r_light_point_hit, COLORMAP_LEN, LIGHTSTYLES};
-use super::polyse::{screen_box, PolyFramebuffer};
+use super::light::{COLORMAP_LEN, LIGHTSTYLES, r_light_point_hit};
+use super::polyse::{PolyFramebuffer, screen_box};
 use super::stats::Profiler;
+use super::{Camera, Frame, ViewGeom, nearest_index};
+use crate::bsp::Bsp;
+use crate::math::{Vec3, dot};
 
 // ---------------------------------------------------------------------------
 // Alias (MDL) models rendered into the world scene
@@ -106,11 +106,7 @@ impl<'a> ModelInstance<'a> {
 /// instead of freezing on the first sub-pose.
 ///
 /// Returns `None` only when the model has no frames at all (or a group is empty).
-fn mdl_frame_verts(
-    mdl: &crate::mdl::Mdl,
-    frame: usize,
-    time: f32,
-) -> Option<&[crate::mdl::TriVertex]> {
+fn mdl_frame_verts(mdl: &crate::mdl::Mdl, frame: usize, time: f32) -> Option<&[crate::mdl::TriVertex]> {
     // `usize -> i32`: a frame beyond `i32::MAX` is treated as out of range (-> 0),
     // exactly as `frame_pose` would do for any out-of-range index.
     let f = i32::try_from(frame).unwrap_or(-1);
@@ -152,11 +148,7 @@ fn mdl_skin(mdl: &crate::mdl::Mdl, skinnum: i32, time: f32) -> Option<ModelSkin<
     if pixels.len() < needed {
         return None;
     }
-    Some(ModelSkin {
-        pixels,
-        width,
-        height,
-    })
+    Some(ModelSkin { pixels, width, height })
 }
 
 // ---------------------------------------------------------------------------
@@ -566,7 +558,12 @@ impl AliasSetup<'_> {
     /// step between poses, so reading it alone would pop the shading at the
     /// 50% crossover; blending the two shades costs one extra dot product
     /// (self.vertex_light already paid for `tv`'s) and is never seen to pop.
-    fn final_vert(&self, tv: &crate::mdl::TriVertex, prev: Option<(&crate::mdl::TriVertex, f32)>, st: &crate::mdl::StVert) -> ClipVert {
+    fn final_vert(
+        &self,
+        tv: &crate::mdl::TriVertex,
+        prev: Option<(&crate::mdl::TriVertex, f32)>,
+        st: &crate::mdl::StVert,
+    ) -> ClipVert {
         let pos = match prev {
             Some((pv, frac)) => std::array::from_fn(|i| {
                 let (p, c) = (f32::from(pv.v[i]), f32::from(tv.v[i]));
@@ -728,12 +725,16 @@ fn alias_prepare<'a>(
         // R_AliasPrepareUnclippedPoints: D_PolysetDrawFinalVerts' points
         // (those inside the view), then the triangles.
         if setup.subdiv {
-            points.extend(fverts.iter().filter(|fv| {
-                fv.v[0] < view.right && fv.v[1] < view.bottom && fv.v[0] >= 0 && fv.v[1] >= 0
-            }));
+            points.extend(
+                fverts
+                    .iter()
+                    .filter(|fv| fv.v[0] < view.right && fv.v[1] < view.bottom && fv.v[0] >= 0 && fv.v[1] >= 0),
+            );
         }
         for tri in &mdl.triangles {
-            if let (Some(a), Some(b), Some(c)) = (vert(tri.vertindex[0]), vert(tri.vertindex[1]), vert(tri.vertindex[2])) {
+            if let (Some(a), Some(b), Some(c)) =
+                (vert(tri.vertindex[0]), vert(tri.vertindex[1]), vert(tri.vertindex[2]))
+            {
                 tris.push(PolyTri { v: [fverts[a], fverts[b], fverts[c]], facesfront: tri.facesfront != 0 });
             }
         }
@@ -1038,10 +1039,10 @@ pub(super) fn prepare_viewmodel<'a>(frame: &Frame<'_, 'a>, vm: &Viewmodel<'a>) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::render::{demo_room, fixtures, Image, Palette, Scene};
     use crate::render::fixtures::render_once;
     use crate::render::fixtures::tiny_mdl;
     use crate::render::light::NEUTRAL_LIGHTSTYLE_SCALES;
+    use crate::render::{Image, Palette, Scene, demo_room, fixtures};
 
     #[test]
     fn render_scene_model_changes_pixels() {
@@ -1065,21 +1066,17 @@ mod tests {
             color: [255, 32, 32],
             skinnum: 0,
         };
-        let with_model = render_once(&Scene { models: std::slice::from_ref(&inst), ..Scene::new(&bsp, cam, 160, 120, &pal) });
+        let with_model =
+            render_once(&Scene { models: std::slice::from_ref(&inst), ..Scene::new(&bsp, cam, 160, 120, &pal) });
 
-        let changed = world_only
-            .pixels
-            .iter()
-            .zip(with_model.pixels.iter())
-            .filter(|(a, b)| a != b)
-            .count();
+        let changed = world_only.pixels.iter().zip(with_model.pixels.iter()).filter(|(a, b)| a != b).count();
         assert!(changed > 0, "model in front of camera changed no pixels");
     }
 
     /// Build a synthetic two-frame single-skin MDL. Frame 0 and frame 1 carry
     /// distinct vertex data so the selected pose is observable.
     fn two_frame_mdl() -> crate::mdl::Mdl {
-        use crate::mdl::{AliasFrame, Frame, Mdl, MdlHeader, Skin, StVert, Triangle, TriVertex};
+        use crate::mdl::{AliasFrame, Frame, Mdl, MdlHeader, Skin, StVert, TriVertex, Triangle};
         let header = MdlHeader {
             ident: i32::from_le_bytes(*b"IDPO"),
             version: 6,
@@ -1237,10 +1234,7 @@ mod tests {
         let mut grouped = tiny_mdl();
         grouped.header.skinwidth = 2;
         grouped.header.skinheight = 1;
-        grouped.skins = vec![Skin::Group {
-            intervals: vec![0.1, 0.2],
-            frames: vec![vec![5, 6], vec![7, 8]],
-        }];
+        grouped.skins = vec![Skin::Group { intervals: vec![0.1, 0.2], frames: vec![vec![5, 6], vec![7, 8]] }];
         let sk = mdl_skin(&grouped, 0, 0.05).expect("skin group resolves at t=0.05");
         assert_eq!((sk.width, sk.height), (2, 1));
         assert_eq!(sk.pixels, &[5, 6], "group sub-skin 0 at t=0.05");
@@ -1259,11 +1253,8 @@ mod tests {
         // Texel indices 1,2,3 (palette entries set vividly in the test).
         mdl.skins = vec![Skin::Single(vec![1, 2, 3, 1])];
         // Spread the three triangle vertices to three corners of the 2x2 skin.
-        mdl.stverts = vec![
-            StVert { onseam: 0, s: 0, t: 0 },
-            StVert { onseam: 0, s: 1, t: 0 },
-            StVert { onseam: 0, s: 0, t: 1 },
-        ];
+        mdl.stverts =
+            vec![StVert { onseam: 0, s: 0, t: 0 }, StVert { onseam: 0, s: 1, t: 0 }, StVert { onseam: 0, s: 0, t: 1 }];
         mdl
     }
 
@@ -1296,7 +1287,8 @@ mod tests {
             color: [255, 32, 32],
             skinnum: 0,
         };
-        let img_skin = render_once(&Scene { models: std::slice::from_ref(&inst_skin), ..Scene::new(&bsp, cam, 160, 120, &pal) });
+        let img_skin =
+            render_once(&Scene { models: std::slice::from_ref(&inst_skin), ..Scene::new(&bsp, cam, 160, 120, &pal) });
 
         // Same model/instance but with the skin stripped -> flat fallback path.
         let mut flat = skinned_mdl();
@@ -1312,14 +1304,10 @@ mod tests {
             color: [255, 32, 32],
             skinnum: 0,
         };
-        let img_flat = render_once(&Scene { models: std::slice::from_ref(&inst_flat), ..Scene::new(&bsp, cam, 160, 120, &pal) });
+        let img_flat =
+            render_once(&Scene { models: std::slice::from_ref(&inst_flat), ..Scene::new(&bsp, cam, 160, 120, &pal) });
 
-        let changed = img_skin
-            .pixels
-            .iter()
-            .zip(img_flat.pixels.iter())
-            .filter(|(a, b)| a != b)
-            .count();
+        let changed = img_skin.pixels.iter().zip(img_flat.pixels.iter()).filter(|(a, b)| a != b).count();
         assert!(changed > 0, "skinned model should differ from flat-colour model");
 
         // The skinned render must actually show one of the skin's texels (no
@@ -1350,13 +1338,9 @@ mod tests {
             color: [255, 32, 32],
             skinnum: 0,
         };
-        let with_model = render_once(&Scene { models: std::slice::from_ref(&inst), ..Scene::new(&bsp, cam, 160, 120, &pal) });
-        let changed = world_only
-            .pixels
-            .iter()
-            .zip(with_model.pixels.iter())
-            .filter(|(a, b)| a != b)
-            .count();
+        let with_model =
+            render_once(&Scene { models: std::slice::from_ref(&inst), ..Scene::new(&bsp, cam, 160, 120, &pal) });
+        let changed = world_only.pixels.iter().zip(with_model.pixels.iter()).filter(|(a, b)| a != b).count();
         assert!(changed > 0, "skinless model must still draw via the flat fallback");
     }
 
@@ -1391,14 +1375,11 @@ mod tests {
             color: [255, 32, 32],
             skinnum: 0,
         };
-        let img0 = render_once(&Scene { models: std::slice::from_ref(&inst0), ..Scene::new(&bsp, cam, 160, 120, &pal) });
-        let img1 = render_once(&Scene { models: std::slice::from_ref(&inst1), ..Scene::new(&bsp, cam, 160, 120, &pal) });
-        let changed = img0
-            .pixels
-            .iter()
-            .zip(img1.pixels.iter())
-            .filter(|(a, b)| a != b)
-            .count();
+        let img0 =
+            render_once(&Scene { models: std::slice::from_ref(&inst0), ..Scene::new(&bsp, cam, 160, 120, &pal) });
+        let img1 =
+            render_once(&Scene { models: std::slice::from_ref(&inst1), ..Scene::new(&bsp, cam, 160, 120, &pal) });
+        let changed = img0.pixels.iter().zip(img1.pixels.iter()).filter(|(a, b)| a != b).count();
         assert!(changed > 0, "different frames should produce different images");
     }
 
@@ -1498,7 +1479,7 @@ mod tests {
     /// the near plane and the triangle actually rasterises. Coloured via a 1x1
     /// skin so it takes the textured path through `palette[7]`.
     fn viewmodel_mdl() -> crate::mdl::Mdl {
-        use crate::mdl::{AliasFrame, Frame, Mdl, MdlHeader, Skin, StVert, Triangle, TriVertex};
+        use crate::mdl::{AliasFrame, Frame, Mdl, MdlHeader, Skin, StVert, TriVertex, Triangle};
         // Mirror the real `v_*` weapon layout: forward along model `+X`, and
         // sitting *below* the eye (model `Z < 0`, via `scale_origin`), so posed
         // at the gun origin it lands in the lower half of the frame, like the
@@ -1588,11 +1569,7 @@ mod tests {
                 }
             }
         }
-        if n == 0 {
-            None
-        } else {
-            Some((minx, miny, maxx, maxy, (sx / n as f64) as f32, (sy / n as f64) as f32))
-        }
+        if n == 0 { None } else { Some((minx, miny, maxx, maxy, (sx / n as f64) as f32, (sy / n as f64) as f32)) }
     }
 
     #[test]
@@ -1611,8 +1588,26 @@ mod tests {
         let cam_a = Camera { pos: [0.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, roll: 0.0, fov_deg: 90.0 };
         let cam_b = Camera { pos: [0.0, 0.0, 0.0], yaw: 137.0, pitch: 0.0, roll: 0.0, fov_deg: 90.0 };
 
-        let img_a = render_once(&Scene { viewmodel: Some(Viewmodel { mdl: &gun, frame: 0, blend: None, origin_ofs: [0.0, 0.0, 2.0], angles: [cam_a.pitch, cam_a.yaw, 0.0] }), ..Scene::new(&bsp, cam_a, w, h, &pal) });
-        let img_b = render_once(&Scene { viewmodel: Some(Viewmodel { mdl: &gun, frame: 0, blend: None, origin_ofs: [0.0, 0.0, 2.0], angles: [cam_b.pitch, cam_b.yaw, 0.0] }), ..Scene::new(&bsp, cam_b, w, h, &pal) });
+        let img_a = render_once(&Scene {
+            viewmodel: Some(Viewmodel {
+                mdl: &gun,
+                frame: 0,
+                blend: None,
+                origin_ofs: [0.0, 0.0, 2.0],
+                angles: [cam_a.pitch, cam_a.yaw, 0.0],
+            }),
+            ..Scene::new(&bsp, cam_a, w, h, &pal)
+        });
+        let img_b = render_once(&Scene {
+            viewmodel: Some(Viewmodel {
+                mdl: &gun,
+                frame: 0,
+                blend: None,
+                origin_ofs: [0.0, 0.0, 2.0],
+                angles: [cam_b.pitch, cam_b.yaw, 0.0],
+            }),
+            ..Scene::new(&bsp, cam_b, w, h, &pal)
+        });
 
         // Isolate the gun pixels (its unique skin colour) in each frame.
         let gun_only = |img: &Image| {
@@ -1637,10 +1632,7 @@ mod tests {
                 (cx - cxf).abs() < w as f32 * 0.30,
                 "gun should be roughly horizontally centred (cx={cx}, centre={cxf})"
             );
-            assert!(
-                cy > h as f32 * 0.5,
-                "gun should sit in the lower half of the frame (cy={cy}, h={h})"
-            );
+            assert!(cy > h as f32 * 0.5, "gun should sit in the lower half of the frame (cy={cy}, h={h})");
         }
         assert!(
             (cax - cbx).abs() < w as f32 * 0.15 && (cay - cby).abs() < h as f32 * 0.15,
@@ -1677,7 +1669,16 @@ mod tests {
             "wall-only render must not contain gun-coloured pixels"
         );
 
-        let with_gun = render_once(&Scene { viewmodel: Some(Viewmodel { mdl: &gun, frame: 0, blend: None, origin_ofs: [0.0, 0.0, 2.0], angles: [cam.pitch, cam.yaw, 0.0] }), ..Scene::new(&bsp, cam, w, h, &pal) });
+        let with_gun = render_once(&Scene {
+            viewmodel: Some(Viewmodel {
+                mdl: &gun,
+                frame: 0,
+                blend: None,
+                origin_ofs: [0.0, 0.0, 2.0],
+                angles: [cam.pitch, cam.yaw, 0.0],
+            }),
+            ..Scene::new(&bsp, cam, w, h, &pal)
+        });
 
         // The gun's pure-yellow skin (B == 0) must appear, proving it drew on top
         // of the wall rather than being depth-occluded by it.
@@ -1685,12 +1686,7 @@ mod tests {
         assert!(shows_gun, "weapon viewmodel must draw on top of the wall directly ahead");
 
         // And it changed pixels relative to the wall-only render.
-        let changed = world
-            .pixels
-            .iter()
-            .zip(with_gun.pixels.iter())
-            .filter(|(a, b)| a != b)
-            .count();
+        let changed = world.pixels.iter().zip(with_gun.pixels.iter()).filter(|(a, b)| a != b).count();
         assert!(changed > 0, "viewmodel changed no pixels over the wall");
     }
 
@@ -1705,7 +1701,16 @@ mod tests {
         // Frameless model -> draw_viewmodel returns early.
         let mut frameless = viewmodel_mdl();
         frameless.frames.clear();
-        let img = render_once(&Scene { viewmodel: Some(Viewmodel { mdl: &frameless, frame: 0, blend: None, origin_ofs: [0.0, 0.0, 2.0], angles: [cam.pitch, cam.yaw, 0.0] }), ..Scene::new(&bsp, cam, 80, 60, &pal) });
+        let img = render_once(&Scene {
+            viewmodel: Some(Viewmodel {
+                mdl: &frameless,
+                frame: 0,
+                blend: None,
+                origin_ofs: [0.0, 0.0, 2.0],
+                angles: [cam.pitch, cam.yaw, 0.0],
+            }),
+            ..Scene::new(&bsp, cam, 80, 60, &pal)
+        });
         let baseline = render_once(&Scene::new(&bsp, cam, 80, 60, &pal));
         assert_eq!(img.pixels, baseline.pixels, "frameless weapon must draw nothing");
 
@@ -1713,7 +1718,16 @@ mod tests {
         let mut bad = viewmodel_mdl();
         bad.triangles = vec![crate::mdl::Triangle { facesfront: 1, vertindex: [0, 1, 9999] }];
         // Must not panic.
-        let _ = render_once(&Scene { viewmodel: Some(Viewmodel { mdl: &bad, frame: 0, blend: None, origin_ofs: [0.0, 0.0, 2.0], angles: [cam.pitch, cam.yaw, 0.0] }), ..Scene::new(&bsp, cam, 80, 60, &pal) });
+        let _ = render_once(&Scene {
+            viewmodel: Some(Viewmodel {
+                mdl: &bad,
+                frame: 0,
+                blend: None,
+                origin_ofs: [0.0, 0.0, 2.0],
+                angles: [cam.pitch, cam.yaw, 0.0],
+            }),
+            ..Scene::new(&bsp, cam, 80, 60, &pal)
+        });
     }
 
     /// A viewmodel whose geometry deliberately *straddles* the alias clip plane:
@@ -1722,7 +1736,7 @@ mod tests {
     /// and the barrel end is beyond it — exactly the authentic held-gun layout
     /// that the clip must handle.
     fn straddling_viewmodel_mdl() -> crate::mdl::Mdl {
-        use crate::mdl::{AliasFrame, Frame, Mdl, MdlHeader, Skin, StVert, Triangle, TriVertex};
+        use crate::mdl::{AliasFrame, Frame, Mdl, MdlHeader, Skin, StVert, TriVertex, Triangle};
         let header = MdlHeader {
             ident: i32::from_le_bytes(*b"IDPO"),
             version: 6,
@@ -1746,9 +1760,9 @@ mod tests {
         // Decoded model space: X in [-20, +20] (straddles the eye and the
         // 5-unit clip plane), Y in [-4, 4], Z = -8.
         let verts = vec![
-            TriVertex { v: [0, 0, 0], lightnormalindex: 0 },   // X=-20 (behind)
-            TriVertex { v: [40, 0, 0], lightnormalindex: 0 },   // X=+20 (in front)
-            TriVertex { v: [20, 8, 0], lightnormalindex: 0 },   // X=0 (on the eye)
+            TriVertex { v: [0, 0, 0], lightnormalindex: 0 },  // X=-20 (behind)
+            TriVertex { v: [40, 0, 0], lightnormalindex: 0 }, // X=+20 (in front)
+            TriVertex { v: [20, 8, 0], lightnormalindex: 0 }, // X=0 (on the eye)
         ];
         Mdl {
             header,
@@ -1783,22 +1797,25 @@ mod tests {
         let gun = straddling_viewmodel_mdl();
         let cam = Camera { pos: [0.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, roll: 0.0, fov_deg: 90.0 };
 
-        let img = render_once(&Scene { viewmodel: Some(Viewmodel { mdl: &gun, frame: 0, blend: None, origin_ofs: [0.0, 0.0, 2.0], angles: [cam.pitch, cam.yaw, 0.0] }), ..Scene::new(&bsp, cam, w, h, &pal) });
+        let img = render_once(&Scene {
+            viewmodel: Some(Viewmodel {
+                mdl: &gun,
+                frame: 0,
+                blend: None,
+                origin_ofs: [0.0, 0.0, 2.0],
+                angles: [cam.pitch, cam.yaw, 0.0],
+            }),
+            ..Scene::new(&bsp, cam, w, h, &pal)
+        });
 
         // (a) it drew SOME gun pixels (not all-dropped). With the old whole-tri
         // drop, every straddling triangle vanished and this would be zero.
         let gun_pixels = img.pixels.iter().filter(|&&p| is_gun_pixel(p)).count();
-        assert!(
-            gun_pixels > 0,
-            "straddling viewmodel must be clipped and still draw pixels (got {gun_pixels})"
-        );
+        assert!(gun_pixels > 0, "straddling viewmodel must be clipped and still draw pixels (got {gun_pixels})");
 
         // (b) the drawn pixels stay on-screen within the frame (the rasteriser
         // clamps to the framebuffer; this just confirms a non-empty drawn bbox).
-        assert!(
-            drawn_bbox(&img, bg).is_some(),
-            "straddling viewmodel produced a visible bounding box"
-        );
+        assert!(drawn_bbox(&img, bg).is_some(), "straddling viewmodel produced a visible bounding box");
     }
 
     /// `r_torchflicker`: a model standing by a steady torch is lit by the
@@ -1825,13 +1842,21 @@ mod tests {
         assert_eq!(alias_entity_light(&bsp, origin, &styles, Some(&torches), &[], false), id, "still: id's");
         let mut seen = std::collections::BTreeSet::new();
         for f in 0..400 {
-            torches.animate(f as f32 / 40.0, crate::server::LerpLightStyles::Smooth, crate::render::TorchFlicker::STYLE);
+            torches.animate(
+                f as f32 / 40.0,
+                crate::server::LerpLightStyles::Smooth,
+                crate::render::TorchFlicker::STYLE,
+            );
             let delta = torches.face(face).at(luxel) * styles[0];
             let (ambient, _) = alias_entity_light(&bsp, origin, &styles, Some(&torches), &[], false);
             assert_eq!(ambient, ((r + delta).floor() as i32).min(128));
             seen.insert(ambient);
         }
-        assert!(seen.len() >= 4 && seen.iter().any(|&a| a > id.0) && seen.iter().any(|&a| a < id.0), "{seen:?} about {}", id.0);
+        assert!(
+            seen.len() >= 4 && seen.iter().any(|&a| a > id.0) && seen.iter().any(|&a| a < id.0),
+            "{seen:?} about {}",
+            id.0
+        );
     }
 
     #[test]
@@ -1876,10 +1901,15 @@ mod tests {
         let bsp = demo_room();
         let pal = gun_palette();
         let gun = viewmodel_mdl();
-        let draw_as
- = |w: usize, h: usize, fov_deg: f32, video: VideoCvars| {
+        let draw_as = |w: usize, h: usize, fov_deg: f32, video: VideoCvars| {
             let cam = Camera { pos: [200.0, 0.0, 0.0], yaw: 0.0, pitch: 0.0, roll: 0.0, fov_deg };
-            let vm = Viewmodel { mdl: &gun, frame: 0, blend: None, origin_ofs: [0.0, 0.0, 2.0], angles: [cam.pitch, cam.yaw, 0.0] };
+            let vm = Viewmodel {
+                mdl: &gun,
+                frame: 0,
+                blend: None,
+                origin_ofs: [0.0, 0.0, 2.0],
+                angles: [cam.pitch, cam.yaw, 0.0],
+            };
             let options = RenderOptions { video, ..RenderOptions::default() };
             let img = render_once(&Scene { viewmodel: Some(vm), options, ..Scene::new(&bsp, cam, w, h, &pal) });
             let gun_px: Vec<(usize, usize)> =
@@ -1907,7 +1937,10 @@ mod tests {
         // height has, as it is drawn at that view's size.
         let cam = Camera { pos: [0.0; 3], yaw: 0.0, pitch: 0.0, roll: 0.0, fov_deg: 90.0 };
         let wide = Camera { fov_deg: crate::render::FovMode::HorPlus.fov_x(90.0, 1920, 1080, 1.0), ..cam };
-        let (a, b) = (AliasView::new(&wide, 90.0, &ViewGeom::whole(1920, 1080), 1.0), AliasView::new(&cam, 90.0, &ViewGeom::whole(1440, 1080), 1.0));
+        let (a, b) = (
+            AliasView::new(&wide, 90.0, &ViewGeom::whole(1920, 1080), 1.0),
+            AliasView::new(&cam, 90.0, &ViewGeom::whole(1440, 1080), 1.0),
+        );
         assert!((a.transition - b.transition).abs() < 1e-2 && (a.resfudge - b.resfudge).abs() < 1e-2);
         assert!((a.xscale - b.xscale).abs() < 1e-2);
         // id's own at 320x152: res_scale 1, transition 200.

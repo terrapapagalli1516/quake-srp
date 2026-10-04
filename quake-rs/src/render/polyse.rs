@@ -4,7 +4,7 @@
 //! Source: `WinQuake/d_polyse.c` — `D_PolysetDraw`, `D_RasterizeAliasPolySmooth`,
 //! `D_PolysetCalcGradients`, `D_PolysetDrawSpans8`; `adivtab.h`.
 
-use super::alias::{AliasSetup, FinalVert, ALIAS_ONSEAM};
+use super::alias::{ALIAS_ONSEAM, AliasSetup, FinalVert};
 use super::band::Band;
 
 /// The sentinel `D_RasterizeAliasPolySmooth` stores in a span's `count`.
@@ -67,11 +67,7 @@ fn floor_div_mod(numer: f64, denom: f64) -> (i32, i32) {
 /// triangles out of `R_AliasClipTriangle` reach this: a denominator of 1 or 2
 /// under a long edge makes a 1/z step of 1e11.
 pub(super) fn c_ftoi(x: f64) -> i32 {
-    if x > -2_147_483_649.0 && x < 2_147_483_648.0 {
-        x as i32
-    } else {
-        i32::MIN
-    }
+    if x > -2_147_483_649.0 && x < 2_147_483_648.0 { x as i32 } else { i32::MIN }
 }
 
 /// The box `verts` lie in on the screen: their least and greatest columns,
@@ -79,7 +75,9 @@ pub(super) fn c_ftoi(x: f64) -> i32 {
 pub(super) fn screen_box<'v>(verts: impl IntoIterator<Item = &'v FinalVert>) -> Option<[i64; 4]> {
     let mut verts = verts.into_iter().map(|p| (i64::from(p.v[0]), i64::from(p.v[1])));
     let (u, row) = verts.next()?;
-    Some(verts.fold([u, u, row, row], |[umin, umax, vmin, vmax], (u, row)| [umin.min(u), umax.max(u), vmin.min(row), vmax.max(row)]))
+    Some(verts.fold([u, u, row, row], |[umin, umax, vmin, vmax], (u, row)| {
+        [umin.min(u), umax.max(u), vmin.min(row), vmax.max(row)]
+    }))
 }
 
 /// The framebuffer side of `D_PolysetDraw` (d_polyse.c): a band of the view
@@ -232,11 +230,7 @@ impl<'b, 'a> PolyFramebuffer<'b, 'a> {
     /// `acolormap[texel + (light & 0xFF00)]` for the skin texel at `ptex`.
     #[inline]
     fn shade(setup: &AliasSetup, ptex: isize, light: i32) -> u8 {
-        let texel = setup
-            .skin
-            .and_then(|s| usize::try_from(ptex).ok().and_then(|i| s.get(i)))
-            .copied()
-            .unwrap_or(0);
+        let texel = setup.skin.and_then(|s| usize::try_from(ptex).ok().and_then(|i| s.get(i))).copied().unwrap_or(0);
         match setup.colormap {
             Some(cm) => cm.get(texel as usize + (light & 0xFF00) as usize).copied().unwrap_or(texel),
             None => texel,
@@ -285,7 +279,15 @@ impl<'b, 'a> PolyFramebuffer<'b, 'a> {
     /// until every edge is at most a pixel, plotting each split point on a
     /// leading edge.
     #[allow(clippy::too_many_arguments)]
-    fn recursive_triangle(&mut self, setup: &AliasSetup, light: i32, lp1: [i32; 6], lp2: [i32; 6], lp3: [i32; 6], depth: u32) {
+    fn recursive_triangle(
+        &mut self,
+        setup: &AliasSetup,
+        light: i32,
+        lp1: [i32; 6],
+        lp2: [i32; 6],
+        lp3: [i32; 6],
+        depth: u32,
+    ) {
         if depth > 64 {
             return;
         }
@@ -755,8 +757,8 @@ static ADIVTAB: [(i32, i32); 1024] = [
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::render::alias::ALIAS_ZISCALE;
     use crate::render::Image;
+    use crate::render::alias::ALIAS_ZISCALE;
     use crate::render::light::{COLORMAP_LEN, COLORMAP_ROWS};
 
     // -- Alias models: R_AliasSetupLighting + D_PolysetDraw --
@@ -900,7 +902,10 @@ mod tests {
             }
             by_pixel_spans += usize::from(tris.iter().any(|t| t.iter().any(|v| v.v[0] < 0 || v.v[0] >= w as i32)));
         }
-        assert!(drawn > 100_000 && hidden > 100 && by_pixel_spans > 50, "{drawn} pixels drawn, {hidden}, {by_pixel_spans}");
+        assert!(
+            drawn > 100_000 && hidden > 100 && by_pixel_spans > 50,
+            "{drawn} pixels drawn, {hidden}, {by_pixel_spans}"
+        );
     }
 
     #[test]

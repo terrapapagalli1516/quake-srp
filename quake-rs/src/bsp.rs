@@ -112,10 +112,7 @@ pub struct Lump {
 
 impl Lump {
     fn read(r: &mut Reader) -> Result<Lump> {
-        Ok(Lump {
-            fileofs: r.i32()?,
-            filelen: r.i32()?,
-        })
+        Ok(Lump { fileofs: r.i32()?, filelen: r.i32()? })
     }
 }
 
@@ -129,10 +126,7 @@ pub struct Header {
 impl Header {
     fn read(r: &mut Reader) -> Result<Header> {
         let version = r.i32()?;
-        let mut lumps = [Lump {
-            fileofs: 0,
-            filelen: 0,
-        }; HEADER_LUMPS];
+        let mut lumps = [Lump { fileofs: 0, filelen: 0 }; HEADER_LUMPS];
         for slot in lumps.iter_mut() {
             *slot = Lump::read(r)?;
         }
@@ -172,15 +166,7 @@ impl DModel {
         for h in headnode.iter_mut() {
             *h = r.i32()?;
         }
-        Ok(DModel {
-            mins,
-            maxs,
-            origin,
-            headnode,
-            visleafs: r.i32()?,
-            firstface: r.i32()?,
-            numfaces: r.i32()?,
-        })
+        Ok(DModel { mins, maxs, origin, headnode, visleafs: r.i32()?, firstface: r.i32()?, numfaces: r.i32()? })
     }
 }
 
@@ -207,11 +193,7 @@ pub struct DPlane {
 
 impl DPlane {
     fn read(r: &mut Reader) -> Result<DPlane> {
-        Ok(DPlane {
-            normal: r.vec3()?,
-            dist: r.f32()?,
-            ptype: r.i32()?,
-        })
+        Ok(DPlane { normal: r.vec3()?, dist: r.f32()?, ptype: r.i32()? })
     }
 }
 
@@ -233,14 +215,7 @@ impl DNode {
         let children = [r.i16()?, r.i16()?];
         let mins = [r.i16()?, r.i16()?, r.i16()?];
         let maxs = [r.i16()?, r.i16()?, r.i16()?];
-        Ok(DNode {
-            planenum,
-            children,
-            mins,
-            maxs,
-            firstface: r.u16()?,
-            numfaces: r.u16()?,
-        })
+        Ok(DNode { planenum, children, mins, maxs, firstface: r.u16()?, numfaces: r.u16()? })
     }
 }
 
@@ -253,10 +228,7 @@ pub struct DClipNode {
 
 impl DClipNode {
     fn read(r: &mut Reader) -> Result<DClipNode> {
-        Ok(DClipNode {
-            planenum: r.i32()?,
-            children: [r.i16()?, r.i16()?],
-        })
+        Ok(DClipNode { planenum: r.i32()?, children: [r.i16()?, r.i16()?] })
     }
 }
 
@@ -277,11 +249,7 @@ impl TexInfo {
                 *c = r.f32()?;
             }
         }
-        Ok(TexInfo {
-            vecs,
-            miptex: r.i32()?,
-            flags: r.i32()?,
-        })
+        Ok(TexInfo { vecs, miptex: r.i32()?, flags: r.i32()? })
     }
 }
 
@@ -294,9 +262,7 @@ pub struct DEdge {
 
 impl DEdge {
     fn read(r: &mut Reader) -> Result<DEdge> {
-        Ok(DEdge {
-            v: [r.u16()?, r.u16()?],
-        })
+        Ok(DEdge { v: [r.u16()?, r.u16()?] })
     }
 }
 
@@ -324,15 +290,7 @@ impl DFace {
         let texinfo = r.i16()?;
         let styles = r.bytes::<MAXLIGHTMAPS>()?;
         let lightofs = r.i32()?;
-        Ok(DFace {
-            planenum,
-            side,
-            firstedge,
-            numedges,
-            texinfo,
-            styles,
-            lightofs,
-        })
+        Ok(DFace { planenum, side, firstedge, numedges, texinfo, styles, lightofs })
     }
 }
 
@@ -360,15 +318,7 @@ impl DLeaf {
         let firstmarksurface = r.u16()?;
         let nummarksurfaces = r.u16()?;
         let ambient_level = r.bytes::<NUM_AMBIENTS>()?;
-        Ok(DLeaf {
-            contents,
-            visofs,
-            mins,
-            maxs,
-            firstmarksurface,
-            nummarksurfaces,
-            ambient_level,
-        })
+        Ok(DLeaf { contents, visofs, mins, maxs, firstmarksurface, nummarksurfaces, ambient_level })
     }
 }
 
@@ -442,14 +392,10 @@ impl MipTex {
             *o = r.u32()?;
         }
         // Capture the mip-0 pixels (width*height palette indices) at start+offsets[0].
-        let npix = (width as usize)
-            .checked_mul(height as usize)
-            .ok_or_else(|| QError::invalid("miptex size overflow"))?;
+        let npix =
+            (width as usize).checked_mul(height as usize).ok_or_else(|| QError::invalid("miptex size overflow"))?;
         let pixels = if offsets[0] != 0 && npix > 0 {
-            match start
-                .checked_add(offsets[0] as usize)
-                .and_then(|p| r.slice_at(p, npix).ok())
-            {
+            match start.checked_add(offsets[0] as usize).and_then(|p| r.slice_at(p, npix).ok()) {
                 Some(s) => s.to_vec(),
                 None => Vec::new(), // out of range -> leave empty (renderer falls back)
             }
@@ -478,15 +424,7 @@ impl MipTex {
                 }
             }
         }
-        Ok(MipTex {
-            name,
-            width,
-            height,
-            offsets,
-            pixels,
-            mips,
-            anim: None,
-        })
+        Ok(MipTex { name, width, height, offsets, pixels, mips, anim: None })
     }
 
     /// Mip level `m`'s pixels (`0..=3`): `(width >> m) * (height >> m)` palette
@@ -556,28 +494,13 @@ impl Bsp {
 
         let entities = read_entities(bytes, &header.lumps[LUMP_ENTITIES])?;
         let planes = read_typed(bytes, &header.lumps[LUMP_PLANES], DPLANE_SIZE, DPlane::read)?;
-        let vertexes = read_typed(
-            bytes,
-            &header.lumps[LUMP_VERTEXES],
-            DVERTEX_SIZE,
-            DVertex::read,
-        )?;
+        let vertexes = read_typed(bytes, &header.lumps[LUMP_VERTEXES], DVERTEX_SIZE, DVertex::read)?;
         let edges = read_typed(bytes, &header.lumps[LUMP_EDGES], DEDGE_SIZE, DEdge::read)?;
         let faces = read_typed(bytes, &header.lumps[LUMP_FACES], DFACE_SIZE, DFace::read)?;
         let nodes = read_typed(bytes, &header.lumps[LUMP_NODES], DNODE_SIZE, DNode::read)?;
         let leafs = read_typed(bytes, &header.lumps[LUMP_LEAFS], DLEAF_SIZE, DLeaf::read)?;
-        let clipnodes = read_typed(
-            bytes,
-            &header.lumps[LUMP_CLIPNODES],
-            DCLIPNODE_SIZE,
-            DClipNode::read,
-        )?;
-        let texinfo = read_typed(
-            bytes,
-            &header.lumps[LUMP_TEXINFO],
-            TEXINFO_SIZE,
-            TexInfo::read,
-        )?;
+        let clipnodes = read_typed(bytes, &header.lumps[LUMP_CLIPNODES], DCLIPNODE_SIZE, DClipNode::read)?;
+        let texinfo = read_typed(bytes, &header.lumps[LUMP_TEXINFO], TEXINFO_SIZE, TexInfo::read)?;
         let models = read_typed(bytes, &header.lumps[LUMP_MODELS], DMODEL_SIZE, DModel::read)?;
         let marksurfaces = read_u16_array(bytes, &header.lumps[LUMP_MARKSURFACES])?;
         let surfedges = read_i32_array(bytes, &header.lumps[LUMP_SURFEDGES])?;
@@ -715,9 +638,7 @@ impl Bsp {
     pub fn leaf_pvs(&self, leaf: usize) -> Vec<bool> {
         let numleafs = self.leafs.len().saturating_sub(1);
         match self.leafs.get(leaf) {
-            Some(l) if leaf != 0 && !self.visibility.is_empty() => {
-                decompress_vis(&self.visibility, l.visofs, numleafs)
-            }
+            Some(l) if leaf != 0 && !self.visibility.is_empty() => decompress_vis(&self.visibility, l.visofs, numleafs),
             _ => vec![true; numleafs + 1],
         }
     }
@@ -766,8 +687,7 @@ impl Bsp {
             };
         }
         let Some(node) = self.nodes.get(child as usize) else { return true };
-        let Some(plane) = usize::try_from(node.planenum).ok().and_then(|p| self.planes.get(p))
-        else {
+        let Some(plane) = usize::try_from(node.planenum).ok().and_then(|p| self.planes.get(p)) else {
             return true;
         };
         let sides = box_on_plane_side(mins, maxs, plane);
@@ -791,28 +711,16 @@ impl Bsp {
 /// in the C that `mod_base + l->fileofs` for `l->filelen` bytes is in range.
 fn lump_bounds(context: &'static str, lump: &Lump, total: usize) -> Result<(usize, usize)> {
     if lump.fileofs < 0 {
-        return Err(QError::invalid(format!(
-            "{context}: negative lump offset {}",
-            lump.fileofs
-        )));
+        return Err(QError::invalid(format!("{context}: negative lump offset {}", lump.fileofs)));
     }
     if lump.filelen < 0 {
-        return Err(QError::invalid(format!(
-            "{context}: negative lump length {}",
-            lump.filelen
-        )));
+        return Err(QError::invalid(format!("{context}: negative lump length {}", lump.filelen)));
     }
     let ofs = lump.fileofs as usize;
     let len = lump.filelen as usize;
-    let end = ofs
-        .checked_add(len)
-        .ok_or_else(|| QError::invalid(format!("{context}: lump span overflow")))?;
+    let end = ofs.checked_add(len).ok_or_else(|| QError::invalid(format!("{context}: lump span overflow")))?;
     if end > total {
-        return Err(QError::Truncated {
-            context,
-            need: end,
-            have: total,
-        });
+        return Err(QError::Truncated { context, need: end, have: total });
     }
     Ok((ofs, len))
 }
@@ -820,12 +728,7 @@ fn lump_bounds(context: &'static str, lump: &Lump, total: usize) -> Result<(usiz
 /// Decode `filelen / record_size` records of a fixed-size typed lump, each via
 /// `read_one` from a `Reader` positioned at the lump start. A `filelen` not a
 /// whole multiple of `record_size` is the C `funny lump size` error.
-fn read_typed<T, F>(
-    bytes: &[u8],
-    lump: &Lump,
-    record_size: usize,
-    read_one: F,
-) -> Result<Vec<T>>
+fn read_typed<T, F>(bytes: &[u8], lump: &Lump, record_size: usize, read_one: F) -> Result<Vec<T>>
 where
     F: Fn(&mut Reader) -> Result<T>,
 {
@@ -868,9 +771,7 @@ fn read_raw(bytes: &[u8], lump: &Lump) -> Result<Vec<u8>> {
 fn read_u16_array(bytes: &[u8], lump: &Lump) -> Result<Vec<u16>> {
     let (ofs, len) = lump_bounds("LUMP_MARKSURFACES", lump, bytes.len())?;
     if len % 2 != 0 {
-        return Err(QError::invalid(
-            "MOD_LoadBmodel: funny lump size (marksurfaces)",
-        ));
+        return Err(QError::invalid("MOD_LoadBmodel: funny lump size (marksurfaces)"));
     }
     let count = len / 2;
     let mut r = Reader::at(bytes, ofs);
@@ -885,9 +786,7 @@ fn read_u16_array(bytes: &[u8], lump: &Lump) -> Result<Vec<u16>> {
 fn read_i32_array(bytes: &[u8], lump: &Lump) -> Result<Vec<i32>> {
     let (ofs, len) = lump_bounds("LUMP_SURFEDGES", lump, bytes.len())?;
     if len % 4 != 0 {
-        return Err(QError::invalid(
-            "MOD_LoadBmodel: funny lump size (surfedges)",
-        ));
+        return Err(QError::invalid("MOD_LoadBmodel: funny lump size (surfedges)"));
     }
     let count = len / 4;
     let mut r = Reader::at(bytes, ofs);
@@ -913,9 +812,7 @@ fn read_textures(bytes: &[u8], lump: &Lump) -> Result<Vec<Option<MipTex>>> {
     let mut r = Reader::at(bytes, ofs);
     let nummiptex = r.i32()?;
     if nummiptex < 0 {
-        return Err(QError::invalid(format!(
-            "LUMP_TEXTURES: negative nummiptex {nummiptex}"
-        )));
+        return Err(QError::invalid(format!("LUMP_TEXTURES: negative nummiptex {nummiptex}")));
     }
     let nummiptex = nummiptex as usize;
 
@@ -938,15 +835,12 @@ fn read_textures(bytes: &[u8], lump: &Lump) -> Result<Vec<Option<MipTex>>> {
             continue;
         }
         if off < 0 {
-            return Err(QError::invalid(format!(
-                "LUMP_TEXTURES: bad miptex data offset {off}"
-            )));
+            return Err(QError::invalid(format!("LUMP_TEXTURES: bad miptex data offset {off}")));
         }
         // `mt = (miptex_t *)((byte *)m + m->dataofs[i])` — relative to the
         // lump start, which is `ofs` in the whole-file buffer.
-        let abs = ofs
-            .checked_add(off as usize)
-            .ok_or_else(|| QError::invalid("LUMP_TEXTURES: miptex offset overflow"))?;
+        let abs =
+            ofs.checked_add(off as usize).ok_or_else(|| QError::invalid("LUMP_TEXTURES: miptex offset overflow"))?;
         let mut mr = Reader::at(bytes, abs);
         out.push(Some(MipTex::read(&mut mr)?));
     }
@@ -1134,10 +1028,7 @@ mod tests {
         fn new(version: i32) -> BspBuilder {
             let mut header = [0u8; HEADER_SIZE];
             header[0..4].copy_from_slice(&version.to_le_bytes());
-            BspBuilder {
-                header,
-                data: Vec::new(),
-            }
+            BspBuilder { header, data: Vec::new() }
         }
 
         /// Append `payload` as lump `index` and record its directory entry.
@@ -1190,11 +1081,7 @@ mod tests {
         b.set_lump(LUMP_ENTITIES, ent_text);
 
         // LUMP_VERTEXES: 3 vertices.
-        let coords = [
-            [1.0f32, 2.0, 3.0],
-            [-4.0, 5.5, 6.25],
-            [7.0, -8.0, 9.0],
-        ];
+        let coords = [[1.0f32, 2.0, 3.0], [-4.0, 5.5, 6.25], [7.0, -8.0, 9.0]];
         let mut verts = Vec::new();
         for v in coords {
             push_vec3(&mut verts, v);

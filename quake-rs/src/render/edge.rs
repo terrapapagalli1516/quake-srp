@@ -33,27 +33,23 @@
 //! ("Short %d surfaces"), which id's shareware maps do not do at the view
 //! sizes it supports (the counters in [`super::RenderStats`] show the peak).
 
-use crate::bsp::{Bsp, DFace, TexInfo, CONTENTS_SOLID};
-use crate::math::{dot, normalize, sub, Vec3};
-use super::light::{
-    any_dlight_reaches, face_lightmap_with, mark_dlights, mark_dlights_more, LightMap,
-};
-use super::raster::{
-    hash_index, shade_index, span_at, span_cached, span_tex, span_turb, BlockFixed, ScreenProj,
-};
-use super::sky::{draw_sky_span, sky_dome_scale, sky_texture, SkyView};
+use super::band::Band;
+use super::light::{LightMap, any_dlight_reaches, face_lightmap_with, mark_dlights, mark_dlights_more};
+use super::raster::PolyGrads;
+use super::raster::{BlockFixed, ScreenProj, hash_index, shade_index, span_at, span_cached, span_tex, span_turb};
+use super::sky::{SkyView, draw_sky_span, sky_dome_scale, sky_texture};
 use super::stats::Profiler;
-use super::torch::FaceTorches;
 use super::surf::{
-    classify_surface, face_world_poly, texture_animation, BakeJob, Bakes, MipView, SurfBlock, SurfKind, Surface,
-    SurfaceCaches, SurfaceRequest,
+    BakeJob, Bakes, MipView, SurfBlock, SurfKind, Surface, SurfaceCaches, SurfaceRequest, classify_surface,
+    face_world_poly, texture_animation,
 };
+use super::torch::FaceTorches;
 use super::vis::point_in_leaf;
 use super::world::{self, face_grads};
-use super::band::Band;
-use super::raster::PolyGrads;
 use super::{Frame, Projection, ViewGeom};
 use crate::bsp::MipTex;
+use crate::bsp::{Bsp, CONTENTS_SOLID, DFace, TexInfo};
+use crate::math::{Vec3, dot, normalize, sub};
 
 /// "No edge / no span / no surface" in the index links.
 const NONE: u32 = u32::MAX;
@@ -397,22 +393,14 @@ impl EdgeState {
 /// NaN or a value out of range (Rust's `as` saturates).
 #[inline]
 fn c_ftoi(x: f64) -> i32 {
-    if x > -2_147_483_649.0 && x < 2_147_483_648.0 {
-        x as i32
-    } else {
-        i32::MIN
-    }
+    if x > -2_147_483_649.0 && x < 2_147_483_648.0 { x as i32 } else { i32::MIN }
 }
 
 /// [`c_ftoi`] widened for the edges' 44.20 `u` ([`Edge`]): truncation, the
 /// same value wherever id's `int` holds it, and id's 0x80000000 for a NaN.
 #[inline]
 fn c_ftoi64(x: f64) -> i64 {
-    if x.is_nan() {
-        i64::from(i32::MIN)
-    } else {
-        x as i64
-    }
+    if x.is_nan() { i64::from(i32::MIN) } else { x as i64 }
 }
 
 /// `VectorNormalize` (mathlib.c), in floats.
@@ -483,7 +471,13 @@ pub(super) fn view_edges(geom: &ViewGeom, p: &Projection) -> [Vec3; 4] {
 /// `(normal, dist)` in the frame whose axes are `vpn`, `vright`, `vup` and
 /// whose eye is `modelorg` — `view_clipplanes`. A point is inside a side
 /// where `dot(normal, p) - dist >= 0`.
-pub(super) fn frustum_planes(screenedge: &[Vec3; 4], vpn: Vec3, vright: Vec3, vup: Vec3, modelorg: Vec3) -> [(Vec3, f32); 4] {
+pub(super) fn frustum_planes(
+    screenedge: &[Vec3; 4],
+    vpn: Vec3,
+    vright: Vec3,
+    vup: Vec3,
+    modelorg: Vec3,
+) -> [(Vec3, f32); 4] {
     screenedge.map(|se| {
         let v = [se[2], -se[0], se[1]];
         let v2 = [
@@ -532,7 +526,12 @@ impl EdgeState {
         // (inline submodels, then the external boxes).
         let mut ents: Vec<Ent> = Vec::with_capacity(1 + scene.bmodels.len() + scene.external.len());
         ents.push(Ent {
-            bsp, model: 0, origin: [0.0; 3], frame: 0, world_bsp: true, dlights,
+            bsp,
+            model: 0,
+            origin: [0.0; 3],
+            frame: 0,
+            world_bsp: true,
+            dlights,
             rotation: world::IDENTITY_ROTATION,
         });
         for bm in scene.bmodels {
@@ -548,7 +547,12 @@ impl EdgeState {
             // Its *rotation* is the same story (R_MarkLights never saw
             // `entity_rotation` either): unaffected by this round.
             ents.push(Ent {
-                bsp, model: bm.model_index, origin: bm.origin, frame: bm.frame, world_bsp: true, dlights,
+                bsp,
+                model: bm.model_index,
+                origin: bm.origin,
+                frame: bm.frame,
+                world_bsp: true,
+                dlights,
                 rotation: world::entity_rotation_matrix(bm.angles),
             });
         }
@@ -559,7 +563,12 @@ impl EdgeState {
             // Instanced item boxes (`maps/b_*.bsp`) never rotate in id either
             // (out of this round's scope: see `BModelInstance::angles`).
             ents.push(Ent {
-                bsp: ext.bsp, model: 0, origin: ext.origin, frame: 0, world_bsp: false, dlights: &[],
+                bsp: ext.bsp,
+                model: 0,
+                origin: ext.origin,
+                frame: 0,
+                world_bsp: false,
+                dlights: &[],
                 rotation: world::IDENTITY_ROTATION,
             });
         }
@@ -588,11 +597,8 @@ impl EdgeState {
         self.dlight_bits = bits;
         if prof.on() {
             let t4 = lap();
-            let (edges, surfs, spans) = (
-                self.edges.len() as u64 - FIRST_EDGE as u64,
-                self.surfs.len() as u64 - 2,
-                world.spans.len() as u64,
-            );
+            let (edges, surfs, spans) =
+                (self.edges.len() as u64 - FIRST_EDGE as u64, self.surfs.len() as u64 - 2, world.spans.len() as u64);
             prof.add(|s| {
                 // world = the whole pass but the brush entities' edge setup,
                 // which goes to `submodel` (their spans are drawn with the
@@ -718,11 +724,8 @@ impl EdgeState {
         }
         self.visframecount = self.visframecount.wrapping_add(1);
         self.oldviewleaf = Some(viewleaf);
-        let numleafs = bsp
-            .models
-            .first()
-            .map_or(0, |m| m.visleafs.max(0) as usize)
-            .min(bsp.leafs.len().saturating_sub(1));
+        let numleafs =
+            bsp.models.first().map_or(0, |m| m.visleafs.max(0) as usize).min(bsp.leafs.len().saturating_sub(1));
         let vis = match bsp.leafs.get(viewleaf) {
             Some(leaf) if viewleaf != 0 && !bsp.visibility.is_empty() => {
                 crate::bsp::decompress_vis(&bsp.visibility, leaf.visofs, numleafs)
@@ -832,10 +835,7 @@ impl EdgeState {
             if l.contents == CONTENTS_SOLID {
                 return;
             }
-            (
-                [l.mins[0], l.mins[1], l.mins[2], l.maxs[0], l.maxs[1], l.maxs[2]].map(|v| v as f32),
-                Some(li),
-            )
+            ([l.mins[0], l.mins[1], l.mins[2], l.maxs[0], l.maxs[1], l.maxs[2]].map(|v| v as f32), Some(li))
         } else {
             let Some(n) = bsp.nodes.get(node as usize) else { return };
             ([n.mins[0], n.mins[1], n.mins[2], n.maxs[0], n.maxs[1], n.maxs[2]].map(|v| v as f32), None)
@@ -1065,11 +1065,7 @@ impl EdgeState {
             let d0 = dot(pv0, clip.normal) - clip.dist;
             let d1 = dot(pv1, clip.normal) - clip.dist;
             let lerp = |f: f32| {
-                [
-                    pv0[0] + f * (pv1[0] - pv0[0]),
-                    pv0[1] + f * (pv1[1] - pv0[1]),
-                    pv0[2] + f * (pv1[2] - pv0[2]),
-                ]
+                [pv0[0] + f * (pv1[0] - pv0[0]), pv0[1] + f * (pv1[1] - pv0[1]), pv0[2] + f * (pv1[2] - pv0[2])]
             };
             if d0 >= 0.0 {
                 // point 0 is unclipped
@@ -1382,11 +1378,7 @@ impl EdgeState {
             self.vright = world::entity_rotate(&e.rotation, base_vright);
             self.vup = world::entity_rotate(&e.rotation, base_vup);
             self.transform_frustum();
-            let top = if !has_tree(world) {
-                None
-            } else {
-                self.split_entity_on_node(world, world_root, emins, emaxs)
-            };
+            let top = if !has_tree(world) { None } else { self.split_entity_on_node(world, world_root, emins, emaxs) };
             match top {
                 // Not a leaf: clipped to the world BSP.
                 Some(node) if node >= 0 => {
@@ -1423,11 +1415,7 @@ impl EdgeState {
                 return false;
             };
             let d = (dot(modelorg, plane.normal) - plane.dist) as f64;
-            if face.side != 0 {
-                d < -BACKFACE_EPSILON
-            } else {
-                d > BACKFACE_EPSILON
-            }
+            if face.side != 0 { d < -BACKFACE_EPSILON } else { d > BACKFACE_EPSILON }
         })
     }
 
@@ -1459,7 +1447,11 @@ impl EdgeState {
                     break;
                 };
                 let (ei, a, b) = if lindex > 0 { (lindex as usize, 0, 1) } else { ((-(lindex as i64)) as usize, 1, 0) };
-                let verts = e.bsp.edges.get(ei).and_then(|m| Some((Self::vertex(e.bsp, m.v[a])?, Self::vertex(e.bsp, m.v[b])?)));
+                let verts = e
+                    .bsp
+                    .edges
+                    .get(ei)
+                    .and_then(|m| Some((Self::vertex(e.bsp, m.v[a])?, Self::vertex(e.bsp, m.v[b])?)));
                 let Some((v0, v1)) = verts else {
                     ok = false;
                     break;
@@ -1660,8 +1652,7 @@ impl EdgeState {
         // "make sure nothing sorts past this": id's `2000 << 24` (which wraps
         // its int negative; neither value is ever compared, the tail stops
         // every walk first)
-        self.edges[EDGE_SENTINEL as usize] =
-            Edge { u: i64::MAX, u_step: 0, prev: EDGE_AFTERTAIL, ..Edge::ZERO };
+        self.edges[EDGE_SENTINEL as usize] = Edge { u: i64::MAX, u_step: 0, prev: EDGE_AFTERTAIL, ..Edge::ZERO };
     }
 
     /// One scanline of `R_ScanEdges`: add the new edges, generate the spans
@@ -2200,18 +2191,51 @@ impl WorldDraw<'_> {
                     }
                     Paint::Turb { grads, mt } => {
                         let (tw, th) = (mt.width as usize, mt.height as usize);
-                        span_turb(row, &span_at(grads, u, v), grads, &mt.pixels, tw, th, &frame.turb, scene.time, persp);
+                        span_turb(
+                            row,
+                            &span_at(grads, u, v),
+                            grads,
+                            &mt.pixels,
+                            tw,
+                            th,
+                            &frame.turb,
+                            scene.time,
+                            persp,
+                        );
                     }
                     Paint::Cached { grads, fixed, block, job } => {
                         let texels = job.map_or(&block.block[..], |job| bakes.block(job));
                         span_cached(row, &span_at(grads, u, v), fixed, texels, block.bw, block.bh, persp);
                     }
                     Paint::Texels { grads, texture, shade, lightmap } => {
-                        let (pixels, tw, th) = texture.map_or((&[][..], 0, 0), |mt| (&mt.pixels[..], mt.width as usize, mt.height as usize));
-                        span_tex(row, &span_at(grads, u, v), grads, pixels, tw, th, palette, *shade, lightmap.as_ref(), colormap);
+                        let (pixels, tw, th) = texture
+                            .map_or((&[][..], 0, 0), |mt| (&mt.pixels[..], mt.width as usize, mt.height as usize));
+                        span_tex(
+                            row,
+                            &span_at(grads, u, v),
+                            grads,
+                            pixels,
+                            tw,
+                            th,
+                            palette,
+                            *shade,
+                            lightmap.as_ref(),
+                            colormap,
+                        );
                     }
                     Paint::Flat { grads, colour, shade, lightmap } => {
-                        span_tex(row, &span_at(grads, u, v), grads, std::slice::from_ref(colour), 1, 1, palette, *shade, Some(lightmap), colormap);
+                        span_tex(
+                            row,
+                            &span_at(grads, u, v),
+                            grads,
+                            std::slice::from_ref(colour),
+                            1,
+                            1,
+                            palette,
+                            *shade,
+                            Some(lightmap),
+                            colormap,
+                        );
                     }
                 }
                 if !background {
@@ -2285,7 +2309,7 @@ mod tests {
     use super::*;
     use crate::math::cross;
     use crate::render::fixtures::render_once;
-    use crate::render::{demo_room, recycle_image, Camera, Image, Renderer, Scene, VideoCvars};
+    use crate::render::{Camera, Image, Renderer, Scene, VideoCvars, demo_room, recycle_image};
 
     fn palette() -> [[u8; 3]; 256] {
         let mut pal = [[0u8; 3]; 256];
@@ -2411,9 +2435,8 @@ mod tests {
         let big = render(4 * w, 4 * h);
         assert_eq!((big.w, big.h), (2560, 600));
         assert!(!big.pixels.contains(&R_CLEARCOLOR), "the room covers the view: no background");
-        let differ = (0..h * w)
-            .filter(|&i| big.pixels[(4 * (i / w) + 2) * 4 * w + 4 * (i % w) + 2] != small.pixels[i])
-            .count();
+        let differ =
+            (0..h * w).filter(|&i| big.pixels[(4 * (i / w) + 2) * 4 * w + 4 * (i % w) + 2] != small.pixels[i]).count();
         assert!(differ * 100 < w * h, "{differ} of {} pixels differ", w * h);
     }
 
@@ -2423,7 +2446,7 @@ mod tests {
         // walk (R_RecursiveWorldNode) reaches the faces through the node. A
         // face naming a plane past the lump had its edges emitted but no
         // surface posted, and R_LeadingEdge indexed past the surfaces.
-        use crate::bsp::{DLeaf, DNode, DPlane, CONTENTS_EMPTY, NUM_AMBIENTS};
+        use crate::bsp::{CONTENTS_EMPTY, DLeaf, DNode, DPlane, NUM_AMBIENTS};
         let mut bsp = demo_room();
         let n = bsp.faces.len();
         bsp.planes.push(DPlane { normal: [1.0, 0.0, 0.0], dist: -1000.0, ptype: 0 });
@@ -2454,9 +2477,7 @@ mod tests {
         bsp.models[0].visleafs = 2;
         let cam = Camera::looking_at([-200.0, -200.0, 40.0], [0.0, 0.0, 0.0], 90.0);
         let pal = palette();
-        let draw = |bsp: &Bsp| {
-            render_once(&Scene::new(bsp, cam, 96, 64, &pal))
-        };
+        let draw = |bsp: &Bsp| render_once(&Scene::new(bsp, cam, 96, 64, &pal));
         for fi in 0..n {
             let mut bad = bsp.clone();
             bad.faces[fi].planenum = 9999;
@@ -2515,7 +2536,8 @@ mod tests {
                 ("e1m3", [[-1352.0, -720.0, -50.0], [-1352.0, -600.0, -40.0], [-1300.0, -400.0, -40.0]]),
                 ("e1m4", [[998.0, 2246.0, 944.0], [320.0, 1284.0, 950.0], [320.0, 1284.0, 700.0]]),
             ] {
-                let world = Bsp::parse(&pak.read_file(&format!("maps/{map}.bsp")).expect("read").expect("the map")).expect("a bsp");
+                let world = Bsp::parse(&pak.read_file(&format!("maps/{map}.bsp")).expect("read").expect("the map"))
+                    .expect("a bsp");
                 for (k, pos) in eyes.into_iter().enumerate() {
                     for (j, (w, h)) in [(320, 200), (701, 397), (1315, 535)].into_iter().enumerate() {
                         for turn in 0..6 {

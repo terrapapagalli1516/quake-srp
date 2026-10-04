@@ -24,7 +24,7 @@ use crate::vm::Fld;
 use super::cl_input::clamp_pitch;
 use super::cl_main::client_items;
 use super::host::host_error;
-use super::{assemble_walk, spawn_view_angles, SoundCall, Walk};
+use super::{SoundCall, Walk, assemble_walk, spawn_view_angles};
 use crate::QError;
 
 /// Sane upper bounds the `give` command clamps to, mirroring Quake's pickup
@@ -46,24 +46,14 @@ pub const IT_INVISIBILITY: i32 = 1 << 19; // Ring of Shadows (524288)
 /// into `out`. `cmd` is already lowercased; `argv[0]` is the command itself.
 /// Unknown verbs push nothing (the caller reports them). A `kill` that
 /// restarts the level makes its sound calls into `sound`.
-pub fn run_game_command(
-    w: &mut Walk,
-    cmd: &str,
-    argv: &[&str],
-    out: &mut Vec<String>,
-    sound: &mut Vec<SoundCall>,
-) {
+pub fn run_game_command(w: &mut Walk, cmd: &str, argv: &[&str], out: &mut Vec<String>, sound: &mut Vec<SoundCall>) {
     let player = w.player;
     match cmd {
         // Host_God_f: flags ^= FL_GODMODE.
         "god" => {
             let flags = w.server.vm.flags(player).toggled(EntFlags::GODMODE);
             w.server.vm.set_flags(player, flags);
-            out.push(if flags.contains(EntFlags::GODMODE) {
-                "godmode ON".into()
-            } else {
-                "godmode OFF".into()
-            });
+            out.push(if flags.contains(EntFlags::GODMODE) { "godmode ON".into() } else { "godmode OFF".into() });
         }
         // Host_Noclip_f: movetype toggles WALK <-> NOCLIP.
         "noclip" => {
@@ -151,11 +141,7 @@ fn run_give_command(w: &mut Walk, argv: &[&str], out: &mut Vec<String>) {
             // 2..8 are IT_SHOTGUN << (d-2), exactly as Host_Give_f does
             // (sv_player->v.items |= IT_SHOTGUN << (t[0]-'2')).
             let d = (c0 as u8 - b'0') as i32; // 1..8
-            let bit = if d == 1 {
-                IT_AXE
-            } else {
-                IT_SHOTGUN << (d - 2)
-            };
+            let bit = if d == 1 { IT_AXE } else { IT_SHOTGUN << (d - 2) };
             let items = w.server.vm.ent_float(player, w.server.vm.fo().items) as i32 | bit;
             w.server.vm.set_ent_float(player, w.server.vm.fo().items, items as f32);
             // Select it: the QuakeC `weapon` field is the active weapon bit.
@@ -240,7 +226,6 @@ pub fn build_walk_map(
     assemble_walk(pak, map.to_string(), server, player, entry_parms, bsp, yaw, pitch)
 }
 
-
 /// Perform a deferred level transition: save the current player's spawn parms,
 /// load `next_map` and a fresh `progs.dat` from the open pak, spawn the new
 /// level's entities, and reconnect the client carrying its inventory. On a
@@ -273,11 +258,7 @@ pub fn try_changelevel(w: &mut Walk, next_map: &str, sound: &mut Vec<SoundCall>)
     // the pak path (tolerating an already-qualified name). Without this the read
     // missed and the swap silently aborted — the start-hub episode-1 slipgate
     // (and every in-game changelevel) "did nothing".
-    let map_file = if next_map.ends_with(".bsp") {
-        next_map.to_string()
-    } else {
-        format!("maps/{next_map}.bsp")
-    };
+    let map_file = if next_map.ends_with(".bsp") { next_map.to_string() } else { format!("maps/{next_map}.bsp") };
     // Two BSP copies (one for the sim/collision world the server owns, one for
     // rendering) plus a fresh progs.dat for the new server. Any failure aborts
     // the swap, leaving the live level running.
@@ -508,15 +489,12 @@ pub fn build_walk_savegame(
     sound: &mut Vec<SoundCall>,
     max_edicts: usize,
 ) -> Result<Walk, String> {
-    use crate::save::{parse_savegame, SAVEGAME_VERSION};
+    use crate::save::{SAVEGAME_VERSION, parse_savegame};
 
     let sg = parse_savegame(text).map_err(|e| e.to_string())?;
     if sg.version != SAVEGAME_VERSION {
         // Con_Printf ("Savegame is version %i, not %i\n", ...)
-        return Err(format!(
-            "Savegame is version {}, not {}",
-            sg.version, SAVEGAME_VERSION
-        ));
+        return Err(format!("Savegame is version {}, not {}", sg.version, SAVEGAME_VERSION));
     }
     let couldnt = || "Couldn't load map".to_string(); // SV_SpawnServer failure
     let read = |n: &str| pak.read_file(n).ok().flatten();
@@ -530,8 +508,8 @@ pub fn build_walk_savegame(
     // The engine-side load: header -> SV_SpawnServer (map spawn functions DO
     // run, rebuilding precaches; see save.rs) -> lightstyles -> globals ->
     // edicts -> sv.time/spawn_parms. No entrance script, no signon settle.
-    let mut server = Server::load_savegame(sim_bsp, progs, Some(pak.clone()), rand, text, max_edicts)
-        .map_err(|e| e.to_string())?;
+    let mut server =
+        Server::load_savegame(sim_bsp, progs, Some(pak.clone()), rand, text, max_edicts).map_err(|e| e.to_string())?;
     let player = server.player_edict().ok_or_else(|| "savegame has no player edict".to_string())?;
     // Host_Spawn_f names the client edict (`netname = host_client->name`) only
     // for a fresh spawn: a loaded game keeps the save's. Saves the port wrote
@@ -563,17 +541,7 @@ pub fn build_walk_savegame(
     // into the Walk; committed to the sound layer only after assembly succeeds.
     let statics = server.drain_static_sounds();
 
-    let mut w = assemble_walk(
-        pak,
-        map,
-        server,
-        player,
-        entry_parms,
-        render_bsp,
-        yaw,
-        pitch,
-    )
-    .ok_or_else(couldnt)?;
+    let mut w = assemble_walk(pak, map, server, player, entry_parms, render_bsp, yaw, pitch).ok_or_else(couldnt)?;
 
     // Committed: tear down the previous level/mode's looping audio, start this
     // level's, and drop one-shot events the load's spawn + settle ticks queued

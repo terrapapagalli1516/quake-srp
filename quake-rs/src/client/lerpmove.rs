@@ -92,7 +92,9 @@ impl Glide {
         let blend = (((time - self.start) / f64::from(self.length)) as f32).clamp(0.0, 1.0);
         Pose {
             origin: std::array::from_fn(|i| self.from.origin[i] + blend * (self.to.origin[i] - self.from.origin[i])),
-            angles: std::array::from_fn(|i| self.from.angles[i] + blend * short_way(self.to.angles[i] - self.from.angles[i])),
+            angles: std::array::from_fn(|i| {
+                self.from.angles[i] + blend * short_way(self.to.angles[i] - self.from.angles[i])
+            }),
         }
     }
 }
@@ -137,15 +139,7 @@ impl StepGlides {
             let since = (time - glide.start) as f32;
             let stepped = glide.length > 0.0 || glide.from != glide.to;
             let length = if stepped && since < GLIDE / 2.0 { since } else { GLIDE };
-            *glide = Glide {
-                model,
-                from: glide.at(time),
-                to: pose,
-                start: time,
-                length,
-                seen: frame,
-                drawn: pose,
-            };
+            *glide = Glide { model, from: glide.at(time), to: pose, start: time, length, seen: frame, drawn: pose };
         }
         glide.seen = frame;
         glide.drawn = glide.at(time);

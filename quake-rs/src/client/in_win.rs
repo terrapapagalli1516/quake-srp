@@ -814,8 +814,10 @@ mod tests {
         cv.joy.menu_keys = false;
         j.set_pad(Some(Pad { pressed: 1 << 9, ..pad() }));
         assert_eq!(j.commands(&cv.joy, PadKeys::Menu), [(K_AUX1 + 9, true)], "joy_menukeys 0: Start is AUX10");
-        assert_eq!([K_JOY1 + 1, K_AUX1 + 9, K_AUX29 + 1, K_AUX32, K_JOY1 + 2].map(|k| menu_key(k, PadKeys::Menu)),
-                   [Some(K_ESCAPE), Some(K_ESCAPE), Some(K_RIGHTARROW), Some(K_LEFTARROW), None]);
+        assert_eq!(
+            [K_JOY1 + 1, K_AUX1 + 9, K_AUX29 + 1, K_AUX32, K_JOY1 + 2].map(|k| menu_key(k, PadKeys::Menu)),
+            [Some(K_ESCAPE), Some(K_ESCAPE), Some(K_RIGHTARROW), Some(K_LEFTARROW), None]
+        );
     }
 
     /// IN_JoyMove at id's defaults (`joystick 1`): X turns at cl_yawspeed

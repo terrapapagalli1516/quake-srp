@@ -153,10 +153,28 @@ impl FrameLerps {
     /// or this call snapped: see the module doc). `is_group` is whether
     /// `frame` resolves to a [`crate::mdl::Frame::Group`]
     /// ([`crate::mdl::Mdl::frame_is_group`]): a group frame always snaps.
-    pub fn blend(&mut self, num: i32, model: usize, frame: usize, is_group: bool, origin: Vec3, time: f64) -> Option<(usize, f32)> {
+    pub fn blend(
+        &mut self,
+        num: i32,
+        model: usize,
+        frame: usize,
+        is_group: bool,
+        origin: Vec3,
+        time: f64,
+    ) -> Option<(usize, f32)> {
         let seen = self.frame;
         let flashed = self.flashed.remove(&num);
-        let snap = Lerp { model, origin, prev_frame: frame, cur_frame: frame, start: time, length: 0.0, group: is_group, defer: false, seen };
+        let snap = Lerp {
+            model,
+            origin,
+            prev_frame: frame,
+            cur_frame: frame,
+            start: time,
+            length: 0.0,
+            group: is_group,
+            defer: false,
+            seen,
+        };
         let entry = self.lerps.entry(num).or_insert(snap);
         let jumped = (0..3).any(|i| (origin[i] - entry.origin[i]).abs() > TELEPORT);
         if is_group || entry.group || entry.model != model || time < entry.start || jumped || flashed {
@@ -180,7 +198,17 @@ impl FrameLerps {
             let changed_before = entry.length > 0.0 || entry.prev_frame != entry.cur_frame;
             let since = (time - entry.start) as f32;
             let length = if changed_before && since < GLIDE_FRAME / 2.0 { since.max(0.0) } else { GLIDE_FRAME };
-            *entry = Lerp { model, origin, prev_frame: entry.cur_frame, cur_frame: frame, start: time, length, group: false, defer: false, seen };
+            *entry = Lerp {
+                model,
+                origin,
+                prev_frame: entry.cur_frame,
+                cur_frame: frame,
+                start: time,
+                length,
+                group: false,
+                defer: false,
+                seen,
+            };
         } else {
             entry.origin = origin;
         }

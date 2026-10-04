@@ -14,28 +14,26 @@ use crate::cd_audio::CdCall;
 use crate::math::angle_wrap;
 use crate::mdl::Mdl;
 use crate::particles::{TrailHead, TrailStep};
-use crate::stepping::advance_clock;
 use crate::render::{self, Camera, ModelInstance, Viewmodel};
-use crate::server::{wire_angle, wire_coord, EntFlags, MoveType, SoundEvent, StaticEntity, UserCmd};
-use crate::vm::{Fld, Glb};
+use crate::server::{EntFlags, MoveType, SoundEvent, StaticEntity, UserCmd, wire_angle, wire_coord};
+use crate::stepping::advance_clock;
 use crate::tent::BeamModel;
+use crate::vm::{Fld, Glb};
 
-use super::cl_input::{
-    clamp_pitch, KeyMove, CL_ANGLESPEEDKEY, CL_PITCHSPEED, CL_YAWSPEED, SPEED, V_CENTERSPEED,
-};
-use super::cl_tent::{rocket_trail_type, spawn_temp_entity, TRAIL_ROCKET};
+use super::cl_input::{CL_ANGLESPEEDKEY, CL_PITCHSPEED, CL_YAWSPEED, KeyMove, SPEED, V_CENTERSPEED, clamp_pitch};
+use super::cl_tent::{TRAIL_ROCKET, rocket_trail_type, spawn_temp_entity};
 use super::host::host_error;
-use super::host_cmd::{try_changelevel, try_restart, IT_INVISIBILITY};
+use super::host_cmd::{IT_INVISIBILITY, try_changelevel, try_restart};
 use super::lerpmodels::{self, LerpModels};
 use super::lerpmove::LerpMove;
 use super::nailbarrels::{self, GunPose, NailBarrels};
 use super::view::{
-    cshift_add, fade_cshifts, parse_damage, stamp_item_gettime, stufftext_bonus_flash, BONUS_COLOR,
-    BONUS_PERCENT, FACE_ANIM_TIME, V_KICKTIME,
+    BONUS_COLOR, BONUS_PERCENT, FACE_ANIM_TIME, V_KICKTIME, cshift_add, fade_cshifts, parse_damage, stamp_item_gettime,
+    stufftext_bonus_flash,
 };
 use super::{
-    backtile_for, color_for_name, draw_view, lap, render_options, s_update, view_hook, warp_below, ClientFrame,
-    Listener, Phase, SoundCall, Vid, Walk,
+    ClientFrame, Listener, Phase, SoundCall, Vid, Walk, backtile_for, color_for_name, draw_view, lap, render_options,
+    s_update, view_hook, warp_below,
 };
 
 /// `SV_WriteClientdataToMessage`'s fixangle (sv_main.c) and the client's
@@ -77,11 +75,8 @@ fn parse_client_damage(w: &mut Walk, ent_origin: [f32; 3]) {
     if other < 0 || other as usize >= vm.num_edicts() {
         other = 0;
     }
-    let (o, mins, maxs) = (
-        vm.ent_vec(other, vm.fo().origin),
-        vm.ent_vec(other, vm.fo().mins),
-        vm.ent_vec(other, vm.fo().maxs),
-    );
+    let (o, mins, maxs) =
+        (vm.ent_vec(other, vm.fo().origin), vm.ent_vec(other, vm.fo().mins), vm.ent_vec(other, vm.fo().maxs));
     let coord = |i: usize| wire_coord(o[i] + 0.5 * (mins[i] + maxs[i]));
     let from = [coord(0), coord(1), coord(2)];
     vm.set_ent_float(p, vm.fo().dmg_take, 0.0);
@@ -372,16 +367,14 @@ fn client_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid, dra
             + if menu_up {
                 0.0
             } else {
-                ((if w.in_jump { 1.0 } else { 0.0 }) - (if w.in_down { 1.0 } else { 0.0 }))
-                    * SPEED
+                ((if w.in_jump { 1.0 } else { 0.0 }) - (if w.in_down { 1.0 } else { 0.0 })) * SPEED
             },
         yaw: w.yaw,
         pitch: w.pitch,
         buttons: if menu_up {
             0
         } else {
-            (if w.in_attack || km.attack { 1 } else { 0 })
-                | (if w.in_jump || km.jump { 2 } else { 0 })
+            (if w.in_attack || km.attack { 1 } else { 0 }) | (if w.in_jump || km.jump { 2 } else { 0 })
         },
         impulse: if menu_up { 0 } else { w.next_impulse },
     };
@@ -517,12 +510,8 @@ fn client_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid, dra
     // 2. Surface the sounds the world fired this frame (gunshots, doors, monster
     //    voices) to the sound layer, each where CL_ParseStartSoundPacket's
     //    MSG_ReadCoords put it: to the 1/8 unit.
-    let events: Vec<SoundEvent> = w
-        .server
-        .drain_sounds()
-        .into_iter()
-        .map(|e| SoundEvent { origin: e.origin.map(wire_coord), ..e })
-        .collect();
+    let events: Vec<SoundEvent> =
+        w.server.drain_sounds().into_iter().map(|e| SoundEvent { origin: e.origin.map(wire_coord), ..e }).collect();
     sound.push(SoundCall::Start { events, view_entity: w.player });
 
     // 2a. Drain QuakeC's on-screen messages (centerprint / sprint / bprint) into
@@ -571,8 +560,7 @@ fn client_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid, dra
             w.beams.parse_beam(ev.entity, bm, ev.pos, ev.end, now);
             let name = bm.model_name();
             if !w.model_cache.contains_key(name) {
-                let parsed =
-                    w.pak.read_file(name).ok().flatten().and_then(|b| Mdl::parse(&b).ok());
+                let parsed = w.pak.read_file(name).ok().flatten().and_then(|b| Mdl::parse(&b).ok());
                 w.model_cache.insert(name.to_string(), parsed);
             }
             continue; // beams spawn no particles / sounds / dlights here
@@ -613,8 +601,7 @@ fn client_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid, dra
             *r = false;
         }
     }
-    let is_relinked =
-        |e: i32| usize::try_from(e).ok().and_then(|e| relinked.get(e)).copied() == Some(true);
+    let is_relinked = |e: i32| usize::try_from(e).ok().and_then(|e| relinked.get(e)).copied() == Some(true);
 
     // 2d. Entity light effects (EF_MUZZLEFLASH / BRIGHTLIGHT / DIMLIGHT) of the
     //     relinked edicts, by the call a demo's entities make
@@ -653,8 +640,7 @@ fn client_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid, dra
         } else if m.ends_with(".spr") && !w.sprite_cache.contains_key(m) {
             // A sprite-model entity (progs/s_explod.spr explosion flash, bubbles).
             // Parse once and cache; None on missing/unparseable.
-            let parsed =
-                w.pak.read_file(m).ok().flatten().and_then(|b| crate::spr::Sprite::parse(&b).ok());
+            let parsed = w.pak.read_file(m).ok().flatten().and_then(|b| crate::spr::Sprite::parse(&b).ok());
             w.sprite_cache.insert(m.to_string(), parsed);
         }
     }
@@ -696,8 +682,7 @@ fn client_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid, dra
     // origin below, so no trail on the first frame). Disjoint field borrows.
     {
         let vm = &w.server.vm;
-        w.trail_org
-            .retain(|&e, _| !vm.is_free_edict(e));
+        w.trail_org.retain(|&e, _| !vm.is_free_edict(e));
     }
     let smooth = w.lerpmove == LerpMove::Smooth;
     // r_nailbarrels (a slop option): the player's own nails, as (index in
@@ -782,11 +767,7 @@ fn client_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid, dra
         // its yaw overwritten with `anglemod(100*cl.time)` every frame so it spins.
         // Otherwise use the entity's own yaw. Without this every pickup sat frozen.
         let ent_angles = w.server.vm.ent_vec(ent, w.server.vm.fo().angles);
-        let yaw = if mflags & crate::demo::EF_ROTATE != 0 {
-            crate::demo::rotate_yaw(w.clock)
-        } else {
-            ent_angles[1]
-        };
+        let yaw = if mflags & crate::demo::EF_ROTATE != 0 { crate::demo::rotate_yaw(w.clock) } else { ent_angles[1] };
         // [pitch, yaw, roll]: EF_ROTATE overrides yaw only; pitch/roll come straight
         // from the entity so flying projectiles point along their flight path
         // (r_alias.c R_AliasSetUpTransform), not just spin about Z.
@@ -858,10 +839,7 @@ fn client_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid, dra
         // ent->origin / ent->angles: the QC set `angles = pos.mangle` (fixangle)
         // and froze the player MOVETYPE_NONE, which SV_ClientThink early-outs on,
         // so the spot's angles survive the per-frame mouse v_angle updates.
-        (
-            w.server.vm.ent_vec(w.player, w.server.vm.fo().origin),
-            w.server.vm.ent_vec(w.player, w.server.vm.fo().angles),
-        )
+        (w.server.vm.ent_vec(w.player, w.server.vm.fo().origin), w.server.vm.ent_vec(w.player, w.server.vm.fo().angles))
     } else {
         w.server.player_view()
     };
@@ -875,11 +853,7 @@ fn client_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid, dra
     // turned -90 deg. Panning only needs the horizontal plane.
     let yaw_rad = (ang[1] as f64).to_radians();
     let (sy, cy) = (yaw_rad.sin() as f32, yaw_rad.cos() as f32);
-    let listener = Listener {
-        pos: eye,
-        forward: [cy, sy, 0.0],
-        right: [sy, -cy, 0.0],
-    };
+    let listener = Listener { pos: eye, forward: [cy, sy, 0.0], right: [sy, -cy, 0.0] };
 
     // S_UpdateAmbientSounds: ramp the four automatic ambient channels toward
     // the VIEW leaf's ambient_level[] targets (water wash / sky wind). Uses the
@@ -1100,7 +1074,14 @@ fn client_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid, dra
                 let blend = if smooth_frames {
                     let model_id = weapon_model_index(w, &weapon_name);
                     let is_group = mdl.frame_is_group(weapon_frame as i32);
-                    w.frame_lerps.blend(lerpmodels::VIEWMODEL, model_id, weapon_frame, is_group, cam.pos, f64::from(w.clock))
+                    w.frame_lerps.blend(
+                        lerpmodels::VIEWMODEL,
+                        model_id,
+                        weapon_frame,
+                        is_group,
+                        cam.pos,
+                        f64::from(w.clock),
+                    )
                 } else {
                     None
                 };
@@ -1128,8 +1109,7 @@ fn client_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid, dra
     // ramp by `cl.time - cl.oldtime` (0 while paused). A particle is drawn
     // where and as it was spawned on its first frame, and on its last.
     w.particles.retire(now);
-    let parts: Vec<([f32; 3], u8)> =
-        w.particles.particles().iter().map(|p| (p.origin, p.color)).collect();
+    let parts: Vec<([f32; 3], u8)> = w.particles.particles().iter().map(|p| (p.origin, p.color)).collect();
     if dt.is_finite() && dt > 0.0 && !paused {
         // grav = frametime * sv_gravity.value * 0.05 (100 on e1m8).
         w.particles.integrate(dt, now, w.server.sv_gravity() * 0.05);
@@ -1388,13 +1368,12 @@ fn client_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid, dra
     ClientFrame { image: img, cshifts: shifts, sound }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::server_items;
     use crate::progs::Progs;
-    use crate::server::testutil::{empty_bsp, Builder};
     use crate::server::Server;
+    use crate::server::testutil::{Builder, empty_bsp};
 
     /// A server on a progs with the fields `items` (cell 0) and, if
     /// `with_items2`, `items2` (cell 1), and the global `serverflags`; edict 0

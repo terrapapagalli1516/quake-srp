@@ -6,8 +6,8 @@
 //! [`snd_dma`](crate::snd_dma). Its tests drive the real client end to end on
 //! the embedded shareware data.
 
-use quake_rs::client::cl_main::{walk_frame, walk_frame_undrawn};
 use quake_rs::client::Vid;
+use quake_rs::client::cl_main::{walk_frame, walk_frame_undrawn};
 use quake_rs::render;
 
 use crate::app::Walk;
@@ -15,7 +15,13 @@ use crate::app::Walk;
 /// One frame of the live walk at `render_w x render_h`: the finished screen
 /// and its colour shifts (`cl.cshifts`, applied by the host after the menu and
 /// console); the frame's sound calls are carried out.
-pub(crate) fn step_walk(w: &mut Walk, dt: f64, menu_up: bool, vid: &Vid, draw: bool) -> (render::Image, Vec<([u8; 3], f32)>) {
+pub(crate) fn step_walk(
+    w: &mut Walk,
+    dt: f64,
+    menu_up: bool,
+    vid: &Vid,
+    draw: bool,
+) -> (render::Image, Vec<([u8; 3], f32)>) {
     let frame = if draw { walk_frame(w, dt, menu_up, vid) } else { walk_frame_undrawn(w, dt, menu_up, vid) };
     crate::snd_dma::play(&w.pak, frame.sound);
     (frame.image, frame.cshifts)
@@ -24,17 +30,14 @@ pub(crate) fn step_walk(w: &mut Walk, dt: f64, menu_up: bool, vid: &Vid, draw: b
 #[cfg(test)]
 mod tests {
     use super::*;
-    use quake_rs::client::cl_main::{
-        client_items, client_punchangle, offset_box, static_is_visible,
-        ALIAS_MODEL_HALF,
-    };
+    use quake_rs::client::SoundCall;
+    use quake_rs::client::cl_main::{ALIAS_MODEL_HALF, client_items, client_punchangle, offset_box, static_is_visible};
     use quake_rs::client::host_cmd::{try_changelevel, try_restart};
     use quake_rs::server::EntFlags;
     use quake_rs::server::wire_angle;
-    use quake_rs::client::SoundCall;
     use quake_rs::tent::BeamModel;
 
-    use crate::app::{boot, boot_attract, build_walk, build_walk_map, APP};
+    use crate::app::{APP, boot, boot_attract, build_walk, build_walk_map};
     use crate::console::{console_toggle, console_visible};
     use crate::host::step;
     use crate::menu::menu_select;
@@ -204,11 +207,7 @@ mod tests {
             // per-texel relighting that tick touches ~2.4%. A 4% ceiling still
             // separates bug from animation with a wide margin both ways.
             let fb: Vec<u8> = APP.with(|c| c.borrow().as_ref().unwrap().present.rgba());
-            let nd = prev
-                .chunks_exact(4)
-                .zip(fb.chunks_exact(4))
-                .filter(|(a4, b4)| a4[..3] != b4[..3])
-                .count();
+            let nd = prev.chunks_exact(4).zip(fb.chunks_exact(4)).filter(|(a4, b4)| a4[..3] != b4[..3]).count();
             assert!(
                 nd <= w * h / 25,
                 "frame {i} vs {}: {nd} px differ ({:.2}%) — a one-time view shift leaked into the first frames",
@@ -244,10 +243,7 @@ mod tests {
         for _ in 0..6 {
             let _ = step_walk(&mut w, 0.05, false, &crate::vid::mode_vid(320, 200), true);
         }
-        assert!(
-            w.beams.any_live(w.clock),
-            "firing the thunderbolt put a live beam in the store"
-        );
+        assert!(w.beams.any_live(w.clock), "firing the thunderbolt put a live beam in the store");
         assert!(
             matches!(w.model_cache.get("progs/bolt2.mdl"), Some(Some(_))),
             "TE_LIGHTNING2 loaded progs/bolt2.mdl on demand"
@@ -264,10 +260,7 @@ mod tests {
             "one ~600-unit beam expands to 1..=21 pieces (got {})",
             w.beam_scratch.len()
         );
-        assert!(
-            w.beam_scratch.iter().all(|s| s.model == BeamModel::Bolt2),
-            "thunderbolt pieces use bolt2.mdl"
-        );
+        assert!(w.beam_scratch.iter().all(|s| s.model == BeamModel::Bolt2), "thunderbolt pieces use bolt2.mdl");
         // The first piece sits at the player ORIGIN: the WriteEntity short
         // carried the player edict number through the decoder (an int global —
         // a float read would have yielded ~0 and never matched w.player), and
@@ -292,16 +285,8 @@ mod tests {
         w.prng = rng;
         w.beams.clear();
         let (without_bolt, _) = step_walk(&mut w, 0.0, false, &crate::vid::mode_vid(320, 200), true);
-        let diff = with_bolt
-            .pixels
-            .iter()
-            .zip(without_bolt.pixels.iter())
-            .filter(|(a, b)| a != b)
-            .count();
-        assert!(
-            diff > 0,
-            "the rendered thunderbolt changes pixels vs the beam-less frame"
-        );
+        let diff = with_bolt.pixels.iter().zip(without_bolt.pixels.iter()).filter(|(a, b)| a != b).count();
+        assert!(diff > 0, "the rendered thunderbolt changes pixels vs the beam-less frame");
         // Optional visual evidence: QUAKE_DUMP_BEAM=/some/dir dumps the two
         // frames as PPMs for eyeballing (never set in CI; the asserts above are
         // the real check).
@@ -331,11 +316,7 @@ mod tests {
                 if w.server.vm.ent_get_string(ent, "classname") == "trigger_changelevel" {
                     let amin = w.server.vm.ent_get_vector(ent, "absmin");
                     let amax = w.server.vm.ent_get_vector(ent, "absmax");
-                    return [
-                        0.5 * (amin[0] + amax[0]),
-                        0.5 * (amin[1] + amax[1]),
-                        0.5 * (amin[2] + amax[2]),
-                    ];
+                    return [0.5 * (amin[0] + amax[0]), 0.5 * (amin[1] + amax[1]), 0.5 * (amin[2] + amax[2])];
                 }
             }
             panic!("no trigger_changelevel in the live map");
@@ -413,10 +394,7 @@ mod tests {
         assert_eq!(w.server.vm.ent_get_float(p, "dmg_take"), 20.0, "T_Damage counted the hit");
         let (_, cshifts) = step_walk(&mut w, 0.05, false, &crate::vid::mode_vid(320, 200), true);
         assert_eq!(w.server.vm.ent_get_float(p, "dmg_take"), 0.0, "sent and zeroed");
-        assert!(
-            cshifts.iter().any(|&(c, pct)| c == [255, 0, 0] && pct > 0.0),
-            "a red damage cshift: {cshifts:?}"
-        );
+        assert!(cshifts.iter().any(|&(c, pct)| c == [255, 0, 0] && pct > 0.0), "a red damage cshift: {cshifts:?}");
         // count = max(20*0.5, 10) = 10: percent 30, then one 0.05 s drop of 7.5,
         // truncated like the C's int percent.
         assert_eq!(w.damage_blend, 22.0);
@@ -467,8 +445,7 @@ mod tests {
     /// load all start with the carried items seeded and every get-time 0.
     #[test]
     fn only_items_got_in_play_flash_not_what_a_level_starts_with() {
-        let unflashed =
-            |w: &Walk| w.cl_items == client_items(w) && w.item_gettime.iter().all(|&t| t == 0.0);
+        let unflashed = |w: &Walk| w.cl_items == client_items(w) && w.item_gettime.iter().all(|&t| t == 0.0);
         let mut w = build_walk().expect("e1m1 boots");
         assert_ne!(client_items(&w) & 1, 0, "the player spawns with the shotgun (bit 0)");
         assert!(unflashed(&w), "new game");
@@ -584,28 +561,17 @@ mod tests {
             // the moment the latch happened, so the latched value IS the server's
             // current clock.
             assert!(w.completed_time >= 1.0, "completed_time latches sv.time (epoch 1.0)");
-            assert_eq!(
-                w.completed_time,
-                w.server.time(),
-                "completed_time = sv.time at the latch (no steps ran since)"
-            );
+            assert_eq!(w.completed_time, w.server.time(), "completed_time = sv.time at the latch (no steps ran since)");
             // execute_changelevel froze the player: MOVETYPE_NONE, modelindex 0,
             // view_ofs zeroed, moved to the info_intermission spot.
-            assert_eq!(
-                w.server.vm.ent_get_float(w.player, "movetype") as i32,
-                0,
-                "player frozen MOVETYPE_NONE"
-            );
+            assert_eq!(w.server.vm.ent_get_float(w.player, "movetype") as i32, 0, "player frozen MOVETYPE_NONE");
             assert_eq!(
                 w.server.vm.ent_get_vector(w.player, "view_ofs"),
                 [0.0, 0.0, 0.0],
                 "view_ofs zeroed for the intermission camera"
             );
             // The stats the overlay shows come from the QC globals and are sane.
-            assert!(
-                w.server.vm.gget_float("total_monsters") > 0.0,
-                "e1m1 reports a monster total"
-            );
+            assert!(w.server.vm.gget_float("total_monsters") > 0.0, "e1m1 reports a monster total");
         });
         // The QC moved the player to the info_intermission spot (e1m1 has one);
         // its angles came from the spot's mangle via fixangle.
@@ -625,9 +591,8 @@ mod tests {
             w.intermission = 1;
             (a, b)
         });
-        let region_differs = (56..160).any(|y| {
-            (160..320).any(|x| with_overlay.pixels[y * 320 + x] != without_overlay.pixels[y * 320 + x])
-        });
+        let region_differs = (56..160)
+            .any(|y| (160..320).any(|x| with_overlay.pixels[y * 320 + x] != without_overlay.pixels[y * 320 + x]));
         assert!(region_differs, "the intermission overlay painted the stats region");
         // The crosshair (slop's `crosshair 1`) stays off the level-complete
         // screen, as id's GLQuake leaves it: the frozen frame is the same with
@@ -737,11 +702,7 @@ mod tests {
             let b = c.borrow();
             let menu = &b.as_ref().unwrap().menu;
             assert!(menu.visible, "svc_sellscreen popped the menu");
-            assert_eq!(
-                menu.screen(),
-                render::MenuScreen::Help,
-                "the sell screen is the Help/Ordering pages"
-            );
+            assert_eq!(menu.screen(), render::MenuScreen::Help, "the sell screen is the Help/Ordering pages");
         });
         walk_mut(|w| w.in_attack = false);
     }
@@ -873,9 +834,7 @@ mod tests {
         }
         let vm = &w.server.vm;
         let e = (1..vm.num_edicts() as i32)
-            .find(|&e| {
-                e != w.player && !vm.is_free_edict(e) && vm.ent_string_ref(e, "model").ends_with(".mdl")
-            })
+            .find(|&e| e != w.player && !vm.is_free_edict(e) && vm.ent_string_ref(e, "model").ends_with(".mdl"))
             .expect("an alias-model entity");
         (w, e)
     }

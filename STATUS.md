@@ -735,8 +735,8 @@ thing reverting the size was those four explicit resets.)
 
 **Verified:** 401 lib + 26 wasm tests pass (added
 `chosen_resolution_persists_across_reboot`; updated the preset-cycle + clamp tests).
-End-to-end headless Chromium check (in a work directory, `
-verify_resolution.py`, 9/9 pass): fresh boot = 960×600, persists to localStorage,
+End-to-end headless Chromium check (a one-off
+`verify_resolution.py`, 9/9 pass): fresh boot = 960×600, persists to localStorage,
 reload restores a picked 640×400, **walk/boot + New Game both preserve it** (the bug),
 oversized saved value clamps to 1280×800, garbage falls back to default, no console
 errors. `web/quake_wasm.wasm` rebuilt + deployed.

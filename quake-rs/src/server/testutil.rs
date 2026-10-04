@@ -7,8 +7,8 @@
 //! Fixtures used by only one module's tests live next to those tests instead.
 
 use crate::bsp::Bsp;
-use crate::progs::{Def, Function, Op, Statement, MAX_PARMS, OFS_PARM0, PROG_VERSION, RESERVED_OFS};
-use crate::server::{parm_global_name, Server, NUM_SPAWN_PARMS};
+use crate::progs::{Def, Function, MAX_PARMS, OFS_PARM0, Op, PROG_VERSION, RESERVED_OFS, Statement};
+use crate::server::{NUM_SPAWN_PARMS, Server, parm_global_name};
 
 const HEADER_SIZE: usize = 60;
 
@@ -31,15 +31,7 @@ fn ser_def(d: &Def) -> Vec<u8> {
 }
 fn ser_func(f: &Function) -> Vec<u8> {
     let mut v = Vec::new();
-    for x in [
-        f.first_statement,
-        f.parm_start,
-        f.locals,
-        f.profile,
-        f.s_name,
-        f.s_file,
-        f.numparms,
-    ] {
+    for x in [f.first_statement, f.parm_start, f.locals, f.profile, f.s_name, f.s_file, f.numparms] {
         v.extend_from_slice(&x.to_le_bytes());
     }
     v.extend_from_slice(&f.parm_size);
@@ -86,20 +78,12 @@ impl Builder {
     /// Add a global def of `type_` at `ofs` named `name`.
     pub(crate) fn add_global(&mut self, name: &str, type_: u16, ofs: u16) {
         let s = self.intern(name);
-        self.globaldefs.push(Def {
-            type_,
-            ofs,
-            s_name: s,
-        });
+        self.globaldefs.push(Def { type_, ofs, s_name: s });
     }
     /// Add a field def of `type_` at `ofs` named `name`.
     pub(crate) fn add_field(&mut self, name: &str, type_: u16, ofs: u16) {
         let s = self.intern(name);
-        self.fielddefs.push(Def {
-            type_,
-            ofs,
-            s_name: s,
-        });
+        self.fielddefs.push(Def { type_, ofs, s_name: s });
     }
     /// Add a bytecode function `name` with `stmts`; returns its index.
     pub(crate) fn add_function(&mut self, name: &str, stmts: Vec<Statement>) -> usize {
@@ -229,15 +213,11 @@ pub(crate) const EV_ENTITY: u16 = 4;
 /// EMPTY. This lets the entity-clip tests see entity collisions instead of a
 /// world block at fraction 0.
 pub(crate) fn world_open_bsp() -> Bsp {
-    use crate::bsp::{DClipNode, DLeaf, DModel, DNode, DPlane, CONTENTS_EMPTY, CONTENTS_SOLID};
+    use crate::bsp::{CONTENTS_EMPTY, CONTENTS_SOLID, DClipNode, DLeaf, DModel, DNode, DPlane};
     let mut b = empty_bsp();
     // One axial plane at x = -100000 (far away), so every test point is on
     // its front side -> child 0 -> the empty leaf.
-    b.planes = vec![DPlane {
-        normal: [1.0, 0.0, 0.0],
-        dist: -100000.0,
-        ptype: 0,
-    }];
+    b.planes = vec![DPlane { normal: [1.0, 0.0, 0.0], dist: -100000.0, ptype: 0 }];
     // node 0: both children name leaf 1 (index -(- ( -2)) ...). Children are
     // i16: a negative child -(leaf)-1. Leaf 1 -> child = -(1)-1 = -2.
     b.nodes = vec![DNode {
@@ -270,10 +250,7 @@ pub(crate) fn world_open_bsp() -> Bsp {
         },
     ];
     // Clip hulls 1/2: a single clipnode that is empty on both sides.
-    b.clipnodes = vec![DClipNode {
-        planenum: 0,
-        children: [CONTENTS_EMPTY as i16, CONTENTS_EMPTY as i16],
-    }];
+    b.clipnodes = vec![DClipNode { planenum: 0, children: [CONTENTS_EMPTY as i16, CONTENTS_EMPTY as i16] }];
     b.models = vec![DModel {
         mins: [-4096.0; 3],
         maxs: [4096.0; 3],
@@ -316,18 +293,8 @@ pub(crate) fn marker_progs() -> (Vec<u8>, usize, usize) {
     let marker = b.add_function(
         "marker",
         vec![
-            Statement {
-                op: Op::StoreF,
-                a: g_one as i16,
-                b: g_flag as i16,
-                c: 0,
-            },
-            Statement {
-                op: Op::Done,
-                a: 0,
-                b: 0,
-                c: 0,
-            },
+            Statement { op: Op::StoreF, a: g_one as i16, b: g_flag as i16, c: 0 },
+            Statement { op: Op::Done, a: 0, b: 0, c: 0 },
         ],
     );
 
@@ -377,18 +344,8 @@ pub(crate) fn touch_progs() -> (Vec<u8>, usize, usize, usize) {
     let touch_fn = b.add_function(
         "do_touch",
         vec![
-            Statement {
-                op: Op::StoreF,
-                a: g_one as i16,
-                b: g_flag as i16,
-                c: 0,
-            },
-            Statement {
-                op: Op::Done,
-                a: 0,
-                b: 0,
-                c: 0,
-            },
+            Statement { op: Op::StoreF, a: g_one as i16, b: g_flag as i16, c: 0 },
+            Statement { op: Op::Done, a: 0, b: 0, c: 0 },
         ],
     );
 
@@ -401,7 +358,7 @@ pub(crate) fn touch_progs() -> (Vec<u8>, usize, usize, usize) {
 /// A player box dropped onto it lands on `z = 0` and cannot tunnel through.
 /// The split plane is the axial +Z plane at `dist = 0` (`ptype = 2`).
 pub(crate) fn floor_bsp() -> Bsp {
-    use crate::bsp::{DClipNode, DLeaf, DModel, DNode, DPlane, CONTENTS_EMPTY, CONTENTS_SOLID};
+    use crate::bsp::{CONTENTS_EMPTY, CONTENTS_SOLID, DClipNode, DLeaf, DModel, DNode, DPlane};
     let mut b = empty_bsp();
     // plane 0: +Z at z = 0 (the point hull, hull 0). plane 1: +Z at z = 24,
     // which models how the BSP compiler bakes the player box (mins.z = -24)
@@ -414,14 +371,7 @@ pub(crate) fn floor_bsp() -> Bsp {
     // Hull-0 node: front side (z >= 0, child 0) -> empty leaf 1;
     // back side (z < 0, child 1) -> solid leaf 0. Negative child -(leaf)-1:
     // leaf 1 -> -2 (empty), leaf 0 -> -1 (solid).
-    b.nodes = vec![DNode {
-        planenum: 0,
-        children: [-2, -1],
-        mins: [0; 3],
-        maxs: [0; 3],
-        firstface: 0,
-        numfaces: 0,
-    }];
+    b.nodes = vec![DNode { planenum: 0, children: [-2, -1], mins: [0; 3], maxs: [0; 3], firstface: 0, numfaces: 0 }];
     b.leafs = vec![
         DLeaf {
             contents: CONTENTS_SOLID,
@@ -444,10 +394,7 @@ pub(crate) fn floor_bsp() -> Bsp {
     ];
     // Clip hulls 1/2 split on plane 1 (z = 24): above empty, below solid —
     // the player-expanded floor.
-    b.clipnodes = vec![DClipNode {
-        planenum: 1,
-        children: [CONTENTS_EMPTY as i16, CONTENTS_SOLID as i16],
-    }];
+    b.clipnodes = vec![DClipNode { planenum: 1, children: [CONTENTS_EMPTY as i16, CONTENTS_SOLID as i16] }];
     b.models = vec![DModel {
         mins: [-4096.0; 3],
         maxs: [4096.0; 3],
@@ -465,7 +412,7 @@ pub(crate) fn floor_bsp() -> Bsp {
 /// a step at `x = 100` pushed out by the box's 16-unit half width. Hull 0
 /// keeps the flat floor; only the player's box is traced here.
 pub(crate) fn step_bsp() -> Bsp {
-    use crate::bsp::{DClipNode, DPlane, CONTENTS_EMPTY, CONTENTS_SOLID};
+    use crate::bsp::{CONTENTS_EMPTY, CONTENTS_SOLID, DClipNode, DPlane};
     let mut b = floor_bsp();
     b.planes.push(DPlane { normal: [1.0, 0.0, 0.0], dist: 84.0, ptype: 0 }); // 2: the riser
     b.planes.push(DPlane { normal: [0.0, 0.0, 1.0], dist: 40.0, ptype: 2 }); // 3: the step's top
@@ -549,12 +496,7 @@ pub(crate) fn player_progs_with_prethink(prethink: Vec<Statement>) -> (Vec<u8>, 
     let f_origin = 2u16;
 
     // Empty system functions (DONE only).
-    let done = || Statement {
-        op: Op::Done,
-        a: 0,
-        b: 0,
-        c: 0,
-    };
+    let done = || Statement { op: Op::Done, a: 0, b: 0, c: 0 };
     b.add_function("SetNewParms", vec![done()]);
     b.add_function("ClientConnect", vec![done()]);
     b.add_function("StartFrame", vec![done()]);
@@ -582,26 +524,11 @@ pub(crate) fn player_progs_with_prethink(prethink: Vec<Statement>) -> (Vec<u8>, 
                 c: g_ptr as i16,
             },
             // *ptr = const100
-            Statement {
-                op: Op::StorepF,
-                a: g_const100 as i16,
-                b: g_ptr as i16,
-                c: 0,
-            },
+            Statement { op: Op::StorepF, a: g_const100 as i16, b: g_ptr as i16, c: 0 },
             // ptr = ADDRESS(self, f_origin)
-            Statement {
-                op: Op::Address,
-                a: 31,
-                b: g_forigin as i16,
-                c: g_ptr as i16,
-            },
+            Statement { op: Op::Address, a: 31, b: g_forigin as i16, c: g_ptr as i16 },
             // *ptr = origin_const (vector)
-            Statement {
-                op: Op::StorepV,
-                a: g_origin as i16,
-                b: g_ptr as i16,
-                c: 0,
-            },
+            Statement { op: Op::StorepV, a: g_origin as i16, b: g_ptr as i16, c: 0 },
             done(),
         ],
     );
@@ -703,12 +630,7 @@ pub(crate) fn attack_progs() -> (Vec<u8>, usize) {
     let sound_fn = b.add_builtin("sound", 8);
 
     // Empty connect/frame system functions.
-    let done = || Statement {
-        op: Op::Done,
-        a: 0,
-        b: 0,
-        c: 0,
-    };
+    let done = || Statement { op: Op::Done, a: 0, b: 0, c: 0 };
     b.add_function("SetNewParms", vec![done()]);
     b.add_function("ClientConnect", vec![done()]);
     b.add_function("PutClientInServer", vec![done()]);
@@ -735,60 +657,15 @@ pub(crate) fn attack_progs() -> (Vec<u8>, usize) {
     b.add_function(
         "PlayerPostThink",
         vec![
-            Statement {
-                op: Op::LoadF,
-                a: SELF as i16,
-                b: G_FBUTTON0 as i16,
-                c: G_BTN as i16,
-            },
-            Statement {
-                op: Op::Ifnot,
-                a: G_BTN as i16,
-                b: 8,
-                c: 0,
-            },
-            Statement {
-                op: Op::StoreF,
-                a: G_ONE as i16,
-                b: G_FIRED as i16,
-                c: 0,
-            },
-            Statement {
-                op: Op::StoreEnt,
-                a: SELF as i16,
-                b: parm0,
-                c: 0,
-            },
-            Statement {
-                op: Op::StoreF,
-                a: G_CHAN as i16,
-                b: parm1,
-                c: 0,
-            },
-            Statement {
-                op: Op::StoreS,
-                a: G_SAMPLE as i16,
-                b: parm2,
-                c: 0,
-            },
-            Statement {
-                op: Op::StoreF,
-                a: G_VOL as i16,
-                b: parm3,
-                c: 0,
-            },
-            Statement {
-                op: Op::StoreF,
-                a: G_ATTEN as i16,
-                b: parm4,
-                c: 0,
-            },
-            Statement {
-                op: Op::Call5,
-                a: G_SNDFUNC as i16,
-                b: 0,
-                c: 0,
-            },
+            Statement { op: Op::LoadF, a: SELF as i16, b: G_FBUTTON0 as i16, c: G_BTN as i16 },
+            Statement { op: Op::Ifnot, a: G_BTN as i16, b: 8, c: 0 },
+            Statement { op: Op::StoreF, a: G_ONE as i16, b: G_FIRED as i16, c: 0 },
+            Statement { op: Op::StoreEnt, a: SELF as i16, b: parm0, c: 0 },
+            Statement { op: Op::StoreF, a: G_CHAN as i16, b: parm1, c: 0 },
+            Statement { op: Op::StoreS, a: G_SAMPLE as i16, b: parm2, c: 0 },
+            Statement { op: Op::StoreF, a: G_VOL as i16, b: parm3, c: 0 },
+            Statement { op: Op::StoreF, a: G_ATTEN as i16, b: parm4, c: 0 },
+            Statement { op: Op::Call5, a: G_SNDFUNC as i16, b: 0, c: 0 },
             done(),
         ],
     );
@@ -859,12 +736,7 @@ pub(crate) fn changelevel_progs() -> (Vec<u8>, usize, usize) {
     b.add_field("size", EV_VECTOR, 20);
     b.add_field("health", EV_FLOAT, 23);
 
-    let done = || Statement {
-        op: Op::Done,
-        a: 0,
-        b: 0,
-        c: 0,
-    };
+    let done = || Statement { op: Op::Done, a: 0, b: 0, c: 0 };
     // SetChangeParms: parm1 = g_const.
     b.add_function(
         "SetChangeParms",

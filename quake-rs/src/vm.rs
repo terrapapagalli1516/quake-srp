@@ -38,7 +38,7 @@ use std::rc::Rc;
 
 use crate::error::{ProgramError, QError, Result};
 use crate::math::Vec3;
-use crate::progs::{string_in, Op, Progs, Statement, MAX_PARMS, OFS_PARM0, OFS_RETURN};
+use crate::progs::{MAX_PARMS, OFS_PARM0, OFS_RETURN, Op, Progs, Statement, string_in};
 use crate::qrand::QRand;
 
 mod print;
@@ -244,9 +244,22 @@ impl GlobalOfs {
     /// The spawn parms `parm1`..`parm16`, in order (`NUM_SPAWN_PARMS`).
     pub fn parms(&self) -> [Glb; 16] {
         [
-            self.parm1, self.parm2, self.parm3, self.parm4, self.parm5, self.parm6, self.parm7,
-            self.parm8, self.parm9, self.parm10, self.parm11, self.parm12, self.parm13,
-            self.parm14, self.parm15, self.parm16,
+            self.parm1,
+            self.parm2,
+            self.parm3,
+            self.parm4,
+            self.parm5,
+            self.parm6,
+            self.parm7,
+            self.parm8,
+            self.parm9,
+            self.parm10,
+            self.parm11,
+            self.parm12,
+            self.parm13,
+            self.parm14,
+            self.parm15,
+            self.parm16,
         ]
     }
 }
@@ -1110,11 +1123,7 @@ impl Vm {
         }
         let ef = self.entityfields();
         let idx = (e as usize).checked_mul(ef)?.checked_add(ofs)?;
-        if idx < self.edict_fields.len() {
-            Some(idx)
-        } else {
-            None
-        }
+        if idx < self.edict_fields.len() { Some(idx) } else { None }
     }
 
     /// Read entity field as a float (`E_FLOAT`). Out of range reads as `0.0`.
@@ -1168,9 +1177,7 @@ impl Vm {
                 *c = v;
                 Ok(())
             }
-            None => Err(self.run_error(format!(
-                "pointer {ptr} out of range (len {len})"
-            ))),
+            None => Err(self.run_error(format!("pointer {ptr} out of range (len {len})"))),
         }
     }
 
@@ -1178,10 +1185,7 @@ impl Vm {
 
     /// Read a raw global cell, bounds-checked (for the interpreter inner loop).
     fn cell(&self, ofs: usize) -> Result<u32> {
-        self.globals
-            .get(ofs)
-            .copied()
-            .ok_or_else(|| self.run_error(format!("global offset {ofs} out of range")))
+        self.globals.get(ofs).copied().ok_or_else(|| self.run_error(format!("global offset {ofs} out of range")))
     }
     /// Read a raw global cell as a float.
     fn cell_f(&self, ofs: usize) -> Result<f32> {
@@ -1203,9 +1207,7 @@ impl Vm {
                 *c = v;
                 Ok(())
             }
-            None => Err(self.run_error(format!(
-                "global offset {ofs} out of range (len {len})"
-            ))),
+            None => Err(self.run_error(format!("global offset {ofs} out of range (len {len})"))),
         }
     }
     fn set_cell_f(&mut self, ofs: usize, v: f32) -> Result<()> {
@@ -1248,10 +1250,7 @@ impl Vm {
         if self.stack.len() + 1 >= MAX_STACK_DEPTH {
             return Err(self.run_error("stack overflow"));
         }
-        self.stack.push(Frame {
-            s: self.xstatement,
-            f: self.xfunction,
-        });
+        self.stack.push(Frame { s: self.xstatement, f: self.xfunction });
 
         let f = self
             .progs
@@ -1305,10 +1304,7 @@ impl Vm {
     /// `PR_LeaveFunction`: restore the current function's locals from the locals
     /// stack and pop the caller frame, returning the resume statement index.
     fn leave_function(&mut self) -> Result<usize> {
-        let frame = self
-            .stack
-            .pop()
-            .ok_or_else(|| self.run_error("prog stack underflow"))?;
+        let frame = self.stack.pop().ok_or_else(|| self.run_error("prog stack underflow"))?;
 
         let f = self
             .progs
@@ -1338,10 +1334,8 @@ impl Vm {
 
     /// Call the function named `name`. Errors if no such function exists.
     pub fn call_by_name(&mut self, name: &str) -> Result<()> {
-        let fnum = self
-            .progs
-            .find_function(name)
-            .ok_or_else(|| self.run_error(format!("no function named {name:?}")))?;
+        let fnum =
+            self.progs.find_function(name).ok_or_else(|| self.run_error(format!("no function named {name:?}")))?;
         self.execute(fnum)
     }
 
@@ -1440,8 +1434,7 @@ impl Vm {
 
             if self.trace {
                 let mn = st.op.mnemonic();
-                self.output
-                    .push_str(&format!("{s:5}: {mn} a={} b={} c={}\n", st.a, st.b, st.c));
+                self.output.push_str(&format!("{s:5}: {mn} a={} b={} c={}\n", st.a, st.b, st.c));
             }
 
             let op = st.op;
@@ -1637,9 +1630,7 @@ impl Vm {
                     let ent = self.cell_i(a)?;
                     let field = self.cell_i(b)?;
                     if ent < 0 || field < 0 {
-                        return Err(self.run_error(format!(
-                            "ADDRESS with bad ent={ent} field={field}"
-                        )));
+                        return Err(self.run_error(format!("ADDRESS with bad ent={ent} field={field}")));
                     }
                     let ef = self.entityfields();
                     let flat = (ent as usize)
@@ -1660,9 +1651,7 @@ impl Vm {
                     }
                     let cell = self
                         .edict_cell(ent, field as usize)
-                        .ok_or_else(|| self.run_error(format!(
-                            "LOAD ent={ent} field={field} out of range"
-                        )))?;
+                        .ok_or_else(|| self.run_error(format!("LOAD ent={ent} field={field} out of range")))?;
                     let v = self.edict_fields[cell];
                     self.set_cell(c, v)?;
                 }
@@ -1674,9 +1663,7 @@ impl Vm {
                     }
                     let base = self
                         .edict_cell(ent, field as usize)
-                        .ok_or_else(|| self.run_error(format!(
-                            "LOAD_V ent={ent} field={field} out of range"
-                        )))?;
+                        .ok_or_else(|| self.run_error(format!("LOAD_V ent={ent} field={field} out of range")))?;
                     // Bounds-check all three cells.
                     let x = *self.edict_fields.get(base).ok_or_else(|| self.run_error("LOAD_V oob"))?;
                     let y = *self.edict_fields.get(base + 1).ok_or_else(|| self.run_error("LOAD_V oob"))?;
@@ -1836,15 +1823,7 @@ mod tests {
     }
     fn ser_func(f: &Function) -> Vec<u8> {
         let mut v = Vec::new();
-        for x in [
-            f.first_statement,
-            f.parm_start,
-            f.locals,
-            f.profile,
-            f.s_name,
-            f.s_file,
-            f.numparms,
-        ] {
+        for x in [f.first_statement, f.parm_start, f.locals, f.profile, f.s_name, f.s_file, f.numparms] {
             v.extend_from_slice(&x.to_le_bytes());
         }
         v.extend_from_slice(&f.parm_size);
@@ -2049,7 +2028,11 @@ mod tests {
             s_name: dbl_name,
             s_file: 0,
             numparms: 1,
-            parm_size: { let mut p = [0u8; 8]; p[0] = 1; p },
+            parm_size: {
+                let mut p = [0u8; 8];
+                p[0] = 1;
+                p
+            },
         });
         let dbl_idx = b.functions.len() - 1;
 

@@ -13,11 +13,11 @@
 
 use super::pr_cmds::bi_changeyaw;
 use super::sv_world::{link_edict, sv_move, touch_triggers};
-use super::{EntFlags, CONTENTS_EMPTY, CONTENTS_SOLID};
-use crate::math::{add as v_add, Vec3};
+use super::{CONTENTS_EMPTY, CONTENTS_SOLID, EntFlags};
+use crate::Result;
+use crate::math::{Vec3, add as v_add};
 use crate::vm::Vm;
 use crate::world;
-use crate::Result;
 
 /// `DI_NODIR` (sv_move.c): the "no preferred direction" sentinel used by
 /// [`sv_new_chase_dir`]'s axis-direction picks.
@@ -152,9 +152,7 @@ pub fn sv_movestep(vm: &mut Vm, ent: i32, mov: Vec3, relink: bool) -> bool {
             if tr.fraction == 1.0 {
                 // A swim monster that would leave water cannot make this move.
                 if flags.contains(EntFlags::SWIM) {
-                    let c = vm
-                        .with_host(|_vm, h| h.point_contents(tr.endpos))
-                        .unwrap_or(CONTENTS_SOLID);
+                    let c = vm.with_host(|_vm, h| h.point_contents(tr.endpos)).unwrap_or(CONTENTS_SOLID);
                     if c == CONTENTS_EMPTY {
                         return false; // swim monster left water
                     }
@@ -304,7 +302,6 @@ fn sv_fix_check_bottom(vm: &mut Vm, ent: i32) {
     let flags = vm.flags(ent);
     vm.set_flags(ent, flags.with(EntFlags::PARTIALGROUND));
 }
-
 
 /// `SV_NewChaseDir` (sv_move.c ~283): pick a new movement direction for `actor`
 /// toward `enemy` and step that way.

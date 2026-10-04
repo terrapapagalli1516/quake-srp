@@ -33,26 +33,14 @@ pub fn cmd_changelevel(pak_path: &str, map_name: &str) -> CmdResult {
     let player = server.connect_client().map_err(|e| format!("connect_client: {e}"))?;
 
     let mut o = String::new();
-    let _ = writeln!(
-        o,
-        "changelevel {map_name}: {} entities spawned; player = edict {player}",
-        rep.spawned
-    );
+    let _ = writeln!(o, "changelevel {map_name}: {} entities spawned; player = edict {player}", rep.spawned);
 
     // A small snapshot of the player's persistent state for the BEFORE/AFTER
     // comparison: weapon, items bitfield, health, armor, and the three ammo
     // counters DecodeLevelParms restores.
     let snapshot = |s: &Server| -> [i64; 7] {
         let g = |f: &str| s.vm.ent_get_float(player.max(0), f) as i64;
-        [
-            g("weapon"),
-            g("items"),
-            g("health"),
-            g("armorvalue"),
-            g("ammo_shells"),
-            g("ammo_nails"),
-            g("ammo_rockets"),
-        ]
+        [g("weapon"), g("items"), g("health"), g("armorvalue"), g("ammo_shells"), g("ammo_nails"), g("ammo_rockets")]
     };
     let fmt = |v: &[i64; 7]| {
         format!(
@@ -73,11 +61,7 @@ pub fn cmd_changelevel(pak_path: &str, map_name: &str) -> CmdResult {
         if server.vm.ent_get_string(ent, "classname") == "trigger_changelevel" {
             let amin = server.vm.ent_get_vector(ent, "absmin");
             let amax = server.vm.ent_get_vector(ent, "absmax");
-            let centre = [
-                0.5 * (amin[0] + amax[0]),
-                0.5 * (amin[1] + amax[1]),
-                0.5 * (amin[2] + amax[2]),
-            ];
+            let centre = [0.5 * (amin[0] + amax[0]), 0.5 * (amin[1] + amax[1]), 0.5 * (amin[2] + amax[2])];
             trigger = Some((ent, centre));
             break;
         }
@@ -153,18 +137,14 @@ pub fn cmd_changelevel(pak_path: &str, map_name: &str) -> CmdResult {
     let before = snapshot(&server);
     let parms = server.save_spawn_parms()?;
     let _ = writeln!(o, "  BEFORE swap: {}", fmt(&before));
-    let _ = writeln!(
-        o,
-        "  saved spawn parms: {}",
-        parms.iter().map(|p| format!("{p:.0}")).collect::<Vec<_>>().join(",")
-    );
+    let _ =
+        writeln!(o, "  saved spawn parms: {}", parms.iter().map(|p| format!("{p:.0}")).collect::<Vec<_>>().join(","));
 
     // Build the next server from the next BSP + a fresh progs, spawn its entities,
     // and reconnect the client carrying the saved parms (DecodeLevelParms restores
     // the inventory inside PutClientInServer).
     let next_bsp_path = format!("maps/{next_map_name}.bsp");
-    let next_bytes = read(&next_bsp_path)
-        .map_err(|e| format!("loading next map {next_bsp_path}: {e}"))?;
+    let next_bytes = read(&next_bsp_path).map_err(|e| format!("loading next map {next_bsp_path}: {e}"))?;
     let next_bsp = Bsp::parse(&next_bytes)?;
     let next_progs = Progs::parse(&read("progs.dat")?)?;
     // Carry the chosen difficulty across (a new server starts at skill 1) and
@@ -175,9 +155,8 @@ pub fn cmd_changelevel(pak_path: &str, map_name: &str) -> CmdResult {
     next_server.set_map_name(&next_map_name); // SV_SpawnServer for the swapped-to level
     next_server.set_skill(carry_skill as f32);
     let next_rep = next_server.spawn_entities()?;
-    let next_player = next_server
-        .connect_client_with_parms(parms)
-        .map_err(|e| format!("connect_client_with_parms: {e}"))?;
+    let next_player =
+        next_server.connect_client_with_parms(parms).map_err(|e| format!("connect_client_with_parms: {e}"))?;
     let _ = writeln!(
         o,
         "  swapped to {next_bsp_path}: {} entities spawned; player = edict {next_player}",
@@ -187,15 +166,7 @@ pub fn cmd_changelevel(pak_path: &str, map_name: &str) -> CmdResult {
     let after_player = next_player;
     let after = {
         let g = |f: &str| next_server.vm.ent_get_float(after_player, f) as i64;
-        [
-            g("weapon"),
-            g("items"),
-            g("health"),
-            g("armorvalue"),
-            g("ammo_shells"),
-            g("ammo_nails"),
-            g("ammo_rockets"),
-        ]
+        [g("weapon"), g("items"), g("health"), g("armorvalue"), g("ammo_shells"), g("ammo_nails"), g("ammo_rockets")]
     };
     let _ = writeln!(o, "  AFTER swap:  {}", fmt(&after));
     let carried = after[0] == before[0]
@@ -210,4 +181,3 @@ pub fn cmd_changelevel(pak_path: &str, map_name: &str) -> CmdResult {
     );
     Ok(Out::Text(o))
 }
-

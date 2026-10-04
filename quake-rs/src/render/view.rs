@@ -5,9 +5,9 @@
 //! the software `V_UpdatePalette`'s ramps, `BuildGammaTable`, and the gun
 //! placement of `V_CalcRefdef` / `CalcGunAngle`.
 
+use super::{Camera, Image, Palette};
 use crate::math::Vec3;
 use crate::sbar::{IT_INVISIBILITY, IT_INVULNERABILITY, IT_QUAD, IT_SUIT};
-use super::{Camera, Image, Palette};
 
 /// Quake's `V_CalcBob` (view.c): the sinusoidal head-bob amount (world units) to
 /// add to the eye height while moving, so the view rocks up and down with each
@@ -27,11 +27,7 @@ pub fn view_bob(vel_xy: f32, time: f32) -> f32 {
     }
     // Phase within the bob cycle, in [0, 1).
     let mut cycle = (time - (time / CL_BOBCYCLE).floor() * CL_BOBCYCLE) / CL_BOBCYCLE;
-    cycle = if cycle < CL_BOBUP {
-        PI * cycle / CL_BOBUP
-    } else {
-        PI + PI * (cycle - CL_BOBUP) / (1.0 - CL_BOBUP)
-    };
+    cycle = if cycle < CL_BOBUP { PI * cycle / CL_BOBUP } else { PI + PI * (cycle - CL_BOBUP) / (1.0 - CL_BOBUP) };
     // Bob is proportional to horizontal speed, mostly the sin term.
     let base = vel_xy * CL_BOB;
     let bob = base * 0.3 + base * 0.7 * cycle.sin();
@@ -286,7 +282,12 @@ mod tests {
         for (shifts, g) in [(vec![], 1.0), (vec![water], 1.0), (vec![water, ([255, 0, 0], 150.0), quad], 0.7)] {
             let gamma = build_gamma_table(g);
             let [r, gr, b] = cshift_ramps(&shifts, &gamma);
-            let old: Vec<u8> = image.to_rgb(&base).pixels.iter().flat_map(|p| [r[p[0] as usize], gr[p[1] as usize], b[p[2] as usize], 255]).collect();
+            let old: Vec<u8> = image
+                .to_rgb(&base)
+                .pixels
+                .iter()
+                .flat_map(|p| [r[p[0] as usize], gr[p[1] as usize], b[p[2] as usize], 255])
+                .collect();
             for threads in [1, 3] {
                 let mut new = Vec::new();
                 pack_rgba(&image, &FramePalette::new(&base, &shifts, &gamma), &mut new, threads);

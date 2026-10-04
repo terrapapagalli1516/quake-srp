@@ -24,7 +24,7 @@
 
 use quake_rs::render::{self, FramePalette, Image};
 
-use crate::proto::{Msg, FORMAT_INDEXED8, FORMAT_RGBA8};
+use crate::proto::{FORMAT_INDEXED8, FORMAT_RGBA8, Msg};
 
 /// The frames the program keeps: the page may be reading the newest or the
 /// one before while the next one is drawn.
@@ -112,7 +112,14 @@ impl Present {
         let held = &self.ring[slot];
         let (w, h, format) = (held.w as u16, held.h as u16, held.format);
         Some(if self.in_place {
-            Msg::FrameAt { w, h, format, slot: slot as u8, pixels: address(&held.pixels), palette: address(&held.palette) }
+            Msg::FrameAt {
+                w,
+                h,
+                format,
+                slot: slot as u8,
+                pixels: address(&held.pixels),
+                palette: address(&held.palette),
+            }
         } else {
             let palette = if format == FORMAT_INDEXED8 { &held.palette[..] } else { &[] };
             Msg::Frame { w, h, format, palette, pixels: &held.pixels }
@@ -165,7 +172,10 @@ mod tests {
         let (image, palette) = frame();
         p.frame(image, &palette, 1);
         let indexed = record(&p);
-        assert_eq!((indexed.kind, indexed.payload[4], indexed.payload.len()), (Record::FRAME, FORMAT_INDEXED8, 8 + 1024 + 8));
+        assert_eq!(
+            (indexed.kind, indexed.payload[4], indexed.payload.len()),
+            (Record::FRAME, FORMAT_INDEXED8, 8 + 1024 + 8)
+        );
         assert_eq!(&indexed.payload[8..8 + 1024], &palette.to_bytes()[..]);
         assert_eq!(&indexed.payload[8 + 1024..], &[0, 1, 2, 3, 4, 5, 6, 7]);
         assert_eq!(p.rgba(), rgba.payload[8..], "either way the page shows the same colours");

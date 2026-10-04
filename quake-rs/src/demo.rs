@@ -28,7 +28,7 @@
 #![forbid(unsafe_code)]
 
 use crate::error::{QError, Result};
-use crate::server::{ParticleBurst, SoundEvent, StaticSound, TempEntityEvent, MAX_LIGHTSTYLES};
+use crate::server::{MAX_LIGHTSTYLES, ParticleBurst, SoundEvent, StaticSound, TempEntityEvent};
 use std::rc::Rc;
 
 // ---------------------------------------------------------------------------
@@ -196,11 +196,7 @@ struct NetReader<'a> {
 
 impl<'a> NetReader<'a> {
     fn new(data: &'a [u8]) -> Self {
-        NetReader {
-            data,
-            pos: 0,
-            bad: false,
-        }
+        NetReader { data, pos: 0, bad: false }
     }
 
     /// `MSG_ReadChar`: next byte sign-extended to i32, or -1 at end (+ bad flag).
@@ -264,12 +260,7 @@ impl<'a> NetReader<'a> {
             self.bad = true;
             return 0.0;
         }
-        let bytes = [
-            self.data[self.pos],
-            self.data[self.pos + 1],
-            self.data[self.pos + 2],
-            self.data[self.pos + 3],
-        ];
+        let bytes = [self.data[self.pos], self.data[self.pos + 1], self.data[self.pos + 2], self.data[self.pos + 3]];
         self.pos += 4;
         f32::from_le_bytes(bytes)
     }
@@ -933,12 +924,7 @@ fn parse_demo_with(bytes: &[u8]) -> Result<(Demo, bool)> {
         if pos + 4 > bytes.len() {
             break; // clean EOF (or trailing garbage shorter than a header)
         }
-        let len = i32::from_le_bytes([
-            bytes[pos],
-            bytes[pos + 1],
-            bytes[pos + 2],
-            bytes[pos + 3],
-        ]);
+        let len = i32::from_le_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]]);
         pos += 4;
 
         // A negative or nonsensical length means a corrupt stream: stop cleanly.
@@ -953,12 +939,7 @@ fn parse_demo_with(bytes: &[u8]) -> Result<(Demo, bool)> {
         }
         let mut block_angles = [0.0f32; 3];
         for a in block_angles.iter_mut() {
-            *a = f32::from_le_bytes([
-                bytes[pos],
-                bytes[pos + 1],
-                bytes[pos + 2],
-                bytes[pos + 3],
-            ]);
+            *a = f32::from_le_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]]);
             pos += 4;
         }
 
@@ -1063,10 +1044,8 @@ fn snapshot(cl: &mut ClientState) -> DemoFrame {
         .entities
         .get(cl.viewentity)
         .map_or(([0.0; 3], [0.0; 3], true), |ve| (ve.msg_origins[0], ve.msg_origins[1], ve.forcelink));
-    let (view_entity_angles, view_prev_entity_angles) = cl
-        .entities
-        .get(cl.viewentity)
-        .map_or(([0.0; 3], [0.0; 3]), |ve| (ve.msg_angles[0], ve.msg_angles[1]));
+    let (view_entity_angles, view_prev_entity_angles) =
+        cl.entities.get(cl.viewentity).map_or(([0.0; 3], [0.0; 3]), |ve| (ve.msg_angles[0], ve.msg_angles[1]));
     let mut view_origin = view_entity_origin;
     view_origin[2] += cl.viewheight;
     // CL_RelinkEntities reads `effects` of an entity the newest message
@@ -1440,11 +1419,7 @@ fn parse_server_message(cl: &mut ClientState, msg: &[u8]) -> Result<ParseFlow> {
                 let sound_num = r.read_byte();
                 let vol = r.read_byte();
                 let atten = r.read_byte();
-                let sample = cl
-                    .sound_precache
-                    .get(sound_num as usize)
-                    .cloned()
-                    .unwrap_or_default();
+                let sample = cl.sound_precache.get(sound_num as usize).cloned().unwrap_or_default();
                 cl.static_sounds.push(StaticSound {
                     origin,
                     sound_index: sound_num,
@@ -1478,9 +1453,7 @@ fn parse_server_message(cl: &mut ClientState, msg: &[u8]) -> Result<ParseFlow> {
             // svc_bad (0), OBSOLETE svc_spawnbinary (21), and anything else
             // are illegible — the original called Host_Error.
             _ => {
-                return Err(QError::invalid(format!(
-                    "illegible server message: unknown command {cmd}"
-                )));
+                return Err(QError::invalid(format!("illegible server message: unknown command {cmd}")));
             }
         }
     }
@@ -1503,17 +1476,11 @@ fn parse_update(cl: &mut ClientState, r: &mut NetReader, mut bits: i32) -> Resul
         bits |= i << 8;
     }
 
-    let num = if bits & U_LONGENTITY != 0 {
-        r.read_short()
-    } else {
-        r.read_byte()
-    };
+    let num = if bits & U_LONGENTITY != 0 { r.read_short() } else { r.read_byte() };
     if num < 0 {
         return Err(QError::invalid("entity update: bad entity number"));
     }
-    let idx = cl
-        .entity_num(num as usize)
-        .ok_or_else(|| QError::invalid("entity update: entity number too large"))?;
+    let idx = cl.entity_num(num as usize).ok_or_else(|| QError::invalid("entity update: entity number too large"))?;
 
     // Work on a copy of the entity, then store it back. (Borrow-checker
     // friendly and avoids holding a &mut across NetReader calls.)
@@ -1531,81 +1498,41 @@ fn parse_update(cl: &mut ClientState, r: &mut NetReader, mut bits: i32) -> Resul
 
     // Order matches CL_ParseUpdate EXACTLY: model, frame, colormap, skin,
     // effects, then origin1, angle1, origin2, angle2, origin3, angle3.
-    ent.modelindex = if bits & U_MODEL != 0 {
-        r.read_byte()
-    } else {
-        ent.base_modelindex
-    };
+    ent.modelindex = if bits & U_MODEL != 0 { r.read_byte() } else { ent.base_modelindex };
     // C: when the model changes to NULL, force a relink ("hack to make null
     // model players work"). modelindex 0 is the empty/world model here.
     if ent.modelindex != prev_modelindex && ent.modelindex == 0 {
         forcelink = true;
     }
 
-    ent.frame = if bits & U_FRAME != 0 {
-        r.read_byte()
-    } else {
-        ent.base_frame
-    };
+    ent.frame = if bits & U_FRAME != 0 { r.read_byte() } else { ent.base_frame };
 
     if bits & U_COLORMAP != 0 {
         let _ = r.read_byte(); // colormap — consumed, not rendered here
     }
 
     // CL_ParseUpdate: `skin = U_SKIN ? MSG_ReadByte() : ent->baseline.skin`.
-    ent.skin = if bits & U_SKIN != 0 {
-        r.read_byte()
-    } else {
-        ent.base_skin
-    };
+    ent.skin = if bits & U_SKIN != 0 { r.read_byte() } else { ent.base_skin };
 
     // CL_ParseUpdate stores effects (or restores the baseline value); we keep
     // it so a front-end can drive dynamic lights / brightfield particles.
     // CL_ParseBaseline never reads an effects byte, so baseline.effects is
     // always 0 (the zeroed entity_state_t), hence the fallback is 0.
-    ent.effects = if bits & U_EFFECTS != 0 {
-        r.read_byte()
-    } else {
-        0
-    };
+    ent.effects = if bits & U_EFFECTS != 0 { r.read_byte() } else { 0 };
 
     // "shift the known values for interpolation": the previous most-recent
     // snapshot ([0]) becomes the older one ([1]) before we read the new [0].
     ent.msg_origins[1] = ent.msg_origins[0];
     ent.msg_angles[1] = ent.msg_angles[0];
 
-    ent.msg_origins[0][0] = if bits & U_ORIGIN1 != 0 {
-        r.read_coord()
-    } else {
-        ent.base_origin[0]
-    };
-    ent.msg_angles[0][0] = if bits & U_ANGLE1 != 0 {
-        r.read_angle()
-    } else {
-        ent.base_angles[0]
-    };
+    ent.msg_origins[0][0] = if bits & U_ORIGIN1 != 0 { r.read_coord() } else { ent.base_origin[0] };
+    ent.msg_angles[0][0] = if bits & U_ANGLE1 != 0 { r.read_angle() } else { ent.base_angles[0] };
 
-    ent.msg_origins[0][1] = if bits & U_ORIGIN2 != 0 {
-        r.read_coord()
-    } else {
-        ent.base_origin[1]
-    };
-    ent.msg_angles[0][1] = if bits & U_ANGLE2 != 0 {
-        r.read_angle()
-    } else {
-        ent.base_angles[1]
-    };
+    ent.msg_origins[0][1] = if bits & U_ORIGIN2 != 0 { r.read_coord() } else { ent.base_origin[1] };
+    ent.msg_angles[0][1] = if bits & U_ANGLE2 != 0 { r.read_angle() } else { ent.base_angles[1] };
 
-    ent.msg_origins[0][2] = if bits & U_ORIGIN3 != 0 {
-        r.read_coord()
-    } else {
-        ent.base_origin[2]
-    };
-    ent.msg_angles[0][2] = if bits & U_ANGLE3 != 0 {
-        r.read_angle()
-    } else {
-        ent.base_angles[2]
-    };
+    ent.msg_origins[0][2] = if bits & U_ORIGIN3 != 0 { r.read_coord() } else { ent.base_origin[2] };
+    ent.msg_angles[0][2] = if bits & U_ANGLE3 != 0 { r.read_angle() } else { ent.base_angles[2] };
 
     // No update last message: copy the new snapshot into BOTH history slots so
     // the lerp is a no-op (the entity simply appears at [0]).
@@ -1676,17 +1603,9 @@ fn spawn_static(r: &mut NetReader) -> Entity {
 /// every optional field resets to its default when its bit is missing (the
 /// server resends the full set each message).
 fn parse_clientdata(cl: &mut ClientState, r: &mut NetReader, bits: i32) -> Result<()> {
-    cl.viewheight = if bits & SU_VIEWHEIGHT != 0 {
-        r.read_char() as f32
-    } else {
-        DEFAULT_VIEWHEIGHT
-    };
+    cl.viewheight = if bits & SU_VIEWHEIGHT != 0 { r.read_char() as f32 } else { DEFAULT_VIEWHEIGHT };
 
-    cl.idealpitch = if bits & SU_IDEALPITCH != 0 {
-        r.read_char() as f32
-    } else {
-        0.0
-    };
+    cl.idealpitch = if bits & SU_IDEALPITCH != 0 { r.read_char() as f32 } else { 0.0 };
 
     // VectorCopy(cl.mvelocity[0], cl.mvelocity[1]): shift the velocity history
     // BEFORE reading the new values, so CL_RelinkEntities can lerp between the
@@ -1697,16 +1616,8 @@ fn parse_clientdata(cl: &mut ClientState, r: &mut NetReader, bits: i32) -> Resul
     // quantized as value/16 on the wire (`cl.mvelocity[0][i] =
     // MSG_ReadChar()*16`); punch angles are whole degrees in a char.
     for i in 0..3 {
-        cl.punchangle[i] = if bits & (SU_PUNCH1 << i) != 0 {
-            r.read_char() as f32
-        } else {
-            0.0
-        };
-        cl.mvelocity[0][i] = if bits & (SU_VELOCITY1 << i) != 0 {
-            r.read_char() as f32 * 16.0
-        } else {
-            0.0
-        };
+        cl.punchangle[i] = if bits & (SU_PUNCH1 << i) != 0 { r.read_char() as f32 } else { 0.0 };
+        cl.mvelocity[0][i] = if bits & (SU_VELOCITY1 << i) != 0 { r.read_char() as f32 * 16.0 } else { 0.0 };
     }
 
     // items — always a long ("[always sent]"). The C also latches per-bit
@@ -1717,11 +1628,7 @@ fn parse_clientdata(cl: &mut ClientState, r: &mut NetReader, bits: i32) -> Resul
     cl.onground = bits & SU_ONGROUND != 0;
     cl.inwater = bits & SU_INWATER != 0;
 
-    cl.stats[STAT_WEAPONFRAME] = if bits & SU_WEAPONFRAME != 0 {
-        r.read_byte()
-    } else {
-        0
-    };
+    cl.stats[STAT_WEAPONFRAME] = if bits & SU_WEAPONFRAME != 0 { r.read_byte() } else { 0 };
     cl.stats[STAT_ARMOR] = if bits & SU_ARMOR != 0 { r.read_byte() } else { 0 };
     cl.stats[STAT_WEAPON] = if bits & SU_WEAPON != 0 { r.read_byte() } else { 0 };
 
@@ -1752,16 +1659,9 @@ fn parse_clientdata(cl: &mut ClientState, r: &mut NetReader, bits: i32) -> Resul
 fn parse_start_sound(cl: &mut ClientState, r: &mut NetReader) -> Result<()> {
     let field_mask = r.read_byte();
 
-    let volume = if field_mask & SND_VOLUME != 0 {
-        r.read_byte()
-    } else {
-        DEFAULT_SOUND_PACKET_VOLUME
-    };
-    let attenuation = if field_mask & SND_ATTENUATION != 0 {
-        r.read_byte() as f32 / 64.0
-    } else {
-        DEFAULT_SOUND_PACKET_ATTENUATION
-    };
+    let volume = if field_mask & SND_VOLUME != 0 { r.read_byte() } else { DEFAULT_SOUND_PACKET_VOLUME };
+    let attenuation =
+        if field_mask & SND_ATTENUATION != 0 { r.read_byte() as f32 / 64.0 } else { DEFAULT_SOUND_PACKET_ATTENUATION };
 
     let channel = r.read_short();
     let sound_num = r.read_byte();
@@ -1776,11 +1676,7 @@ fn parse_start_sound(cl: &mut ClientState, r: &mut NetReader) -> Result<()> {
     // Resolve the precache name like S_StartSound's cl.sound_precache[] index;
     // an out-of-range index leaves the sample empty (the front-end drops
     // nameless events, mirroring S_StartSound's `if (!sfx) return`).
-    let sample = usize::try_from(sound_num)
-        .ok()
-        .and_then(|i| cl.sound_precache.get(i))
-        .cloned()
-        .unwrap_or_default();
+    let sample = usize::try_from(sound_num).ok().and_then(|i| cl.sound_precache.get(i)).cloned().unwrap_or_default();
 
     cl.pending_sounds.push(SoundEvent {
         entity,
@@ -1817,11 +1713,8 @@ fn parse_particle(cl: &mut ClientState, r: &mut NetReader) {
     let org = [r.read_coord(), r.read_coord(), r.read_coord()];
     // Net dir is a signed byte per axis, scaled by 1/16 (the C `dir[i] =
     // MSG_ReadChar()*(1.0/16)`).
-    let dir = [
-        r.read_char() as f32 * (1.0 / 16.0),
-        r.read_char() as f32 * (1.0 / 16.0),
-        r.read_char() as f32 * (1.0 / 16.0),
-    ];
+    let dir =
+        [r.read_char() as f32 * (1.0 / 16.0), r.read_char() as f32 * (1.0 / 16.0), r.read_char() as f32 * (1.0 / 16.0)];
     let msg_count = r.read_byte();
     let color = r.read_byte();
 
@@ -1875,8 +1768,8 @@ fn parse_temp_entity(cl: &mut ClientState, r: &mut NetReader) -> Result<()> {
         }
 
         // Everything else: a single coord3 position.
-        TE_SPIKE | TE_SUPERSPIKE | TE_GUNSHOT | TE_EXPLOSION | TE_TAREXPLOSION
-        | TE_WIZSPIKE | TE_KNIGHTSPIKE | TE_LAVASPLASH | TE_TELEPORT => {
+        TE_SPIKE | TE_SUPERSPIKE | TE_GUNSHOT | TE_EXPLOSION | TE_TAREXPLOSION | TE_WIZSPIKE | TE_KNIGHTSPIKE
+        | TE_LAVASPLASH | TE_TELEPORT => {
             let pos = [r.read_coord(), r.read_coord(), r.read_coord()];
             cl.pending_tents.push(TempEntityEvent {
                 te_type: te as u8,
@@ -1890,9 +1783,7 @@ fn parse_temp_entity(cl: &mut ClientState, r: &mut NetReader) -> Result<()> {
 
         // Sys_Error ("CL_ParseTEnt: bad type") — illegible, desyncs the stream.
         _ => {
-            return Err(QError::invalid(format!(
-                "svc_temp_entity: bad TE type {te}"
-            )));
+            return Err(QError::invalid(format!("svc_temp_entity: bad TE type {te}")));
         }
     }
     Ok(())
@@ -1908,9 +1799,7 @@ fn parse_serverinfo(cl: &mut ClientState, r: &mut NetReader) -> Result<()> {
 
     let proto = r.read_long();
     if proto != PROTOCOL_VERSION {
-        return Err(QError::invalid(format!(
-            "svc_serverinfo: protocol {proto}, expected {PROTOCOL_VERSION}"
-        )));
+        return Err(QError::invalid(format!("svc_serverinfo: protocol {proto}, expected {PROTOCOL_VERSION}")));
     }
 
     let _maxclients = r.read_byte();
@@ -1932,9 +1821,7 @@ fn parse_serverinfo(cl: &mut ClientState, r: &mut NetReader) -> Result<()> {
         }
         // A bad read in the middle of the precache list means truncation.
         if r.bad {
-            return Err(QError::invalid(
-                "svc_serverinfo: truncated model precache list",
-            ));
+            return Err(QError::invalid("svc_serverinfo: truncated model precache list"));
         }
         cl.model_precache.push(s);
     }
@@ -1950,9 +1837,7 @@ fn parse_serverinfo(cl: &mut ClientState, r: &mut NetReader) -> Result<()> {
             break;
         }
         if r.bad {
-            return Err(QError::invalid(
-                "svc_serverinfo: truncated sound precache list",
-            ));
+            return Err(QError::invalid("svc_serverinfo: truncated sound precache list"));
         }
         cl.sound_precache.push(s);
     }
@@ -2040,7 +1925,10 @@ mod tests {
     /// loop's forced CD track), demo2 and demo3 `-1\n` (none).
     #[test]
     fn the_header_line_is_the_forced_cd_track() {
-        assert_eq!([parse_forcetrack(b"2"), parse_forcetrack(b"-1"), parse_forcetrack(b"11"), parse_forcetrack(b"")], [2, -1, 11, 0]);
+        assert_eq!(
+            [parse_forcetrack(b"2"), parse_forcetrack(b"-1"), parse_forcetrack(b"11"), parse_forcetrack(b"")],
+            [2, -1, 11, 0]
+        );
         let demo = parse_demo(b"-1\n").unwrap();
         assert_eq!((demo.forcetrack, demo.cdtrack), (-1, None));
     }
@@ -2249,10 +2137,7 @@ mod tests {
         let file = demo_with_message(&msg);
         let demo = parse_demo(&file).expect("parse");
         let frame = demo.frames.last().expect("frame");
-        assert!(frame
-            .entities
-            .iter()
-            .any(|e| e.modelindex == 3 && e.origin == [1.0, 2.0, 3.0]));
+        assert!(frame.entities.iter().any(|e| e.modelindex == 3 && e.origin == [1.0, 2.0, 3.0]));
     }
 
     /// `svc_spawnstaticsound` registrations are collected into
@@ -2382,10 +2267,7 @@ mod tests {
         let demo = parse_demo(&file).expect("parse");
         let frame = demo.frames.last().expect("a frame");
         assert_eq!(frame.particles.len(), 1);
-        assert_eq!(
-            frame.particles[0].count, 1024,
-            "count 255 maps to the 1024-particle explosion"
-        );
+        assert_eq!(frame.particles[0].count, 1024, "count 255 maps to the 1024-particle explosion");
     }
 
     #[test]
@@ -2612,10 +2494,7 @@ mod tests {
         let demo = parse_demo(&file).expect("parse");
         let frame = demo.frames.last().expect("a frame");
 
-        assert!(
-            frame.entities.iter().any(|e| e.modelindex == 5),
-            "the entity updated this message still renders"
-        );
+        assert!(frame.entities.iter().any(|e| e.modelindex == 5), "the entity updated this message still renders");
         assert!(
             !frame.entities.iter().any(|e| e.modelindex == 6),
             "the entity that went silent this message must be culled"
@@ -2700,7 +2579,8 @@ mod tests {
         let demo = parse_demo(&file).expect("parse");
         let frame = demo.frames.last().expect("a frame");
         assert_eq!(
-            frame.view_angles, [10.0, 20.0, 30.0],
+            frame.view_angles,
+            [10.0, 20.0, 30.0],
             "recorded camera angles drive the view; svc_setangle is ignored"
         );
     }
@@ -2775,10 +2655,7 @@ mod tests {
         // Frame 1: stats accumulated, no intermission yet.
         let f1 = &demo.frames[0];
         assert_eq!(f1.intermission, 0);
-        assert_eq!(
-            f1.stats,
-            DemoStats { monsters: 2, total_monsters: 31, secrets: 1, total_secrets: 5 }
-        );
+        assert_eq!(f1.stats, DemoStats { monsters: 2, total_monsters: 31, secrets: 1, total_secrets: 5 });
 
         // Frame 2: svc_intermission latched cl.completed_time = cl.time.
         let f2 = &demo.frames[1];
@@ -3105,10 +2982,7 @@ mod tests {
         let file = demo_with_message(&msg);
         let demo = parse_demo(&file).expect("parse");
         let frame = demo.frames.last().expect("a frame");
-        assert_eq!(
-            frame.damage,
-            vec![DamageEvent { armor: 6, blood: 14, from: [64.0, -32.0, 8.0] }]
-        );
+        assert_eq!(frame.damage, vec![DamageEvent { armor: 6, blood: 14, from: [64.0, -32.0, 8.0] }]);
     }
 
     #[test]
@@ -3171,10 +3045,7 @@ mod tests {
         assert_eq!(f.time, 1.4, "playback starts at the first update's time");
         assert!(f.sounds.is_empty(), "signon sound events do not leak");
         assert!(f.prints.is_empty(), "signon prints do not leak (Con_ClearNotify)");
-        assert!(
-            f.entities.iter().any(|e| e.modelindex == 5),
-            "the first update's entity renders"
-        );
+        assert!(f.entities.iter().any(|e| e.modelindex == 5), "the first update's entity renders");
     }
 
     /// A demo of `n` post-signon messages at t = 1.0, 1.1, ... (one reliable

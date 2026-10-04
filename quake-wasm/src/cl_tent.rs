@@ -8,7 +8,7 @@ mod tests {
     use quake_rs::server::probe_point_contents;
     use quake_rs::tent::BeamModel;
 
-    use crate::app::{build_walk_map, Walk};
+    use crate::app::{Walk, build_walk_map};
     use crate::cl_walk::step_walk;
     use crate::snd_dma::{clear_pending, pending_starts};
 
@@ -117,8 +117,7 @@ mod tests {
 
         // Take the rune: item_sigil's SUB_UseTargets (t4) runs boss_awake.
         let sigil = find_all(&w, "classname", "item_sigil")[0];
-        let (smin, smax) =
-            (w.server.vm.ent_get_vector(sigil, "absmin"), w.server.vm.ent_get_vector(sigil, "absmax"));
+        let (smin, smax) = (w.server.vm.ent_get_vector(sigil, "absmin"), w.server.vm.ent_get_vector(sigil, "absmax"));
         let sigil_centre: [f32; 3] = std::array::from_fn(|i| 0.5 * (smin[i] + smax[i]));
         for _ in 0..10 {
             pin(&mut w, sigil_centre);
@@ -250,8 +249,7 @@ mod tests {
         // svc_intermission), then a button after intermission_exittime
         // (ExitIntermission on e1m7: svc_finale + Chthon's epitaph).
         let exit = find_all(&w, "classname", "trigger_changelevel")[0];
-        let (xmin, xmax) =
-            (w.server.vm.ent_get_vector(exit, "absmin"), w.server.vm.ent_get_vector(exit, "absmax"));
+        let (xmin, xmax) = (w.server.vm.ent_get_vector(exit, "absmin"), w.server.vm.ent_get_vector(exit, "absmax"));
         pin(&mut w, std::array::from_fn(|i| 0.5 * (xmin[i] + xmax[i])));
         for _ in 0..10 {
             frame(&mut w);

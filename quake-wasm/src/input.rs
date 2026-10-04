@@ -6,18 +6,18 @@
 //! `CL_BaseMove`/`CL_AdjustAngles`) is [`quake_rs::client::cl_input`]'s, and
 //! the pad as winmm's joystick is [`quake_rs::client::in_win`]'s.
 
-use quake_rs::client::cl_input::{clamp_pitch, V_CENTERSPEED};
-use quake_rs::client::in_win::{Held, Joystick, Pad, PadKeys, Rumble};
 use quake_rs::client::Walk;
-use quake_rs::render::MenuScreen;
+use quake_rs::client::cl_input::{V_CENTERSPEED, clamp_pitch};
+use quake_rs::client::in_win::{Held, Joystick, Pad, PadKeys, Rumble};
 use quake_rs::keys::{
-    consolekey, keynum_to_string, keyshift, menubound, Binding, BIND_CENTERVIEW, BIND_CHANGEWEAPON,
-    BIND_IMPULSE_0, BIND_MLOOK, BIND_PAUSE, BIND_SIZEDOWN, BIND_SIZEUP, BIND_STRAFE, BIND_TOGGLECONSOLE,
-    K_BACKSPACE, K_ESCAPE, K_PAUSE, K_SHIFT,
+    BIND_CENTERVIEW, BIND_CHANGEWEAPON, BIND_IMPULSE_0, BIND_MLOOK, BIND_PAUSE, BIND_SIZEDOWN, BIND_SIZEUP,
+    BIND_STRAFE, BIND_TOGGLECONSOLE, Binding, K_BACKSPACE, K_ESCAPE, K_PAUSE, K_SHIFT, consolekey, keynum_to_string,
+    keyshift, menubound,
 };
+use quake_rs::render::MenuScreen;
 
-use crate::app::{ensure_app, App, KeyDest, APP};
-use crate::menu::{apply_menu_action, run_menu_deferred, MenuDeferred};
+use crate::app::{APP, App, KeyDest, ensure_app};
+use crate::menu::{MenuDeferred, apply_menu_action, run_menu_deferred};
 
 // --- mouse cvars (in_win.c IN_MouseMove) -----------------------------------
 
@@ -357,12 +357,7 @@ pub(crate) fn key_is_down(keynum: i32) -> i32 {
     if !(0..256).contains(&keynum) {
         return 0;
     }
-    APP.with(|c| {
-        c.borrow()
-            .as_ref()
-            .map(|a| a.keys_held[keynum as usize] as i32)
-            .unwrap_or(0)
-    })
+    APP.with(|c| c.borrow().as_ref().map(|a| a.keys_held[keynum as usize] as i32).unwrap_or(0))
 }
 
 /// Raw mouse deltas (browser `movementX`/`movementY` counts) — a port of
@@ -581,23 +576,13 @@ pub(crate) fn rumble_after_frame(a: &mut App) {
 /// read-only verification/debug call (the browser checks Invert Mouse and
 /// lookspring flip/centre the pitch through it). 0 when no walk is live.
 pub(crate) fn player_pitch() -> f32 {
-    APP.with(|c| {
-        c.borrow()
-            .as_ref()
-            .and_then(|a| a.walk.as_ref().map(|w| w.pitch))
-            .unwrap_or(0.0)
-    })
+    APP.with(|c| c.borrow().as_ref().and_then(|a| a.walk.as_ref().map(|w| w.pitch)).unwrap_or(0.0))
 }
 
 /// The Options "Mouse speed" as a multiplier of the default (`sensitivity`
 /// over default.cfg's 3; 1.0 before the App exists).
 pub(crate) fn mouse_sensitivity() -> f32 {
-    APP.with(|c| {
-        c.borrow()
-            .as_ref()
-            .map(|a| a.settings.cvars.sensitivity / 3.0)
-            .unwrap_or(1.0)
-    })
+    APP.with(|c| c.borrow().as_ref().map(|a| a.settings.cvars.sensitivity / 3.0).unwrap_or(1.0))
 }
 
 pub(crate) fn look(dyaw: f32, dpitch: f32) {
@@ -634,11 +619,13 @@ mod tests {
     #[test]
     fn keys_pressed_in_the_menu_or_console_do_not_hold_their_binding() {
         use quake_rs::client::cl_input::derive_key_move;
-        let showscores = || APP.with(|c| {
-            let a = c.borrow();
-            let a = a.as_ref().unwrap();
-            derive_key_move(&a.settings.cvars, &a.settings.binds, &a.keys_held).showscores
-        });
+        let showscores = || {
+            APP.with(|c| {
+                let a = c.borrow();
+                let a = a.as_ref().unwrap();
+                derive_key_move(&a.settings.cvars, &a.settings.binds, &a.keys_held).showscores
+            })
+        };
         assert_eq!(boot(), 1);
         assert_eq!(menu_visible(), 1, "boot opens the menu over e1m1");
         key_down(9); // Tab, into the menu
@@ -757,7 +744,8 @@ mod tests {
         for _ in 0..3 {
             menu_cancel();
         }
-        let lines = || APP.with(|c| c.borrow().as_ref().unwrap().console.lines().map(str::to_string).collect::<Vec<_>>());
+        let lines =
+            || APP.with(|c| c.borrow().as_ref().unwrap().console.lines().map(str::to_string).collect::<Vec<_>>());
         key_event(i32::from(K_MOUSE2), 1, 0);
         key_event(i32::from(K_MOUSE2), 0, 0);
         assert_eq!(lines().last().map(String::as_str), Some("MOUSE2 is unbound, hit F4 to set."));
@@ -894,11 +882,7 @@ mod tests {
         menu_cancel(); // Main -> closed
         assert_eq!(menu_visible(), 0);
         step(0.05);
-        assert_eq!(
-            walk_mut(|w| w.key_move.fwd),
-            200.0,
-            "toggling Always Run off drops the walk to 200"
-        );
+        assert_eq!(walk_mut(|w| w.key_move.fwd), 200.0, "toggling Always Run off drops the walk to 200");
 
         // Releasing the key stops the contribution.
         key_up(i32::from(b'w'));
@@ -1088,9 +1072,8 @@ mod tests {
             pad_frame(1, [1.0, -1.0, 0.0, 0.0, 0.0, 0.0]);
         }
         assert_eq!((yaw(), key_is_down(i32::from(K_JOY1))), (yaw0, 0), "joystick 0: nothing");
-        let lines = || {
-            APP.with(|c| c.borrow().as_ref().unwrap().console.lines().map(str::to_string).collect::<Vec<_>>())
-        };
+        let lines =
+            || APP.with(|c| c.borrow().as_ref().unwrap().console.lines().map(str::to_string).collect::<Vec<_>>());
         assert!(lines().iter().any(|l| l == "joystick detected"), "IN_StartupJoystick's line");
         crate::host_cmd::execute_console_command("joystick 1");
         pad_frame(1, [1.0, -1.0, 0.0, 0.0, 0.0, 0.0]);

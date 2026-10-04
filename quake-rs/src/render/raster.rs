@@ -9,10 +9,10 @@
 //! bounding-box triangle ([`raster_triangle`]) is the untextured debug
 //! renderer's ([`super::render_bsp`]).
 
-use super::{nearest_index, Image, Palette};
+use super::light::{COLORMAP_LEN, LightMap, colormap_row};
+use super::warp::{TURB_COORD_MASK, TurbTable, turb_phase, warp_st};
+use super::{Image, Palette, nearest_index};
 use crate::math::Vec3;
-use super::light::{colormap_row, LightMap, COLORMAP_LEN};
-use super::warp::{turb_phase, warp_st, TurbTable, TURB_COORD_MASK};
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -465,8 +465,14 @@ pub enum PerspSpan {
 impl PerspSpan {
     /// The six, from the longest to exact: the order the settings page steps
     /// them (right is finer).
-    pub const ALL: [PerspSpan; 6] =
-        [PerspSpan::Spans64, PerspSpan::Spans32, PerspSpan::Spans16, PerspSpan::Spans8, PerspSpan::Spans4, PerspSpan::Exact];
+    pub const ALL: [PerspSpan; 6] = [
+        PerspSpan::Spans64,
+        PerspSpan::Spans32,
+        PerspSpan::Spans16,
+        PerspSpan::Spans8,
+        PerspSpan::Spans4,
+        PerspSpan::Exact,
+    ];
 
     /// The pixels from one divide to the next: 64, 32, 16, 8, 4 or 1 (the
     /// cvar's value).
@@ -498,6 +504,7 @@ impl PerspSpan {
 /// `reciprocal_table_16` (d_varsa.s): `1/n` for `n = 2..=15` in 1.31 fixed
 /// point, `floor(2^31 / n)`. `D_DrawSpans16`'s last segment steps by
 /// `(snext - s) * 2` times this, keeping the high word: `floor(ds * R / 2^31)`.
+#[rustfmt::skip] // a table, eight to a line
 const RECIPROCAL_16: [i64; 16] = [
     0, 0, 0x4000_0000, 0x2aaa_aaaa, 0x2000_0000, 0x1999_9999, 0x1555_5555, 0x1249_2492,
     0x1000_0000, 0x0e38_e38e, 0x0ccc_cccc, 0x0ba2_e8ba, 0x0aaa_aaaa, 0x09d8_9d89, 0x0924_9249,
@@ -564,13 +571,7 @@ fn segments_ahead<const N: usize, E>(k0: usize, end: usize, seg_end: impl Fn(usi
 /// block without a per-pixel clamp. The 16-pixel grid starts at the span's
 /// first pixel, so it restarts wherever the surface comes out from behind a
 /// nearer one (`R_ScanEdges` cuts its spans there).
-fn span16_cached(
-    crow: &mut [u8],
-    sp: &Span,
-    fx: &BlockFixed,
-    block: &[u8],
-    bw: usize,
-) {
+fn span16_cached(crow: &mut [u8], sp: &Span, fx: &BlockFixed, block: &[u8], bw: usize) {
     let end = crow.len();
     let (s0, t0) = sp.st_at(0, fx.sadjust, fx.tadjust);
     let (mut s, mut t) = (s0.clamp(0, fx.bbextents), t0.clamp(0, fx.bbextentt));
@@ -693,11 +694,7 @@ fn span_c_cached<const N: usize>(crow: &mut [u8], sp: &Span, fx: &BlockFixed, bl
 /// measured no faster: a span divides twice, not a pixel.)
 #[inline]
 fn c_step(x: i64, d: usize) -> i64 {
-    if d == 0 {
-        0
-    } else {
-        x / d as i64
-    }
+    if d == 0 { 0 } else { x / d as i64 }
 }
 
 /// The exact perspective's texel at every pixel of one span of a
@@ -836,7 +833,8 @@ fn exact_plan(n: usize, sp: &Span, bw: usize, bh: usize, len: usize) -> Option<(
     // Proof (c): `|X'''| = 6 |W| dzi^2 z^4 / 65536^3`, `W = sz dzi - dsz zi`
     // constant along the span (with a little for its own rounding), and
     // `max|t (t - H) (t - 2H)| / 6 = 2 H^3 / (3 sqrt 3) / 6 = 0.06415 H^3`.
-    let w = |a: f64, d: f64| (a * sp.dzi - d * sp.zi).abs() + 4.0 * f64::EPSILON * ((a * sp.dzi).abs() + (d * sp.zi).abs());
+    let w =
+        |a: f64, d: f64| (a * sp.dzi - d * sp.zi).abs() + 4.0 * f64::EPSILON * ((a * sp.dzi).abs() + (d * sp.zi).abs());
     let h = EXACT_KNOT as f64;
     let c = 6.0 * 0.0642 * h * h * h * sp.dzi * sp.dzi / (65536.0 * 65536.0 * 65536.0);
     Some((c * w(sp.sz, sp.dsz), c * w(sp.tz, sp.dtz)))
@@ -897,7 +895,13 @@ impl Parabola {
 /// The two parabolas of the segment through the knots `a`, `m`, `b`, for
 /// s and t, or `None` when it is drawn by the divide.
 #[inline]
-fn segment_parabolas(a: Knot, m: Knot, b: Knot, scale: (f64, f64), (smax, tmax): (i64, i64)) -> Option<(Parabola, Parabola)> {
+fn segment_parabolas(
+    a: Knot,
+    m: Knot,
+    b: Knot,
+    scale: (f64, f64),
+    (smax, tmax): (i64, i64),
+) -> Option<(Parabola, Parabola)> {
     let (es, et) = interpolation_bounds(a, b, scale);
     Some((Parabola::through(a.s, m.s, b.s, es, smax)?, Parabola::through(a.t, m.t, b.t, et, tmax)?))
 }
@@ -1075,7 +1079,15 @@ fn span_exact_cached(crow: &mut [u8], sp: &Span, fx: &BlockFixed, block: &[u8], 
 /// overlaps the one before (`k0 < done`) it is drawn aside and only its new
 /// pixels kept: the ones before are done, and the replay never goes back.
 #[inline]
-fn draw_segment(crow: &mut [u8], k0: usize, done: usize, lanes: Lanes, block: &[u8], bw: usize, replay: &mut ExactReplay) {
+fn draw_segment(
+    crow: &mut [u8],
+    k0: usize,
+    done: usize,
+    lanes: Lanes,
+    block: &[u8],
+    bw: usize,
+    replay: &mut ExactReplay,
+) {
     let mut aside = [0u8; EXACT_SEG];
     let seg: &mut [u8; EXACT_SEG] =
         if k0 < done { &mut aside } else { (&mut crow[k0..k0 + EXACT_SEG]).try_into().expect("a segment") };
@@ -1098,10 +1110,7 @@ const MIN_TRIPLE_AREA2: f64 = 1e-6;
 /// `Mod_LoadFaces` gives turbulent surfaces (`texturemins` -8192).
 fn turb_adjust(grads: &PolyGrads) -> (i64, i64) {
     let st_eye = grads.st_eye;
-    (
-        ((st_eye[0] + 8192.0) * 65536.0 + 0.5).floor() as i64,
-        ((st_eye[1] + 8192.0) * 65536.0 + 0.5).floor() as i64,
-    )
+    (((st_eye[0] + 8192.0) * 65536.0 + 0.5).floor() as i64, ((st_eye[1] + 8192.0) * 65536.0 + 0.5).floor() as i64)
 }
 
 /// Wrap `v` into `0..n`, the way `D_DrawTurbulent8Span`'s `&63` does for id's
@@ -1111,11 +1120,7 @@ fn turb_adjust(grads: &PolyGrads) -> (i64, i64) {
 /// division. Any other `n` (never id's data) falls back to the division.
 #[inline]
 fn wrap_texel(v: i32, n: usize) -> usize {
-    if n.is_power_of_two() {
-        (v & (n as i32 - 1)) as usize
-    } else {
-        v.rem_euclid(n as i32) as usize
-    }
+    if n.is_power_of_two() { (v & (n as i32 - 1)) as usize } else { v.rem_euclid(n as i32) as usize }
 }
 
 /// `Turbulent8` (d_scan.c; C in the x86 build too) over one of id's spans of a
@@ -1496,7 +1501,12 @@ mod tests {
         let v = |x: f32, y: f32, vz: f32, s: f32| AttrVert { x, y, vz, s, t: 1.5 };
         // 1/z from 1 to 1/12 across the row: the near end's texels are 4
         // pixels wide, the far end's a third of a pixel.
-        let quad = [v(0.0, 0.0, 1.0, 0.5), v(w as f32, 0.0, 12.0, 255.0), v(w as f32, h as f32, 12.0, 255.0), v(0.0, h as f32, 1.0, 0.5)];
+        let quad = [
+            v(0.0, 0.0, 1.0, 0.5),
+            v(w as f32, 0.0, 12.0, 255.0),
+            v(w as f32, h as f32, 12.0, 255.0),
+            v(0.0, h as f32, 1.0, 0.5),
+        ];
         let g = PolyGrads::from_vertices(&quad).expect("quad");
         let fx = BlockFixed::new(&g, [0.0, 0.0], bw, bh);
         let draw = |persp| spans(w, h, 0, &g, |row, sp| span_cached(row, sp, &fx, &block, bw, bh, persp)).pixels;
@@ -1604,7 +1614,12 @@ mod tests {
             let lin = |a: f64, b: f64| (a * zi0, (b * zi1 - a * zi0) / (len - 1).max(1) as f64);
             let ((sz, dsz), (tz, dtz)) = (lin(s0, s1), lin(t0, t1));
             let sp = Span { zi: zi0, sz, tz, dzi, dsz, dtz };
-            let mut fx = BlockFixed { sadjust: 0, tadjust: 0, bbextents: ((bw as i64) << 16) - 1, bbextentt: ((bh as i64) << 16) - 1 };
+            let mut fx = BlockFixed {
+                sadjust: 0,
+                tadjust: 0,
+                bbextents: ((bw as i64) << 16) - 1,
+                bbextentt: ((bh as i64) << 16) - 1,
+            };
             // Steer: a pixel's s (or t) to within two units of a texel edge.
             if i % 3 == 0 {
                 let k = range(0.0, len as f64) as usize;
@@ -1615,8 +1630,13 @@ mod tests {
             let (mut new, mut old) = (vec![0u8; len], vec![0u8; len]);
             span_exact_cached(&mut new, &sp, &fx, &block, bw, bh);
             span_exact_reference(&mut old, &sp, &fx, &block, bw, bh);
-            assert!(new == old, "span {i}: {len} pixels on {bw}x{bh}, {sp:?}, sadjust {} tadjust {}: first difference at {:?}",
-                fx.sadjust, fx.tadjust, new.iter().zip(&old).position(|(a, b)| a != b));
+            assert!(
+                new == old,
+                "span {i}: {len} pixels on {bw}x{bh}, {sp:?}, sadjust {} tadjust {}: first difference at {:?}",
+                fx.sadjust,
+                fx.tadjust,
+                new.iter().zip(&old).position(|(a, b)| a != b)
+            );
             fast += usize::from(exact_plan(len, &sp, bw, bh, block.len()).is_some());
             steered_hits += usize::from(i % 3 == 0);
         }
@@ -1649,7 +1669,12 @@ mod tests {
         let lin = |a: f64, b: f64| (a * zi0, (b * zi1 - a * zi0) / (len - 1) as f64);
         let ((sz, dsz), (tz, dtz)) = (lin(s0, s1), lin(t0, t1));
         let sp = Span { zi: zi0, sz, tz, dzi, dsz, dtz };
-        let fx = BlockFixed { sadjust: 0, tadjust: 0, bbextents: ((bw as i64) << 16) - 1, bbextentt: ((bh as i64) << 16) - 1 };
+        let fx = BlockFixed {
+            sadjust: 0,
+            tadjust: 0,
+            bbextents: ((bw as i64) << 16) - 1,
+            bbextentt: ((bh as i64) << 16) - 1,
+        };
         (len, bw, bh, sp, fx)
     }
 
@@ -1672,7 +1697,14 @@ mod tests {
     /// The segments [`span_exact_cached`] draws by parabolas, in its order:
     /// each one's first pixel, its s and t parabolas and their
     /// interpolation bounds `es`.
-    fn parabola_segments(sp: &Span, fx: &BlockFixed, n: usize, bw: usize, bh: usize, scale: (f64, f64)) -> Vec<(usize, [Parabola; 2], [f64; 2])> {
+    fn parabola_segments(
+        sp: &Span,
+        fx: &BlockFixed,
+        n: usize,
+        bw: usize,
+        bh: usize,
+        scale: (f64, f64),
+    ) -> Vec<(usize, [Parabola; 2], [f64; 2])> {
         let max = (((bw as i64) << 16) - 1, ((bh as i64) << 16) - 1);
         let knot = |k: usize| sp.knot(k, fx.sadjust, fx.tadjust);
         let last = n - 1 - EXACT_SEG;
@@ -1725,7 +1757,9 @@ mod tests {
                     let z = knot.z;
                     for (c, (a, d)) in [(sp.sz, sp.dsz), (sp.tz, sp.dtz)].into_iter().enumerate() {
                         let xk = x(k, a, d);
-                        worst_noise = worst_noise.max((products[c] - xk).abs() / noise).max(((a + k as f64 * d) * z - xk).abs() / noise);
+                        worst_noise = worst_noise
+                            .max((products[c] - xk).abs() / noise)
+                            .max(((a + k as f64 * d) * z - xk).abs() / noise);
                     }
                 }
             }
@@ -1738,7 +1772,11 @@ mod tests {
                     for j in 0..EXACT_SEG {
                         let k = k0 + j;
                         let dist = (128 * reference[k].0[c] - y).abs();
-                        assert!(dist < 128 * p.guard, "pixel {k} of span {i}, lane {c}: |128 R - y| = {dist}, guard {} (es {es})", p.guard);
+                        assert!(
+                            dist < 128 * p.guard,
+                            "pixel {k} of span {i}, lane {c}: |128 R - y| = {dist}, guard {} (es {es})",
+                            p.guard
+                        );
                         worst = worst.max(dist as f64 / 128.0 - es);
                         // Q through the true X at the knots, at t = j / H.
                         let t = j as f64 / EXACT_KNOT as f64;
@@ -1753,7 +1791,9 @@ mod tests {
                 }
             }
         }
-        eprintln!("cheap exact's bound: {spans} spans, {segments} segments, {lane_pixels} lane pixels; worst |R - y/128| - es = {worst:.4} (proof: < 4.54), |Q - X| / es = {worst_interp:.4} (<= 1), rounding / noise = {worst_noise:.4} (<= 1/2)");
+        eprintln!(
+            "cheap exact's bound: {spans} spans, {segments} segments, {lane_pixels} lane pixels; worst |R - y/128| - es = {worst:.4} (proof: < 4.54), |Q - X| / es = {worst_interp:.4} (<= 1), rounding / noise = {worst_noise:.4} (<= 1/2)"
+        );
         assert!(segments > spans, "most spans have segments by parabola: {segments}");
         assert!(worst < 4.54 && worst_interp <= 1.0 && worst_noise <= 0.5);
     }
@@ -1824,12 +1864,24 @@ mod tests {
             span_exact_cached(&mut new, &sp, &fx, &block, bw, bh);
             span_exact_reference(&mut old, &sp, &fx, &block, bw, bh);
             if new != old {
-                differ.push(format!("span {i} ({n} px on {bw}x{bh}, segment {k0}, lane {c}): first difference at {:?}", new.iter().zip(&old).position(|(a, b)| a != b)));
+                differ.push(format!(
+                    "span {i} ({n} px on {bw}x{bh}, segment {k0}, lane {c}): first difference at {:?}",
+                    new.iter().zip(&old).position(|(a, b)| a != b)
+                ));
             }
         }
-        eprintln!("cheap exact steered: {steered} segments, smallest margin {:.3} units (GUARD_SLACK {GUARD_SLACK}), {} differ", min_margin as f64 / 128.0, differ.len());
+        eprintln!(
+            "cheap exact steered: {steered} segments, smallest margin {:.3} units (GUARD_SLACK {GUARD_SLACK}), {} differ",
+            min_margin as f64 / 128.0,
+            differ.len()
+        );
         assert!(steered * 3 > spans, "most spans steered: {steered}");
-        assert!(differ.is_empty(), "{} steered segments differ from the divide, the first: {}", differ.len(), differ[0]);
+        assert!(
+            differ.is_empty(),
+            "{} steered segments differ from the divide, the first: {}",
+            differ.len(),
+            differ[0]
+        );
     }
 
     #[test]
@@ -1916,11 +1968,7 @@ mod tests {
             let view = ScreenProj { forward, right, up, cx, cy, xscale, yscale };
             let (n, _) = normalize([0.3, -0.5, 0.8]);
             let dist = 40.0f32;
-            let ti = crate::bsp::TexInfo {
-                vecs: [[1.0, 0.0, 0.0, 5.5], [0.0, 0.7, 0.7, -3.0]],
-                miptex: 0,
-                flags: 0,
-            };
+            let ti = crate::bsp::TexInfo { vecs: [[1.0, 0.0, 0.0, 5.5], [0.0, 0.7, 0.7, -3.0]], miptex: 0, flags: 0 };
             let (u, _) = normalize(cross(n, [0.0, 0.0, 1.0]));
             let v = cross(n, u);
             for origin in [[0.0f32; 3], [64.0, -32.0, 8.0]] {
@@ -1928,7 +1976,11 @@ mod tests {
                 let eye = [cam.pos[0] - origin[0], cam.pos[1] - origin[1], cam.pos[2] - origin[2]];
                 let g = PolyGrads::for_plane(&view, eye, n, dist, Some(&ti)).expect("eye off the plane");
                 for (a, b) in [(0.0f32, 0.0f32), (150.0, 20.0), (-80.0, 90.0), (300.0, -120.0)] {
-                    let p = [n[0] * dist + a * u[0] + b * v[0], n[1] * dist + a * u[1] + b * v[1], n[2] * dist + a * u[2] + b * v[2]];
+                    let p = [
+                        n[0] * dist + a * u[0] + b * v[0],
+                        n[1] * dist + a * u[1] + b * v[1],
+                        n[2] * dist + a * u[2] + b * v[2],
+                    ];
                     let rel = [p[0] - eye[0], p[1] - eye[1], p[2] - eye[2]];
                     let (vx, vy, vz) = (dot(rel, right), dot(rel, up), dot(rel, forward));
                     if vz <= 1.0 {
@@ -1989,7 +2041,14 @@ mod tests {
         let (s0, t0) = (r.range(-texels, 2.0 * texels), r.range(-texels, 2.0 * texels));
         let (s1, t1) = (r.range(-3.0, 3.0) * texels * scale, r.range(-3.0, 3.0) * texels * scale);
         let zi1 = zi + dzi * len as f64;
-        Span { zi, sz: s0 * zi, tz: t0 * zi, dzi, dsz: (s1 * zi1 - s0 * zi) / len as f64, dtz: (t1 * zi1 - t0 * zi) / len as f64 }
+        Span {
+            zi,
+            sz: s0 * zi,
+            tz: t0 * zi,
+            dzi,
+            dsz: (s1 * zi1 - s0 * zi) / len as f64,
+            dtz: (t1 * zi1 - t0 * zi) / len as f64,
+        }
     }
 
     /// `D_DrawSpans8` as d_scan.c writes it, `n_px` for its 8 (`>> 3` its
@@ -1998,7 +2057,15 @@ mod tests {
     /// block panics.
     fn d_draw_spans8_as_written(n_px: i64, crow: &mut [u8], sp: &Span, fx: &BlockFixed, block: &[u8], bw: usize) {
         let shift = n_px.trailing_zeros();
-        let clamp = |v: i64, lo: i64, hi: i64| if v > hi { hi } else if v < lo { lo } else { v };
+        let clamp = |v: i64, lo: i64, hi: i64| {
+            if v > hi {
+                hi
+            } else if v < lo {
+                lo
+            } else {
+                v
+            }
+        };
         let mut count = crow.len() as i64;
         let (s0, t0) = sp.st_at(0, fx.sadjust, fx.tadjust);
         let (mut s, mut t) = (clamp(s0, 0, fx.bbextents), clamp(t0, 0, fx.bbextentt));
@@ -2041,10 +2108,27 @@ mod tests {
     /// `Turbulent8` and `D_DrawTurbulent8Span` as d_scan.c writes them, at
     /// `n_px` for its 16, in the C's `int`s from each segment's masked start.
     #[allow(clippy::too_many_arguments)]
-    fn turbulent8_as_written(n_px: i64, crow: &mut [u8], sp: &Span, sadjust: i64, tadjust: i64, pixels: &[u8], turb: &TurbTable, phase: usize) {
+    fn turbulent8_as_written(
+        n_px: i64,
+        crow: &mut [u8],
+        sp: &Span,
+        sadjust: i64,
+        tadjust: i64,
+        pixels: &[u8],
+        turb: &TurbTable,
+        phase: usize,
+    ) {
         const BB: i64 = (16384 << 16) - 1;
         let shift = n_px.trailing_zeros();
-        let clamp = |v: i64, lo: i64, hi: i64| if v > hi { hi } else if v < lo { lo } else { v };
+        let clamp = |v: i64, lo: i64, hi: i64| {
+            if v > hi {
+                hi
+            } else if v < lo {
+                lo
+            } else {
+                v
+            }
+        };
         let mut count = crow.len() as i64;
         let (s0, t0) = sp.st_at(0, sadjust, tadjust);
         let (mut s, mut t) = (clamp(s0, 0, BB), clamp(t0, 0, BB));
@@ -2112,7 +2196,11 @@ mod tests {
         if steps > 0 {
             let (sn, tn) = sp.st_at(k0 + steps, fx.sadjust, fx.tadjust);
             let (dss, dts) = (sn.max(4096).min(fx.bbextents) - s, tn.max(4096).min(fx.bbextentt) - t);
-            (ss, ts) = if steps == 1 { (dss, dts) } else { ((dss * RECIPROCAL_16[steps]) >> 31, (dts * RECIPROCAL_16[steps]) >> 31) };
+            (ss, ts) = if steps == 1 {
+                (dss, dts)
+            } else {
+                ((dss * RECIPROCAL_16[steps]) >> 31, (dts * RECIPROCAL_16[steps]) >> 31)
+            };
         }
         for c in crow.iter_mut().skip(k0) {
             *c = block[(t >> 16) as usize * bw + (s >> 16) as usize];
@@ -2155,7 +2243,9 @@ mod tests {
         let turb = TurbTable::new();
         let liquid: Vec<u8> = (0..64 * 64).map(|i| (i * 7 + i / 64) as u8).collect();
         // QUAKE_FUZZ_SPANS=N runs N spans instead (2026-10-03: 2,000,000).
-        let spans = std::env::var("QUAKE_FUZZ_SPANS").ok().and_then(|v| v.parse().ok())
+        let spans = std::env::var("QUAKE_FUZZ_SPANS")
+            .ok()
+            .and_then(|v| v.parse().ok())
             .unwrap_or(if cfg!(debug_assertions) { 1000 } else { 20_000 });
         let mut in_block = 0usize;
         for _ in 0..spans {
@@ -2171,7 +2261,9 @@ mod tests {
                 bbextentt: ((bh as i64) << 16) - 1,
             };
             let (mut port, mut c) = (vec![0u8; len], vec![0u8; len]);
-            for (persp, n) in [(PerspSpan::Spans4, 4), (PerspSpan::Spans8, 8), (PerspSpan::Spans32, 32), (PerspSpan::Spans64, 64)] {
+            for (persp, n) in
+                [(PerspSpan::Spans4, 4), (PerspSpan::Spans8, 8), (PerspSpan::Spans32, 32), (PerspSpan::Spans64, 64)]
+            {
                 span_cached(&mut port, &sp, &fx, &block, bw, bh, persp);
                 d_draw_spans8_as_written(n, &mut c, &sp, &fx, &block, bw);
                 assert_eq!(port, c, "{persp:?}, {len} pixels on {bw}x{bh}, {sp:?}");
@@ -2217,4 +2309,3 @@ mod tests {
         }
     }
 }
-

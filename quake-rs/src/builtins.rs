@@ -64,7 +64,6 @@ fn pf_debug_noop(_vm: &mut Vm) -> Result<()> {
     Ok(())
 }
 
-
 /// `PF_VarString(first)`: the string arguments from `first` to `pr_argc`,
 /// joined. id's C (and this port, originally) just concatenated them — a
 /// fixed 256-byte buffer there, a `String` here. The mission packs' 2021
@@ -333,11 +332,7 @@ fn pf_vtos(vm: &mut Vm) -> Result<()> {
 /// before adding 0.5 to match PF_rint bit-for-bit.
 fn pf_rint(vm: &mut Vm) -> Result<()> {
     let f = vm.arg_float(0);
-    let r = if f > 0.0 {
-        (f as f64 + 0.5) as i32
-    } else {
-        (f as f64 - 0.5) as i32
-    };
+    let r = if f > 0.0 { (f as f64 + 0.5) as i32 } else { (f as f64 - 0.5) as i32 };
     vm.ret_float(r as f32);
     Ok(())
 }
@@ -513,16 +508,16 @@ pub fn default_builtins() -> Vec<Builtin> {
         pf_fixme,       // 77  precache_file
         pf_fixme,       // 78  setspawnparms (server world)
         pf_fixme,       // 79  finaleFinished (mission packs' re-release only; server
-                        //     world — install_engine_builtins puts bi_finale_finished)
-        pf_fixme,       // 80  localsound (mission packs' re-release only; never
-                        //     called by either pack — left unimplemented, see B4)
+        //     world — install_engine_builtins puts bi_finale_finished)
+        pf_fixme, // 80  localsound (mission packs' re-release only; never
+                  //     called by either pack — left unimplemented, see B4)
     ]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::progs::{Function, Op, Progs, Statement, OFS_PARM0, OFS_RETURN, RESERVED_OFS};
+    use crate::progs::{Function, OFS_PARM0, OFS_RETURN, Op, Progs, RESERVED_OFS, Statement};
 
     const HEADER_SIZE: usize = 60;
 
@@ -591,15 +586,7 @@ mod tests {
         };
         let ser_func = |f: &Function| {
             let mut v = Vec::new();
-            for x in [
-                f.first_statement,
-                f.parm_start,
-                f.locals,
-                f.profile,
-                f.s_name,
-                f.s_file,
-                f.numparms,
-            ] {
+            for x in [f.first_statement, f.parm_start, f.locals, f.profile, f.s_name, f.s_file, f.numparms] {
                 v.extend_from_slice(&x.to_le_bytes());
             }
             v.extend_from_slice(&f.parm_size);
@@ -790,19 +777,11 @@ mod tests {
         let f = 8_388_609.0f32;
         vm.set_gf(OFS_PARM0, f);
         pf_rint(&mut vm).expect("rint");
-        assert_eq!(
-            vm.gf(OFS_RETURN),
-            8_388_609.0,
-            "rint must add 0.5 in f64 (got the f32-rounded 8388610 instead)"
-        );
+        assert_eq!(vm.gf(OFS_RETURN), 8_388_609.0, "rint must add 0.5 in f64 (got the f32-rounded 8388610 instead)");
         // The symmetric negative case: (int)(f - 0.5) in double = -8388609.
         vm.set_gf(OFS_PARM0, -f);
         pf_rint(&mut vm).expect("rint");
-        assert_eq!(
-            vm.gf(OFS_RETURN),
-            -8_388_609.0,
-            "rint must subtract 0.5 in f64 for the negative boundary"
-        );
+        assert_eq!(vm.gf(OFS_RETURN), -8_388_609.0, "rint must subtract 0.5 in f64 for the negative boundary");
     }
 
     #[test]
@@ -934,11 +913,7 @@ mod tests {
         vm.set_gi(OFS_PARM0 + 3, field as i32);
         vm.set_gi(OFS_PARM0 + 6, empty);
         pf_find(&mut vm).expect("find");
-        assert_eq!(
-            vm.gi(OFS_RETURN),
-            e2,
-            "empty search matches the first empty field, not the non-empty one"
-        );
+        assert_eq!(vm.gi(OFS_RETURN), e2, "empty search matches the first empty field, not the non-empty one");
     }
 
     #[test]
@@ -1010,10 +985,7 @@ mod tests {
         }
         // Sanity: a true engine-world stub (#16 traceline) is still a fixme fault
         // in the bare default table (only the engine server installs the real one).
-        assert!(
-            vm.call_builtin(16, 4).is_err(),
-            "#16 traceline stays a fault in the default table"
-        );
+        assert!(vm.call_builtin(16, 4).is_err(), "#16 traceline stays a fault in the default table");
     }
 
     #[test]
@@ -1023,10 +995,7 @@ mod tests {
         let (img, bi_idx) = build_calling_builtin(28, Op::Call0);
         let mut vm = Vm::load(&img).expect("load");
         vm.set_gi(60, bi_idx as i32);
-        assert!(
-            vm.call_by_name("main").is_ok(),
-            "coredump() called from bytecode must not abort"
-        );
+        assert!(vm.call_by_name("main").is_ok(), "coredump() called from bytecode must not abort");
     }
 
     #[test]

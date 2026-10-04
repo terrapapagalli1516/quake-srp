@@ -25,7 +25,7 @@ use quake_rs::cvar::Cvars;
 use quake_rs::render::{self, FovMode, MipCvars, SkyScroll, TorchFlicker, VideoCvars};
 use quake_rs::server::LerpLightStyles;
 
-use crate::app::{ensure_app, App, APP, START_PRESET};
+use crate::app::{APP, App, START_PRESET, ensure_app};
 
 /// The default (boot) render resolution. A crisp `960x600` (preset index 4 — must
 /// stay a member of [`render::RESOLUTION_PRESETS`] so the Video Options list
@@ -367,10 +367,16 @@ mod tests {
         assert_eq!(span(), PerspSpan::Spans16, "the tests start in Classic: id's spans");
         use_slop();
         assert_eq!(span(), PerspSpan::Spans8, "slop: id's portable C loop, every 8 pixels");
-        for (line, want) in [("r_perspspan 4", PerspSpan::Spans4), ("r_perspspan 1", PerspSpan::Exact),
-                             ("r_perspspan 64", PerspSpan::Spans64), ("r_perspspan 32", PerspSpan::Spans32),
-                             ("wasm_exactpersp 0", PerspSpan::Spans16), ("wasm_exactpersp 1", PerspSpan::Exact),
-                             ("r_perspspan 16", PerspSpan::Spans16), ("r_perspspan 8", PerspSpan::Spans8)] {
+        for (line, want) in [
+            ("r_perspspan 4", PerspSpan::Spans4),
+            ("r_perspspan 1", PerspSpan::Exact),
+            ("r_perspspan 64", PerspSpan::Spans64),
+            ("r_perspspan 32", PerspSpan::Spans32),
+            ("wasm_exactpersp 0", PerspSpan::Spans16),
+            ("wasm_exactpersp 1", PerspSpan::Exact),
+            ("r_perspspan 16", PerspSpan::Spans16),
+            ("r_perspspan 8", PerspSpan::Spans8),
+        ] {
             crate::host_cmd::execute_console_command(line);
             assert_eq!(span(), want, "{line}");
         }
@@ -524,10 +530,7 @@ mod tests {
         // The pixel-budget cap: a max-width AND max-height request is trimmed so
         // w*h never exceeds MAX_PIXELS, never panicking.
         let (cw, ch) = clamp_resolution(MAX_W, MAX_H);
-        assert!(
-            (cw as i32).saturating_mul(ch as i32) <= MAX_PIXELS,
-            "clamped {cw}x{ch} must respect the pixel cap"
-        );
+        assert!((cw as i32).saturating_mul(ch as i32) <= MAX_PIXELS, "clamped {cw}x{ch} must respect the pixel cap");
         assert!(cw >= MIN_W as usize && ch >= MIN_H as usize, "still a valid non-zero size");
         // i32::MAX in both dims must not overflow or panic.
         let (mw, mh) = clamp_resolution(i32::MAX, i32::MAX);
@@ -759,11 +762,7 @@ mod tests {
 
         // Re-boot the walk: the resolution MUST be preserved, not reset to DEFAULT.
         assert_eq!(boot(), 1);
-        assert_eq!(
-            (width(), height()),
-            (640, 400),
-            "re-boot preserves the chosen resolution (was the reported bug)"
-        );
+        assert_eq!((width(), height()), (640, 400), "re-boot preserves the chosen resolution (was the reported bug)");
         // ...and the fresh menu's current video mode tracks the live framebuffer,
         // so opening Video Options marks the real mode (no label/fb desync).
         APP.with(|c| {

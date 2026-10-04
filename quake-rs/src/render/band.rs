@@ -124,11 +124,7 @@ impl<'a> Band<'a> {
     pub(super) fn at(&mut self, idx: usize) -> Option<(&mut u8, &mut i16)> {
         let i = idx.checked_sub(self.y0 * self.w)?;
         let z = self.z.get_mut(i)?;
-        let p = if self.stride == self.w && self.x0 == 0 {
-            i
-        } else {
-            i / self.w * self.stride + self.x0 + i % self.w
-        };
+        let p = if self.stride == self.w && self.x0 == 0 { i } else { i / self.w * self.stride + self.x0 + i % self.w };
         Some((self.pixels.get_mut(p)?, z))
     }
 }
@@ -206,7 +202,8 @@ fn strips<'a>(mut rows: &'a mut [u8], stride: usize, targets: Vec<Target<'a>>, b
     let height = rows.len() / stride;
     // Each target with its place in the list and the `1/z` of its rows not
     // yet handed out.
-    let mut left: Vec<(usize, Target)> = targets.into_iter().enumerate().filter(|(_, t)| t.fits(stride, height)).collect();
+    let mut left: Vec<(usize, Target)> =
+        targets.into_iter().enumerate().filter(|(_, t)| t.fits(stride, height)).collect();
     let mut cuts: Vec<usize> = left.iter().flat_map(|(_, t)| [t.y0, t.y0 + t.h]).collect();
     cuts.sort_unstable();
     cuts.dedup();
@@ -232,7 +229,9 @@ fn strips<'a>(mut rows: &'a mut [u8], stride: usize, targets: Vec<Target<'a>>, b
         (rows, top) = (rest, b);
         for (k, strip) in mine.chunks_mut(band_rows * stride).enumerate() {
             let parts = (bands.iter_mut())
-                .filter_map(|(view, w, x0, y, z)| Some(Part { view: *view, w: *w, x0: *x0, y0: *y + k * band_rows, z: z.next()? }))
+                .filter_map(|(view, w, x0, y, z)| {
+                    Some(Part { view: *view, w: *w, x0: *x0, y0: *y + k * band_rows, z: z.next()? })
+                })
                 .collect();
             out.push(Strip { rows: strip, parts });
         }
@@ -343,8 +342,15 @@ where
 
 /// [`for_rows`] with a source row for each output row: `f` gets matching
 /// runs of `dst` and `src` (`src_row` elements a row).
-pub(crate) fn map_rows<D, S, F>(threads: usize, rows: usize, dst: &mut [D], dst_row: usize, src: &[S], src_row: usize, f: F)
-where
+pub(crate) fn map_rows<D, S, F>(
+    threads: usize,
+    rows: usize,
+    dst: &mut [D],
+    dst_row: usize,
+    src: &[S],
+    src_row: usize,
+    f: F,
+) where
     D: Send,
     S: Sync,
     F: Fn(&mut [D], &[S]) + Sync,
@@ -500,11 +506,13 @@ mod tests {
             });
             let mut rows: Vec<(usize, usize)> = rows.into_iter().flatten().collect();
             rows.sort_unstable();
-            let want: Vec<(usize, usize)> = views.iter().enumerate().flat_map(|(i, &(_, h, ..))| (0..h).map(move |v| (i, v))).collect();
+            let want: Vec<(usize, usize)> =
+                views.iter().enumerate().flat_map(|(i, &(_, h, ..))| (0..h).map(move |v| (i, v))).collect();
             assert_eq!(rows, want, "{threads} threads: every row of every view once");
             for (i, p) in screen.iter().enumerate() {
                 let (x, y) = (i % stride, i / stride);
-                let inside = views.iter().position(|&(w, h, x0, y0)| (x0..x0 + w).contains(&x) && (y0..y0 + h).contains(&y));
+                let inside =
+                    views.iter().position(|&(w, h, x0, y0)| (x0..x0 + w).contains(&x) && (y0..y0 + h).contains(&y));
                 let want = inside.map_or(0, |view| {
                     let (w, _, x0, _) = views[view];
                     1 + view as u8 + if x == x0 + w - 1 { 10 } else { 0 }
@@ -512,7 +520,10 @@ mod tests {
                 assert_eq!(*p, want, "{threads} threads: screen ({x}, {y})");
             }
             for (z, &(w, h, ..)) in zs.iter().zip(&views) {
-                assert!(z.iter().enumerate().all(|(i, &v)| v as usize == i + 1) && z.len() == w * h, "{threads} threads: z");
+                assert!(
+                    z.iter().enumerate().all(|(i, &v)| v as usize == i + 1) && z.len() == w * h,
+                    "{threads} threads: z"
+                );
             }
         }
     }

@@ -29,12 +29,7 @@ struct Asm {
 
 impl Asm {
     fn new(num_globals: usize) -> Self {
-        Asm {
-            strings: vec![0],
-            statements: Vec::new(),
-            functions: Vec::new(),
-            globals: vec![0; num_globals],
-        }
+        Asm { strings: vec![0], statements: Vec::new(), functions: Vec::new(), globals: vec![0; num_globals] }
     }
     fn intern(&mut self, s: &str) -> i32 {
         let o = self.strings.len() as i32;
@@ -53,8 +48,17 @@ impl Asm {
     }
     /// first_statement<0 means builtin number -first.
     fn func(&mut self, first: i32, parm_start: i32, locals: i32, s_name: i32, numparms: i32, p0: u8) {
-        self.functions
-            .push([first as i64, parm_start as i64, locals as i64, 0, s_name as i64, 0, numparms as i64, p0 as i64, 0]);
+        self.functions.push([
+            first as i64,
+            parm_start as i64,
+            locals as i64,
+            0,
+            s_name as i64,
+            0,
+            numparms as i64,
+            p0 as i64,
+            0,
+        ]);
     }
 
     fn build(&self) -> Vec<u8> {
@@ -91,13 +95,20 @@ impl Asm {
         body.extend_from_slice(&glob_b);
 
         let header: [i32; 15] = [
-            6, 0,
-            ofs_statements as i32, self.statements.len() as i32,
-            ofs_globaldefs as i32, 0,
-            ofs_fielddefs as i32, 0,
-            ofs_functions as i32, self.functions.len() as i32,
-            ofs_strings as i32, self.strings.len() as i32,
-            ofs_globals as i32, self.globals.len() as i32,
+            6,
+            0,
+            ofs_statements as i32,
+            self.statements.len() as i32,
+            ofs_globaldefs as i32,
+            0,
+            ofs_fielddefs as i32,
+            0,
+            ofs_functions as i32,
+            self.functions.len() as i32,
+            ofs_strings as i32,
+            self.strings.len() as i32,
+            ofs_globals as i32,
+            self.globals.len() as i32,
             0,
         ];
         let mut out = Vec::new();

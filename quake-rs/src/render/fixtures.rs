@@ -1,15 +1,15 @@
 //! Test fixtures shared by the renderer and 2-D modules' tests.
 
+use super::{Image, Renderer, Scene, demo_room};
 use crate::bsp::Bsp;
 use crate::math::Vec3;
 use crate::wad::Qpic;
-use super::{demo_room, Image, Renderer, Scene};
 
 /// Build a tiny but valid single-skin single-frame MDL whose frame-0
 /// triangle, after the model->world transform, sits in front of the camera.
 /// Uses a large `scale` so the decoded vertices span a visible extent.
 pub(super) fn tiny_mdl() -> crate::mdl::Mdl {
-    use crate::mdl::{AliasFrame, Frame, Mdl, MdlHeader, Skin, StVert, Triangle, TriVertex};
+    use crate::mdl::{AliasFrame, Frame, Mdl, MdlHeader, Skin, StVert, TriVertex, Triangle};
     let header = MdlHeader {
         ident: i32::from_le_bytes(*b"IDPO"),
         version: 6,
@@ -49,19 +49,11 @@ pub(super) fn tiny_mdl() -> crate::mdl::Mdl {
 
 /// Build a one-face BSP with the given lighting lump, lightofs, and flags,
 /// plus a 32x32 (=> 3x3 luxel) world polygon.
-pub(super) fn one_face_bsp(
-    lighting: Vec<u8>,
-    lightofs: i32,
-    flags: i32,
-) -> (Bsp, crate::bsp::DFace, Vec<Vec3>) {
+pub(super) fn one_face_bsp(lighting: Vec<u8>, lightofs: i32, flags: i32) -> (Bsp, crate::bsp::DFace, Vec<Vec3>) {
     let mut bsp = demo_room();
     // Replace texinfo[0] with an axis-aligned one and clear textures so the
     // texinfo lookup in face_lightmap resolves predictably.
-    bsp.texinfo = vec![crate::bsp::TexInfo {
-        vecs: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]],
-        miptex: 0,
-        flags,
-    }];
+    bsp.texinfo = vec![crate::bsp::TexInfo { vecs: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]], miptex: 0, flags }];
     bsp.lighting = lighting;
     let face = crate::bsp::DFace {
         planenum: 0,
@@ -72,12 +64,7 @@ pub(super) fn one_face_bsp(
         styles: [0, 0, 0, 0],
         lightofs,
     };
-    let poly = vec![
-        [0.0, 0.0, 0.0],
-        [32.0, 0.0, 0.0],
-        [32.0, 32.0, 0.0],
-        [0.0, 32.0, 0.0],
-    ];
+    let poly = vec![[0.0, 0.0, 0.0], [32.0, 0.0, 0.0], [32.0, 32.0, 0.0], [0.0, 32.0, 0.0]];
     (bsp, face, poly)
 }
 
@@ -87,22 +74,14 @@ pub(super) fn one_face_bsp(
 /// vecs), so luxel `(i,j)` lives at world `(16i, 16j, 0)`.
 pub(super) fn one_face_bsp_zplane(luxel: u8) -> (Bsp, crate::bsp::DFace, Vec<Vec3>) {
     let (mut bsp, face, poly) = one_face_bsp(vec![luxel; 9], 0, 0);
-    bsp.planes[0] = crate::bsp::DPlane {
-        normal: [0.0, 0.0, 1.0],
-        dist: 0.0,
-        ptype: 0,
-    };
+    bsp.planes[0] = crate::bsp::DPlane { normal: [0.0, 0.0, 1.0], dist: 0.0, ptype: 0 };
     (bsp, face, poly)
 }
 
 /// A z-plane one-face BSP whose face uses two light styles. The LIGHTING
 /// lump concatenates the two `3x3` luxel blocks: block for `styles[0]` first
 /// (all `b0`), then `styles[1]` (all `b1`). `styles` are the style indices.
-pub(super) fn two_style_face_bsp(
-    styles: [u8; 4],
-    b0: u8,
-    b1: u8,
-) -> (Bsp, crate::bsp::DFace, Vec<Vec3>) {
+pub(super) fn two_style_face_bsp(styles: [u8; 4], b0: u8, b1: u8) -> (Bsp, crate::bsp::DFace, Vec<Vec3>) {
     // 9 luxels per block, two blocks concatenated.
     let mut lighting = vec![b0; 9];
     lighting.extend(std::iter::repeat(b1).take(9));
@@ -161,11 +140,7 @@ pub(crate) fn solid_conchars() -> Qpic {
 
 /// A solid `w*h` Qpic filled with palette index `idx`.
 pub(crate) fn solid_pic(w: i32, h: i32, idx: u8) -> crate::wad::Qpic {
-    crate::wad::Qpic {
-        width: w,
-        height: h,
-        data: vec![idx; (w * h) as usize],
-    }
+    crate::wad::Qpic { width: w, height: h, data: vec![idx; (w * h) as usize] }
 }
 
 /// Draw `scene` on a renderer of its own (every cache cold), as a one-frame
@@ -208,12 +183,20 @@ pub(super) fn test_sprite(wpx: i32, hpx: i32, fill: u8) -> crate::spr::Sprite {
     use crate::spr::{Frame, Sprite, SpriteFrame, SpriteHeader};
     Sprite {
         header: SpriteHeader {
-            ident: 0, version: 1, type_: 0, boundingradius: 0.0,
-            width: wpx, height: hpx, numframes: 1, beamlength: 0.0, synctype: 0,
+            ident: 0,
+            version: 1,
+            type_: 0,
+            boundingradius: 0.0,
+            width: wpx,
+            height: hpx,
+            numframes: 1,
+            beamlength: 0.0,
+            synctype: 0,
         },
         frames: vec![Frame::Single(SpriteFrame {
             origin: [-wpx / 2, hpx / 2], // centred
-            width: wpx, height: hpx,
+            width: wpx,
+            height: hpx,
             pixels: vec![fill; (wpx * hpx) as usize],
         })],
     }

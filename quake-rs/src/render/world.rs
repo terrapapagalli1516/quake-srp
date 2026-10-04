@@ -6,9 +6,9 @@
 //! entities it takes ([`BModelInstance`], [`ExternalBModel`]) and
 //! `D_CalcGradients`' planes for a face ([`face_grads`]).
 
-use crate::bsp::Bsp;
-use crate::math::{concat_rotations, dot, Vec3, PITCH, ROLL, YAW};
 use super::raster::{PolyGrads, ScreenProj};
+use crate::bsp::Bsp;
+use crate::math::{PITCH, ROLL, Vec3, YAW, concat_rotations, dot};
 
 /// A face's [`PolyGrads`] from its plane (`bsp.planes[face.planenum]`, not
 /// side-flipped: flipping the normal and the distance together changes
@@ -58,8 +58,7 @@ pub struct BModelInstance {
 /// IEEE float, so [`entity_rotate`] through it reproduces its input bit for
 /// bit). The world entity and the external `b_*.bsp` item boxes (which never
 /// rotate; id's own box items never set `angles` either) use this directly.
-pub(super) const IDENTITY_ROTATION: [[f32; 3]; 3] =
-    [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+pub(super) const IDENTITY_ROTATION: [[f32; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
 
 /// `R_RotateBmodel`'s matrix build: `entity_rotation = Roll * Pitch * Yaw`
 /// (`R_ConcatRotations` in that order), each an axis rotation of `angles`'
@@ -157,8 +156,8 @@ pub struct ExternalBModel<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::render::{demo_room, Camera, Scene};
     use crate::render::fixtures::render_once;
+    use crate::render::{Camera, Scene, demo_room};
 
     // -- Brush submodels (inline `*N` bmodels: doors / plats / buttons) -----
 
@@ -181,12 +180,7 @@ mod tests {
         // Four corners of a 64x64 YZ quad at local x = 0, ordered CCW as seen
         // from -X. Pushed as fresh vertexes in the SHARED vertex array.
         let base_vtx = bsp.vertexes.len() as u16;
-        let corners: [[f32; 3]; 4] = [
-            [0.0, -32.0, -32.0],
-            [0.0, 32.0, -32.0],
-            [0.0, 32.0, 32.0],
-            [0.0, -32.0, 32.0],
-        ];
+        let corners: [[f32; 3]; 4] = [[0.0, -32.0, -32.0], [0.0, 32.0, -32.0], [0.0, 32.0, 32.0], [0.0, -32.0, 32.0]];
         for c in corners {
             bsp.vertexes.push(crate::bsp::DVertex { point: c });
         }
@@ -203,11 +197,7 @@ mod tests {
 
         // Plane: outward normal -X (faces toward a camera on the -X side).
         let planenum = bsp.planes.len() as i16;
-        bsp.planes.push(DPlane {
-            normal: [-1.0, 0.0, 0.0],
-            dist: 0.0,
-            ptype: crate::bsp::PLANE_X,
-        });
+        bsp.planes.push(DPlane { normal: [-1.0, 0.0, 0.0], dist: 0.0, ptype: crate::bsp::PLANE_X });
 
         // Reuse texinfo 0 (axis-aligned; demo_room has no inline textures so the
         // submodel takes the flat-colour fallback, same as the world walls).
@@ -257,21 +247,13 @@ mod tests {
         // without it (it can only add coverage, never remove it). With near-plane
         // clipping the surrounding world walls now also fill the frame, so this is
         // an `>=` rather than a strict `>` — the strong check below is occlusion.
-        assert!(
-            drawn_with >= drawn_without,
-            "submodel must not reduce coverage: {drawn_without} -> {drawn_with}"
-        );
+        assert!(drawn_with >= drawn_without, "submodel must not reduce coverage: {drawn_without} -> {drawn_with}");
 
         // The decisive check: the submodel is nearer than the geometry behind it,
         // so adding it must CHANGE the framebuffer (it occludes the far wall). This
         // proves the submodel is rasterised and depth-tested, independent of how
         // much background the world fills.
-        let changed = without
-            .pixels
-            .iter()
-            .zip(with.pixels.iter())
-            .filter(|(a, b)| a != b)
-            .count();
+        let changed = without.pixels.iter().zip(with.pixels.iter()).filter(|(a, b)| a != b).count();
         assert!(changed > 0, "submodel changed no pixels (not drawn / fully occluded)");
     }
 
@@ -284,11 +266,11 @@ mod tests {
         let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
 
         let empty = render_once(&Scene::new(&bsp, cam, 160, 120, &pal));
-        let oob = render_once(&Scene { bmodels: &[BModelInstance { model_index: 999, origin: [-120.0, 0.0, 0.0], frame: 0, angles: [0.0; 3] }], ..Scene::new(&bsp, cam, 160, 120, &pal) });
-        assert_eq!(
-            empty.pixels, oob.pixels,
-            "out-of-range submodel index must be a no-op"
-        );
+        let oob = render_once(&Scene {
+            bmodels: &[BModelInstance { model_index: 999, origin: [-120.0, 0.0, 0.0], frame: 0, angles: [0.0; 3] }],
+            ..Scene::new(&bsp, cam, 160, 120, &pal)
+        });
+        assert_eq!(empty.pixels, oob.pixels, "out-of-range submodel index must be a no-op");
     }
 
     #[test]
@@ -300,15 +282,16 @@ mod tests {
         let pal = crate::render::fixtures::ramp_palette();
         let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
 
-        let centered = render_once(&Scene { bmodels: &[BModelInstance { model_index: 1, origin: [-120.0, 0.0, 0.0], frame: 0, angles: [0.0; 3] }], ..Scene::new(&bsp, cam, 160, 120, &pal) });
+        let centered = render_once(&Scene {
+            bmodels: &[BModelInstance { model_index: 1, origin: [-120.0, 0.0, 0.0], frame: 0, angles: [0.0; 3] }],
+            ..Scene::new(&bsp, cam, 160, 120, &pal)
+        });
         // Shift the quad well off to one side (+Y) so it projects elsewhere.
-        let shifted = render_once(&Scene { bmodels: &[BModelInstance { model_index: 1, origin: [-120.0, 120.0, 0.0], frame: 0, angles: [0.0; 3] }], ..Scene::new(&bsp, cam, 160, 120, &pal) });
-        let changed = centered
-            .pixels
-            .iter()
-            .zip(shifted.pixels.iter())
-            .filter(|(a, b)| a != b)
-            .count();
+        let shifted = render_once(&Scene {
+            bmodels: &[BModelInstance { model_index: 1, origin: [-120.0, 120.0, 0.0], frame: 0, angles: [0.0; 3] }],
+            ..Scene::new(&bsp, cam, 160, 120, &pal)
+        });
+        let changed = centered.pixels.iter().zip(shifted.pixels.iter()).filter(|(a, b)| a != b).count();
         assert!(changed > 0, "moving the submodel origin should move its pixels");
     }
 
@@ -358,7 +341,10 @@ mod tests {
         let pal = crate::render::fixtures::ramp_palette();
         let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
         // Must not panic; the corrupt face is simply skipped.
-        let _img = render_once(&Scene { bmodels: &[BModelInstance { model_index: 1, origin: [-120.0, 0.0, 0.0], frame: 0, angles: [0.0; 3] }], ..Scene::new(&bsp, cam, 80, 60, &pal) });
+        let _img = render_once(&Scene {
+            bmodels: &[BModelInstance { model_index: 1, origin: [-120.0, 0.0, 0.0], frame: 0, angles: [0.0; 3] }],
+            ..Scene::new(&bsp, cam, 80, 60, &pal)
+        });
     }
 
     // -- Rotation (R_RotateBmodel: mission-pack func_rotate_* doors/trains) ----
@@ -424,7 +410,12 @@ mod tests {
         let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
         let at = |yaw: f32| {
             render_once(&Scene {
-                bmodels: &[BModelInstance { model_index: 1, origin: [-120.0, 0.0, 0.0], frame: 0, angles: [0.0, yaw, 0.0] }],
+                bmodels: &[BModelInstance {
+                    model_index: 1,
+                    origin: [-120.0, 0.0, 0.0],
+                    frame: 0,
+                    angles: [0.0, yaw, 0.0],
+                }],
                 ..Scene::new(&bsp, cam, 160, 120, &pal)
             })
         };
@@ -445,7 +436,7 @@ mod tests {
     /// origin via the same origin shift the submodel path uses. No inline textures
     /// (so it takes the flat-colour fallback) and no lighting lump (fullbright).
     fn tiny_brush_bsp() -> Bsp {
-        use crate::bsp::{DEdge, DFace, DModel, DPlane, DVertex, TexInfo, PLANE_X};
+        use crate::bsp::{DEdge, DFace, DModel, DPlane, DVertex, PLANE_X, TexInfo};
 
         // Four corners of a 64x64 YZ quad at local x = 0, ordered CCW as seen from
         // -X (so with the -X plane normal the face is visible from a -X camera).
@@ -466,11 +457,7 @@ mod tests {
             surfedges.push(edge_index);
         }
         let planes = vec![DPlane { normal: [-1.0, 0.0, 0.0], dist: 0.0, ptype: PLANE_X }];
-        let texinfo = vec![TexInfo {
-            vecs: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]],
-            miptex: 0,
-            flags: 0,
-        }];
+        let texinfo = vec![TexInfo { vecs: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]], miptex: 0, flags: 0 }];
         let faces = vec![DFace {
             planenum: 0,
             side: 0,
@@ -524,15 +511,13 @@ mod tests {
         let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
 
         let without = render_once(&Scene::new(&world, cam, 160, 120, &pal));
-        let with = render_once(&Scene { external: &[ExternalBModel { bsp: &box_bsp, origin: [-120.0, 0.0, 0.0] }], ..Scene::new(&world, cam, 160, 120, &pal) });
+        let with = render_once(&Scene {
+            external: &[ExternalBModel { bsp: &box_bsp, origin: [-120.0, 0.0, 0.0] }],
+            ..Scene::new(&world, cam, 160, 120, &pal)
+        });
 
         // The box is nearer than the far wall, so drawing it must CHANGE pixels.
-        let changed = without
-            .pixels
-            .iter()
-            .zip(with.pixels.iter())
-            .filter(|(a, b)| a != b)
-            .count();
+        let changed = without.pixels.iter().zip(with.pixels.iter()).filter(|(a, b)| a != b).count();
         assert!(changed > 0, "external brush bsp changed no pixels (not drawn)");
     }
 
@@ -545,14 +530,15 @@ mod tests {
         let pal = crate::render::fixtures::ramp_palette();
         let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
 
-        let centered = render_once(&Scene { external: &[ExternalBModel { bsp: &box_bsp, origin: [-120.0, 0.0, 0.0] }], ..Scene::new(&world, cam, 160, 120, &pal) });
-        let shifted = render_once(&Scene { external: &[ExternalBModel { bsp: &box_bsp, origin: [-120.0, 120.0, 0.0] }], ..Scene::new(&world, cam, 160, 120, &pal) });
-        let changed = centered
-            .pixels
-            .iter()
-            .zip(shifted.pixels.iter())
-            .filter(|(a, b)| a != b)
-            .count();
+        let centered = render_once(&Scene {
+            external: &[ExternalBModel { bsp: &box_bsp, origin: [-120.0, 0.0, 0.0] }],
+            ..Scene::new(&world, cam, 160, 120, &pal)
+        });
+        let shifted = render_once(&Scene {
+            external: &[ExternalBModel { bsp: &box_bsp, origin: [-120.0, 120.0, 0.0] }],
+            ..Scene::new(&world, cam, 160, 120, &pal)
+        });
+        let changed = centered.pixels.iter().zip(shifted.pixels.iter()).filter(|(a, b)| a != b).count();
         assert!(changed > 0, "moving the external box origin should move its pixels");
     }
 
@@ -585,11 +571,11 @@ mod tests {
             lighting: Vec::new(),
         };
         let baseline = render_once(&Scene::new(&world, cam, 160, 120, &pal));
-        let with_empty = render_once(&Scene { external: &[ExternalBModel { bsp: &empty, origin: [-120.0, 0.0, 0.0] }], ..Scene::new(&world, cam, 160, 120, &pal) });
-        assert_eq!(
-            baseline.pixels, with_empty.pixels,
-            "an empty/missing external box must draw nothing"
-        );
+        let with_empty = render_once(&Scene {
+            external: &[ExternalBModel { bsp: &empty, origin: [-120.0, 0.0, 0.0] }],
+            ..Scene::new(&world, cam, 160, 120, &pal)
+        });
+        assert_eq!(baseline.pixels, with_empty.pixels, "an empty/missing external box must draw nothing");
 
         // A box whose single face references out-of-range edges/planes/texinfo:
         // the face is skipped, no panic.
@@ -599,6 +585,9 @@ mod tests {
             f.planenum = 30_000;
             f.texinfo = 30_000;
         }
-        let _ = render_once(&Scene { external: &[ExternalBModel { bsp: &bad, origin: [-120.0, 0.0, 0.0] }], ..Scene::new(&world, cam, 80, 60, &pal) });
+        let _ = render_once(&Scene {
+            external: &[ExternalBModel { bsp: &bad, origin: [-120.0, 0.0, 0.0] }],
+            ..Scene::new(&world, cam, 80, 60, &pal)
+        });
     }
 }

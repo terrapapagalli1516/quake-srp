@@ -42,9 +42,9 @@ use crate::client::lerpmodels::LerpModels;
 use crate::client::lerpmove::LerpMove;
 use crate::client::nailbarrels::NailBarrels;
 use crate::render::{Crosshair, PerspSpan, SkyScroll, TorchFlicker};
-use crate::snd::SoundMode;
 use crate::screen::{SbarLayout, VIEWSIZE_DEFAULT, VIEWSIZE_MAX, VIEWSIZE_MIN, VIEWSIZE_MODERN, VIEWSIZE_STEP};
 use crate::server::LerpLightStyles;
+use crate::snd::SoundMode;
 use crate::vm::{MAX_EDICTS, MAX_EDICTS_LIMIT};
 
 /// The largest of the port's pixel sizes, [`Cvars::pixel_size`]: 1 to 4
@@ -477,6 +477,7 @@ fn parse_mode(v: &str) -> Option<(u16, u16)> {
 
 /// The console's cvars, in `cvar_vars` order for completion (id's list
 /// finds the one registered last first; the port's own come after id's).
+#[rustfmt::skip] // one cvar to two lines, as written
 pub const CVARS: &[Cvar] = &[
     Cvar { name: "joywwhack2", archive: false, departure: false, help: "WingMan Warrior spinner curve",
         get: |c| number_string(c.joy.wwhack2), set: |c, v| c.joy.wwhack2 = atof(v) },
@@ -637,16 +638,26 @@ const RETIRED: &[Cvar] = &[
     // the span is 1. A saved `wasm_exactpersp "1"` (written by a Classic
     // player who switched it on) draws exact perspective, as it did; a saved
     // "0" (a slop player who switched it off) draws id's 16-pixel spans.
-    Cvar { name: "wasm_exactpersp", archive: false, departure: true, help: "old: 1 is r_perspspan 1, 0 is 16",
+    Cvar {
+        name: "wasm_exactpersp",
+        archive: false,
+        departure: true,
+        help: "old: 1 is r_perspspan 1, 0 is 16",
         get: |c| flag(c.persp_span == PerspSpan::Exact),
-        set: |c, v| c.persp_span = if on(v) { PerspSpan::Exact } else { PerspSpan::Spans16 } },
+        set: |c, v| c.persp_span = if on(v) { PerspSpan::Exact } else { PerspSpan::Spans16 },
+    },
     // The on/off of id's 72 fps cap until 2026-10-03, now `host_maxfps`: on
     // is none (0), off id's 72, and it reads 1 only while there is no cap.
     // A saved `wasm_uncapped "0"` (a slop player who switched it off) runs
     // id's gate, as it did; a saved "1" (a Classic player) runs uncapped.
-    Cvar { name: "wasm_uncapped", archive: false, departure: true, help: "old: 1 is host_maxfps 0, 0 is 72",
+    Cvar {
+        name: "wasm_uncapped",
+        archive: false,
+        departure: true,
+        help: "old: 1 is host_maxfps 0, 0 is 72",
         get: |c| flag(c.max_fps == FrameCap::NONE),
-        set: |c, v| c.max_fps = if on(v) { FrameCap::NONE } else { FrameCap::ID } },
+        set: |c, v| c.max_fps = if on(v) { FrameCap::NONE } else { FrameCap::ID },
+    },
 ];
 
 /// `Cvar_FindVar`: the cvar called `name` (any case, as the port's console
@@ -701,7 +712,11 @@ mod tests {
                 // Screen size is id's own cvar, started one step larger in
                 // slop: not a departure (a preset keeps the
                 // player's own value, `Settings::apply_preset`).
-                assert!(c.departure || c.name == "viewsize", "{} differs between the presets, so it is a departure", c.name);
+                assert!(
+                    c.departure || c.name == "viewsize",
+                    "{} differs between the presets, so it is a departure",
+                    c.name
+                );
             }
         }
         assert_eq!((id.viewsize, slop.viewsize), (VIEWSIZE_DEFAULT, VIEWSIZE_DEFAULT + VIEWSIZE_STEP));
@@ -723,12 +738,24 @@ mod tests {
     fn the_controls_are_the_same_in_both_presets() {
         let (id, slop) = (Cvars::classic(), Cvars::slop());
         for name in [
-            "cl_forwardspeed", "cl_backspeed", "freelook", "cl_jumpswim", "vid_altenter", "joystick", "joy_rumble",
-            "joyadvanced", "joy_deadzone", "in_touch",
+            "cl_forwardspeed",
+            "cl_backspeed",
+            "freelook",
+            "cl_jumpswim",
+            "vid_altenter",
+            "joystick",
+            "joy_rumble",
+            "joyadvanced",
+            "joy_deadzone",
+            "in_touch",
         ] {
             let c = find(name).unwrap();
             assert_eq!(c.get(&id), c.get(&slop), "{name}: the same in both presets");
-            assert_eq!(c.departure, !name.starts_with("cl_") || name == "cl_jumpswim", "{name}: a slop option, but Always Run");
+            assert_eq!(
+                c.departure,
+                !name.starts_with("cl_") || name == "cl_jumpswim",
+                "{name}: a slop option, but Always Run"
+            );
         }
         assert_eq!(id.joy, slop.joy, "the whole gamepad layout, not just `joystick`");
         assert_eq!(id.joy, JoyCvars::twin_stick(), "Cvars::classic already has the slop pad");
@@ -736,14 +763,26 @@ mod tests {
         // with_id_controls touches only the controls: everything else stays
         // whatever preset it came from.
         let old = slop.clone().with_id_controls();
-        assert!(!old.freelook && !old.jumpswim && !old.alt_enter && !old.always_run() && old.joy == JoyCvars::classic());
-        assert_eq!((old.max_fps, old.native, old.crosshair), (slop.max_fps, slop.native, slop.crosshair), "the engine is untouched");
+        assert!(
+            !old.freelook && !old.jumpswim && !old.alt_enter && !old.always_run() && old.joy == JoyCvars::classic()
+        );
+        assert_eq!(
+            (old.max_fps, old.native, old.crosshair),
+            (slop.max_fps, slop.native, slop.crosshair),
+            "the engine is untouched"
+        );
     }
 
     #[test]
     fn cvar_command_parses_like_q_atof() {
-        assert_eq!((atof("100"), atof("0.7"), atof("-0.022"), atof("junk"), atof(" 55xyz")), (100.0, 0.7, -0.022, 0.0, 55.0));
-        assert_eq!((number_string(100.0), number_string(0.7), number_string(-0.022)), ("100".into(), "0.7".into(), "-0.022".into()));
+        assert_eq!(
+            (atof("100"), atof("0.7"), atof("-0.022"), atof("junk"), atof(" 55xyz")),
+            (100.0, 0.7, -0.022, 0.0, 55.0)
+        );
+        assert_eq!(
+            (number_string(100.0), number_string(0.7), number_string(-0.022)),
+            ("100".into(), "0.7".into(), "-0.022".into())
+        );
         let mut c = Cvars::classic();
         find("VIEWSIZE").unwrap().set(&mut c, "500");
         assert_eq!(c.viewsize, 120.0, "viewsize is bounded as SCR_CalcRefdef bounds it");
@@ -788,8 +827,22 @@ mod tests {
         let fps = find("wasm_showfps").expect("the cvar");
         assert_eq!((fps.get(&id), fps.get(&slop)), ("0".into(), "0".into()));
         let mut spans = Cvars::slop();
-        for (set, now) in [("8", "8"), ("4", "4"), ("16", "16"), ("1", "1"), ("32", "32"), ("64", "64"), ("12", "8"),
-                           ("40", "32"), ("100", "64"), ("5", "4"), ("2", "1"), ("0", "16"), ("junk", "16"), ("-4", "16")] {
+        for (set, now) in [
+            ("8", "8"),
+            ("4", "4"),
+            ("16", "16"),
+            ("1", "1"),
+            ("32", "32"),
+            ("64", "64"),
+            ("12", "8"),
+            ("40", "32"),
+            ("100", "64"),
+            ("5", "4"),
+            ("2", "1"),
+            ("0", "16"),
+            ("junk", "16"),
+            ("-4", "16"),
+        ] {
             c.set(&mut spans, set);
             assert_eq!(c.get(&spans), now, "r_perspspan {set}");
         }
@@ -840,17 +893,31 @@ mod tests {
         assert_eq!(old.name, "wasm_exactpersp");
         let mut c = Cvars::classic();
         old.set(&mut c, "1");
-        assert_eq!((c.persp_span, old.get(&c).as_str()), (PerspSpan::Exact, "1"), "a Classic player's saved 1: exact, as before");
+        assert_eq!(
+            (c.persp_span, old.get(&c).as_str()),
+            (PerspSpan::Exact, "1"),
+            "a Classic player's saved 1: exact, as before"
+        );
         let mut out = String::new();
         write_changes(&c, &Cvars::classic(), &mut out);
         assert_eq!(out, "r_perspspan \"1\"\n", "the next save writes the span");
         let mut c = Cvars::slop();
         assert_eq!(old.get(&c), "0", "slop's own 8 is not exact");
         old.set(&mut c, "0");
-        assert_eq!((c.persp_span, old.get(&c).as_str()), (PerspSpan::Spans16, "0"), "a slop player's saved 0: id's spans, as before");
+        assert_eq!(
+            (c.persp_span, old.get(&c).as_str()),
+            (PerspSpan::Spans16, "0"),
+            "a slop player's saved 0: id's spans, as before"
+        );
         old.set(&mut c, "1");
         assert_eq!((c.persp_span, old.get(&c).as_str()), (PerspSpan::Exact, "1"), "a saved 1: exact");
-        for (span, reads) in [(PerspSpan::Spans64, "0"), (PerspSpan::Spans32, "0"), (PerspSpan::Spans8, "0"), (PerspSpan::Spans4, "0"), (PerspSpan::Exact, "1")] {
+        for (span, reads) in [
+            (PerspSpan::Spans64, "0"),
+            (PerspSpan::Spans32, "0"),
+            (PerspSpan::Spans8, "0"),
+            (PerspSpan::Spans4, "0"),
+            (PerspSpan::Exact, "1"),
+        ] {
             c.persp_span = span;
             assert_eq!(old.get(&c), reads, "{span:?}");
         }

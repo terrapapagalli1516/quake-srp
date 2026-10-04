@@ -8,8 +8,8 @@
 //! Ported from Quake (GPLv2). Copyright (C) 1996-1997 Id Software, Inc.
 //! Source: `WinQuake/view.c`.
 
-use crate::math::{angle_vectors, dot, normalize, Vec3};
-use crate::stepping::{Stepping, Tick72, ID_FRAMETIME};
+use crate::math::{Vec3, angle_vectors, dot, normalize};
+use crate::stepping::{ID_FRAMETIME, Stepping, Tick72};
 
 /// `v_kicktime` (view.c, default "0.5"): how long an svc_damage view kick lasts.
 pub const V_KICKTIME: f32 = 0.5;
@@ -42,11 +42,7 @@ pub fn cshift_add(percent: f32, add: f32) -> f32 {
 /// damage flash loses 3 a frame at 72 fps (not 2.08), the bonus flash 2.
 pub fn cshift_drop(percent: f32, frametime: f32, rate: f32) -> f32 {
     let p = (percent - frametime * rate) as i32;
-    if p <= 0 {
-        0.0
-    } else {
-        p as f32
-    }
+    if p <= 0 { 0.0 } else { p as f32 }
 }
 
 /// V_UpdatePalette's damage and bonus fades over a frame of `frametime`,
@@ -128,13 +124,7 @@ pub struct ParsedDamage {
 /// angles as V_CalcRefdef keeps them — `YAW = viewangles[YAW]`, `PITCH =
 /// -viewangles[PITCH]` (entity pitch is stored backwards), roll ~0 — so
 /// AngleVectors sees the pitch mirrored, as in the C.
-pub fn parse_damage(
-    armor: i32,
-    blood: i32,
-    from: Vec3,
-    ent_origin: Vec3,
-    viewangles: Vec3,
-) -> ParsedDamage {
+pub fn parse_damage(armor: i32, blood: i32, from: Vec3, ent_origin: Vec3, viewangles: Vec3) -> ParsedDamage {
     let count = (blood as f32 * 0.5 + armor as f32 * 0.5).max(10.0);
     let color = if armor > blood {
         [200, 100, 100]

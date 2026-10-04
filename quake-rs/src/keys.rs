@@ -628,7 +628,10 @@ mod tests {
     #[test]
     fn default_cfg_is_ids_and_wasd_is_the_shared_layout() {
         let id = Bindings::default_cfg();
-        assert_eq!((id.command(b'a'), id.command(b'd'), id.command(b'c')), (Some(BIND_LOOKUP), Some(BIND_MOVEUP), Some(BIND_MOVEDOWN)));
+        assert_eq!(
+            (id.command(b'a'), id.command(b'd'), id.command(b'c')),
+            (Some(BIND_LOOKUP), Some(BIND_MOVEUP), Some(BIND_MOVEDOWN))
+        );
         assert_eq!((id.get(b'w'), id.get(b's')), (None, None), "default.cfg leaves w and s unbound");
         let wasd = id.clone().with_wasd();
         assert_eq!(
@@ -654,8 +657,10 @@ mod tests {
         assert!((K_JOY1..=K_AUX32).all(|k| id.get(k).is_none()));
         let pad = id.with_gamepad();
         let aux = |n: u8| K_AUX1 + n - 1;
-        assert_eq!([K_JOY1, aux(7), aux(8), aux(6), aux(9)].map(|k| pad.command(k)),
-                   [Some(BIND_JUMP), Some(BIND_JUMP), Some(BIND_ATTACK), Some(BIND_CHANGEWEAPON), Some(BIND_SHOWSCORES)]);
+        assert_eq!(
+            [K_JOY1, aux(7), aux(8), aux(6), aux(9)].map(|k| pad.command(k)),
+            [Some(BIND_JUMP), Some(BIND_JUMP), Some(BIND_ATTACK), Some(BIND_CHANGEWEAPON), Some(BIND_SHOWSCORES)]
+        );
         assert_eq!(pad.get(aux(10)).map(Binding::text), Some("togglemenu"), "Start");
         assert_eq!(pad.get(aux(5)).map(Binding::text), Some("impulse 12"), "LB: the previous weapon");
         assert_eq!((pad.get(K_JOY1 + 2), pad.get(aux(12))), (None, None), "X and R3 free");
@@ -675,7 +680,11 @@ mod tests {
         assert_eq!(wheel.get(K_MWHEELDOWN).map(Binding::text), Some("impulse 12"), "notch down: previous weapon");
         assert_eq!((id.wheel(), wheel.wheel()), (Wheel::Unbound, Wheel::Cycle));
         let back = wheel.clone().without_wheel();
-        assert_eq!((back.get(K_MWHEELUP), back.get(K_MWHEELDOWN)), (None, None), "a switch to Classic turns it off again");
+        assert_eq!(
+            (back.get(K_MWHEELUP), back.get(K_MWHEELDOWN)),
+            (None, None),
+            "a switch to Classic turns it off again"
+        );
         assert_eq!(back, id, "and nothing else changed");
 
         // Bound by hand, either key or both: neither the cycle nor unbound.
@@ -733,7 +742,19 @@ mod tests {
         for k in 32..=127u8 {
             assert_eq!(consolekey(k), k != b'`' && k != b'~', "{k}");
         }
-        for k in [K_ENTER, K_TAB, K_UPARROW, K_DOWNARROW, K_LEFTARROW, K_RIGHTARROW, K_PGUP, K_PGDN, K_SHIFT, K_MWHEELUP, K_MWHEELDOWN] {
+        for k in [
+            K_ENTER,
+            K_TAB,
+            K_UPARROW,
+            K_DOWNARROW,
+            K_LEFTARROW,
+            K_RIGHTARROW,
+            K_PGUP,
+            K_PGDN,
+            K_SHIFT,
+            K_MWHEELUP,
+            K_MWHEELDOWN,
+        ] {
             assert!(consolekey(k), "{k}");
         }
         for k in [K_ESCAPE, K_HOME, K_END, K_DEL, K_INS, K_CTRL, K_ALT, K_F1, K_MOUSE1, K_PAUSE, 0] {

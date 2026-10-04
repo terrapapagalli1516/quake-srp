@@ -45,7 +45,7 @@
 
 use std::collections::HashMap;
 
-use crate::math::{angle_vectors, dot, mul_add, normalize, sub, Vec3};
+use crate::math::{Vec3, angle_vectors, dot, mul_add, normalize, sub};
 
 /// How the client draws the player's nails (`r_nailbarrels`): set by the
 /// host each frame, like [`crate::client::lerpmove::LerpMove`].
@@ -376,7 +376,10 @@ mod tests {
             l.end_frame();
             let v = view(eye, 0.0, d);
             if v[0] < BARREL_MUZZLE[0] - 1.0 {
-                assert!((v[2] - (1.0 + BARREL_MUZZLE[2])).abs() < 1e-3 && (v[1] - 3.8).abs() < 1e-3, "on the level axis: {v:?}");
+                assert!(
+                    (v[2] - (1.0 + BARREL_MUZZLE[2])).abs() < 1e-3 && (v[1] - 3.8).abs() < 1e-3,
+                    "on the level axis: {v:?}"
+                );
             } else {
                 out.push(d);
             }
@@ -393,7 +396,9 @@ mod tests {
         // A wall square across the flight 70 units ahead of the eye.
         let (eye, yaw) = ([0.0, 0.0, 0.0], 0.0);
         let g = gun(eye, 0.0, yaw);
-        let wall = |from: Vec3, to: Vec3| if to[0] > 70.0 { mul_add(from, (70.0 - from[0]) / (to[0] - from[0]), sub(to, from)) } else { to };
+        let wall = |from: Vec3, to: Vec3| {
+            if to[0] > 70.0 { mul_add(from, (70.0 - from[0]) / (to[0] - from[0]), sub(to, from)) } else { to }
+        };
         let mut l = NailLaunches::default();
         let mut last = None;
         for f in 1..=16 {

@@ -87,7 +87,7 @@ pub(crate) fn maybe_stall() {
 }
 
 #[cfg(feature = "bench")]
-pub(crate) use imp::{bench_enable, set_stall_ms, NAMES};
+pub(crate) use imp::{NAMES, bench_enable, set_stall_ms};
 #[cfg(feature = "bench")]
 pub(crate) use workload::bench_start;
 
@@ -169,7 +169,8 @@ alias_models,alias_accepted,alias_tris,bands,band_threads";
         if !ON.with(|c| c.get()) {
             return;
         }
-        let (stats, cache) = renderer.map_or((RenderStats::default(), 0), |r| (r.stats_end(), r.surface_cache_usage().0));
+        let (stats, cache) =
+            renderer.map_or((RenderStats::default(), 0), |r| (r.stats_end(), r.surface_cache_usage().0));
         let acc = ACC.with(|a| *a.borrow());
         DONE.with(|d| *d.borrow_mut() = (acc, stats, cache));
     }
@@ -356,12 +357,11 @@ mod workload {
             _ => false,
         }
     }
-
 }
 
 #[cfg(all(test, feature = "bench"))]
 mod native {
-    use super::imp::{bench_enable, values, NAMES};
+    use super::imp::{NAMES, bench_enable, values};
     use super::workload::{is_walk, start, walk_input};
     use crate::host::step;
     use crate::input::{look, set_attack, set_move};

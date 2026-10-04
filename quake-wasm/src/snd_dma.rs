@@ -49,9 +49,9 @@ use quake_rs::cd_audio::{CdAudio, CdState, Disc};
 use quake_rs::client::{Listener, SoundCall};
 use quake_rs::pak::Pak;
 use quake_rs::server::StaticSound;
-use quake_rs::snd::{Mixer, SoundMode, SLOP_MIXAHEAD};
+use quake_rs::snd::{Mixer, SLOP_MIXAHEAD, SoundMode};
 
-use crate::app::{ensure_app, APP};
+use crate::app::{APP, ensure_app};
 use crate::common::pak;
 
 /// The shared ring's size in sample pairs (`web/PLATFORM.md`, "Sound"): the
@@ -805,39 +805,22 @@ mod tests {
         // FireAmbient — `ambientsound(self.origin, "ambience/fire1.wav", 0.5,
         // ATTN_STATIC)` — during spawn. e1m2 places 24 of them.
         let statics = spawn_map_statics("maps/e1m2.bsp");
-        let fires: Vec<&StaticSound> = statics
-            .iter()
-            .filter(|s| s.sample == "ambience/fire1.wav")
-            .collect();
-        assert!(
-            fires.len() >= 20,
-            "e1m2's torches register ambience/fire1.wav loops (got {})",
-            fires.len()
-        );
+        let fires: Vec<&StaticSound> = statics.iter().filter(|s| s.sample == "ambience/fire1.wav").collect();
+        assert!(fires.len() >= 20, "e1m2's torches register ambience/fire1.wav loops (got {})", fires.len());
         for f in &fires {
             // FireAmbient's exact arguments through the wire bytes:
             // vol 0.5 -> 127/255, ATTN_STATIC 3 -> 192/64 = 3.0.
             assert_eq!(f.volume, 127.0 / 255.0, "torch volume 0.5 (quantized)");
             assert_eq!(f.attenuation, 3.0, "ATTN_STATIC");
-            assert!(
-                f.origin.iter().all(|c| c.abs() < 10000.0),
-                "plausible world position {:?}",
-                f.origin
-            );
+            assert!(f.origin.iter().all(|c| c.abs() < 10000.0), "plausible world position {:?}", f.origin);
             assert!(f.sound_index >= 1, "fire1.wav resolved to a precache slot");
         }
         // The torches sit at DISTINCT places (each wall torch registers its own).
-        let mut pts: Vec<[i32; 3]> = fires
-            .iter()
-            .map(|f| [f.origin[0] as i32, f.origin[1] as i32, f.origin[2] as i32])
-            .collect();
+        let mut pts: Vec<[i32; 3]> =
+            fires.iter().map(|f| [f.origin[0] as i32, f.origin[1] as i32, f.origin[2] as i32]).collect();
         pts.sort_unstable();
         pts.dedup();
-        assert!(
-            pts.len() >= 20,
-            "torch loops are at distinct world positions (got {})",
-            pts.len()
-        );
+        assert!(pts.len() >= 20, "torch loops are at distinct world positions (got {})", pts.len());
     }
 
     #[test]
@@ -846,14 +829,8 @@ mod tests {
         // (ambience/fl_hum1.wav) and its computers drone (ambience/comp1.wav),
         // all at ATTN_STATIC — the level's actual placed soundscape.
         let statics = spawn_map_statics("maps/e1m1.bsp");
-        assert!(
-            statics.iter().any(|s| s.sample == "ambience/fl_hum1.wav"),
-            "fluorescent hum registered"
-        );
-        assert!(
-            statics.iter().any(|s| s.sample == "ambience/comp1.wav"),
-            "computer drone registered"
-        );
+        assert!(statics.iter().any(|s| s.sample == "ambience/fl_hum1.wav"), "fluorescent hum registered");
+        assert!(statics.iter().any(|s| s.sample == "ambience/comp1.wav"), "computer drone registered");
         assert!(statics.len() >= 10, "a full soundscape (got {})", statics.len());
         for s in &statics {
             assert_eq!(s.attenuation, 3.0, "every e1m1 ambient is ATTN_STATIC");
@@ -868,20 +845,9 @@ mod tests {
         // SOME leafs carry non-zero water and sky levels for
         // S_UpdateAmbientSounds to ramp toward.
         let pak = pak().expect("embedded pak");
-        let bsp = Bsp::parse(
-            &pak.read_file("maps/e1m1.bsp").ok().flatten().expect("bsp"),
-        )
-        .expect("parse");
-        let water = bsp
-            .leafs
-            .iter()
-            .filter(|l| l.ambient_level[quake_rs::snd::AMBIENT_WATER] > 0)
-            .count();
-        let sky = bsp
-            .leafs
-            .iter()
-            .filter(|l| l.ambient_level[quake_rs::snd::AMBIENT_SKY] > 0)
-            .count();
+        let bsp = Bsp::parse(&pak.read_file("maps/e1m1.bsp").ok().flatten().expect("bsp")).expect("parse");
+        let water = bsp.leafs.iter().filter(|l| l.ambient_level[quake_rs::snd::AMBIENT_WATER] > 0).count();
+        let sky = bsp.leafs.iter().filter(|l| l.ambient_level[quake_rs::snd::AMBIENT_SKY] > 0).count();
         assert!(water > 0, "some e1m1 leafs hear water ambience");
         assert!(sky > 0, "some e1m1 leafs hear sky/wind ambience");
     }
@@ -931,8 +897,10 @@ mod tests {
         for _ in 0..72 {
             ahead = adapt_modern_ahead(ahead, 0.0, 1.0 / 72.0);
         }
-        assert!((ahead - (SLOP_MIXAHEAD + (jump - SLOP_MIXAHEAD) * 0.07)).abs() < 1e-5,
-            "one second of quick frames sheds 93% of the gap: {ahead}");
+        assert!(
+            (ahead - (SLOP_MIXAHEAD + (jump - SLOP_MIXAHEAD) * 0.07)).abs() < 1e-5,
+            "one second of quick frames sheds 93% of the gap: {ahead}"
+        );
         for _ in 0..72 * 4 {
             ahead = adapt_modern_ahead(ahead, 0.0, 1.0 / 72.0);
         }

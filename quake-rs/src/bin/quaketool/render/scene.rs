@@ -28,7 +28,7 @@ use quake_rs::render::{self, Camera};
 use quake_rs::server::Server;
 
 use super::{camera_for_bsp, color_for_name};
-use crate::{parse_res, CmdResult, Out};
+use crate::{CmdResult, Out, parse_res};
 
 /// `scene`: parse a map from a PAK, spawn its QuakeC entities, and software-
 /// render the world plus every spawned entity's `.mdl` alias model at its world
@@ -48,22 +48,17 @@ pub fn cmd_scene(pak_path: &str, map_name: &str, out: &str, opts: &[String]) -> 
     let pak = Pak::open(pak_path)?;
 
     // --- map BSP bytes from the pak (parsed twice: render + sim) ---
-    let bsp_bytes = pak
-        .read_file(map_name)?
-        .ok_or_else(|| format!("{map_name:?} not found in {pak_path}"))?;
+    let bsp_bytes = pak.read_file(map_name)?.ok_or_else(|| format!("{map_name:?} not found in {pak_path}"))?;
     let bsp_for_render = Bsp::parse(&bsp_bytes)?;
     let bsp_for_sim = Bsp::parse(&bsp_bytes)?;
 
     // --- palette + progs from the pak (graceful errors, never panic) ---
-    let pal_bytes = pak
-        .read_file("gfx/palette.lmp")?
-        .ok_or_else(|| format!("gfx/palette.lmp not found in {pak_path}"))?;
-    let palette = render::parse_palette(&pal_bytes)
-        .ok_or_else(|| format!("bad palette in {pak_path} (need >= 768 bytes)"))?;
+    let pal_bytes =
+        pak.read_file("gfx/palette.lmp")?.ok_or_else(|| format!("gfx/palette.lmp not found in {pak_path}"))?;
+    let palette =
+        render::parse_palette(&pal_bytes).ok_or_else(|| format!("bad palette in {pak_path} (need >= 768 bytes)"))?;
 
-    let progs_bytes = pak
-        .read_file("progs.dat")?
-        .ok_or_else(|| format!("progs.dat not found in {pak_path}"))?;
+    let progs_bytes = pak.read_file("progs.dat")?.ok_or_else(|| format!("progs.dat not found in {pak_path}"))?;
     let progs = Progs::parse(&progs_bytes)?;
 
     // Camera from the player start (derived from the render BSP before sim).
@@ -102,9 +97,16 @@ pub fn cmd_scene(pak_path: &str, map_name: &str, out: &str, opts: &[String]) -> 
         .map(|e| {
             let monster = vm.ent_get_string(e, "classname").starts_with("monster");
             let frame = vm.ent_get_float(e, "frame") as i32;
-            (vm.ent_get_string(e, "model"), vm.ent_get_vector(e, "origin"), vm.ent_get_vector(e, "angles"), frame, monster)
+            (
+                vm.ent_get_string(e, "model"),
+                vm.ent_get_vector(e, "origin"),
+                vm.ent_get_vector(e, "angles"),
+                frame,
+                monster,
+            )
         });
-    let statics = server.statics().iter().map(|st| (st.model.clone(), st.origin, st.angles, i32::from(st.frame), false));
+    let statics =
+        server.statics().iter().map(|st| (st.model.clone(), st.origin, st.angles, i32::from(st.frame), false));
     for (model, origin, angles, frame, monster) in live.chain(statics) {
         if model.is_empty() {
             continue;
@@ -169,17 +171,17 @@ pub fn cmd_scene(pak_path: &str, map_name: &str, out: &str, opts: &[String]) -> 
         .map(|(mdl, origin, yaw, color)| render::ModelInstance {
             mdl,
             origin: *origin,
-            yaw: *yaw, pitch: 0.0, roll: 0.0,
+            yaw: *yaw,
+            pitch: 0.0,
+            roll: 0.0,
             color: *color,
             frame: 0,
             blend: None,
             skinnum: 0,
         })
         .collect();
-    let external: Vec<render::ExternalBModel> = ext_owned
-        .iter()
-        .map(|(bsp, origin)| render::ExternalBModel { bsp, origin: *origin })
-        .collect();
+    let external: Vec<render::ExternalBModel> =
+        ext_owned.iter().map(|(bsp, origin)| render::ExternalBModel { bsp, origin: *origin }).collect();
 
     // Aim the camera from the spawn eye at the nearest model that is not almost
     // on top of us (so it's framed, not degenerate); fall back to the spawn view.
@@ -189,10 +191,7 @@ pub fn cmd_scene(pak_path: &str, map_name: &str, out: &str, opts: &[String]) -> 
     };
     // Prefer the nearest monster (bigger, more recognisable); else nearest model.
     let pick = |pts: &[[f32; 3]]| {
-        pts.iter()
-            .copied()
-            .filter(|o| d2(*o, eye) > 64.0 * 64.0)
-            .min_by(|a, b| d2(*a, eye).total_cmp(&d2(*b, eye)))
+        pts.iter().copied().filter(|o| d2(*o, eye) > 64.0 * 64.0).min_by(|a, b| d2(*a, eye).total_cmp(&d2(*b, eye)))
     };
     let model_pts: Vec<[f32; 3]> = owned.iter().map(|(_, o, _, _)| *o).collect();
     // When QUAKE_AIM_DOOR is set, frame the nearest brush submodel (door/plat) so
@@ -221,11 +220,7 @@ pub fn cmd_scene(pak_path: &str, map_name: &str, out: &str, opts: &[String]) -> 
             // at its mid-height, looking at it — so it fills a good part of frame.
             let dist = d2(t, eye).sqrt();
             let f = if dist > 130.0 { (dist - 110.0) / dist } else { 0.0 };
-            let pos = [
-                eye[0] + (t[0] - eye[0]) * f,
-                eye[1] + (t[1] - eye[1]) * f,
-                eye[2] + (t[2] - eye[2]) * f,
-            ];
+            let pos = [eye[0] + (t[0] - eye[0]) * f, eye[1] + (t[1] - eye[1]) * f, eye[2] + (t[2] - eye[2]) * f];
             Camera::looking_at(pos, [t[0], t[1], t[2] + 16.0], 90.0)
         }
         None => base_cam,
@@ -317,26 +312,44 @@ pub fn cmd_scene(pak_path: &str, map_name: &str, out: &str, opts: &[String]) -> 
         let _ = writeln!(
             o,
             "  phases (ms): world {:.2}  submodel {:.2}  external {:.2}  alias {:.2}  particle {:.2}  sprite {:.2}  viewmodel {:.2}",
-            ms(st.world_ns), ms(st.submodel_ns), ms(st.external_ns), ms(st.alias_ns),
-            ms(st.particle_ns), ms(st.sprite_ns), ms(st.viewmodel_ns),
+            ms(st.world_ns),
+            ms(st.submodel_ns),
+            ms(st.external_ns),
+            ms(st.alias_ns),
+            ms(st.particle_ns),
+            ms(st.sprite_ns),
+            ms(st.viewmodel_ns),
         );
         let _ = writeln!(
             o,
             "  world: {} faces ({} pvs-cull, {} frustum-cull, {} drawn), {} tris, {} px, surf {}/{} hit/miss",
-            st.faces_total, st.faces_pvs_culled, st.faces_frustum_culled, st.faces_drawn,
-            st.world_tris, st.world_pixels, st.surf_hits, st.surf_misses,
+            st.faces_total,
+            st.faces_pvs_culled,
+            st.faces_frustum_culled,
+            st.faces_drawn,
+            st.world_tris,
+            st.world_pixels,
+            st.surf_hits,
+            st.surf_misses,
         );
         let _ = writeln!(
             o,
             "  submodel: {} faces visited, {} drawn ({}/{} surf hit/miss), {} tris, {} lightmap rebuilds",
-            st.sub_faces_visited, st.sub_faces_drawn, st.sub_surf_hits, st.sub_surf_misses,
-            st.sub_tris, st.sub_lm_builds,
+            st.sub_faces_visited,
+            st.sub_faces_drawn,
+            st.sub_surf_hits,
+            st.sub_surf_misses,
+            st.sub_tris,
+            st.sub_lm_builds,
         );
         let _ = writeln!(
             o,
             "  world sub-phases (ms): pvs {:.2}  sort {:.2}  setup+raster {:.2}  lightmap {:.2}  surf {:.2}",
-            ms(st.world_pvs_ns), ms(st.world_sort_ns), ms(st.world_setup_ns),
-            ms(st.world_light_ns), ms(st.world_surf_ns),
+            ms(st.world_pvs_ns),
+            ms(st.world_sort_ns),
+            ms(st.world_setup_ns),
+            ms(st.world_light_ns),
+            ms(st.world_surf_ns),
         );
         let _ = writeln!(
             o,
@@ -367,8 +380,7 @@ pub fn cmd_scene(pak_path: &str, map_name: &str, out: &str, opts: &[String]) -> 
         let _ = writeln!(
             o,
             "  injected dlight at [{:.0} {:.0} {:.0}] radius {:.0} (camera at [{:.0} {:.0} {:.0}])",
-            dl.origin[0], dl.origin[1], dl.origin[2], dl.radius,
-            cam.pos[0], cam.pos[1], cam.pos[2]
+            dl.origin[0], dl.origin[1], dl.origin[2], dl.radius, cam.pos[0], cam.pos[1], cam.pos[2]
         );
     }
     let _ = writeln!(

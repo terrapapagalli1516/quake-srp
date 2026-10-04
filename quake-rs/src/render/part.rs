@@ -4,9 +4,9 @@
 //! Source: `WinQuake/r_part.c` — `R_DrawParticles` (`D_DrawParticle`, `d_part.c`).
 //! The particle simulation itself is [`crate::particles`].
 
-use crate::math::{dot, sub, Vec3};
 use super::band::Band;
 use super::{Camera, Image, ViewGeom};
+use crate::math::{Vec3, dot, sub};
 
 /// Draw a set of engine particles into `image`, z-tested and depth-written
 /// against the shared `zbuf`: id's `D_DrawParticle` (`d_part.c`, the portable
@@ -72,11 +72,7 @@ pub(super) struct ParticleDot {
 
 /// `R_DrawParticles`' projection of `particles` (see [`draw_particles`]), in
 /// list order: the ones `D_DrawParticle` draws, as squares.
-pub(super) fn project_particles(
-    cam: &Camera,
-    proj: &ParticleProjection,
-    particles: &[(Vec3, u8)],
-) -> Vec<ParticleDot> {
+pub(super) fn project_particles(cam: &Camera, proj: &ParticleProjection, particles: &[(Vec3, u8)]) -> Vec<ParticleDot> {
     /// `d_iface.h`: particles nearer than this are not drawn.
     const PARTICLE_Z_CLIP: f32 = 8.0;
     let (forward, right, up) = cam.basis();
@@ -241,8 +237,8 @@ impl ParticleProjection {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::render::{demo_room, Scene};
     use crate::render::fixtures::render_once;
+    use crate::render::{Scene, demo_room};
 
     // -- Engine particles (draw_particles: projection + z-test) ---------------
 
@@ -296,8 +292,7 @@ mod tests {
         let mut img = Image::new(w, h, 0);
         let mut zbuf = vec![0i16; w * h]; // id's d_pzbuffer: 0 = nothing nearer
         draw_particles(&mut img, &mut zbuf, &cam, &[(p, 42)], w, h, aspect);
-        let px: Vec<(usize, usize)> =
-            (0..w * h).filter(|&i| img.pixels[i] == 42).map(|i| (i % w, i / w)).collect();
+        let px: Vec<(usize, usize)> = (0..w * h).filter(|&i| img.pixels[i] == 42).map(|i| (i % w, i / w)).collect();
         let (x0, y0) = (px.iter().map(|p| p.0).min()?, px.iter().map(|p| p.1).min()?);
         let (x1, y1) = (px.iter().map(|p| p.0).max()?, px.iter().map(|p| p.1).max()?);
         assert_eq!(px.len(), (x1 - x0 + 1) * (y1 - y0 + 1), "a particle is a solid block");
@@ -319,7 +314,12 @@ mod tests {
         assert_eq!(particle_box(320, 200, [100.0, 0.0, 60.0], 1.0).map(|b| (b.0, b.1)), Some((160, 5)));
         assert_eq!(particle_box(320, 200, [100.0, 0.0, 95.0], 1.0), None);
         let p = ParticleProjection::new(
-            &Camera { pos: [0.0; 3], yaw: 0.0, pitch: 0.0, roll: 0.0, fov_deg: 90.0 }, 320, 200, 0.8333333, false);
+            &Camera { pos: [0.0; 3], yaw: 0.0, pitch: 0.0, roll: 0.0, fov_deg: 90.0 },
+            320,
+            200,
+            0.8333333,
+            false,
+        );
         assert!((p.xscaleshrink - 157.0).abs() < 1e-3 && (p.yscaleshrink - 157.0 * 0.8333333).abs() < 1e-3);
         assert_eq!((p.xcenter, p.ycenter), (159.5, 99.5));
     }
@@ -447,12 +447,10 @@ mod tests {
         pal[251] = [255, 0, 255]; // a vivid colour unlikely to match the walls
         let without = render_once(&Scene::new(&bsp, cam, 160, 120, &pal));
         // A particle ~80 units in front of the camera (well before the +256 wall).
-        let with = render_once(&Scene { particles: &[([-120.0, 0.0, 0.0], 251)], ..Scene::new(&bsp, cam, 160, 120, &pal) });
+        let with =
+            render_once(&Scene { particles: &[([-120.0, 0.0, 0.0], 251)], ..Scene::new(&bsp, cam, 160, 120, &pal) });
         assert_ne!(without.pixels, with.pixels, "a visible particle must change the frame");
-        assert!(
-            with.pixels.contains(&251),
-            "the particle's palette colour must appear in the frame"
-        );
+        assert!(with.pixels.contains(&251), "the particle's palette colour must appear in the frame");
     }
 
     #[test]
@@ -466,7 +464,8 @@ mod tests {
             ((327 * p.pix_mul) >> p.pix_shift).clamp(p.pix_min, p.pix_max)
         };
         for w in [320, 640] {
-            let (id, hi) = (ParticleProjection::new(&cam, w, 200, 1.0, false), ParticleProjection::new(&cam, w, 200, 1.0, true));
+            let (id, hi) =
+                (ParticleProjection::new(&cam, w, 200, 1.0, false), ParticleProjection::new(&cam, w, 200, 1.0, true));
             assert_eq!((hi.pix_min, hi.pix_max), (id.pix_min, id.pix_max), "{w}");
             for izi in [0, 1, 100, 127, 128, 327, 1000, 4096] {
                 assert_eq!((izi * hi.pix_mul) >> hi.pix_shift, izi >> id.pix_shift, "{w} wide, izi {izi}");
@@ -481,7 +480,10 @@ mod tests {
         assert_eq!(((32 * p.pix_mul) >> p.pix_shift).clamp(p.pix_min, p.pix_max), 12);
         // Hor+ at 16:9 (fov_x 106.26): the 1440x1080 screen's sizes.
         let wide = Camera { fov_deg: crate::render::FovMode::HorPlus.fov_x(90.0, 1920, 1080, 1.0), ..cam };
-        let (a, b) = (ParticleProjection::new(&wide, 1920, 1080, 1.0, true), ParticleProjection::new(&cam, 1440, 1080, 1.0, true));
+        let (a, b) = (
+            ParticleProjection::new(&wide, 1920, 1080, 1.0, true),
+            ParticleProjection::new(&cam, 1440, 1080, 1.0, true),
+        );
         assert_eq!((a.pix_min, a.pix_max, a.pix_mul, a.pix_shift), (b.pix_min, b.pix_max, b.pix_mul, b.pix_shift));
     }
 }

@@ -74,7 +74,11 @@ fn closed_rotating_door_blocks_the_player_and_opens_once_triggered() {
 
     const SOLID_BSP: f32 = 4.0;
     for &e in &movewalls {
-        assert_eq!(server.vm.ent_get_vector(e, "origin"), [0.0, 0.0, 0.0], "a movewall must start at its closed origin");
+        assert_eq!(
+            server.vm.ent_get_vector(e, "origin"),
+            [0.0, 0.0, 0.0],
+            "a movewall must start at its closed origin"
+        );
         assert_eq!(server.vm.ent_get_float(e, "solid"), SOLID_BSP, "a movewall must start solid");
         // The exact bug this round found: `setmodel` already ran (real
         // bounds below prove it), but hiprot.qc's own func_movewall blanks
@@ -88,7 +92,11 @@ fn closed_rotating_door_blocks_the_player_and_opens_once_triggered() {
     // The rotate_object is purely visual (SOLID_NOT): it never blocked
     // anything, in the port or in id's C (both show its angles never move
     // from a stationary plate-touch alone -- a faithful, not a port, detail).
-    assert_ne!(server.vm.ent_get_float(rotate_obj, "solid"), SOLID_BSP, "the rotate_object is decorative, not collision");
+    assert_ne!(
+        server.vm.ent_get_float(rotate_obj, "solid"),
+        SOLID_BSP,
+        "the rotate_object is decorative, not collision"
+    );
 
     // (1) Closed-door collision: walk the real player, from the map's own
     // info_player_start, straight at the door. It must be BLOCKED well
@@ -125,6 +133,10 @@ fn closed_rotating_door_blocks_the_player_and_opens_once_triggered() {
     let moved = movewalls.iter().filter(|&&e| server.vm.ent_get_vector(e, "origin") != [0.0, 0.0, 0.0]).count();
     assert!(moved > 0, "at least one movewall must have moved off its closed origin once triggered");
     for &e in &movewalls {
-        assert_eq!(server.vm.ent_get_float(e, "solid"), SOLID_BSP, "a movewall stays solid while it moves (collision follows it)");
+        assert_eq!(
+            server.vm.ent_get_float(e, "solid"),
+            SOLID_BSP,
+            "a movewall stays solid while it moves (collision follows it)"
+        );
     }
 }

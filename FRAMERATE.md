@@ -978,8 +978,8 @@ under the lock):
 
 
 And on an Android phone, at its 2640x1080, 8 threads,
-`timedemo demo1` (opt-phone's runs, from a scratch directory: `
-phone/D-span-cool-fullscreen.log` cool and `F-span-warm-fullscreen.log` warm,
+`timedemo demo1` (opt-phone's runs: `D-span-cool-fullscreen.log`
+cool and `F-span-warm-fullscreen.log` warm,
 the phone throttling): 16 182 / about 85 fps, 8 175 / 81, 4 174 / 78, exact
 152 / 69 (64 and 32 not measured there).
 

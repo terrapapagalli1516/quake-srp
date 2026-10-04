@@ -15,7 +15,7 @@
 use std::error::Error;
 use std::rc::Rc;
 
-use quake_rs::client::{cl_main, host_cmd, Vid};
+use quake_rs::client::{Vid, cl_main, host_cmd};
 use quake_rs::pak::Pak;
 use quake_rs::qrand::QRand;
 use quake_rs::render::{self, FramePalette, MipCvars, VideoCvars};

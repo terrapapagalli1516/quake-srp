@@ -173,11 +173,7 @@ impl VideoCvars {
     /// The platform clamps the mode it asks for to this.
     #[must_use]
     pub fn max_view_size(self) -> (usize, usize) {
-        if self.hires {
-            (HIRES_MAXWIDTH, HIRES_MAXHEIGHT)
-        } else {
-            (MAXWIDTH, MAXHEIGHT)
-        }
+        if self.hires { (HIRES_MAXWIDTH, HIRES_MAXHEIGHT) } else { (MAXWIDTH, MAXHEIGHT) }
     }
 
     /// `(w, h)` limited to [`VideoCvars::max_view_size`]: in Classic id's
@@ -246,7 +242,7 @@ mod tests {
         // xscale, the centre 24 columns over), but for a few pixels on edges
         // the two clip differently.
         use crate::render::fixtures::render_once;
-        use crate::render::{demo_room, Camera, RenderOptions, Scene};
+        use crate::render::{Camera, RenderOptions, Scene, demo_room};
         let bsp = demo_room();
         let pal = crate::render::fixtures::ramp_palette();
         let cam = Camera::looking_at([-200.0, -150.0, 40.0], [0.0, 0.0, 0.0], 90.0);

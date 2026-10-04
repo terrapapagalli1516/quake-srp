@@ -5,11 +5,10 @@
 //! `Sbar_IntermissionOverlay`, `Sbar_FinaleOverlay`.
 
 use crate::draw::{
-    blit_qpic_at, blit_scaled, conchars_pic, draw_tile_clear, scaled_2d, screen_2d,
-    HUD_TRANSPARENT, HUD_VIRT_W,
+    HUD_TRANSPARENT, HUD_VIRT_W, blit_qpic_at, blit_scaled, conchars_pic, draw_tile_clear, scaled_2d, screen_2d,
 };
 use crate::render::Image;
-use crate::screen::{draw_center_string_revealed, SbarLayout};
+use crate::screen::{SbarLayout, draw_center_string_revealed};
 use crate::server::GameMode;
 
 // ---------------------------------------------------------------------------
@@ -59,11 +58,7 @@ impl BarXf {
     /// The transform on a `vid_w x vid_h` framebuffer.
     fn new(vid_w: usize, vid_h: usize) -> BarXf {
         let sc = screen_2d(vid_w, vid_h);
-        BarXf {
-            scale: sc.scale,
-            ox: sc.centred_320_x(),
-            vy_top: (sc.h as f32 - HUD_BAR_H) * sc.scale,
-        }
+        BarXf { scale: sc.scale, ox: sc.centred_320_x(), vy_top: (sc.h as f32 - HUD_BAR_H) * sc.scale }
     }
 
     /// The framebuffer pixel of bar coordinate `(vx, vy)`.
@@ -151,13 +146,7 @@ pub struct Hud<'a> {
 /// texel nearest-neighbour; texels equal to [`HUD_TRANSPARENT`] (255) are left
 /// transparent, leaving the underlying 3-D pixel untouched. Every write is
 /// clipped to the framebuffer, so a pic that overhangs an edge never panics.
-fn blit_qpic(
-    image: &mut Image,
-    pic: &crate::wad::Qpic,
-    vx: f32,
-    vy: f32,
-    xf: BarXf,
-) {
+fn blit_qpic(image: &mut Image, pic: &crate::wad::Qpic, vx: f32, vy: f32, xf: BarXf) {
     if pic.width <= 0 || pic.height <= 0 || xf.scale <= 0.0 {
         return;
     }
@@ -174,15 +163,7 @@ fn blit_qpic(
     let dst_h = (ph as f32 * xf.scale).round().max(1.0) as i64;
     let inv_scale = 1.0 / xf.scale;
     // Transparent texels leave the 3-D pixel as-is.
-    blit_scaled(
-        image,
-        &pic.data,
-        pw,
-        (0, 0, pw, ph),
-        (dst_x0, dst_y0, dst_w, dst_h),
-        inv_scale,
-        HUD_TRANSPARENT,
-    );
+    blit_scaled(image, &pic.data, pw, (0, 0, pw, ph), (dst_x0, dst_y0, dst_w, dst_h), inv_scale, HUD_TRANSPARENT);
 }
 
 /// Draw a right-justified non-negative integer using the big `num_*` digit pics
@@ -195,15 +176,7 @@ fn blit_qpic(
 /// pics still align. A negative value clamps to 0 (the HUD never shows negative
 /// stats); any digit whose pic is missing is simply skipped (no panic).
 #[allow(clippy::too_many_arguments)]
-fn draw_num(
-    image: &mut Image,
-    value: i32,
-    vx: f32,
-    vy: f32,
-    xf: BarXf,
-    wad: &crate::wad::Wad2,
-    alt: bool,
-) {
+fn draw_num(image: &mut Image, value: i32, vx: f32, vy: f32, xf: BarXf, wad: &crate::wad::Wad2, alt: bool) {
     // Render the magnitude; the HUD shows 0 for any negative stat.
     let v = if value < 0 { 0 } else { value };
     // Decompose into decimal digits, most-significant first.
@@ -226,11 +199,7 @@ fn draw_num(
     // mis-placed every digit at scale != 1 — i.e. at the real 640-wide frame.)
     let mut pen = vx;
     for &d in digits.iter().rev() {
-        let name = if alt {
-            ANUM_NAMES[d as usize]
-        } else {
-            NUM_NAMES[d as usize]
-        };
+        let name = if alt { ANUM_NAMES[d as usize] } else { NUM_NAMES[d as usize] };
         if let Ok(pic) = wad.qpic(name) {
             let w = pic.width.max(0) as f32;
             pen -= w;
@@ -244,15 +213,12 @@ fn draw_num(
 }
 
 /// The white big-number digit pic names (`num_0`..`num_9`).
-const NUM_NAMES: [&str; 10] = [
-    "num_0", "num_1", "num_2", "num_3", "num_4", "num_5", "num_6", "num_7", "num_8", "num_9",
-];
+const NUM_NAMES: [&str; 10] =
+    ["num_0", "num_1", "num_2", "num_3", "num_4", "num_5", "num_6", "num_7", "num_8", "num_9"];
 
 /// The gold/alternate digit pic names (`anum_0`..`anum_9`), used for ammo.
-const ANUM_NAMES: [&str; 10] = [
-    "anum_0", "anum_1", "anum_2", "anum_3", "anum_4", "anum_5", "anum_6", "anum_7", "anum_8",
-    "anum_9",
-];
+const ANUM_NAMES: [&str; 10] =
+    ["anum_0", "anum_1", "anum_2", "anum_3", "anum_4", "anum_5", "anum_6", "anum_7", "anum_8", "anum_9"];
 
 // ---------------------------------------------------------------------------
 // Status-bar item bits (`quakedef.h` IT_* / the QuakeC `items` bitfield) and the
@@ -370,16 +336,12 @@ const RSB_AMMO_ICONS: [(i32, &str); 3] =
 const RSB_INVBAR_NAMES: [&str; 2] = ["r_invbar1", "r_invbar2"];
 
 /// `inv_*` (owned, dim) weapon icon lump names, `sb_weapons[0][i]` in `Sbar_Init`.
-const WEAPON_INV_NAMES: [&str; 7] = [
-    "inv_shotgun", "inv_sshotgun", "inv_nailgun", "inv_snailgun", "inv_rlaunch", "inv_srlaunch",
-    "inv_lightng",
-];
+const WEAPON_INV_NAMES: [&str; 7] =
+    ["inv_shotgun", "inv_sshotgun", "inv_nailgun", "inv_snailgun", "inv_rlaunch", "inv_srlaunch", "inv_lightng"];
 /// The per-weapon name suffixes (`*_shotgun` … `*_lightng`) shared by the
 /// `inv_*`/`inv2_*`/`inva{1..5}_*` icon families (`Sbar_Init`). Used to build the
 /// selection-flash frame names for the active weapon.
-const WEAPON_SUFFIX: [&str; 7] = [
-    "shotgun", "sshotgun", "nailgun", "snailgun", "rlaunch", "srlaunch", "lightng",
-];
+const WEAPON_SUFFIX: [&str; 7] = ["shotgun", "sshotgun", "nailgun", "snailgun", "rlaunch", "srlaunch", "lightng"];
 
 /// `sb_ammo[type]` ammo-icon lump names (`Sbar_Init`): shells/nails/rocket/cells.
 const AMMO_ICON_NAMES: [&str; 4] = ["sb_shells", "sb_nails", "sb_rocket", "sb_cells"];
@@ -390,8 +352,7 @@ const ARMOR_ICON_NAMES: [&str; 3] = ["sb_armor1", "sb_armor2", "sb_armor3"];
 /// `sb_items[0..6]` (`Sbar_Init`): the keys + powerup icons drawn on the ibar.
 /// In `items`-bit order from bit 17: key1, key2, invisibility(ring), invuln(pent),
 /// suit, quad — matching `cl.items & (1<<(17+i))`.
-const SB_ITEM_NAMES: [&str; 6] =
-    ["sb_key1", "sb_key2", "sb_invis", "sb_invuln", "sb_suit", "sb_quad"];
+const SB_ITEM_NAMES: [&str; 6] = ["sb_key1", "sb_key2", "sb_invis", "sb_invuln", "sb_suit", "sb_quad"];
 
 /// `sb_sigil[0..3]` (`Sbar_Init`): the 4 runes, `cl.items & (1<<(28+i))`.
 const SB_SIGIL_NAMES: [&str; 4] = ["sb_sigil1", "sb_sigil2", "sb_sigil3", "sb_sigil4"];
@@ -434,11 +395,7 @@ fn weapon_flashon(hud: &Hud, i: usize) -> i32 {
     let settled = || i32::from(hud.weapon == IT_SHOTGUN << i);
     let Some(gettime) = hud.item_gettime else { return settled() };
     let flashon = ((hud.time - gettime[i]) * 10.0) as i32;
-    if flashon >= 10 {
-        settled()
-    } else {
-        flashon % 5 + 2
-    }
+    if flashon >= 10 { settled() } else { flashon % 5 + 2 }
 }
 
 /// `sb_weapons[flashon][i]` (Sbar_Init): `inv_*`, `inv2_*`, then `inva1..5_*`.
@@ -459,11 +416,7 @@ fn flashon_for(hud: &Hud, bit: i32, idx: usize) -> i32 {
     let Some(gettime) = hud.item_gettime else { return settled() };
     let Some(&t) = gettime.get(idx) else { return settled() };
     let flashon = ((hud.time - t) * 10.0) as i32;
-    if flashon >= 10 {
-        settled()
-    } else {
-        flashon % 5 + 2
-    }
+    if flashon >= 10 { settled() } else { flashon % 5 + 2 }
 }
 
 /// `hsb_weapons[flashon]` (Sbar_Init): `inv_*`, `inv2_*`, then `inva1..5_*` —
@@ -481,14 +434,7 @@ fn flashed_hip_name(flashon: i32, suffix: &str) -> String {
 /// degrades gracefully exactly as the task requires.
 // Mirrors Sbar_DrawPic (sbar.c); the C reads vid/draw globals passed explicitly here.
 #[allow(clippy::too_many_arguments)]
-fn blit_named(
-    image: &mut Image,
-    wad: &crate::wad::Wad2,
-    name: &str,
-    vx: f32,
-    vy: f32,
-    xf: BarXf,
-) {
+fn blit_named(image: &mut Image, wad: &crate::wad::Wad2, name: &str, vx: f32, vy: f32, xf: BarXf) {
     if name.is_empty() {
         return;
     }
@@ -511,14 +457,7 @@ fn blit_named(
 // Mirrors Sbar_DrawCharacter/Draw_Character (sbar.c/draw.c); the C reads vid/draw
 // globals passed explicitly here.
 #[allow(clippy::too_many_arguments)]
-fn draw_sbar_char(
-    image: &mut Image,
-    conchars: &crate::wad::Qpic,
-    ch: u8,
-    vx: f32,
-    vy: f32,
-    xf: BarXf,
-) {
+fn draw_sbar_char(image: &mut Image, conchars: &crate::wad::Qpic, ch: u8, vx: f32, vy: f32, xf: BarXf) {
     if conchars.width != 128 || conchars.height != 128 || conchars.data.len() < 128 * 128 {
         return;
     }
@@ -530,27 +469,14 @@ fn draw_sbar_char(
     let dst_h = (8.0 * xf.scale).round().max(1.0) as i64;
     let inv_scale = 1.0 / xf.scale;
     // conchars uses palette index 0 as the transparent glyph background.
-    blit_scaled(
-        image,
-        &conchars.data,
-        128,
-        (cell_x, cell_y, 8, 8),
-        (dst_x0, dst_y0, dst_w, dst_h),
-        inv_scale,
-        0,
-    );
+    blit_scaled(image, &conchars.data, 128, (cell_x, cell_y, 8, 8), (dst_x0, dst_y0, dst_w, dst_h), inv_scale, 0);
 }
 
 /// `Sbar_DrawInventory` (sbar.c): the `ibar` strip in the 24 virtual rows above
 /// the status strip and, on it, the owned weapons, the four ammo counts, the
 /// keys/powerups and the sigils. Called by [`draw_hud_into`] only while
 /// `sb_lines > 24`. `xf` is the bar's transform.
-fn draw_sbar_inventory(
-    image: &mut Image,
-    hud: &Hud,
-    conchars: Option<&crate::wad::Qpic>,
-    xf: BarXf,
-) {
+fn draw_sbar_inventory(image: &mut Image, hud: &Hud, conchars: Option<&crate::wad::Qpic>, xf: BarXf) {
     let wad = hud.wad;
     // The inventory strip's background: Rogue swaps to the "powered" art while
     // a tier-2 weapon is active (Sbar_DrawInventory's first lines); id1 and
@@ -901,30 +827,15 @@ pub fn draw_hud_into(image: &mut Image, hud: &Hud) {
 /// name. Positions are verbatim from the C (virtual sbar-space, y in 0..24): the
 /// "Monsters" / "Secrets" lines at x=8 (rows 4, 12), "Time" at x=184 row 4, and the
 /// level name right-justified ending at virtual x≈232 on row 12 (`232 - len*4`).
-fn draw_solo_scoreboard(
-    image: &mut Image,
-    conchars: &crate::wad::Qpic,
-    hud: &Hud,
-    xf: BarXf,
-) {
+fn draw_solo_scoreboard(image: &mut Image, conchars: &crate::wad::Qpic, hud: &Hud, xf: BarXf) {
     let draw = |image: &mut Image, vx: f32, vy: f32, s: &str| {
         for (i, &c) in s.as_bytes().iter().enumerate() {
             // Sbar_DrawString blits the raw ASCII glyph (space included, harmless).
             draw_sbar_char(image, conchars, c, vx + (i as f32) * 8.0, vy, xf);
         }
     };
-    draw(
-        image,
-        8.0,
-        4.0,
-        &format!("Monsters:{:3} /{:3}", hud.monsters, hud.total_monsters),
-    );
-    draw(
-        image,
-        8.0,
-        12.0,
-        &format!("Secrets :{:3} /{:3}", hud.secrets, hud.total_secrets),
-    );
+    draw(image, 8.0, 4.0, &format!("Monsters:{:3} /{:3}", hud.monsters, hud.total_monsters));
+    draw(image, 8.0, 12.0, &format!("Secrets :{:3} /{:3}", hud.secrets, hud.total_secrets));
     // Time: minutes:tens-units from the server clock (sbar.c uses integer seconds).
     let t = hud.time.max(0.0) as i32;
     let minutes = t / 60;
@@ -1105,7 +1016,7 @@ pub fn draw_finale_overlay(
 mod tests {
     use super::*;
     use crate::screen::SB_LINES_FULL;
-    use crate::wad::{Qpic, Wad2, CMP_NONE, LUMPINFO_SIZE, NAME_LEN, TYP_QPIC, WADINFO_SIZE};
+    use crate::wad::{CMP_NONE, LUMPINFO_SIZE, NAME_LEN, Qpic, TYP_QPIC, WADINFO_SIZE, Wad2};
 
     // -- HUD / status bar -----------------------------------------------------
 
@@ -1222,7 +1133,9 @@ mod tests {
         let pic = Qpic { width: 24, height: 24, data: (0..24 * 24).map(|_| next() | 0xf0).collect() };
         for &scale in &[0.5f32, 1.0, 1.37, 2.0, 2.5, 3.5, 4.0] {
             let inv = 1.0 / scale;
-            for &(vx, vy, vy_top) in &[(0.0f32, 0.0f32, 40.0f32), (-3.0, -24.0, 50.5), (60.0, 2.0, 30.25), (70.0, 10.0, 61.0)] {
+            for &(vx, vy, vy_top) in
+                &[(0.0f32, 0.0f32, 40.0f32), (-3.0, -24.0, 50.5), (60.0, 2.0, 30.25), (70.0, 10.0, 61.0)]
+            {
                 for ch in [0u8, 18, 27, 65, 255] {
                     let mut want = Image::new(80, 64, 5);
                     let mut got = Image::new(80, 64, 5);
@@ -1308,10 +1221,8 @@ mod tests {
         // region (x in [0,72), y in [0,24)) must have changed.
         let mut img3 = Image::new(80, 24, 0);
         draw_num(&mut img3, 100, 72.0, 0.0, BarXf { scale: 1.0, ox: 0.0, vy_top: 0.0 }, &wad, false);
-        let changed_3: usize = (0..24)
-            .flat_map(|y| (0..72).map(move |x| (x, y)))
-            .filter(|&(x, y)| img3.pixels[y * 80 + x] != 0)
-            .count();
+        let changed_3: usize =
+            (0..24).flat_map(|y| (0..72).map(move |x| (x, y))).filter(|&(x, y)| img3.pixels[y * 80 + x] != 0).count();
         assert!(changed_3 > 0, "3-digit value changed pixels in the digit region");
 
         // A 1-digit value at the same right edge must occupy only the rightmost
@@ -1320,29 +1231,21 @@ mod tests {
         let mut img1 = Image::new(80, 24, 0);
         draw_num(&mut img1, 7, 72.0, 0.0, BarXf { scale: 1.0, ox: 0.0, vy_top: 0.0 }, &wad, false);
         // Right slot [48,72) changed.
-        let right_changed: usize = (0..24)
-            .flat_map(|y| (48..72).map(move |x| (x, y)))
-            .filter(|&(x, y)| img1.pixels[y * 80 + x] != 0)
-            .count();
+        let right_changed: usize =
+            (0..24).flat_map(|y| (48..72).map(move |x| (x, y))).filter(|&(x, y)| img1.pixels[y * 80 + x] != 0).count();
         assert!(right_changed > 0, "1-digit value drew in the rightmost slot");
         // Left two slots [0,48) untouched.
-        let left_changed: usize = (0..24)
-            .flat_map(|y| (0..48).map(move |x| (x, y)))
-            .filter(|&(x, y)| img1.pixels[y * 80 + x] != 0)
-            .count();
+        let left_changed: usize =
+            (0..24).flat_map(|y| (0..48).map(move |x| (x, y))).filter(|&(x, y)| img1.pixels[y * 80 + x] != 0).count();
         assert_eq!(left_changed, 0, "1-digit value left the left slots blank (right-justified)");
 
         // Alignment at the right edge: the units digit of "7" and the units digit
         // of "100" occupy the same column band [48,72). Both should have drawn
         // there (num_7 = index 107, num_0 = index 100 — both non-transparent).
-        let units_7: usize = (0..24)
-            .flat_map(|y| (48..72).map(move |x| (x, y)))
-            .filter(|&(x, y)| img1.pixels[y * 80 + x] != 0)
-            .count();
-        let units_100: usize = (0..24)
-            .flat_map(|y| (48..72).map(move |x| (x, y)))
-            .filter(|&(x, y)| img3.pixels[y * 80 + x] != 0)
-            .count();
+        let units_7: usize =
+            (0..24).flat_map(|y| (48..72).map(move |x| (x, y))).filter(|&(x, y)| img1.pixels[y * 80 + x] != 0).count();
+        let units_100: usize =
+            (0..24).flat_map(|y| (48..72).map(move |x| (x, y))).filter(|&(x, y)| img3.pixels[y * 80 + x] != 0).count();
         assert_eq!(units_7, units_100, "units digit of 1- and 3-digit values align at the right edge");
     }
 
@@ -1357,10 +1260,8 @@ mod tests {
         draw_num(&mut img, 7, 72.0, 0.0, BarXf { scale: 2.0, ox: 0.0, vy_top: 0.0 }, &wad, false);
 
         // Pixels exist in the cell [96,144); none at or past 144.
-        let in_cell = (0..48)
-            .flat_map(|y| (96..144).map(move |x| (x, y)))
-            .filter(|&(x, y)| img.pixels[y * 200 + x] != 0)
-            .count();
+        let in_cell =
+            (0..48).flat_map(|y| (96..144).map(move |x| (x, y))).filter(|&(x, y)| img.pixels[y * 200 + x] != 0).count();
         assert!(in_cell > 0, "scale=2 digit drew in the px[96,144) cell ending at the scaled right edge");
         let past_edge = (0..48)
             .flat_map(|y| (144..200).map(move |x| (x, y)))
@@ -1368,10 +1269,8 @@ mod tests {
             .count();
         assert_eq!(past_edge, 0, "nothing drew past the scaled right edge px=144");
         // And it must NOT be jammed against px=72 (the old bug placed it there).
-        let at_virtual_edge = (0..48)
-            .flat_map(|y| (48..96).map(move |x| (x, y)))
-            .filter(|&(x, y)| img.pixels[y * 200 + x] != 0)
-            .count();
+        let at_virtual_edge =
+            (0..48).flat_map(|y| (48..96).map(move |x| (x, y))).filter(|&(x, y)| img.pixels[y * 200 + x] != 0).count();
         assert_eq!(at_virtual_edge, 0, "digit must not sit at the unscaled px=72 edge (the old unit-mix bug)");
     }
 
@@ -1426,9 +1325,8 @@ mod tests {
 
         // The digits (index >= 100) drew on top of the sbar background somewhere
         // in the bar — proving health/ammo/armour numbers actually rendered.
-        let has_digit = (200 - 24..200)
-            .flat_map(|y| (0..320).map(move |x| (x, y)))
-            .any(|(x, y)| img.pixels[y * 320 + x] >= 100);
+        let has_digit =
+            (200 - 24..200).flat_map(|y| (0..320).map(move |x| (x, y))).any(|(x, y)| img.pixels[y * 320 + x] >= 100);
         assert!(has_digit, "at least one big-number digit drew over the bar");
     }
 
@@ -1636,12 +1534,13 @@ mod tests {
         let complete = Qpic { width: 192, height: 24, data: vec![50u8; 192 * 24] };
         let inter = Qpic { width: 160, height: 144, data: vec![51u8; 160 * 144] };
         let finale = Qpic { width: 288, height: 24, data: vec![52u8; 288 * 24] };
-        let stats = IntermissionStats { completed_time: 205, secrets: 3, total_secrets: 7, monsters: 12, total_monsters: 45 };
+        let stats =
+            IntermissionStats { completed_time: 205, secrets: 3, total_secrets: 7, monsters: 12, total_monsters: 45 };
         // (scaled 2-D, frame, scale, framebuffer x of the overlay's x = 0)
         for (on, (w, h), scale, ox) in [
             (false, (640, 400), 1, 0),
             (false, (1920, 1080), 1, 0),
-            (true, (1315, 535), 2, 338), // ((658 - 320) >> 1) * 2
+            (true, (1315, 535), 2, 338),  // ((658 - 320) >> 1) * 2
             (true, (1920, 1080), 5, 160), // ((384 - 320) >> 1) * 5
             (true, (1280, 800), 4, 0),
         ] {
@@ -1714,7 +1613,8 @@ mod tests {
             }
         }
         // Faces (health brackets + powerups), index 70.
-        for name in ["face5", "face4", "face3", "face2", "face1", "face_inv2", "face_quad", "face_invis", "face_invul2"] {
+        for name in ["face5", "face4", "face3", "face2", "face1", "face_inv2", "face_quad", "face_invis", "face_invul2"]
+        {
             pics.push((name.to_string(), qpic_payload(24, 24, 70)));
         }
         // Pain faces, index 71.
@@ -1792,13 +1692,12 @@ mod tests {
         let hud = Hud {
             wad: &wad,
             mode: GameMode::Id1,
-            health: 100,   // -> face1 (bracket 4)
+            health: 100, // -> face1 (bracket 4)
             ammo: 25,
             armor: 80,
             // shotgun(1) + nailgun(4) owned; armour3; shells ammo type;
             // key1 (bit 17) + quad (bit 22); sigil1 (bit 28).
-            items: IT_SHOTGUN | (IT_SHOTGUN << 2) | IT_ARMOR3 | IT_SHELLS
-                | (1 << 17) | (1 << 22) | (1 << 28),
+            items: IT_SHOTGUN | (IT_SHOTGUN << 2) | IT_ARMOR3 | IT_SHELLS | (1 << 17) | (1 << 22) | (1 << 28),
             weapon: IT_SHOTGUN, // shotgun selected -> flashes inva*_shotgun
             ammo_shells: 100,
             ammo_nails: 0,
@@ -2090,7 +1989,11 @@ mod tests {
                     assert_eq!(over[i], id[i], "({x},{y}): the bar itself is the same");
                     assert_ne!(over[i], fill, "({x},{y}): its opaque pics cover it");
                 } else if bar_row {
-                    assert_eq!((id[i], over[i]), (0, fill), "({x},{y}): id tile-clears the side, the overlay leaves the view");
+                    assert_eq!(
+                        (id[i], over[i]),
+                        (0, fill),
+                        "({x},{y}): id tile-clears the side, the overlay leaves the view"
+                    );
                 } else {
                     assert_eq!((id[i], over[i]), (fill, fill), "({x},{y}): above the bar, untouched");
                 }
@@ -2129,7 +2032,16 @@ mod tests {
         // The five tier-2 weapon icons are RIT_LAVA_NAILGUN<<0..4 exactly:
         // lava nailgun, lava super nailgun, multi-grenade (pic "r_gren"),
         // multi-rocket, plasma gun.
-        assert_eq!([RIT_LAVA_NAILGUN, RIT_LAVA_NAILGUN << 1, RIT_LAVA_NAILGUN << 2, RIT_LAVA_NAILGUN << 3, RIT_LAVA_NAILGUN << 4], [4096, 8192, 16384, 32768, 65536]);
+        assert_eq!(
+            [
+                RIT_LAVA_NAILGUN,
+                RIT_LAVA_NAILGUN << 1,
+                RIT_LAVA_NAILGUN << 2,
+                RIT_LAVA_NAILGUN << 3,
+                RIT_LAVA_NAILGUN << 4
+            ],
+            [4096, 8192, 16384, 32768, 65536]
+        );
     }
 
     /// [`flashon_for`] (Hipnotic's weapons) against the same formula
@@ -2296,5 +2208,4 @@ mod tests {
         assert!(drew(&base(GameMode::Rogue, 0, RIT_LAVA_NAILGUN), 243), "r_invbar1 at or above RIT_LAVA_NAILGUN");
         assert!(!drew(&base(GameMode::Rogue, 0, 0), 242), "Rogue never draws the plain ibar");
     }
-
 }

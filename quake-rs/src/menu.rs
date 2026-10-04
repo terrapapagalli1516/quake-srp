@@ -5,27 +5,22 @@
 //! Source: `WinQuake/menu.c` — the `M_*_Draw` / `M_*_Key` pairs, `M_Print`,
 //! `M_DrawSlider`, `bindnames`; the video list is `vid_win.c`'s `VID_MenuDraw`.
 
-use crate::draw::{
-    blit_qpic_at, draw_char_scaled, draw_string_scaled, fade_screen, screen_2d,
-    MENU_VIRT_W,
-};
-use crate::cvar::{self, PIXEL_SIZE_MAX};
-use crate::keys::{
-    keynum_to_string, Wheel, K_BACKSPACE, K_DEL, K_DOWNARROW, K_ENTER, K_ESCAPE, K_LEFTARROW,
-    K_RIGHTARROW, K_UPARROW,
-};
 use crate::client::host::FrameCap;
+use crate::cvar::{self, PIXEL_SIZE_MAX};
+use crate::draw::{MENU_VIRT_W, blit_qpic_at, draw_char_scaled, draw_string_scaled, fade_screen, screen_2d};
+use crate::keys::{
+    K_BACKSPACE, K_DEL, K_DOWNARROW, K_ENTER, K_ESCAPE, K_LEFTARROW, K_RIGHTARROW, K_UPARROW, Wheel, keynum_to_string,
+};
 use crate::render::{Image, PerspSpan};
-use crate::screen::{center_string_top, Crosshair, VIEWSIZE_MAX, VIEWSIZE_MIN, VIEWSIZE_STEP};
+use crate::screen::{Crosshair, VIEWSIZE_MAX, VIEWSIZE_MIN, VIEWSIZE_STEP, center_string_top};
 use crate::settings::Settings;
 
 // The binding commands were the menu's before they were keys.c's; their
 // names stay reachable here.
 pub use crate::keys::{
-    BIND_ATTACK, BIND_BACK, BIND_CENTERVIEW, BIND_CHANGEWEAPON, BIND_FORWARD, BIND_IMPULSE_0, BIND_JUMP,
-    BIND_KLOOK, BIND_LEFT, BIND_LOOKDOWN, BIND_LOOKUP, BIND_MLOOK, BIND_MOVEDOWN, BIND_MOVELEFT,
-    BIND_MOVERIGHT, BIND_MOVEUP, BIND_PAUSE, BIND_RIGHT, BIND_SHOWSCORES, BIND_SIZEDOWN, BIND_SIZEUP,
-    BIND_SPEED, BIND_STRAFE, BIND_TOGGLECONSOLE,
+    BIND_ATTACK, BIND_BACK, BIND_CENTERVIEW, BIND_CHANGEWEAPON, BIND_FORWARD, BIND_IMPULSE_0, BIND_JUMP, BIND_KLOOK,
+    BIND_LEFT, BIND_LOOKDOWN, BIND_LOOKUP, BIND_MLOOK, BIND_MOVEDOWN, BIND_MOVELEFT, BIND_MOVERIGHT, BIND_MOVEUP,
+    BIND_PAUSE, BIND_RIGHT, BIND_SHOWSCORES, BIND_SIZEDOWN, BIND_SIZEUP, BIND_SPEED, BIND_STRAFE, BIND_TOGGLECONSOLE,
 };
 
 // ---------------------------------------------------------------------------
@@ -520,15 +515,8 @@ pub const NUM_BINDNAMES: usize = 18;
 /// HUD at their own pixel size (the "scaled 2-D" extra,
 /// [`crate::draw::set_scaled_2d`], blows them up instead). The Options "Screen size" row is id's
 /// `viewsize` (see [`calc_refdef`](crate::screen::calc_refdef)), not the mode, exactly as in WinQuake.
-pub const RESOLUTION_PRESETS: [(i32, i32); 7] = [
-    (320, 200),
-    (480, 300),
-    (640, 400),
-    (800, 500),
-    (960, 600),
-    (1120, 700),
-    (1280, 800),
-];
+pub const RESOLUTION_PRESETS: [(i32, i32); 7] =
+    [(320, 200), (480, 300), (640, 400), (800, 500), (960, 600), (1120, 700), (1280, 800)];
 
 /// Video Options' native-resolution rows, appended after [`RESOLUTION_PRESETS`]
 /// when they show ([`Menu::native_rows_shown`]): the whole pixel sizes
@@ -902,7 +890,9 @@ impl Question {
         match self {
             Question::NewGame => "Are you sure you want to\nstart a new game?\n",
             Question::ResetSlop => "Reset everything to the slop\npreset: keys, Options, video?\nSaved games stay.\n",
-            Question::ResetClassic => "Reset everything to the Classic\npreset: keys, Options, video?\nSaved games stay.\n",
+            Question::ResetClassic => {
+                "Reset everything to the Classic\npreset: keys, Options, video?\nSaved games stay.\n"
+            }
         }
     }
 }
@@ -1484,7 +1474,11 @@ impl Menu {
                     // PORT ROWS: ask first (m_entersound, the menu stays up
                     // under the question, as New Game's does).
                     self.snd(MenuSound::Menu2);
-                    self.asking = Some(if self.cursor() == ROW_RESET_SLOP { Question::ResetSlop } else { Question::ResetClassic });
+                    self.asking = Some(if self.cursor() == ROW_RESET_SLOP {
+                        Question::ResetSlop
+                    } else {
+                        Question::ResetClassic
+                    });
                     MenuAction::None
                 }
                 ROW_CONSOLE => {
@@ -1701,7 +1695,15 @@ impl Menu {
             }
         }
         // The colours wrap: 14 is 0 again, -1 is 13.
-        let wrap = |v: i32| if v > 13 { 0 } else if v < 0 { 13 } else { v };
+        let wrap = |v: i32| {
+            if v > 13 {
+                0
+            } else if v < 0 {
+                13
+            } else {
+                v
+            }
+        };
         self.setup.top = wrap(self.setup.top);
         self.setup.bottom = wrap(self.setup.bottom);
         MenuAction::None
@@ -1773,10 +1775,7 @@ impl Menu {
             return MenuAction::None;
         }
         match self.screen {
-            MenuScreen::SinglePlayer
-            | MenuScreen::Multiplayer
-            | MenuScreen::Options
-            | MenuScreen::Help => {
+            MenuScreen::SinglePlayer | MenuScreen::Multiplayer | MenuScreen::Options | MenuScreen::Help => {
                 // M_*_Key K_ESCAPE -> M_Menu_Main_f (m_entersound = true).
                 self.screen = MenuScreen::Main;
                 self.snd(MenuSound::Menu2);
@@ -1925,10 +1924,7 @@ impl Menu {
         // M_Load_Key / M_Save_Key / M_Keys_Key: LEFT pairs with UP and RIGHT
         // with DOWN (cursor movement, menu1 inside move_cursor). VID_MenuKey
         // also moves the mode line on left/right (single-column here).
-        if matches!(
-            self.screen,
-            MenuScreen::Load | MenuScreen::Save | MenuScreen::Keys | MenuScreen::Video
-        ) {
+        if matches!(self.screen, MenuScreen::Load | MenuScreen::Save | MenuScreen::Keys | MenuScreen::Video) {
             self.move_cursor(step);
             return;
         }
@@ -2053,7 +2049,10 @@ impl Menu {
             return None;
         }
         let offer = self.native_offer();
-        offer.iter().position(|&(_, size)| size == self.actual_size).or_else(|| offer.iter().position(|&(p, _)| p == pixel_size))
+        offer
+            .iter()
+            .position(|&(_, size)| size == self.actual_size)
+            .or_else(|| offer.iter().position(|&(p, _)| p == pixel_size))
     }
 
     /// The row [`MenuScreen::Video`] should mark current and open its cursor
@@ -2125,7 +2124,6 @@ impl Menu {
         self.snd(MenuSound::Menu2);
         s.binds.unbind_command(self.cursor().min(NUM_BINDNAMES - 1));
     }
-
 }
 
 // ---------------------------------------------------------------------------
@@ -2171,9 +2169,7 @@ impl MenuScreen {
     fn rows(self) -> Option<RowLayout> {
         let even = |y0, step| Some(RowLayout::Even { y0, step, count: self.item_count() });
         match self {
-            MenuScreen::Main | MenuScreen::SinglePlayer | MenuScreen::Multiplayer => {
-                even(PIC_ROW_Y0, PIC_ROW_STEP)
-            }
+            MenuScreen::Main | MenuScreen::SinglePlayer | MenuScreen::Multiplayer => even(PIC_ROW_Y0, PIC_ROW_STEP),
             MenuScreen::Options | MenuScreen::SlopOptions | MenuScreen::SlopPage(_) => {
                 even(OPTIONS_ROW_Y0, OPTIONS_ROW_STEP)
             }
@@ -2276,21 +2272,13 @@ impl Menu {
 /// puts the knob on the left segment and fraction 1 on the rightmost of the
 /// [`SLIDER_RANGE`] middle segments. A non-finite fraction is treated as 0.
 fn slider_knob_offset(range: f32) -> f32 {
-    let r = if range.is_finite() {
-        range.clamp(0.0, 1.0)
-    } else {
-        0.0
-    };
+    let r = if range.is_finite() { range.clamp(0.0, 1.0) } else { 0.0 };
     (SLIDER_RANGE - 1) as f32 * 8.0 * r
 }
 
 /// The checkbox label text (`M_DrawCheckbox`): "on" / "off".
 fn checkbox_text(on: bool) -> &'static str {
-    if on {
-        "on"
-    } else {
-        "off"
-    }
+    if on { "on" } else { "off" }
 }
 
 /// Wrap a Help page index into `0..NUM_HELP_PAGES` (`M_Help_Key`: past the last
@@ -2381,16 +2369,7 @@ const QUIT_MESSAGES: [[&str; 4]; 8] = [
 /// labels, values and hints this way; white marks only the odd highlight (the
 /// current video mode, "No Communications Available").
 #[allow(clippy::too_many_arguments)]
-fn m_print(
-    image: &mut Image,
-    conchars: &crate::wad::Qpic,
-    vx: f32,
-    vy: f32,
-    text: &str,
-    scale: f32,
-    ox: f32,
-    oy: f32,
-) {
+fn m_print(image: &mut Image, conchars: &crate::wad::Qpic, vx: f32, vy: f32, text: &str, scale: f32, ox: f32, oy: f32) {
     for (i, b) in text.bytes().enumerate() {
         let x = vx + 8.0 * i as f32;
         draw_char_scaled(image, conchars, x, vy, b.wrapping_add(128), scale, ox, oy);
@@ -2541,11 +2520,7 @@ fn draw_menu_inner(
 
     // The animated cursor frame: (int)(host_time*10) % 6. Guard a non-finite /
     // negative clock so the index stays 0..6.
-    let frame = if host_time.is_finite() && host_time > 0.0 {
-        ((host_time * 10.0) as usize) % 6
-    } else {
-        0
-    };
+    let frame = if host_time.is_finite() && host_time > 0.0 { ((host_time * 10.0) as usize) % 6 } else { 0 };
     // The flashing conchars cursor (Options / Load / Save / Keys / Video) runs
     // on REAL time at 4 Hz, independent of the menudot's host_time spinner.
     let cursor = menu_cursor_glyph(realtime);
@@ -2879,11 +2854,7 @@ fn draw_load_save_screen(
     oy: f32,
     cursor_glyph: u8,
 ) {
-    let title = if menu.screen == MenuScreen::Save {
-        &pics.p_save
-    } else {
-        &pics.p_load
-    };
+    let title = if menu.screen == MenuScreen::Save { &pics.p_save } else { &pics.p_load };
     if let Some(t) = title {
         let tx = (MENU_VIRT_W - t.width.max(0) as f32) * 0.5;
         blit_qpic_at(image, t, tx, 4.0, scale, ox, oy);
@@ -3043,13 +3014,9 @@ fn draw_keys_screen(
     let Some(cc) = conchars else { return };
     // Every string on this screen is M_Print (bronze).
     if menu.bind_grabbing() {
-        m_print(
-            image, cc, 12.0, 32.0, "Press a key or button for this action", scale, ox, oy,
-        );
+        m_print(image, cc, 12.0, 32.0, "Press a key or button for this action", scale, ox, oy);
     } else {
-        m_print(
-            image, cc, 18.0, 32.0, "Enter to change, backspace to clear", scale, ox, oy,
-        );
+        m_print(image, cc, 18.0, 32.0, "Enter to change, backspace to clear", scale, ox, oy);
     }
     for (i, (_, label)) in BINDNAMES.iter().enumerate() {
         let y = KEYS_ROW_Y0 + TEXT_ROW_STEP * i as f32;
@@ -3064,9 +3031,7 @@ fn draw_keys_screen(
                     // M_Print (140 + x + 8, y, "or"); M_Print (140 + x + 32, ...).
                     let x = name.len() as f32 * 8.0;
                     m_print(image, cc, 140.0 + x + 8.0, y, "or", scale, ox, oy);
-                    m_print(
-                        image, cc, 140.0 + x + 32.0, y, &keynum_to_string(k1), scale, ox, oy,
-                    );
+                    m_print(image, cc, 140.0 + x + 32.0, y, &keynum_to_string(k1), scale, ox, oy);
                 }
             }
         }
@@ -3168,14 +3133,7 @@ const VIDEO_BOX_HINT: &str = "The modes above draw in a 4:3 box";
 /// Draw the Help/Ordering screen (`M_Help_Draw`): blit the current page pic
 /// (`gfx/help{page}.lmp`) full-screen at virtual (0,0). A missing page pic draws
 /// nothing (graceful degrade); no panic.
-fn draw_help_screen(
-    image: &mut Image,
-    menu: &Menu,
-    pics: &MenuPics,
-    scale: f32,
-    ox: f32,
-    oy: f32,
-) {
+fn draw_help_screen(image: &mut Image, menu: &Menu, pics: &MenuPics, scale: f32, ox: f32, oy: f32) {
     if let Some(p) = pics.help.get(menu.help_page()).and_then(|p| p.as_ref()) {
         blit_qpic_at(image, p, 0.0, 0.0, scale, ox, oy);
     }
@@ -3184,12 +3142,7 @@ fn draw_help_screen(
 /// `SCR_DrawNotifyString` (screen.c): each line (up to 40 columns) centred on
 /// the screen, from `y = vid.height*0.35` (x87's row 69 on a 200-line screen,
 /// [`center_string_top`]), in plain (white) conchars.
-fn draw_notify_string(
-    image: &mut Image,
-    conchars: &crate::wad::Qpic,
-    text: &str,
-    scale: f32,
-) {
+fn draw_notify_string(image: &mut Image, conchars: &crate::wad::Qpic, text: &str, scale: f32) {
     // vid.width / vid.height of the 2-D screen: the text is placed on it, not
     // on the menu's centred 320 columns.
     let sc = screen_2d(image.w, image.h);
@@ -3302,8 +3255,8 @@ mod tests {
         MenuClock { host_time, realtime }
     }
     use crate::keys::{K_CTRL, K_MOUSE1, K_MWHEELUP, K_SHIFT, K_SPACE, K_UPARROW};
-    use crate::render::fixtures::solid_pic;
     use crate::render::TorchFlicker;
+    use crate::render::fixtures::solid_pic;
     use crate::wad::Qpic;
 
     /// A test conchars atlas where every glyph texel is the lit index 3 (except
@@ -3479,7 +3432,10 @@ mod tests {
         m.keydown(K_DOWNARROW, None, &mut s);
         m.take_sounds();
         assert_eq!(m.keydown(K_ENTER, None, &mut s), MenuAction::Back);
-        assert_eq!((m.screen(), s.cvars.cl_name.as_str(), s.cvars.cl_color), (MenuScreen::Multiplayer, "Ranger", 16 + 13));
+        assert_eq!(
+            (m.screen(), s.cvars.cl_name.as_str(), s.cvars.cl_color),
+            (MenuScreen::Multiplayer, "Ranger", 16 + 13)
+        );
         assert_eq!(m.take_sounds(), vec![MenuSound::Menu2]);
         // Host_Color_f clamps each to 13; the name is cut to 15.
         s.cvars.set_color(15, 22);
@@ -3515,10 +3471,7 @@ mod tests {
         m.select(&mut s); // Setup
         let mut data = vec![16u8, 96, 255, 7];
         data.resize(4, 0);
-        let pics = MenuPics {
-            menuplyr: Some(Qpic { width: 4, height: 1, data }),
-            ..Default::default()
-        };
+        let pics = MenuPics { menuplyr: Some(Qpic { width: 4, height: 1, data }), ..Default::default() };
         let mut img = Image::new(320, 200, 1);
         draw_menu(&mut img, &m, &s, &pics, None, clock(0.0, 0.0));
         let at = |x: usize| img.pixels[72 * 320 + x];
@@ -3900,10 +3853,7 @@ mod tests {
         m.open();
         // A present mainmenu graphic (opaque index 7 -> a non-background colour)
         // at (72,32) must change pixels there.
-        let pics = MenuPics {
-            mainmenu: Some(solid_pic(120, 80, 7)),
-            ..Default::default()
-        };
+        let pics = MenuPics { mainmenu: Some(solid_pic(120, 80, 7)), ..Default::default() };
         draw_menu(&mut img, &m, &s, &pics, None, clock(0.0, 0.0));
         // At scale 1 on the 320x200 frame, virtual (72,32) maps to pixel (72,32).
         let idx = 32 * img.w + 72;
@@ -4196,10 +4146,7 @@ mod tests {
 
         // Only the title pic is present (the cursor is a conchars glyph now, drawn
         // at x=200, not a menudot).
-        let pics = MenuPics {
-            p_option: Some(solid_pic(120, 24, 5)),
-            ..Default::default()
-        };
+        let pics = MenuPics { p_option: Some(solid_pic(120, 24, 5)), ..Default::default() };
 
         let bg = 9u8;
         let mut img = Image::new(320, 200, bg);
@@ -4407,8 +4354,14 @@ mod tests {
         assert_eq!(m.modal_key(b'y', &mut s), MenuAction::Reset);
         assert_eq!(s, Settings::default(), "yes: everything is the slop preset's");
         assert!((s.cvars.sensitivity - SENS_DEFAULT).abs() < 1e-6 && (s.cvars.volume - VOLUME_DEFAULT).abs() < 1e-6);
-        assert!((s.cvars.gamma - GAMMA_DEFAULT).abs() < 1e-6 && s.cvars.always_run() && s.binds.command(b'j').is_none());
-        assert_eq!((m.screen(), m.cursor(), m.visible), (MenuScreen::Options, ROW_RESET_SLOP, true), "Options, on its row");
+        assert!(
+            (s.cvars.gamma - GAMMA_DEFAULT).abs() < 1e-6 && s.cvars.always_run() && s.binds.command(b'j').is_none()
+        );
+        assert_eq!(
+            (m.screen(), m.cursor(), m.visible),
+            (MenuScreen::Options, ROW_RESET_SLOP, true),
+            "Options, on its row"
+        );
 
         // Reset to Classic, the row above: asks; yes is everything
         // Classic's, the keys and id's Options too.
@@ -4421,7 +4374,11 @@ mod tests {
         assert_eq!((m.asking(), s.preset), (None, Preset::Slop));
         m.select(&mut s);
         assert_eq!(m.modal_key(b'y', &mut s), MenuAction::Reset);
-        assert_eq!(s, Settings::new(Preset::Classic, Machine::default()), "everything Classic's, Mouse Speed and the keys too");
+        assert_eq!(
+            s,
+            Settings::new(Preset::Classic, Machine::default()),
+            "everything Classic's, Mouse Speed and the keys too"
+        );
         assert!((s.cvars.sensitivity - SENS_DEFAULT).abs() < 1e-6 && s.binds.command(b'j').is_none());
         assert_eq!((ROW_RESET_CLASSIC, ROW_RESET_SLOP), (OPTIONS_ITEMS - 2, OPTIONS_ITEMS - 1), "the resets are last");
 
@@ -4500,7 +4457,11 @@ mod tests {
             m.set_cursor(i);
             m.adjust(-1, &mut s);
             m.adjust(1, &mut s);
-            assert_eq!(s, Settings::new(Preset::Classic, Machine::default()), "{page:?}: left and right change nothing");
+            assert_eq!(
+                s,
+                Settings::new(Preset::Classic, Machine::default()),
+                "{page:?}: left and right change nothing"
+            );
             assert_eq!(m.take_sounds(), vec![MenuSound::Menu3; 2]);
             assert_eq!(m.select(&mut s), MenuAction::None);
             assert_eq!((m.screen(), m.cursor()), (MenuScreen::SlopPage(page), 0));
@@ -4537,7 +4498,12 @@ mod tests {
             let base = c.get(&s.cvars);
             let (other, other_word) = if base == "0" { ("1", "on") } else { ("0", "off") };
             m.adjust(1, &mut s);
-            assert_eq!((c.get(&s.cvars).as_str(), row.value(&s).as_str()), (other, other_word), "right flips {}", row.cvar);
+            assert_eq!(
+                (c.get(&s.cvars).as_str(), row.value(&s).as_str()),
+                (other, other_word),
+                "right flips {}",
+                row.cvar
+            );
             m.adjust(1, &mut s);
             assert_eq!(c.get(&s.cvars), base, "the direction is ignored");
             m.adjust(-1, &mut s);
@@ -4556,7 +4522,12 @@ mod tests {
         // The crosshair steps the same way: off, the cross, id's +, wrapping.
         let crosshair = on_row(&mut m, "crosshair");
         assert_eq!(crosshair.value(&s), "off");
-        let steps: Vec<String> = (0..4).map(|_| { m.adjust(1, &mut s); crosshair.value(&s) }).collect();
+        let steps: Vec<String> = (0..4)
+            .map(|_| {
+                m.adjust(1, &mut s);
+                crosshair.value(&s)
+            })
+            .collect();
         assert_eq!(steps, ["cross", "id's +", "off", "cross"]);
         m.adjust(-1, &mut s);
         m.adjust(-1, &mut s);
@@ -4569,10 +4540,20 @@ mod tests {
         let span = on_row(&mut m, "r_perspspan");
         assert_eq!((span.value(&s).as_str(), span.label.trim_start()), ("id's 16", "Perspective span"));
         assert_eq!(span.value(&Settings::default()), "8", "slop starts at 8: id's portable C loop");
-        let steps: Vec<String> = (0..7).map(|_| { m.adjust(1, &mut s); span.value(&s) }).collect();
+        let steps: Vec<String> = (0..7)
+            .map(|_| {
+                m.adjust(1, &mut s);
+                span.value(&s)
+            })
+            .collect();
         assert_eq!(steps, ["8", "4", "exact", "64", "32", "id's 16", "8"]);
         m.adjust(-1, &mut s);
-        let steps: Vec<String> = (0..3).map(|_| { m.adjust(-1, &mut s); span.value(&s) }).collect();
+        let steps: Vec<String> = (0..3)
+            .map(|_| {
+                m.adjust(-1, &mut s);
+                span.value(&s)
+            })
+            .collect();
         assert_eq!(steps, ["32", "64", "exact"], "left: the longer, and from 64 round to exact");
         let console = cvar::find("r_perspspan").unwrap().get(&s.cvars);
         assert_eq!((s.cvars.persp_span, console.as_str()), (PerspSpan::Exact, "1"));
@@ -4590,10 +4571,18 @@ mod tests {
         assert_eq!((row_of("host_maxfps"), cap.label.trim_start()), ((SlopPage::Picture, 0), "Frame rate cap"));
         assert_eq!(cap.value(&s), "id's 72");
         assert_eq!(cap.value(&Settings::default()), "none");
-        let steps: Vec<String> = (0..6).map(|_| { m.adjust(1, &mut s); cap.value(&s) }).collect();
+        let steps: Vec<String> = (0..6)
+            .map(|_| {
+                m.adjust(1, &mut s);
+                cap.value(&s)
+            })
+            .collect();
         assert_eq!(steps, ["120", "144", "240", "none", "60", "id's 72"]);
         m.adjust(-1, &mut s);
-        assert_eq!((s.cvars.max_fps, cvar::find("host_maxfps").unwrap().get(&s.cvars).as_str()), (FrameCap::new(60), "60"));
+        assert_eq!(
+            (s.cvars.max_fps, cvar::find("host_maxfps").unwrap().get(&s.cvars).as_str()),
+            (FrameCap::new(60), "60")
+        );
         m.adjust(-1, &mut s);
         assert_eq!(cap.value(&s), "none", "left from 60 wraps to none");
         cvar::find("host_maxfps").unwrap().set(&mut s.cvars, "100");
@@ -4615,7 +4604,12 @@ mod tests {
         assert_eq!((s.cvars.torches, torch.slider(&s), torch.value(&s).as_str()), (TorchFlicker::OFF, Some(0.0), ""));
         m.adjust(-1, &mut s);
         assert_eq!(s.cvars.torches, TorchFlicker::OFF, "no lower than 0");
-        let steps: Vec<f32> = (0..11).map(|_| { m.adjust(1, &mut s); s.cvars.torches.value() }).collect();
+        let steps: Vec<f32> = (0..11)
+            .map(|_| {
+                m.adjust(1, &mut s);
+                s.cvars.torches.value()
+            })
+            .collect();
         assert_eq!(steps, [0.2, 0.4, 0.6, 0.8, 1.0, 1.2, 1.4, 1.6, 1.8, 2.0, 2.0], "up to 2, no further");
         assert_eq!(torch.slider(&s), Some(1.0));
         assert_eq!(m.take_sounds(), vec![MenuSound::Menu3; 12]);
@@ -4636,9 +4630,15 @@ mod tests {
         assert_eq!((row_of("bind").0, wheel.kind), (SlopPage::Controls, RowKind::Wheel));
         assert_eq!(wheel.value(&s), "off");
         m.adjust(-1, &mut s);
-        assert_eq!((wheel.value(&s).as_str(), &s.binds), ("on", &Settings::new(Preset::Slop, Machine::default()).binds));
+        assert_eq!(
+            (wheel.value(&s).as_str(), &s.binds),
+            ("on", &Settings::new(Preset::Slop, Machine::default()).binds)
+        );
         m.select(&mut s);
-        assert_eq!((wheel.value(&s).as_str(), &s.binds), ("off", &Settings::new(Preset::Classic, Machine::default()).binds));
+        assert_eq!(
+            (wheel.value(&s).as_str(), &s.binds),
+            ("off", &Settings::new(Preset::Classic, Machine::default()).binds)
+        );
         // Bound by hand, it reads "custom"; a key puts the cycle back over
         // the player's binding, the next one takes it off.
         s.binds.bind(K_MWHEELUP, BIND_JUMP);
@@ -4671,7 +4671,8 @@ mod tests {
 
     #[test]
     fn the_settings_pages_list_every_slop_option_once_by_kind() {
-        let controls = |n: &str| matches!(n, "freelook" | "cl_jumpswim" | "vid_altenter" | "joystick" | "joy_rumble" | "in_touch");
+        let controls =
+            |n: &str| matches!(n, "freelook" | "cl_jumpswim" | "vid_altenter" | "joystick" | "joy_rumble" | "in_touch");
         for row in SLOP_OPTIONS_ROWS.iter().chain(page_rows().map(|(_, _, r)| r)) {
             match row.kind {
                 RowKind::Wheel => assert_eq!(row.cvar, "bind"),
@@ -4787,7 +4788,11 @@ mod tests {
             assert_eq!(px(&img, 16 + 6 * 8, 136), 5, "'R' of Reset to Classic, y=136");
             assert_eq!(px(&img, 16 + 9 * 8, 144), 5, "'R' of Reset to slop, y=144");
             for y in [128, 136, 144] {
-                assert_eq!(span(&img, y).map(|(_, b)| b), Some(16 + 22 * 8 - 1), "y={y}: the label's last column, nothing at x=220");
+                assert_eq!(
+                    span(&img, y).map(|(_, b)| b),
+                    Some(16 + 22 * 8 - 1),
+                    "y={y}: the label's last column, nothing at x=220"
+                );
             }
             assert_eq!(px(&img, 16 + 11 * 8, 48), 5, "'S' of Screen size, row 2");
         }
@@ -4908,7 +4913,8 @@ mod tests {
         m.set_cursor(0);
         let mut img = Image::new(320, 200, 0);
         draw_menu(&mut img, &m, &s, &pics, Some(&cc), clock(0.0, 0.3));
-        let pages: Vec<u8> = SLOP_OPTIONS_ROWS.iter().enumerate().map(|(i, r)| px(&img, first(r), 32 + i * 8)).collect();
+        let pages: Vec<u8> =
+            SLOP_OPTIONS_ROWS.iter().enumerate().map(|(i, r)| px(&img, first(r), 32 + i * 8)).collect();
         assert_eq!(pages, [5, 5, 5], "every page's row bronze");
         assert_eq!(span(&img, 148), Some((92, 92 + 17 * 8 - 1)), "the header at y=148, no line above it");
     }
@@ -4955,11 +4961,7 @@ mod tests {
         // (m_help_page++) while DOWN goes back (m_help_page--).
         m.help_page = 0;
         m.move_cursor(1); // down -> previous page (wraps below 0)
-        assert_eq!(
-            m.help_page(),
-            NUM_HELP_PAGES - 1,
-            "down pages backward on Help (wraps to the last page)"
-        );
+        assert_eq!(m.help_page(), NUM_HELP_PAGES - 1, "down pages backward on Help (wraps to the last page)");
         m.move_cursor(-1); // up -> next page (wraps back to 0)
         assert_eq!(m.help_page(), 0, "up pages forward on Help");
         // page() is a no-op off the Help screen.
@@ -5114,11 +5116,7 @@ mod tests {
         m.take_sounds();
         assert_eq!(m.select(&mut s), MenuAction::ResolutionChanged);
         assert_eq!(m.resolution(), RESOLUTION_PRESETS[3]);
-        assert_eq!(
-            m.take_sounds(),
-            vec![MenuSound::Menu1],
-            "VID_MenuKey K_ENTER plays menu1 (not menu2)"
-        );
+        assert_eq!(m.take_sounds(), vec![MenuSound::Menu1], "VID_MenuKey K_ENTER plays menu1 (not menu2)");
         assert_eq!(m.screen(), MenuScreen::Video, "the mode list stays up after applying");
         // The cursor wraps over the WHOLE list — the presets, then (slop:
         // Settings::default() is the slop preset) the native rows; left/right also
@@ -5165,11 +5163,7 @@ mod tests {
         assert_eq!(m.select(&mut s), MenuAction::None);
         assert!(m.bind_grabbing(), "Enter starts the bind grab");
         assert_eq!(m.take_sounds(), vec![MenuSound::Menu2]);
-        assert_eq!(
-            s.binds.find_keys_for_command(BIND_ATTACK),
-            [None, None],
-            "two-key rows unbind before grabbing"
-        );
+        assert_eq!(s.binds.find_keys_for_command(BIND_ATTACK), [None, None], "two-key rows unbind before grabbing");
         // Deliver the grabbed key: 'x' binds to +attack, menu1 plays.
         m.bind_key(b'x', &mut s);
         assert!(!m.bind_grabbing());
@@ -5672,11 +5666,7 @@ mod tests {
         m.move_cursor(ROW_VIDEO as i32);
         m.select(&mut s); // -> Video
         assert_eq!(m.screen(), MenuScreen::Video);
-        assert_eq!(
-            m.cursor(),
-            RESOLUTION_PRESETS.len(),
-            "opens on the native row (1x), not a fixed-mode guess"
-        );
+        assert_eq!(m.cursor(), RESOLUTION_PRESETS.len(), "opens on the native row (1x), not a fixed-mode guess");
         // The old bug: a fresh Menu's res_preset defaults to 0, and nothing
         // here ever set it to match 960x540 (there IS no such preset) — so a
         // reader of `resolution()` alone could once mistake "the fixed-mode

@@ -6,13 +6,13 @@
 use std::rc::Rc;
 
 use quake_rs::cd_audio::CdCall;
-use quake_rs::client::{host_cmd, SoundCall, Walk};
+use quake_rs::client::{SoundCall, Walk, host_cmd};
 use quake_rs::common::pop_lmp;
-use quake_rs::pak::{write_pack, Pak};
+use quake_rs::pak::{Pak, write_pack};
 use quake_rs::qrand::QRand;
 
 use crate::cl_walk::step_walk;
-use crate::proto::{encode, Record};
+use crate::proto::{Record, encode};
 
 /// The shareware pak with a synthetic registered `pak1.pak` in front of it:
 /// id's `gfx/pop.lmp`, and e1m1 again as `maps/e2m1.bsp`.
@@ -94,7 +94,15 @@ fn the_cd_plays_beside_the_mix_in_cd_records() {
         Record::split(&out)
             .into_iter()
             .filter(|r| r.kind == Record::CD)
-            .map(|r| (r.u32_at(0), r.payload[4], r.payload[5], r.payload[6], f32::from_le_bytes(r.payload[8..12].try_into().unwrap())))
+            .map(|r| {
+                (
+                    r.u32_at(0),
+                    r.payload[4],
+                    r.payload[5],
+                    r.payload[6],
+                    f32::from_le_bytes(r.payload[8..12].try_into().unwrap()),
+                )
+            })
             .collect::<Vec<_>>()
     };
     let mut input = Vec::new();
@@ -111,10 +119,10 @@ fn the_cd_plays_beside_the_mix_in_cd_records() {
     assert_eq!(
         recs,
         [
-            (1, 2, 1, 1, full),  // demo1: its header's forced track 2, looping
-            (1, 2, 1, 1, half),  // bgmvolume 0.5: (int)(0.5 * 255) = 127
-            (2, 6, 1, 1, half),  // e1m1's `sounds` 6, from its top
-            (2, 6, 1, 2, half),  // paused where it was
+            (1, 2, 1, 1, full), // demo1: its header's forced track 2, looping
+            (1, 2, 1, 1, half), // bgmvolume 0.5: (int)(0.5 * 255) = 127
+            (2, 6, 1, 1, half), // e1m1's `sounds` 6, from its top
+            (2, 6, 1, 2, half), // paused where it was
         ]
     );
     assert!(cd_records(&input, &[]).is_empty(), "no music, no drive, no records");

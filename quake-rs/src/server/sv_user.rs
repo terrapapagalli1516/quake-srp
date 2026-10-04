@@ -15,7 +15,7 @@
 
 use super::sv_world::sv_move;
 use super::{EntFlags, MoveType, Server, UserCmd};
-use crate::math::{angle_vectors, Vec3};
+use crate::math::{Vec3, angle_vectors};
 
 // Player-movement cvars (sv_user.c defaults). This engine has no console-cvar
 // subsystem, so the values are faithful constants instead of a registry.
@@ -101,8 +101,7 @@ impl Server {
         if steps < 2 {
             return;
         }
-        self.vm
-            .set_ent_float(ent, self.vm.fo().idealpitch, -dir * SV_IDEALPITCHSCALE);
+        self.vm.set_ent_float(ent, self.vm.fo().idealpitch, -dir * SV_IDEALPITCHSCALE);
     }
 
     /// `SV_ReadClientMove` (sv_user.c): copy this frame's [`UserCmd`] onto the
@@ -115,12 +114,9 @@ impl Server {
     pub(super) fn apply_usercmd_to_edict(&mut self, ent: i32, cmd: &UserCmd) {
         // v_angle before PreThink so weapon aim is correct (client_think later
         // re-derives it from the same cmd during the move).
-        self.vm
-            .set_ent_vec(ent, self.vm.fo().v_angle, [cmd.pitch, cmd.yaw, 0.0]);
-        self.vm
-            .set_ent_float(ent, self.vm.fo().button0, (cmd.buttons & 1) as f32);
-        self.vm
-            .set_ent_float(ent, self.vm.fo().button2, ((cmd.buttons & 2) >> 1) as f32);
+        self.vm.set_ent_vec(ent, self.vm.fo().v_angle, [cmd.pitch, cmd.yaw, 0.0]);
+        self.vm.set_ent_float(ent, self.vm.fo().button0, (cmd.buttons & 1) as f32);
+        self.vm.set_ent_float(ent, self.vm.fo().button2, ((cmd.buttons & 2) >> 1) as f32);
         // The C only assigns impulse when the byte is non-zero (a 0 impulse means
         // "no command this frame"); the QuakeC clears it when it runs it.
         if cmd.impulse != 0 {
@@ -161,8 +157,7 @@ impl Server {
 
         // v_angle field = [pitch, yaw, roll] from the incoming command (the C
         // SV_ReadClientMove writes this before SV_ClientThink).
-        self.vm
-            .set_ent_vec(ent, self.vm.fo().v_angle, [cmd.pitch, cmd.yaw, 0.0]);
+        self.vm.set_ent_vec(ent, self.vm.fo().v_angle, [cmd.pitch, cmd.yaw, 0.0]);
 
         // Local v_angle including the punch kick (the C `VectorAdd` into a temp;
         // the stored v_angle field is NOT modified by the punch).
@@ -184,17 +179,12 @@ impl Server {
             self.vm.set_ent_vec(
                 ent,
                 self.vm.fo().angles,
-                [
-                    -v_angle_kick[crate::math::PITCH] / 3.0,
-                    v_angle_kick[crate::math::YAW],
-                    roll,
-                ],
+                [-v_angle_kick[crate::math::PITCH] / 3.0, v_angle_kick[crate::math::YAW], roll],
             );
         } else {
             // Honour the forced pitch/yaw but still bank the roll, then clear the
             // flag (SV_WriteClientdata).
-            self.vm
-                .set_ent_vec(ent, self.vm.fo().angles, [cur_angles[0], cur_angles[1], roll]);
+            self.vm.set_ent_vec(ent, self.vm.fo().angles, [cur_angles[0], cur_angles[1], roll]);
             self.vm.set_ent_float(ent, self.vm.fo().fixangle, 0.0);
         }
 
@@ -362,28 +352,16 @@ impl Server {
         // of the player box, ignoring the player.
         let origin = self.vm.ent_vec(ent, self.vm.fo().origin);
         let pmins = self.vm.ent_vec(ent, self.vm.fo().mins);
-        let start = [
-            origin[0] + vel[0] / speed * 16.0,
-            origin[1] + vel[1] / speed * 16.0,
-            origin[2] + pmins[2],
-        ];
+        let start = [origin[0] + vel[0] / speed * 16.0, origin[1] + vel[1] / speed * 16.0, origin[2] + pmins[2]];
         let stop = [start[0], start[1], start[2] - 34.0];
         // SV_UserFriction (sv_user.c) uses SV_Move(..., true, ent): the edge
         // dropoff probe is MOVE_NOMONSTERS, so a box entity below the leading
         // edge can't spuriously suppress edge friction (world geometry only).
         let trace = sv_move(&mut self.vm, start, stop, [0.0; 3], [0.0; 3], ent, true, false);
-        let friction = if trace.fraction == 1.0 {
-            SV_FRICTION * SV_EDGEFRICTION
-        } else {
-            SV_FRICTION
-        };
+        let friction = if trace.fraction == 1.0 { SV_FRICTION * SV_EDGEFRICTION } else { SV_FRICTION };
 
         // apply friction
-        let control = if speed < SV_STOPSPEED {
-            SV_STOPSPEED
-        } else {
-            speed
-        };
+        let control = if speed < SV_STOPSPEED { SV_STOPSPEED } else { speed };
         let mut newspeed = speed - dt * control * friction;
         if newspeed < 0.0 {
             newspeed = 0.0;
@@ -448,8 +426,7 @@ impl Server {
         if len < 0.0 {
             len = 0.0;
         }
-        self.vm
-            .set_ent_vec(ent, self.vm.fo().punchangle, crate::math::scale(dir, len));
+        self.vm.set_ent_vec(ent, self.vm.fo().punchangle, crate::math::scale(dir, len));
     }
 }
 
@@ -481,11 +458,7 @@ pub fn v_calc_roll(angles: Vec3, velocity: Vec3) -> f32 {
     let raw = crate::math::dot(velocity, right);
     let sign = if raw < 0.0 { -1.0 } else { 1.0 };
     let side = raw.abs();
-    let side = if side < CL_ROLLSPEED {
-        side * CL_ROLLANGLE / CL_ROLLSPEED
-    } else {
-        CL_ROLLANGLE
-    };
+    let side = if side < CL_ROLLSPEED { side * CL_ROLLANGLE / CL_ROLLSPEED } else { CL_ROLLANGLE };
     side * sign
 }
 
@@ -514,8 +487,7 @@ mod tests {
         server.vm.ent_set_vector(p, "origin", [0.0, 0.0, 24.0]);
         server.vm.ent_set_vector(p, "velocity", [200.0, 0.0, 0.0]);
         let flags = server.vm.flags(p);
-        server
-            .vm.set_flags(p, flags.with(EntFlags::ONGROUND));
+        server.vm.set_flags(p, flags.with(EntFlags::ONGROUND));
 
         // No movement input -> friction only.
         let cmd = UserCmd::default();
@@ -530,22 +502,15 @@ mod tests {
         };
         // Re-plant on the ground (the move may clear ONGROUND) and tick again.
         let flags = server.vm.flags(p);
-        server
-            .vm.set_flags(p, flags.with(EntFlags::ONGROUND));
+        server.vm.set_flags(p, flags.with(EntFlags::ONGROUND));
         server.client_frame(&cmd, 0.1).expect("frame2");
         let speed2 = {
             let v = server.vm.ent_get_vector(p, "velocity");
             (v[0] * v[0] + v[1] * v[1]).sqrt()
         };
 
-        assert!(
-            speed1 < speed0,
-            "friction reduced speed: {speed0} -> {speed1}"
-        );
-        assert!(
-            speed2 < speed1,
-            "friction kept reducing speed: {speed1} -> {speed2}"
-        );
+        assert!(speed1 < speed0, "friction reduced speed: {speed0} -> {speed1}");
+        assert!(speed2 < speed1, "friction kept reducing speed: {speed1} -> {speed2}");
     }
 
     // SV_WaterMove: waist-deep the player swims instead of walking. Idle, you
@@ -622,27 +587,19 @@ mod tests {
 
         // First tick: velocity gains a +X component (accelerate toward wishdir).
         let flags = server.vm.flags(p);
-        server
-            .vm.set_flags(p, flags.with(EntFlags::ONGROUND));
+        server.vm.set_flags(p, flags.with(EntFlags::ONGROUND));
         server.client_frame(&cmd, 0.1).expect("frame");
         let v1 = server.vm.ent_get_vector(p, "velocity");
-        assert!(
-            v1[0] > 0.0,
-            "velocity moved toward +X wishdir, got {v1:?}"
-        );
+        assert!(v1[0] > 0.0, "velocity moved toward +X wishdir, got {v1:?}");
 
         // Many ticks: horizontal speed never exceeds sv_maxspeed.
         for _ in 0..40 {
             let flags = server.vm.flags(p);
-            server
-                .vm.set_flags(p, flags.with(EntFlags::ONGROUND));
+            server.vm.set_flags(p, flags.with(EntFlags::ONGROUND));
             server.client_frame(&cmd, 0.1).expect("frame");
             let v = server.vm.ent_get_vector(p, "velocity");
             let hspeed = (v[0] * v[0] + v[1] * v[1]).sqrt();
-            assert!(
-                hspeed <= SV_MAXSPEED + 1.0,
-                "horizontal speed clamped at maxspeed, got {hspeed}"
-            );
+            assert!(hspeed <= SV_MAXSPEED + 1.0, "horizontal speed clamped at maxspeed, got {hspeed}");
         }
     }
 
@@ -691,12 +648,7 @@ mod tests {
         // computed from the velocity at the TOP of SV_ClientThink (before this
         // frame's acceleration), so build up sideways speed over a few frames
         // first — exactly id's one-frame-lagged lean.
-        let cmd = UserCmd {
-            sidemove: 320.0,
-            yaw: 0.0,
-            pitch: 0.0,
-            ..UserCmd::default()
-        };
+        let cmd = UserCmd { sidemove: 320.0, yaw: 0.0, pitch: 0.0, ..UserCmd::default() };
         for _ in 0..4 {
             server.client_frame(&cmd, 0.1).expect("build strafe speed");
         }
@@ -750,34 +702,17 @@ mod tests {
         server.vm.ent_set_float(p, "health", 100.0);
 
         // --- Frame 1: attack released (buttons = 0) ---
-        let release = UserCmd {
-            buttons: 0,
-            ..UserCmd::default()
-        };
+        let release = UserCmd { buttons: 0, ..UserCmd::default() };
         server.client_frame(&release, 0.1).expect("frame");
-        assert_eq!(
-            server.vm.gget_float("fired_flag"),
-            0.0,
-            "no attack -> PostThink did not fire"
-        );
+        assert_eq!(server.vm.gget_float("fired_flag"), 0.0, "no attack -> PostThink did not fire");
         let (b0, _, _) = server.player_attack_state();
         assert_eq!(b0, 0.0, "button0 cleared on the edict when not pressed");
-        assert!(
-            server.drain_sounds().is_empty(),
-            "no sound queued when not attacking"
-        );
+        assert!(server.drain_sounds().is_empty(), "no sound queued when not attacking");
 
         // --- Frame 2: attack pressed (buttons = 1) ---
-        let attack = UserCmd {
-            buttons: 1,
-            ..UserCmd::default()
-        };
+        let attack = UserCmd { buttons: 1, ..UserCmd::default() };
         server.client_frame(&attack, 0.1).expect("frame");
-        assert_eq!(
-            server.vm.gget_float("fired_flag"),
-            1.0,
-            "attack -> button0 reached QuakeC PostThink and fired"
-        );
+        assert_eq!(server.vm.gget_float("fired_flag"), 1.0, "attack -> button0 reached QuakeC PostThink and fired");
         let (b0, _, _) = server.player_attack_state();
         assert_eq!(b0, 1.0, "button0 set on the edict while attack held");
 
@@ -816,10 +751,7 @@ mod tests {
         server.vm.ent_set_float(p, "health", 100.0);
 
         // Frame with impulse 7 (e.g. a weapon-switch command).
-        let cmd = UserCmd {
-            impulse: 7,
-            ..UserCmd::default()
-        };
+        let cmd = UserCmd { impulse: 7, ..UserCmd::default() };
         server.client_frame(&cmd, 0.1).expect("frame");
         assert_eq!(server.vm.ent_get_float(p, "impulse"), 7.0, "the engine does not clear it");
 
@@ -883,12 +815,7 @@ mod tests {
         let g_fimpulse = 41u16; // holds the impulse field offset for LOAD
         let g_tmp = 42u16;
 
-        let done = || Statement {
-            op: Op::Done,
-            a: 0,
-            b: 0,
-            c: 0,
-        };
+        let done = || Statement { op: Op::Done, a: 0, b: 0, c: 0 };
         b.add_function("SetNewParms", vec![done()]);
         b.add_function("ClientConnect", vec![done()]);
         b.add_function("PutClientInServer", vec![done()]);
@@ -897,18 +824,8 @@ mod tests {
         b.add_function(
             "PlayerPreThink",
             vec![
-                Statement {
-                    op: Op::LoadF,
-                    a: SELF as i16,
-                    b: g_fimpulse as i16,
-                    c: g_tmp as i16,
-                },
-                Statement {
-                    op: Op::StoreF,
-                    a: g_tmp as i16,
-                    b: g_seen as i16,
-                    c: 0,
-                },
+                Statement { op: Op::LoadF, a: SELF as i16, b: g_fimpulse as i16, c: g_tmp as i16 },
+                Statement { op: Op::StoreF, a: g_tmp as i16, b: g_seen as i16, c: 0 },
                 done(),
             ],
         );
@@ -925,18 +842,11 @@ mod tests {
         server.vm.ent_set_vector(p, "origin", [0.0, 0.0, 24.0]);
         server.vm.ent_set_float(p, "health", 100.0);
 
-        let cmd = UserCmd {
-            impulse: 3,
-            ..UserCmd::default()
-        };
+        let cmd = UserCmd { impulse: 3, ..UserCmd::default() };
         server.client_frame(&cmd, 0.1).expect("frame");
 
         // PreThink saw the impulse the engine wrote on the edict this frame...
-        assert_eq!(
-            server.vm.gget_float("seen_impulse"),
-            3.0,
-            "impulse was on the edict before PreThink ran"
-        );
+        assert_eq!(server.vm.gget_float("seen_impulse"), 3.0, "impulse was on the edict before PreThink ran");
         // ...and the engine left it there (only the QuakeC clears it).
         assert_eq!(server.vm.ent_get_float(p, "impulse"), 3.0, "impulse kept after the frame");
     }

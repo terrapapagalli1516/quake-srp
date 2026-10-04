@@ -121,11 +121,7 @@ impl Pak {
         let mut r = Reader::new(file_bytes);
         let id: [u8; 4] = r.bytes::<4>()?;
         if &id != b"PACK" {
-            return Err(QError::BadMagic {
-                context: "pak header",
-                found: id,
-                expected: "PACK",
-            });
+            return Err(QError::BadMagic { context: "pak header", found: id, expected: "PACK" });
         }
         let dirofs = r.i32()?;
         let dirlen = r.i32()?;
@@ -142,9 +138,7 @@ impl Pak {
         // numpackfiles = header.dirlen / sizeof(dpackfile_t)
         let numfiles = dirlen / DIRENTRY_SIZE;
         if numfiles > MAX_FILES_IN_PACK {
-            return Err(QError::invalid(format!(
-                "pak has {numfiles} files (max {MAX_FILES_IN_PACK})"
-            )));
+            return Err(QError::invalid(format!("pak has {numfiles} files (max {MAX_FILES_IN_PACK})")));
         }
 
         // The C engine seeks to dirofs and reads exactly dirlen bytes; the
@@ -160,11 +154,7 @@ impl Pak {
             let name = dr.name(NAME_SIZE)?;
             let filepos = dr.i32()?;
             let filelen = dr.i32()?;
-            entries.push(PakEntry {
-                name,
-                filepos,
-                filelen,
-            });
+            entries.push(PakEntry { name, filepos, filelen });
         }
 
         // CRC the directory region exactly as COM_LoadPackFile does.
@@ -184,13 +174,7 @@ impl Pak {
     /// slice it directly.
     pub fn from_bytes(name: String, bytes: Vec<u8>) -> Result<Pak> {
         let (entries, dir_crc) = Self::decode_directory(&bytes)?;
-        Ok(Pak {
-            source: Source::Memory(bytes),
-            entries,
-            name,
-            dir_crc,
-            next: None,
-        })
+        Ok(Pak { source: Source::Memory(bytes), entries, name, dir_crc, next: None })
     }
 
     /// Open a PAK file on disk: read the header, seek to the directory, and
@@ -210,11 +194,7 @@ impl Pak {
         let mut hr = Reader::new(&header);
         let id: [u8; 4] = hr.bytes::<4>()?;
         if &id != b"PACK" {
-            return Err(QError::BadMagic {
-                context: "pak header",
-                found: id,
-                expected: "PACK",
-            });
+            return Err(QError::BadMagic { context: "pak header", found: id, expected: "PACK" });
         }
         let dirofs = hr.i32()?;
         let dirlen = hr.i32()?;
@@ -230,9 +210,7 @@ impl Pak {
 
         let numfiles = dirlen_usize / DIRENTRY_SIZE;
         if numfiles > MAX_FILES_IN_PACK {
-            return Err(QError::invalid(format!(
-                "pak has {numfiles} files (max {MAX_FILES_IN_PACK})"
-            )));
+            return Err(QError::invalid(format!("pak has {numfiles} files (max {MAX_FILES_IN_PACK})")));
         }
 
         // --- seek to dirofs and read the directory ---
@@ -246,21 +224,11 @@ impl Pak {
             let name_field = dr.name(NAME_SIZE)?;
             let filepos = dr.i32()?;
             let filelen = dr.i32()?;
-            entries.push(PakEntry {
-                name: name_field,
-                filepos,
-                filelen,
-            });
+            entries.push(PakEntry { name: name_field, filepos, filelen });
         }
 
         let dir_crc = crate::crc::crc_block(&dir);
-        Ok(Pak {
-            source: Source::File(path.to_path_buf()),
-            entries,
-            name,
-            dir_crc,
-            next: None,
-        })
+        Ok(Pak { source: Source::File(path.to_path_buf()), entries, name, dir_crc, next: None })
     }
 
     /// The archive's name (file path for [`open`](Self::open), or the caller's
@@ -335,16 +303,10 @@ impl Pak {
     /// `filepos`, and reads `filelen` bytes.
     pub fn read_entry(&self, e: &PakEntry) -> Result<Vec<u8>> {
         if e.filepos < 0 {
-            return Err(QError::invalid(format!(
-                "pak entry {:?} has negative filepos {}",
-                e.name, e.filepos
-            )));
+            return Err(QError::invalid(format!("pak entry {:?} has negative filepos {}", e.name, e.filepos)));
         }
         if e.filelen < 0 {
-            return Err(QError::invalid(format!(
-                "pak entry {:?} has negative filelen {}",
-                e.name, e.filelen
-            )));
+            return Err(QError::invalid(format!("pak entry {:?} has negative filelen {}", e.name, e.filelen)));
         }
         let filepos = e.filepos as usize;
         let filelen = e.filelen as usize;
@@ -441,10 +403,7 @@ mod tests {
     }
 
     fn sample_files() -> Vec<(&'static str, &'static [u8])> {
-        vec![
-            ("progs/player.mdl", b"IDPO-player-model-bytes" as &[u8]),
-            ("maps/start.bsp", b"BSP29-start-map" as &[u8]),
-        ]
+        vec![("progs/player.mdl", b"IDPO-player-model-bytes" as &[u8]), ("maps/start.bsp", b"BSP29-start-map" as &[u8])]
     }
 
     #[test]
@@ -458,10 +417,7 @@ mod tests {
         // filepos/filelen line up with the synthetic layout.
         assert_eq!(entries[0].filepos, HEADER_SIZE as i32);
         assert_eq!(entries[0].filelen, files[0].1.len() as i32);
-        assert_eq!(
-            entries[1].filepos,
-            HEADER_SIZE as i32 + files[0].1.len() as i32
-        );
+        assert_eq!(entries[1].filepos, HEADER_SIZE as i32 + files[0].1.len() as i32);
         assert_eq!(entries[1].filelen, files[1].1.len() as i32);
     }
 
@@ -513,11 +469,7 @@ mod tests {
         img[2] = b'P';
         img[3] = b'E';
         match Pak::parse_directory(&img) {
-            Err(QError::BadMagic {
-                context,
-                expected,
-                found,
-            }) => {
+            Err(QError::BadMagic { context, expected, found }) => {
                 assert_eq!(context, "pak header");
                 assert_eq!(expected, "PACK");
                 assert_eq!(&found, b"NOPE");
@@ -577,11 +529,7 @@ mod tests {
 
     #[test]
     fn read_entry_negative_filepos_is_error() {
-        let bogus = PakEntry {
-            name: "x".into(),
-            filepos: -1,
-            filelen: 4,
-        };
+        let bogus = PakEntry { name: "x".into(), filepos: -1, filelen: 4 };
         let pak = Pak::from_bytes("t.pak".into(), build_pack(&[("a", b"data")])).unwrap();
         assert!(pak.read_entry(&bogus).is_err());
     }
@@ -597,8 +545,14 @@ mod tests {
         std::fs::write(dir.join("loose.cfg"), b"loose").unwrap();
         std::fs::write(dir.join("maps/custom.bsp"), b"custom").unwrap();
         std::fs::write(dir.join("progs.dat"), b"loose progs").unwrap();
-        let pak0 = Pak::from_bytes("pak0.pak".into(), build_pack(&[("progs.dat", b"id progs"), ("maps/e1m1.bsp", b"e1m1")])).unwrap();
-        let pak1 = Pak::from_bytes("pak1.pak".into(), build_pack(&[("maps/e1m1.bsp", b"patched"), ("maps/e2m1.bsp", b"e2m1")])).unwrap();
+        let pak0 =
+            Pak::from_bytes("pak0.pak".into(), build_pack(&[("progs.dat", b"id progs"), ("maps/e1m1.bsp", b"e1m1")]))
+                .unwrap();
+        let pak1 = Pak::from_bytes(
+            "pak1.pak".into(),
+            build_pack(&[("maps/e1m1.bsp", b"patched"), ("maps/e2m1.bsp", b"e2m1")]),
+        )
+        .unwrap();
         let read = |p: &Pak, n: &str| p.read_file(n).unwrap().map(|b| String::from_utf8(b).unwrap());
         for registered in [false, true] {
             let path = pak1.clone().over(pak0.clone().over(Pak::directory(&dir, registered)));

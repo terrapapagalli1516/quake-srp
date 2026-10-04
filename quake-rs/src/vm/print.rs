@@ -11,11 +11,12 @@ use std::fmt::Write as _;
 
 use super::Vm;
 use crate::error::ProgramError;
-use crate::progs::{string_in, Def, Op, Statement, DEF_SAVEGLOBAL, OP_MAX};
+use crate::progs::{DEF_SAVEGLOBAL, Def, OP_MAX, Op, Statement, string_in};
 
 /// `pr_opnames[]` (pr_exec.c): id's opcode names, as `PR_PrintStatement`
 /// prints them. The disassembler has its own ([`Op::mnemonic`]): `DIV_F` and
 /// `LOAD_F` where id says `DIV` and `INDIRECT`.
+#[rustfmt::skip] // id's pr_opnames, several to a line as in pr_exec.c
 const PR_OPNAMES: [&str; OP_MAX as usize + 1] = [
     "DONE", "MUL_F", "MUL_V", "MUL_FV", "MUL_VF", "DIV", "ADD_F", "ADD_V", "SUB_F", "SUB_V",
     "EQ_F", "EQ_V", "EQ_S", "EQ_E", "EQ_FNC", "NE_F", "NE_V", "NE_S", "NE_E", "NE_FNC", "LE",

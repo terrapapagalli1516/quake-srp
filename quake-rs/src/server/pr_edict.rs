@@ -14,10 +14,10 @@
 //! `Host_Loadgame_f` shares `COM_Parse` / `ED_ParseEdict`.
 
 use super::pr_cmds::cvar_value;
-use super::{Server, SpawnReport, SETTLE_FRAMETIME};
+use super::{SETTLE_FRAMETIME, Server, SpawnReport};
+use crate::Result;
 use crate::math::Vec3;
 use crate::progs::EType;
-use crate::Result;
 
 // Skill spawnflags (server.h). These mark an entity as absent on a given
 // difficulty (or in deathmatch); `ED_LoadFromFile` filters by the current skill.
@@ -42,10 +42,7 @@ pub(crate) struct Tokenizer<'a> {
 
 impl<'a> Tokenizer<'a> {
     pub(crate) fn new(s: &'a str) -> Tokenizer<'a> {
-        Tokenizer {
-            data: s.as_bytes(),
-            pos: 0,
-        }
+        Tokenizer { data: s.as_bytes(), pos: 0 }
     }
 
     /// Return the next token, or `None` at end of input. Mirrors `COM_Parse`,
@@ -64,9 +61,7 @@ impl<'a> Tokenizer<'a> {
                 self.pos += 1;
             }
             // skip // comments
-            if self.data.get(self.pos) == Some(&b'/')
-                && self.data.get(self.pos + 1) == Some(&b'/')
-            {
+            if self.data.get(self.pos) == Some(&b'/') && self.data.get(self.pos + 1) == Some(&b'/') {
                 while let Some(&c) = self.data.get(self.pos) {
                     if c == b'\n' {
                         break;
@@ -85,7 +80,7 @@ impl<'a> Tokenizer<'a> {
             self.pos += 1;
             loop {
                 match self.data.get(self.pos) {
-                    None => break,            // EOF inside a quote: stop cleanly
+                    None => break, // EOF inside a quote: stop cleanly
                     Some(&b'"') => {
                         self.pos += 1; // consume closing quote
                         break;
@@ -377,11 +372,7 @@ impl Server {
                 continue;
             }
 
-            let value = if anglehack {
-                format!("0 {value} 0")
-            } else {
-                value
-            };
+            let value = if anglehack { format!("0 {value} 0") } else { value };
 
             // Set the field by name using its def TYPE; unknown keys are skipped
             // (the C printed "'%s' is not a field" and continued).
@@ -513,17 +504,10 @@ mod tests {
         assert_eq!(report.no_spawn_function, 1, "worldspawn has no spawn fn");
 
         // The spawn function set the global flag to 1.0.
-        assert_eq!(
-            server.vm.gget_float("spawned_flag"),
-            1.0,
-            "marker's spawn function executed and set the global"
-        );
+        assert_eq!(server.vm.gget_float("spawned_flag"), 1.0, "marker's spawn function executed and set the global");
 
         // classnames report contains both, sorted by count desc then name.
-        assert!(report
-            .classnames
-            .iter()
-            .any(|(c, n)| c == "marker" && *n == 1));
+        assert!(report.classnames.iter().any(|(c, n)| c == "marker" && *n == 1));
     }
 
     #[test]
@@ -571,9 +555,7 @@ mod tests {
         let make = |skill: f32, spawnflags: i32| -> SpawnReport {
             let (img, _marker, g_one) = marker_progs();
             let progs = Progs::parse(&img).expect("parse");
-            let ents = format!(
-                "{{ \"classname\" \"marker\" \"spawnflags\" \"{spawnflags}\" }}\n"
-            );
+            let ents = format!("{{ \"classname\" \"marker\" \"spawnflags\" \"{spawnflags}\" }}\n");
             let mut server = Server::new(bsp_with_entities(&ents), progs).expect("server");
             server.vm.set_gf(g_one, 1.0);
             server.set_skill(skill);

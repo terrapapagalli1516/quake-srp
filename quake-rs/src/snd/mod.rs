@@ -20,6 +20,6 @@ mod mix;
 
 pub use dma::{
     AMBIENT_FADE_DEFAULT, AMBIENT_LEVEL_DEFAULT, AMBIENT_SAMPLES, AMBIENT_SKY, AMBIENT_WATER, ChannelState, Fixes,
-    ID_RATE, MAX_CHANNELS, MAX_DYNAMIC_CHANNELS, SLOP_MIXAHEAD, Mixer, SoundCvars, SoundMode,
+    ID_RATE, MAX_CHANNELS, MAX_DYNAMIC_CHANNELS, Mixer, SLOP_MIXAHEAD, SoundCvars, SoundMode,
 };
 pub use mem::{LoadOptions, SfxCache, SfxData, WavInfo, load_sound, wav_info};

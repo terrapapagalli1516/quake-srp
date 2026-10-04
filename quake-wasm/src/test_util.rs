@@ -1,10 +1,10 @@
 //! Shared fixtures for the crate's `#[cfg(test)]` modules: a synthetic pak
 //! builder and the helpers that drive the live App the way the page does.
 
-use quake_rs::pak::{Pak, DIRENTRY_SIZE, HEADER_SIZE, NAME_SIZE};
+use quake_rs::pak::{DIRENTRY_SIZE, HEADER_SIZE, NAME_SIZE, Pak};
 use quake_rs::render;
 
-use crate::app::{Walk, APP};
+use crate::app::{APP, Walk};
 use crate::console::{console_char, console_enter};
 
 /// Build a synthetic PACK image holding the given (name, contents) files, so

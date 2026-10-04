@@ -26,15 +26,15 @@
 use std::io::{self, Read, Write};
 use std::time::Instant;
 
-use crate::app::{boot_attract, APP};
+use crate::app::{APP, boot_attract};
 use crate::automation;
 use crate::cl_demo::timedemo_running;
 use crate::config::{exec_config, write_if_changed};
 use crate::host::step;
 use crate::input::{clear_all_states, gamepad, key_event, mouse_move, pointer_unlocked};
 use crate::proto::{
-    read_event, AudioCounts, Event, Msg, PCM_CLEAR, STATE_ASK, STATE_BIND_GRAB, STATE_CONSOLE,
-    STATE_ALT_ENTER, STATE_MENU, STATE_NATIVE, STATE_PAUSED, STATE_TIMEDEMO, STATE_TOUCH, STATE_WALK,
+    AudioCounts, Event, Msg, PCM_CLEAR, STATE_ALT_ENTER, STATE_ASK, STATE_BIND_GRAB, STATE_CONSOLE, STATE_MENU,
+    STATE_NATIVE, STATE_PAUSED, STATE_TIMEDEMO, STATE_TOUCH, STATE_WALK, read_event,
 };
 use crate::savegame::scan_saves;
 use crate::snd_dma::Audio;
@@ -374,7 +374,7 @@ fn address_preset(command_line: &[String]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proto::{encode, Record, STATE_ASK, STATE_ALT_ENTER, STATE_NATIVE, STATE_PAUSED, STATE_TOUCH};
+    use crate::proto::{Record, STATE_ALT_ENTER, STATE_ASK, STATE_NATIVE, STATE_PAUSED, STATE_TOUCH, encode};
 
     /// quake.rc's `stuffcmds`: the command line's `+profile 2026` (the
     /// preset's old words; the tests start in Classic) runs after
@@ -535,15 +535,26 @@ mod tests {
             input.extend(encode::tick(2, 0.0));
             let recs = run_on(&input);
             let frame = recs.iter().rev().find(|r| r.kind == Record::FRAME).expect("a frame");
-            let (w, h) = (u16::from_le_bytes([frame.payload[0], frame.payload[1]]), u16::from_le_bytes([frame.payload[2], frame.payload[3]]));
+            let (w, h) = (
+                u16::from_le_bytes([frame.payload[0], frame.payload[1]]),
+                u16::from_le_bytes([frame.payload[2], frame.payload[3]]),
+            );
             let state = recs.iter().rev().find(|r| r.kind == Record::STATE).unwrap();
             (w, h, state.u32_at(0) & (STATE_NATIVE | STATE_ALT_ENTER), state.u32_at(8))
         };
         assert_eq!(frame_and_state("slop", (1920, 1080)), (1920, 1080, STATE_NATIVE | STATE_ALT_ENTER, 1));
         assert_eq!(frame_and_state("slop", (3840, 2160)), (3840, 2160, STATE_NATIVE | STATE_ALT_ENTER, 1), "4K: 1x");
-        assert_eq!(frame_and_state("slop", (5120, 2880)), (2560, 1440, STATE_NATIVE | STATE_ALT_ENTER, 2), "5K: 2x, what the memory holds");
+        assert_eq!(
+            frame_and_state("slop", (5120, 2880)),
+            (2560, 1440, STATE_NATIVE | STATE_ALT_ENTER, 2),
+            "5K: 2x, what the memory holds"
+        );
         assert_eq!(frame_and_state("slop", (1300, 700)), (1300, 700, STATE_NATIVE | STATE_ALT_ENTER, 1), "any aspect");
-        assert_eq!(frame_and_state("classic", (1920, 1080)), (960, 600, STATE_ALT_ENTER, 0), "the mode, in the 4:3 box; Alt+Enter is a shared control, on here too");
+        assert_eq!(
+            frame_and_state("classic", (1920, 1080)),
+            (960, 600, STATE_ALT_ENTER, 0),
+            "the mode, in the 4:3 box; Alt+Enter is a shared control, on here too"
+        );
     }
 
     /// The flags the page's touch controls read: `in_touch` (on in both
@@ -691,9 +702,15 @@ mod tests {
     /// path is per frame: `IN_MouseMove` adds each record as it comes.
     #[test]
     fn the_mouse_turns_the_view_the_same_at_any_refresh_rate() {
-        for (preset, hz, split) in
-            [("slop", 60, 1), ("slop", 144, 1), ("slop", 240, 1), ("slop", 480, 1), ("slop", 480, 3), ("classic", 60, 1), ("classic", 480, 1)]
-        {
+        for (preset, hz, split) in [
+            ("slop", 60, 1),
+            ("slop", 144, 1),
+            ("slop", 240, 1),
+            ("slop", 480, 1),
+            ("slop", 480, 3),
+            ("classic", 60, 1),
+            ("classic", 480, 1),
+        ] {
             let yaws = drawn_yaws(preset, hz, |i| {
                 let counts = if i == 0 { 0 } else { counts_by(i, hz) - counts_by(i - 1, hz) };
                 (0..split)
@@ -703,7 +720,10 @@ mod tests {
                     .collect()
             });
             let t: f64 = turns(&yaws).iter().sum();
-            assert!((t + 160.0).abs() < 0.01, "{preset} at {hz} Hz, {split} event(s) a refresh: turned {t}°, not 160° right");
+            assert!(
+                (t + 160.0).abs() < 0.01,
+                "{preset} at {hz} Hz, {split} event(s) a refresh: turned {t}°, not 160° right"
+            );
         }
     }
 
@@ -749,7 +769,8 @@ mod tests {
             for preset in ["slop", "classic"] {
                 for hz in [60, 240, 480, 1000] {
                     for clock in [0.5, 1.0, 2.0] {
-                        let t: f64 = turns(&drawn_yaws_clocked(preset, hz, clock, mouse_1000hz(hz, counts, false))).iter().sum();
+                        let t: f64 =
+                            turns(&drawn_yaws_clocked(preset, hz, clock, mouse_1000hz(hz, counts, false))).iter().sum();
                         assert!(
                             (t + want).abs() < yaw_rounding(1000),
                             "{preset} at {hz} Hz, the clock at {clock}x: 1000 events of {counts} counts turned {t}°, not {want}° right"
@@ -769,10 +790,15 @@ mod tests {
     #[test]
     fn every_frame_draws_the_mouse_turn_so_far() {
         for per_refresh in [1, 2] {
-            let yaws = drawn_yaws("slop", 480, |i| if (1..=480).contains(&i) { vec![1.0; per_refresh] } else { Vec::new() });
+            let yaws =
+                drawn_yaws("slop", 480, |i| if (1..=480).contains(&i) { vec![1.0; per_refresh] } else { Vec::new() });
             let want = -0.16 * per_refresh as f64;
             for (i, t) in turns(&yaws)[..480].iter().enumerate() {
-                assert!((t - want).abs() < 1e-4, "slop, {per_refresh} count(s) a refresh: frame {} turned {t}°, not {want}°", i + 1);
+                assert!(
+                    (t - want).abs() < 1e-4,
+                    "slop, {per_refresh} count(s) a refresh: frame {} turned {t}°, not {want}°",
+                    i + 1
+                );
             }
         }
         let yaws = drawn_yaws("classic", 480, |i| if (1..=480).contains(&i) { vec![1.0] } else { Vec::new() });
@@ -780,7 +806,11 @@ mod tests {
         for (i, t) in turns(&yaws)[..480].iter().enumerate() {
             since += 1;
             if *t != 0.0 {
-                assert!((t + 0.16 * f64::from(since)).abs() < 1e-3, "Classic: refresh {} drew {t}° for {since} counts", i + 1);
+                assert!(
+                    (t + 0.16 * f64::from(since)).abs() < 1e-3,
+                    "Classic: refresh {} drew {t}° for {since} counts",
+                    i + 1
+                );
                 (since, drawn) = (0, drawn + 1);
             }
         }

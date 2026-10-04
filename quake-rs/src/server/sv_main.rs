@@ -19,15 +19,15 @@
 
 use super::pr_cmds::install_engine_builtins;
 use super::sv_world::link_edict;
-use super::{EntFlags, GameMode, MoveType, Server, Solid, SysFn, WorldModel, NUM_SPAWN_PARMS};
+use super::{EntFlags, GameMode, MoveType, NUM_SPAWN_PARMS, Server, Solid, SysFn, WorldModel};
 use std::collections::HashMap;
 
+use crate::Result;
 use crate::bsp::{Bsp, CONTENTS_SOLID};
-use crate::math::{dot, Vec3};
+use crate::math::{Vec3, dot};
 use crate::progs::Progs;
 use crate::stepping::Stepping;
 use crate::vm::Vm;
-use crate::Result;
 use std::rc::Rc;
 
 /// `EF_MUZZLEFLASH` (`quakedef.h`): the firing entity emits a brief, bright
@@ -204,10 +204,7 @@ impl Server {
     /// (the only step that differs — fresh `SetNewParms` vs. restoring saved
     /// parms), then `ClientConnect` + `PutClientInServer`, re-assert physics,
     /// mark `FL_CLIENT`, and link into the world.
-    fn connect_client_inner(
-        &mut self,
-        setup_parms: impl FnOnce(&mut Self, i32) -> Result<()>,
-    ) -> Result<i32> {
+    fn connect_client_inner(&mut self, setup_parms: impl FnOnce(&mut Self, i32) -> Result<()>) -> Result<i32> {
         // Reserve a fresh edict (the first free slot after spawn_entities).
         let ent = self.vm.spawn();
         self.player = Some(ent);
@@ -273,8 +270,7 @@ impl Server {
             let ei = e as i32;
             let eff = self.vm.ent_float(ei, self.vm.fo().effects) as i32;
             if eff & EF_MUZZLEFLASH != 0 {
-                self.vm
-                    .set_ent_float(ei, self.vm.fo().effects, (eff & !EF_MUZZLEFLASH) as f32);
+                self.vm.set_ent_float(ei, self.vm.fo().effects, (eff & !EF_MUZZLEFLASH) as f32);
             }
         }
     }
@@ -328,10 +324,7 @@ impl Server {
                 continue;
             }
             *slot = match &pvs {
-                Some(pvs) => vm
-                    .edict_leafs(ent)
-                    .iter()
-                    .any(|&l| pvs.get(usize::from(l)).copied().unwrap_or(false)),
+                Some(pvs) => vm.edict_leafs(ent).iter().any(|&l| pvs.get(usize::from(l)).copied().unwrap_or(false)),
                 None => true,
             };
         }
@@ -406,8 +399,8 @@ fn add_to_fat_pvs(bsp: &Bsp, org: Vec3, mut child: i32, depth: usize, budget: &m
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::server::testutil::*;
     use crate::server::UserCmd;
+    use crate::server::testutil::*;
 
     #[test]
     fn set_map_name_sets_up_the_world_edict_like_sv_spawnserver() {
@@ -458,41 +451,20 @@ mod tests {
             server.client_frame(&still, 0.1).expect("settle");
         }
         let settled = server.vm.ent_get_vector(p, "origin");
-        assert!(
-            settled[2] >= 24.0 - 1.0,
-            "player rests on the floor (origin.z ~ 24), got {}",
-            settled[2]
-        );
-        assert!(
-            settled[2] <= 40.0 + 0.1,
-            "player did not rise above spawn, got {}",
-            settled[2]
-        );
+        assert!(settled[2] >= 24.0 - 1.0, "player rests on the floor (origin.z ~ 24), got {}", settled[2]);
+        assert!(settled[2] <= 40.0 + 0.1, "player did not rise above spawn, got {}", settled[2]);
 
         // Drive forward (yaw 0 = +X) and confirm XY advance + no tunnelling.
-        let cmd = UserCmd {
-            forwardmove: 320.0,
-            yaw: 0.0,
-            ..UserCmd::default()
-        };
+        let cmd = UserCmd { forwardmove: 320.0, yaw: 0.0, ..UserCmd::default() };
         let before = server.vm.ent_get_vector(p, "origin");
         for _ in 0..10 {
             server.client_frame(&cmd, 0.1).expect("walk");
             let o = server.vm.ent_get_vector(p, "origin");
             // The box bottom is origin.z - 24; it must stay at/above the floor.
-            assert!(
-                o[2] - 24.0 >= -1.0,
-                "player did not tunnel through the floor, origin.z = {}",
-                o[2]
-            );
+            assert!(o[2] - 24.0 >= -1.0, "player did not tunnel through the floor, origin.z = {}", o[2]);
         }
         let after = server.vm.ent_get_vector(p, "origin");
-        assert!(
-            after[0] > before[0] + 1.0,
-            "player advanced forward in +X: {} -> {}",
-            before[0],
-            after[0]
-        );
+        assert!(after[0] > before[0] + 1.0, "player advanced forward in +X: {} -> {}", before[0], after[0]);
     }
 
     #[test]
@@ -541,31 +513,21 @@ mod tests {
         let mut parms = [0.0f32; NUM_SPAWN_PARMS];
         parms[0] = 7.5; // parm1
         parms[3] = 25.0; // parm4 (e.g. shells)
-        let p = server
-            .connect_client_with_parms(parms)
-            .expect("connect with parms");
+        let p = server.connect_client_with_parms(parms).expect("connect with parms");
         assert_eq!(server.player_edict(), Some(p));
 
         // The parm1 global holds the value we passed in...
-        assert_eq!(
-            server.vm.gget_float("parm1"),
-            7.5,
-            "connect_client_with_parms wrote parm1"
-        );
+        assert_eq!(server.vm.gget_float("parm1"), 7.5, "connect_client_with_parms wrote parm1");
         assert_eq!(server.vm.gget_float("parm4"), 25.0, "and parm4");
         // ...and PutClientInServer (the spawn script) saw it (decoded parm1).
-        assert_eq!(
-            server.vm.gf(g_decoded),
-            7.5,
-            "PutClientInServer ran AFTER the parm globals were set"
-        );
+        assert_eq!(server.vm.gf(g_decoded), 7.5, "PutClientInServer ran AFTER the parm globals were set");
     }
 
     /// SV_AddToFatPVS: the PVS of the leaf holding the point, OR'd with every
     /// leaf whose plane is within 8 units; a solid leaf adds nothing.
     #[test]
     fn fat_pvs_unions_the_leaves_within_8_units() {
-        use crate::bsp::{DLeaf, DNode, DPlane, CONTENTS_EMPTY, NUM_AMBIENTS};
+        use crate::bsp::{CONTENTS_EMPTY, DLeaf, DNode, DPlane, NUM_AMBIENTS};
         let leaf = |contents, visofs| DLeaf {
             contents,
             visofs,
@@ -578,11 +540,9 @@ mod tests {
         // x < 0: leaf 1 (sees 1); 0 <= x < 100: leaf 2 (sees 2, 3);
         // x >= 100: leaf 3 (sees 2, 3); x >= 200: solid leaf 4.
         let mut b = empty_bsp();
-        b.planes = [0.0, 100.0, 200.0]
-            .iter()
-            .map(|&dist| DPlane { normal: [1.0, 0.0, 0.0], dist, ptype: 0 })
-            .collect();
-        let node = |planenum, children| DNode { planenum, children, mins: [0; 3], maxs: [0; 3], firstface: 0, numfaces: 0 };
+        b.planes = [0.0, 100.0, 200.0].iter().map(|&dist| DPlane { normal: [1.0, 0.0, 0.0], dist, ptype: 0 }).collect();
+        let node =
+            |planenum, children| DNode { planenum, children, mins: [0; 3], maxs: [0; 3], firstface: 0, numfaces: 0 };
         b.nodes = vec![node(0, [1, -2]), node(1, [2, -3]), node(2, [-5, -4])];
         b.leafs = vec![
             leaf(CONTENTS_SOLID, -1),

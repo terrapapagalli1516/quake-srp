@@ -86,12 +86,7 @@ impl Plane {
             signbits |= u8::from(n < 0.0) << j;
         }
 
-        Plane {
-            normal,
-            dist,
-            ptype,
-            signbits,
-        }
+        Plane { normal, dist, ptype, signbits }
     }
 }
 
@@ -106,11 +101,7 @@ pub fn dot(a: Vec3, b: Vec3) -> f32 {
 #[inline]
 #[must_use]
 pub fn cross(a: Vec3, b: Vec3) -> Vec3 {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
+    [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
 }
 
 /// `VectorAdd(a,b,c)`.
@@ -138,11 +129,7 @@ pub fn scale(v: Vec3, s: f32) -> Vec3 {
 #[inline]
 #[must_use]
 pub fn mul_add(a: Vec3, scale: f32, b: Vec3) -> Vec3 {
-    [
-        a[0] + scale * b[0],
-        a[1] + scale * b[1],
-        a[2] + scale * b[2],
-    ]
+    [a[0] + scale * b[0], a[1] + scale * b[1], a[2] + scale * b[2]]
 }
 
 /// Alias for [`mul_add`], matching the C name `VectorMA`.
@@ -256,16 +243,8 @@ pub fn angle_vectors(angles: Vec3) -> (Vec3, Vec3, Vec3) {
 
     let forward: Vec3 = [(cp * cy) as f32, (cp * sy) as f32, (-sp) as f32];
     // The C spells these `-1*sr*...`; unary negation is bit-identical for floats.
-    let right: Vec3 = [
-        (-sr * sp * cy + -cr * -sy) as f32,
-        (-sr * sp * sy + -cr * cy) as f32,
-        (-sr * cp) as f32,
-    ];
-    let up: Vec3 = [
-        (cr * sp * cy + -sr * -sy) as f32,
-        (cr * sp * sy + -sr * cy) as f32,
-        (cr * cp) as f32,
-    ];
+    let right: Vec3 = [(-sr * sp * cy + -cr * -sy) as f32, (-sr * sp * sy + -cr * cy) as f32, (-sr * cp) as f32];
+    let up: Vec3 = [(cr * sp * cy + -sr * -sy) as f32, (cr * sp * sy + -sr * cy) as f32, (cr * cp) as f32];
 
     (forward, right, up)
 }
@@ -319,38 +298,14 @@ pub fn concat_transforms(a: &[[f32; 4]; 3], b: &[[f32; 4]; 3]) -> [[f32; 4]; 3] 
 pub fn box_on_plane_side(emins: Vec3, emaxs: Vec3, p: &Plane) -> u8 {
     let n = p.normal;
     let (dist1, dist2): (f32, f32) = match p.signbits {
-        0 => (
-            n[0] * emaxs[0] + n[1] * emaxs[1] + n[2] * emaxs[2],
-            n[0] * emins[0] + n[1] * emins[1] + n[2] * emins[2],
-        ),
-        1 => (
-            n[0] * emins[0] + n[1] * emaxs[1] + n[2] * emaxs[2],
-            n[0] * emaxs[0] + n[1] * emins[1] + n[2] * emins[2],
-        ),
-        2 => (
-            n[0] * emaxs[0] + n[1] * emins[1] + n[2] * emaxs[2],
-            n[0] * emins[0] + n[1] * emaxs[1] + n[2] * emins[2],
-        ),
-        3 => (
-            n[0] * emins[0] + n[1] * emins[1] + n[2] * emaxs[2],
-            n[0] * emaxs[0] + n[1] * emaxs[1] + n[2] * emins[2],
-        ),
-        4 => (
-            n[0] * emaxs[0] + n[1] * emaxs[1] + n[2] * emins[2],
-            n[0] * emins[0] + n[1] * emins[1] + n[2] * emaxs[2],
-        ),
-        5 => (
-            n[0] * emins[0] + n[1] * emaxs[1] + n[2] * emins[2],
-            n[0] * emaxs[0] + n[1] * emins[1] + n[2] * emaxs[2],
-        ),
-        6 => (
-            n[0] * emaxs[0] + n[1] * emins[1] + n[2] * emins[2],
-            n[0] * emins[0] + n[1] * emaxs[1] + n[2] * emaxs[2],
-        ),
-        7 => (
-            n[0] * emins[0] + n[1] * emins[1] + n[2] * emins[2],
-            n[0] * emaxs[0] + n[1] * emaxs[1] + n[2] * emaxs[2],
-        ),
+        0 => (n[0] * emaxs[0] + n[1] * emaxs[1] + n[2] * emaxs[2], n[0] * emins[0] + n[1] * emins[1] + n[2] * emins[2]),
+        1 => (n[0] * emins[0] + n[1] * emaxs[1] + n[2] * emaxs[2], n[0] * emaxs[0] + n[1] * emins[1] + n[2] * emins[2]),
+        2 => (n[0] * emaxs[0] + n[1] * emins[1] + n[2] * emaxs[2], n[0] * emins[0] + n[1] * emaxs[1] + n[2] * emins[2]),
+        3 => (n[0] * emins[0] + n[1] * emins[1] + n[2] * emaxs[2], n[0] * emaxs[0] + n[1] * emaxs[1] + n[2] * emins[2]),
+        4 => (n[0] * emaxs[0] + n[1] * emaxs[1] + n[2] * emins[2], n[0] * emins[0] + n[1] * emins[1] + n[2] * emaxs[2]),
+        5 => (n[0] * emins[0] + n[1] * emaxs[1] + n[2] * emins[2], n[0] * emaxs[0] + n[1] * emins[1] + n[2] * emaxs[2]),
+        6 => (n[0] * emaxs[0] + n[1] * emins[1] + n[2] * emins[2], n[0] * emins[0] + n[1] * emaxs[1] + n[2] * emaxs[2]),
+        7 => (n[0] * emins[0] + n[1] * emins[1] + n[2] * emins[2], n[0] * emaxs[0] + n[1] * emaxs[1] + n[2] * emaxs[2]),
         _ => {
             // Bad signbits: instead of Sys_Error, fall back to the general
             // corner formula from the C `#if 0` block.
@@ -384,11 +339,7 @@ pub fn box_on_plane_side(emins: Vec3, emaxs: Vec3, p: &Plane) -> u8 {
 pub fn project_point_on_plane(p: Vec3, normal: Vec3) -> Vec3 {
     let inv_denom = 1.0 / dot(normal, normal);
     let d = dot(normal, p) * inv_denom;
-    let n = [
-        normal[0] * inv_denom,
-        normal[1] * inv_denom,
-        normal[2] * inv_denom,
-    ];
+    let n = [normal[0] * inv_denom, normal[1] * inv_denom, normal[2] * inv_denom];
     [p[0] - d * n[0], p[1] - d * n[1], p[2] - d * n[2]]
 }
 
@@ -503,11 +454,7 @@ pub fn floor_div_mod(numer: f64, denom: f64) -> (i32, i32) {
 #[must_use]
 pub fn gcd(a: i32, b: i32) -> i32 {
     if a > b {
-        if b == 0 {
-            a
-        } else {
-            gcd(b, a % b)
-        }
+        if b == 0 { a } else { gcd(b, a % b) }
     } else if a == 0 {
         b
     } else {
@@ -634,7 +581,10 @@ mod tests {
     /// angle again, in f64 (where no sum here rounds).
     #[test]
     fn angle_wrap_keeps_the_angle_to_the_bit() {
-        assert_eq!([angle_wrap(180.0), angle_wrap(-180.0), angle_wrap(540.0), angle_wrap(-0.0)], [-180.0, -180.0, -180.0, -0.0]);
+        assert_eq!(
+            [angle_wrap(180.0), angle_wrap(-180.0), angle_wrap(540.0), angle_wrap(-0.0)],
+            [-180.0, -180.0, -180.0, -0.0]
+        );
         let mut a = -40000.0f32;
         while a < 40000.0 {
             let w = angle_wrap(a);
@@ -687,16 +637,8 @@ mod tests {
     #[test]
     fn concat_transforms_identity_translation() {
         // Identity rotation with a translation in the 4th column.
-        let i = [
-            [1.0, 0.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0, 0.0],
-            [0.0, 0.0, 1.0, 0.0],
-        ];
-        let t = [
-            [1.0, 0.0, 0.0, 10.0],
-            [0.0, 1.0, 0.0, 20.0],
-            [0.0, 0.0, 1.0, 30.0],
-        ];
+        let i = [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]];
+        let t = [[1.0, 0.0, 0.0, 10.0], [0.0, 1.0, 0.0, 20.0], [0.0, 0.0, 1.0, 30.0]];
         // I * T should equal T (rotation identity, translation preserved).
         assert_eq!(concat_transforms(&i, &t), t);
         // T * I: translation comes from in1's 4th column added.

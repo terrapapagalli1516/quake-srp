@@ -1,10 +1,10 @@
-# The checks every push and pull request must pass: both crates' tests and
-# clippy with warnings as errors, and the browser program's two builds.
+# The checks every push and pull request must pass: both crates' formatting
+# (rustfmt.toml), tests and clippy with warnings as errors, and the browser
+# program's two builds.
 # ci/local.sh runs the same commands on a local checkout.
 #
 # Not here: the goldens and Classic's proof against id's C (oracle.yml, run
-# by hand), and `cargo fmt --check` (the tree is not rustfmt-formatted yet:
-# CODE_PLAN.md, W0a).
+# by hand).
 name: check
 
 on:
@@ -32,7 +32,7 @@ jobs:
       - name: Rust ${{ env.RUST_TOOLCHAIN }}, clippy and the two WASI targets
         run: |
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal \
-            --component clippy --target wasm32-wasip1 --target wasm32-wasip1-threads
+            --component clippy --component rustfmt --target wasm32-wasip1 --target wasm32-wasip1-threads
           rustup default "$RUST_TOOLCHAIN"
           rustc --version
 
@@ -43,6 +43,11 @@ jobs:
           sudo apt-get update -q
           sudo apt-get install -y -q --no-install-recommends libarchive-tools
           ci/fetch_shareware.sh
+
+      - name: rustfmt
+        run: |
+          (cd quake-rs && cargo fmt --check)
+          (cd quake-wasm && cargo fmt --check)
 
       - name: quake-rs — tests
         working-directory: quake-rs

@@ -59,11 +59,11 @@
 
 use std::collections::HashMap;
 
+use crate::Result;
 use crate::bsp::Bsp;
 use crate::math::Vec3;
 use crate::stepping::Stepping;
 use crate::vm::{Glb, GlobalOfs, Host, HostTrace, Vm};
-use crate::Result;
 
 mod host;
 mod lightstyle;
@@ -76,23 +76,20 @@ mod sv_phys;
 mod sv_user;
 mod sv_world;
 
-pub use lightstyle::{lightstyle_scales_at, LerpLightStyles, GLIDE_STEP, MAX_LIGHTSTYLES};
 pub(crate) use lightstyle::lightstyle_value_at;
+pub use lightstyle::{GLIDE_STEP, LerpLightStyles, MAX_LIGHTSTYLES, lightstyle_scales_at};
 pub use msg::{
-    te_consts, wire_angle, wire_coord, GameMessage, Outbox, ParticleBurst, SoundEvent, StaticEntity,
-    StaticSound, SvcEvent, TempEntityEvent,
+    GameMessage, Outbox, ParticleBurst, SoundEvent, StaticEntity, StaticSound, SvcEvent, TempEntityEvent, te_consts,
+    wire_angle, wire_coord,
 };
 pub use pr_cmds::install_engine_builtins;
-pub use sv_main::{LitEntity, EF_BRIGHTLIGHT, EF_DIMLIGHT, EF_MUZZLEFLASH};
-pub use sv_move::{
-    sv_check_bottom, sv_move_to_goal, sv_movestep, sv_new_chase_dir, sv_step_direction,
-};
+pub use sv_main::{EF_BRIGHTLIGHT, EF_DIMLIGHT, EF_MUZZLEFLASH, LitEntity};
+pub use sv_move::{sv_check_bottom, sv_move_to_goal, sv_movestep, sv_new_chase_dir, sv_step_direction};
 pub use sv_user::v_calc_roll;
-pub use sv_world::{probe_point_contents, sv_impact, sv_move, touch_triggers, MoveTrace};
-
+pub use sv_world::{MoveTrace, probe_point_contents, sv_impact, sv_move, touch_triggers};
 
 pub use host::ServerCvars;
-pub(crate) use pr_edict::{ed_new_string, parse_float, parse_int, parse_vector, Tokenizer};
+pub(crate) use pr_edict::{Tokenizer, ed_new_string, parse_float, parse_int, parse_vector};
 pub(crate) use sv_world::link_edict;
 
 #[cfg(test)]
@@ -856,15 +853,14 @@ impl Server {
     }
 }
 
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::testutil::*;
+    use super::*;
     use crate::progs::Progs;
 
     /// [`GameMode::detect`] on synthetic progs shaped like each game's real
@@ -920,12 +916,8 @@ mod tests {
         // `setmodel`'s `model_bbox` returns them — the box gets a real bbox
         // (e.g. b_explob.bsp -> (0,0,0)..(32,32,64)) instead of (0,0,0).
         let mut wm3 = WorldModel::with_pak(empty_bsp(), None);
-        wm3.model_bounds
-            .insert("maps/b_explob.bsp".into(), ([0.0, 0.0, 0.0], [32.0, 32.0, 64.0]));
-        assert_eq!(
-            wm3.model_bbox("maps/b_explob.bsp"),
-            Some(([0.0, 0.0, 0.0], [32.0, 32.0, 64.0]))
-        );
+        wm3.model_bounds.insert("maps/b_explob.bsp".into(), ([0.0, 0.0, 0.0], [32.0, 32.0, 64.0]));
+        assert_eq!(wm3.model_bbox("maps/b_explob.bsp"), Some(([0.0, 0.0, 0.0], [32.0, 32.0, 64.0])));
     }
 
     /// CENSUS L10: `PF_setmodel` -> `SetMinMaxSize (e, mod->mins, mod->maxs,

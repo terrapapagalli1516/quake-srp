@@ -8,8 +8,8 @@
 //!   `d_lightstylevalue`), shared by the live server and demo playback.
 
 use super::{Outbox, Server};
-use crate::vm::Vm;
 use crate::Result;
+use crate::vm::Vm;
 
 // ---------------------------------------------------------------------------
 // Animated light styles (PF_lightstyle / R_AnimateLight).
@@ -235,7 +235,7 @@ impl Server {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::progs::{Progs, OFS_PARM0};
+    use crate::progs::{OFS_PARM0, Progs};
     use crate::server::testutil::*;
     // ------------------------------------------------ animated light styles (#35)
 
@@ -353,7 +353,10 @@ mod tests {
         let mut s2 = Server::new(empty_bsp(), progs2).expect("server");
         s2.run_frame(0.1).expect("frame");
         assert_eq!(s2.lightstyle(1), "", "stale style must not leak into a new server");
-        assert!((s2.lightstyle_scales(0.0, LerpLightStyles::Classic)[1] - 1.0).abs() < 1e-6, "new server style 1 normal");
+        assert!(
+            (s2.lightstyle_scales(0.0, LerpLightStyles::Classic)[1] - 1.0).abs() < 1e-6,
+            "new server style 1 normal"
+        );
     }
 
     // ------------------------------------------- r_lerplightstyles (the slop extra)
@@ -473,7 +476,11 @@ mod tests {
             let mid = lightstyle_scales_at(&table, f64::from((n as f32 + 0.5) / 10.0), Smooth);
             for (j, map) in WORLDSPAWN.iter().enumerate() {
                 let want = (letter(map, n) + letter(map, n + 1)) / 2;
-                assert!((units(mid[j]) - want).abs() <= GLIDE_STEP / 2, "style {j}, tenth {n}.5: {} vs {want}", units(mid[j]));
+                assert!(
+                    (units(mid[j]) - want).abs() <= GLIDE_STEP / 2,
+                    "style {j}, tenth {n}.5: {} vs {want}",
+                    units(mid[j])
+                );
             }
         }
         // 4800 Hz over 6 s.
@@ -536,7 +543,8 @@ mod tests {
         // Tenth 1_008_000 of the flicker (style 1) is letter 1_008_000 % 23
         // = 2 ('n'), the next 'm': a one-letter tenth, 11 steps of 2.
         let t0 = 100_800.0f64;
-        let values: Vec<i32> = (0..48).map(|k| units(lightstyle_scales_at(&table, t0 + f64::from(k) / 480.0, Smooth)[1])).collect();
+        let values: Vec<i32> =
+            (0..48).map(|k| units(lightstyle_scales_at(&table, t0 + f64::from(k) / 480.0, Smooth)[1])).collect();
         let distinct: std::collections::BTreeSet<i32> = values.iter().copied().collect();
         assert_eq!(distinct.len(), 12, "the 11 steps from 'n' to 'm', and 'm': {values:?}");
         assert!(values.windows(2).all(|w| w[1] <= w[0]), "down, never back: {values:?}");
@@ -557,7 +565,11 @@ mod tests {
         let at_zero = lightstyle_scales_at(&table, 0.0, Smooth);
         for t in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
             assert_eq!(lightstyle_scales_at(&table, f64::from(t), Smooth), at_zero, "{t}");
-            assert_eq!(lightstyle_scales_at(&table, f64::from(t), Classic), lightstyle_scales_at(&table, 0.0, Classic), "{t}");
+            assert_eq!(
+                lightstyle_scales_at(&table, f64::from(t), Classic),
+                lightstyle_scales_at(&table, 0.0, Classic),
+                "{t}"
+            );
         }
         for t in [-1e-9, -0.05, -0.1, -123.456, -1e30, 1e30, f32::MAX, f32::MIN, 16_777_217.0] {
             let sc = lightstyle_scales_at(&table, f64::from(t), Smooth);
@@ -569,7 +581,11 @@ mod tests {
         // Past 2^23 tenths an f32 clock has no fraction left: the glide is
         // id's letter there.
         for t in [1e30, f32::MAX, f32::MIN] {
-            assert_eq!(lightstyle_scales_at(&table, f64::from(t), Smooth), lightstyle_scales_at(&table, f64::from(t), Classic), "{t}");
+            assert_eq!(
+                lightstyle_scales_at(&table, f64::from(t), Smooth),
+                lightstyle_scales_at(&table, f64::from(t), Classic),
+                "{t}"
+            );
         }
         // Before 0: tenth -1 is the pattern's last letter, gliding to its
         // first — SLOW STROBE's z (550) to a, three quarters of the way:

@@ -10,8 +10,8 @@
 //! The BSP hull traces underneath (`SV_RecursiveHullCheck`, the box hull,
 //! point contents) are the crate's `world.rs`; this module adds the edicts.
 
-use super::{EntFlags, Solid, CONTENTS_SOLID};
-use crate::math::{add as v_add, Vec3};
+use super::{CONTENTS_SOLID, EntFlags, Solid};
+use crate::math::{Vec3, add as v_add};
 use crate::vm::{EdictLeafs, HostTrace, Vm};
 
 // ---------------------------------------------------------------------------
@@ -193,11 +193,7 @@ pub fn sv_move(
         // tractable — and it's RESULT-IDENTICAL, since a non-overlapping box can
         // never be hit. For a missile the box uses the +-15 `mins2/maxs2` expansion
         // so nearby FL_MONSTER touches are still considered.
-        let (m2_mins, m2_maxs) = if missile {
-            ([-15.0, -15.0, -15.0], [15.0, 15.0, 15.0])
-        } else {
-            (mins, maxs)
-        };
+        let (m2_mins, m2_maxs) = if missile { ([-15.0, -15.0, -15.0], [15.0, 15.0, 15.0]) } else { (mins, maxs) };
         let mut box_mins = [0.0f32; 3];
         let mut box_maxs = [0.0f32; 3];
         for i in 0..3 {
@@ -302,12 +298,11 @@ pub fn sv_move(
             // `mins2`/`maxs2` box instead of the move's own box, so rockets
             // detonate when they land NEAR a monster. Non-monster entities and
             // the world keep the move's own `mins`/`maxs`.
-            let (clip_mins, clip_maxs) =
-                if missile && vm.flags(ei).contains(EntFlags::MONSTER) {
-                    ([-15.0, -15.0, -15.0], [15.0, 15.0, 15.0])
-                } else {
-                    (mins, maxs)
-                };
+            let (clip_mins, clip_maxs) = if missile && vm.flags(ei).contains(EntFlags::MONSTER) {
+                ([-15.0, -15.0, -15.0], [15.0, 15.0, 15.0])
+            } else {
+                (mins, maxs)
+            };
 
             let tr = match solid {
                 Solid::Bsp => {
@@ -331,18 +326,14 @@ pub fn sv_move(
                         .and_then(|m| m.strip_prefix('*'))
                         .and_then(|d| d.parse::<usize>().ok());
                     match idx {
-                        Some(idx) => crate::world::trace_submodel(
-                            bsp, idx, origin, start, end, clip_mins, clip_maxs,
-                        ),
+                        Some(idx) => crate::world::trace_submodel(bsp, idx, origin, start, end, clip_mins, clip_maxs),
                         None => continue, // SOLID_BSP without a valid "*N" model
                     }
                 }
                 Solid::BBox | Solid::SlideBox => {
                     let ent_mins = vm.ent_vec(ei, vm.fo().mins);
                     let ent_maxs = vm.ent_vec(ei, vm.fo().maxs);
-                    crate::world::clip_box(
-                        start, end, clip_mins, clip_maxs, ent_mins, ent_maxs, origin,
-                    )
+                    crate::world::clip_box(start, end, clip_mins, clip_maxs, ent_mins, ent_maxs, origin)
                 }
                 // SOLID_NOT and SOLID_TRIGGER do not block a move.
                 Solid::Not | Solid::Trigger | Solid::Other(_) => continue,
@@ -509,8 +500,8 @@ pub fn touch_triggers(vm: &mut Vm, mover: i32, sv_time: f32) {
 mod tests {
     use super::*;
     use crate::progs::{Op, Progs, Statement};
-    use crate::server::testutil::*;
     use crate::server::Server;
+    use crate::server::testutil::*;
 
     // ----------------------------------------------- entity-aware move / touch
 
@@ -584,11 +575,7 @@ mod tests {
 
         let sv_time = 5.0;
         touch_triggers(&mut server.vm, mover, sv_time);
-        assert_eq!(
-            server.vm.gf(g_flag),
-            sv_time,
-            "the trigger touch ran with sv.time, not the stale 99.0"
-        );
+        assert_eq!(server.vm.gf(g_flag), sv_time, "the trigger touch ran with sv.time, not the stale 99.0");
     }
 
     #[test]
@@ -610,11 +597,7 @@ mod tests {
 
         let sv_time = 7.25;
         sv_impact(&mut server.vm, e1, e2, sv_time);
-        assert_eq!(
-            server.vm.gf(g_flag),
-            sv_time,
-            "sv_impact ran the touch with sv.time, not the stale 42.0"
-        );
+        assert_eq!(server.vm.gf(g_flag), sv_time, "sv_impact ran the touch with sv.time, not the stale 42.0");
     }
 
     #[test]
@@ -660,7 +643,7 @@ mod tests {
     /// `world.rs`'s `submodel_wall_bsp`, folded onto the open world so a
     /// Solid::Bsp entity using model 1 is the only thing a trace can hit.
     fn world_open_bsp_with_wall_submodel() -> crate::bsp::Bsp {
-        use crate::bsp::{DClipNode, DModel, DPlane, CONTENTS_EMPTY, CONTENTS_SOLID};
+        use crate::bsp::{CONTENTS_EMPTY, CONTENTS_SOLID, DClipNode, DModel, DPlane};
         let mut b = world_open_bsp();
         b.planes.push(DPlane { normal: [1.0, 0.0, 0.0], dist: 0.0, ptype: 0 });
         let wall_plane = (b.planes.len() - 1) as i32;
@@ -761,8 +744,8 @@ mod tests {
             [200.0, 0.0, 0.0],
             [0.0, 0.0, 0.0],
             [0.0, 0.0, 0.0],
-            -1,   // ignore nothing
-            true, // MOVE_NOMONSTERS: skip box entities
+            -1,    // ignore nothing
+            true,  // MOVE_NOMONSTERS: skip box entities
             false, // not a missile move
         );
 
@@ -937,11 +920,7 @@ mod tests {
             false,
             true, // MOVE_MISSILE
         );
-        assert!(
-            missile.fraction < 1.0,
-            "missile expanded box clips the nearby monster, got {}",
-            missile.fraction
-        );
+        assert!(missile.fraction < 1.0, "missile expanded box clips the nearby monster, got {}", missile.fraction);
         assert_eq!(missile.ent, monster, "the monster was the blocker");
     }
 
@@ -970,10 +949,7 @@ mod tests {
             false,
             true, // MOVE_MISSILE
         );
-        assert_eq!(
-            missile.fraction, 1.0,
-            "non-monster keeps its own box, missile passes by"
-        );
+        assert_eq!(missile.fraction, 1.0, "non-monster keeps its own box, missile passes by");
         assert_eq!(missile.ent, -1);
     }
 
@@ -1057,11 +1033,7 @@ mod tests {
 
         assert_eq!(server.vm.gget_float("touched_flag"), 0.0, "not yet touched");
         touch_triggers(&mut server.vm, mover, 0.0);
-        assert_eq!(
-            server.vm.gget_float("touched_flag"),
-            1.0,
-            "the overlapping trigger's touch function ran"
-        );
+        assert_eq!(server.vm.gget_float("touched_flag"), 1.0, "the overlapping trigger's touch function ran");
     }
 
     #[test]

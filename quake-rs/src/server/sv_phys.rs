@@ -13,15 +13,14 @@
 //! The collision queries are world.c's (`sv_world.rs`); the player's wish
 //! velocity comes from sv_user.c's `SV_ClientThink` (`sv_user.rs`).
 
-use super::sv_world::{link_edict, sv_impact, sv_move, touch_triggers, MoveTrace};
+use super::sv_world::{MoveTrace, link_edict, sv_impact, sv_move, touch_triggers};
 use super::{
-    EntFlags, FrameReport, MoveType, Server, Solid, SysFn, UserCmd, CONTENTS_EMPTY, CONTENTS_SOLID,
-    SV_MAXVELOCITY,
+    CONTENTS_EMPTY, CONTENTS_SOLID, EntFlags, FrameReport, MoveType, SV_MAXVELOCITY, Server, Solid, SysFn, UserCmd,
 };
-use crate::math::{add as v_add, angle_vectors, Vec3};
-use crate::stepping::{advance_clock, Stepping};
-use crate::world;
 use crate::Result;
+use crate::math::{Vec3, add as v_add, angle_vectors};
+use crate::stepping::{Stepping, advance_clock};
+use crate::world;
 
 impl Server {
     /// One server frame (a stripped `SV_Physics`): advance `time` by `dt`, set
@@ -90,10 +89,7 @@ impl Server {
         self.apply_lightstyles();
         self.apply_statics();
 
-        Ok(FrameReport {
-            thinks_fired,
-            time: self.time(),
-        })
+        Ok(FrameReport { thinks_fired, time: self.time() })
     }
 
     /// The end of `SV_Physics`: `sv.time += host_frametime`, in double. (The
@@ -171,11 +167,7 @@ impl Server {
         // thinktime < ent->v.ltime + host_frametime: float + double.
         let movetime = if f64::from(thinktime) < f64::from(oldltime) + self.vm.host_frametime() {
             let m = thinktime - oldltime;
-            if m < 0.0 {
-                0.0
-            } else {
-                m
-            }
+            if m < 0.0 { 0.0 } else { m }
         } else {
             dt
         };
@@ -237,8 +229,7 @@ impl Server {
 
         // Save and apply the pusher move.
         let pushorig = self.vm.ent_vec(pusher, self.vm.fo().origin);
-        self.vm
-            .set_ent_vec(pusher, self.vm.fo().origin, v_add(pushorig, mov));
+        self.vm.set_ent_vec(pusher, self.vm.fo().origin, v_add(pushorig, mov));
         self.advance_ltime(pusher, movetime);
         link_edict(&mut self.vm, pusher);
 
@@ -259,10 +250,7 @@ impl Server {
             }
             let ck_movetype = self.vm.movetype(check);
             // SV_PushMove skips PUSH, NONE, and NOCLIP entities (sv_phys.c:478).
-            if ck_movetype == MoveType::Push
-                || ck_movetype == MoveType::None
-                || ck_movetype == MoveType::NoClip
-            {
+            if ck_movetype == MoveType::Push || ck_movetype == MoveType::None || ck_movetype == MoveType::NoClip {
                 check += 1;
                 continue;
             }
@@ -361,11 +349,7 @@ impl Server {
             // 1. Restore the blocker. `block` is also the last entry in `moved`
             //    (pushed before its SV_PushEntity), so step 4's loop restores it
             //    again harmlessly — exactly as the C re-restores moved_edict.
-            let block_saved = moved
-                .iter()
-                .rev()
-                .find(|&&(e, _)| e == block)
-                .map(|&(_, saved)| saved);
+            let block_saved = moved.iter().rev().find(|&&(e, _)| e == block).map(|&(_, saved)| saved);
             if let Some(saved) = block_saved {
                 self.vm.set_ent_vec(block, self.vm.fo().origin, saved);
                 link_edict(&mut self.vm, block);
@@ -503,13 +487,11 @@ impl Server {
     fn integrate_noclip(&mut self, ent: i32, dt: f32) {
         let angles = self.vm.ent_vec(ent, self.vm.fo().angles);
         let avel = self.vm.ent_vec(ent, self.vm.fo().avelocity);
-        self.vm
-            .set_ent_vec(ent, self.vm.fo().angles, crate::math::mul_add(angles, dt, avel));
+        self.vm.set_ent_vec(ent, self.vm.fo().angles, crate::math::mul_add(angles, dt, avel));
 
         let origin = self.vm.ent_vec(ent, self.vm.fo().origin);
         let vel = self.vm.ent_vec(ent, self.vm.fo().velocity);
-        self.vm
-            .set_ent_vec(ent, self.vm.fo().origin, crate::math::mul_add(origin, dt, vel));
+        self.vm.set_ent_vec(ent, self.vm.fo().origin, crate::math::mul_add(origin, dt, vel));
 
         link_edict(&mut self.vm, ent);
     }
@@ -566,8 +548,7 @@ impl Server {
 
                 // "just hit ground": FL_ONGROUND newly latched by the slide move
                 // -> the landing thud, gated on the pre-gravity downward speed.
-                let now_on_ground =
-                    self.vm.flags(ent).contains(EntFlags::ONGROUND);
+                let now_on_ground = self.vm.flags(ent).contains(EntFlags::ONGROUND);
                 if now_on_ground && hitsound {
                     self.start_sound(ent, 0, "demon/dland2.wav", 255, 1.0);
                 }
@@ -597,8 +578,7 @@ impl Server {
         // move angles
         let angles = self.vm.ent_vec(ent, self.vm.fo().angles);
         let avel = self.vm.ent_vec(ent, self.vm.fo().avelocity);
-        self.vm
-            .set_ent_vec(ent, self.vm.fo().angles, crate::math::mul_add(angles, dt, avel));
+        self.vm.set_ent_vec(ent, self.vm.fo().angles, crate::math::mul_add(angles, dt, avel));
 
         // move origin (the uncapped step leads the fall: `gravity_lead`)
         let mut vel = self.vm.ent_vec(ent, self.vm.fo().velocity);
@@ -716,10 +696,7 @@ impl Server {
     fn check_water_transition(&mut self, ent: i32) {
         const CONTENTS_WATER: i32 = -3;
         let origin = self.vm.ent_vec(ent, self.vm.fo().origin);
-        let cont = self
-            .vm
-            .with_host(|_vm, h| h.point_contents(origin))
-            .unwrap_or(CONTENTS_SOLID);
+        let cont = self.vm.with_host(|_vm, h| h.point_contents(origin)).unwrap_or(CONTENTS_SOLID);
 
         let watertype = self.vm.ent_float(ent, self.vm.fo().watertype) as i32;
         if watertype == 0 {
@@ -840,10 +817,7 @@ impl Server {
     /// move, which starts inside the standoff, touches it. Classic: nothing.
     fn keep_ground(&mut self, ent: i32) {
         let depth = self.stepping.ground_probe();
-        if depth == 0.0
-            || self.vm.is_free_edict(ent)
-            || self.vm.flags(ent).contains(EntFlags::ONGROUND)
-        {
+        if depth == 0.0 || self.vm.is_free_edict(ent) || self.vm.flags(ent).contains(EntFlags::ONGROUND) {
             return;
         }
         let origin = self.vm.ent_vec(ent, self.vm.fo().origin);
@@ -1054,10 +1028,7 @@ impl Server {
         self.apply_lightstyles();
         self.apply_statics();
 
-        Ok(FrameReport {
-            thinks_fired,
-            time: self.time(),
-        })
+        Ok(FrameReport { thinks_fired, time: self.time() })
     }
 
     /// `SV_Physics_Client` (sv_phys.c ~1059): `PlayerPreThink` -> the movement
@@ -1140,8 +1111,7 @@ impl Server {
                 // origin += frametime * velocity (no clipping).
                 let origin = self.vm.ent_vec(ent, self.vm.fo().origin);
                 let vel = self.vm.ent_vec(ent, self.vm.fo().velocity);
-                self.vm
-                    .set_ent_vec(ent, self.vm.fo().origin, crate::math::mul_add(origin, dt, vel));
+                self.vm.set_ent_vec(ent, self.vm.fo().origin, crate::math::mul_add(origin, dt, vel));
             }
             MoveType::Toss | MoveType::Bounce => {
                 // SV_Physics_Client `case MOVETYPE_TOSS/BOUNCE: SV_Physics_Toss`:
@@ -1199,13 +1169,7 @@ impl Server {
     /// `FL_ONGROUND` on a floor contact, and runs the touch functions of any
     /// entity it bumps via [`sv_impact`]. `out_steptrace` receives the trace of
     /// the wall hit that triggers stair-stepping.
-    fn fly_move_core(
-        &mut self,
-        ent: i32,
-        dt: f32,
-        sv_time: f32,
-        out_steptrace: &mut Option<MoveTrace>,
-    ) -> i32 {
+    fn fly_move_core(&mut self, ent: i32, dt: f32, sv_time: f32, out_steptrace: &mut Option<MoveTrace>) -> i32 {
         let num_bumps = 4;
         let mut blocked = 0;
         let original_velocity = self.vm.ent_vec(ent, self.vm.fo().velocity);
@@ -1318,8 +1282,7 @@ impl Server {
                 let dir = crate::math::cross(planes[0], planes[1]);
                 let cur = self.vm.ent_vec(ent, self.vm.fo().velocity);
                 let d = crate::math::dot(dir, cur);
-                self.vm
-                    .set_ent_vec(ent, self.vm.fo().velocity, crate::math::scale(dir, d));
+                self.vm.set_ent_vec(ent, self.vm.fo().velocity, crate::math::scale(dir, d));
             }
 
             // if velocity is against the original velocity, stop dead to avoid
@@ -1393,8 +1356,7 @@ impl Server {
         self.push_entity(ent, upmove, sv_time);
 
         // move forward (no vertical wish in velocity).
-        self.vm
-            .set_ent_vec(ent, self.vm.fo().velocity, [oldvel[0], oldvel[1], 0.0]);
+        self.vm.set_ent_vec(ent, self.vm.fo().velocity, [oldvel[0], oldvel[1], 0.0]);
         let mut steptrace2 = None;
         let mut clip2 = self.fly_move_core(ent, dt, sv_time, &mut steptrace2);
 
@@ -1494,8 +1456,7 @@ impl Server {
             // try pushing a little in an axial direction (from the stuck origin).
             self.push_entity(ent, dir, sv_time);
             // retry the original move (horizontal only).
-            self.vm
-                .set_ent_vec(ent, self.vm.fo().velocity, [oldvel[0], oldvel[1], 0.0]);
+            self.vm.set_ent_vec(ent, self.vm.fo().velocity, [oldvel[0], oldvel[1], 0.0]);
             let mut steptrace = None;
             let clip = self.fly_move_core(ent, 0.1, sv_time, &mut steptrace);
             let neworg = self.vm.ent_vec(ent, self.vm.fo().origin);
@@ -1559,18 +1520,8 @@ mod tests {
         let think_fn = b.add_function(
             "do_think",
             vec![
-                Statement {
-                    op: Op::StoreF,
-                    a: g_one as i16,
-                    b: g_flag as i16,
-                    c: 0,
-                },
-                Statement {
-                    op: Op::Done,
-                    a: 0,
-                    b: 0,
-                    c: 0,
-                },
+                Statement { op: Op::StoreF, a: g_one as i16, b: g_flag as i16, c: 0 },
+                Statement { op: Op::Done, a: 0, b: 0, c: 0 },
             ],
         );
 
@@ -1698,14 +1649,25 @@ mod tests {
         // e.velocity = '100 0 0'. After one 0.1 s frame it has moved 10 units.
         let mut b = Builder::new();
         b.entityfields = 32;
-        for (name, ty, ofs) in [("self", 4, 31), ("other", 4, 32), ("time", EV_FLOAT, 33), ("frametime", EV_FLOAT, 35)] {
+        for (name, ty, ofs) in [("self", 4, 31), ("other", 4, 32), ("time", EV_FLOAT, 33), ("frametime", EV_FLOAT, 35)]
+        {
             b.add_global(name, ty, ofs);
         }
         for (name, ty, ofs) in [
-            ("classname", EV_STRING, 1), ("movetype", EV_FLOAT, 2), ("nextthink", EV_FLOAT, 3),
-            ("flags", EV_FLOAT, 4), ("velocity", 3, 5), ("origin", 3, 8), ("mins", 3, 11),
-            ("maxs", 3, 14), ("think", EV_FUNCTION, 17), ("solid", EV_FLOAT, 18),
-            ("absmin", 3, 19), ("absmax", 3, 22), ("size", 3, 25), ("groundentity", 4, 28),
+            ("classname", EV_STRING, 1),
+            ("movetype", EV_FLOAT, 2),
+            ("nextthink", EV_FLOAT, 3),
+            ("flags", EV_FLOAT, 4),
+            ("velocity", 3, 5),
+            ("origin", 3, 8),
+            ("mins", 3, 11),
+            ("maxs", 3, 14),
+            ("think", EV_FUNCTION, 17),
+            ("solid", EV_FLOAT, 18),
+            ("absmin", 3, 19),
+            ("absmax", 3, 22),
+            ("size", 3, 25),
+            ("groundentity", 4, 28),
             ("owner", 4, 29),
         ] {
             b.add_field(name, ty, ofs);
@@ -1754,10 +1716,7 @@ mod tests {
         b.add_global("startframe_time", EV_FLOAT, 40);
         b.add_function(
             "StartFrame",
-            vec![
-                Statement { op: Op::StoreF, a: 33, b: 40, c: 0 },
-                Statement { op: Op::Done, a: 0, b: 0, c: 0 },
-            ],
+            vec![Statement { op: Op::StoreF, a: 33, b: 40, c: 0 }, Statement { op: Op::Done, a: 0, b: 0, c: 0 }],
         );
         let progs = Progs::parse(&b.build()).expect("parse");
         let mut server = Server::new(empty_bsp(), progs).expect("server");
@@ -1786,10 +1745,7 @@ mod tests {
         for (name, dst) in [("StartFrame", 40i16), ("record", 41)] {
             b.add_function(
                 name,
-                vec![
-                    Statement { op: Op::StoreF, a: 33, b: dst, c: 0 },
-                    Statement { op: Op::Done, a: 0, b: 0, c: 0 },
-                ],
+                vec![Statement { op: Op::StoreF, a: 33, b: dst, c: 0 }, Statement { op: Op::Done, a: 0, b: 0, c: 0 }],
             );
         }
         let progs = Progs::parse(&b.build()).expect("parse");
@@ -2079,11 +2035,7 @@ mod tests {
             crate::bsp::CONTENTS_WATER,
             "watertype updated to the water contents"
         );
-        assert_eq!(
-            server.vm.ent_get_float(e, "waterlevel"),
-            1.0,
-            "waterlevel set to 1 on entry"
-        );
+        assert_eq!(server.vm.ent_get_float(e, "waterlevel"), 1.0, "waterlevel set to 1 on entry");
         // The air->water crossing queued the splash.
         let sounds = server.drain_sounds();
         assert!(
@@ -2111,14 +2063,8 @@ mod tests {
         server.run_frame(0.1).expect("frame");
 
         assert_eq!(server.vm.ent_get_float(e, "waterlevel"), 1.0);
-        assert_eq!(
-            server.vm.ent_get_float(e, "watertype") as i32,
-            crate::bsp::CONTENTS_WATER
-        );
-        assert!(
-            server.drain_sounds().is_empty(),
-            "the just-spawned water adoption must be silent"
-        );
+        assert_eq!(server.vm.ent_get_float(e, "watertype") as i32, crate::bsp::CONTENTS_WATER);
+        assert!(server.drain_sounds().is_empty(), "the just-spawned water adoption must be silent");
     }
 
     #[test]
@@ -2228,11 +2174,7 @@ mod tests {
         assert_eq!(report.thinks_fired, 0, "future think must not fire");
 
         let after = server.vm.ent_get_vector(p, "origin");
-        assert!(
-            (after[0] - 1.0).abs() < 1e-5,
-            "pusher origin x moved by velocity*dt (10*0.1=1.0), got {}",
-            after[0]
-        );
+        assert!((after[0] - 1.0).abs() < 1e-5, "pusher origin x moved by velocity*dt (10*0.1=1.0), got {}", after[0]);
         assert!(after[1].abs() < 1e-5 && after[2].abs() < 1e-5);
         // ltime advanced by dt (SV_PushMove advances it when not blocked).
         let ltime = server.vm.ent_get_float(p, "ltime");
@@ -2278,11 +2220,7 @@ mod tests {
         let pafter = server.vm.ent_get_vector(p, "origin");
         let rafter = server.vm.ent_get_vector(r, "origin");
         assert!((pafter[2] - 1.0).abs() < 1e-5, "pusher z moved 1.0");
-        assert!(
-            (rafter[2] - 33.0).abs() < 1e-5,
-            "rider carried the same delta (32+1.0), got {}",
-            rafter[2]
-        );
+        assert!((rafter[2] - 33.0).abs() < 1e-5, "rider carried the same delta (32+1.0), got {}", rafter[2]);
     }
 
     /// A zero-velocity pusher only advances `ltime`; its origin does not change.
@@ -2308,10 +2246,7 @@ mod tests {
         let after = server.vm.ent_get_vector(p, "origin");
         assert_eq!(after, [5.0, 6.0, 7.0], "zero-velocity pusher did not move");
         let ltime = server.vm.ent_get_float(p, "ltime");
-        assert!(
-            (ltime - dt).abs() < 1e-6,
-            "ltime still advances by dt for a zero-velocity pusher, got {ltime}"
-        );
+        assert!((ltime - dt).abs() < 1e-6, "ltime still advances by dt for a zero-velocity pusher, got {ltime}");
     }
 
     #[test]
@@ -2344,10 +2279,7 @@ mod tests {
         server.vm.ent_set_vector(blocker, "mins", [0.0, 0.0, 0.0]);
         server.vm.ent_set_vector(blocker, "maxs", [0.0, 0.0, 0.0]);
         let tr_normal = server.push_entity(blocker, [200.0, 0.0, 0.0], 0.0);
-        assert!(
-            tr_normal.fraction < 1.0,
-            "a Solid::BBox mover (MOVE_NORMAL) is stopped by the monster"
-        );
+        assert!(tr_normal.fraction < 1.0, "a Solid::BBox mover (MOVE_NORMAL) is stopped by the monster");
 
         // SOLID_NOT mover (e.g. a gib): MOVE_NOMONSTERS, passes through.
         let gib = server.vm.spawn();
@@ -2357,10 +2289,7 @@ mod tests {
         server.vm.ent_set_vector(gib, "mins", [0.0, 0.0, 0.0]);
         server.vm.ent_set_vector(gib, "maxs", [0.0, 0.0, 0.0]);
         let tr_not = server.push_entity(gib, [200.0, 0.0, 0.0], 0.0);
-        assert_eq!(
-            tr_not.fraction, 1.0,
-            "a Solid::Not mover (MOVE_NOMONSTERS) passes through the monster"
-        );
+        assert_eq!(tr_not.fraction, 1.0, "a Solid::Not mover (MOVE_NOMONSTERS) passes through the monster");
 
         // SOLID_TRIGGER mover: also MOVE_NOMONSTERS, passes through.
         let trig = server.vm.spawn();
@@ -2370,10 +2299,7 @@ mod tests {
         server.vm.ent_set_vector(trig, "mins", [0.0, 0.0, 0.0]);
         server.vm.ent_set_vector(trig, "maxs", [0.0, 0.0, 0.0]);
         let tr_trig = server.push_entity(trig, [200.0, 0.0, 0.0], 0.0);
-        assert_eq!(
-            tr_trig.fraction, 1.0,
-            "a Solid::Trigger mover (MOVE_NOMONSTERS) passes through the monster"
-        );
+        assert_eq!(tr_trig.fraction, 1.0, "a Solid::Trigger mover (MOVE_NOMONSTERS) passes through the monster");
     }
 
     #[test]
@@ -2401,11 +2327,7 @@ mod tests {
         server.vm.ent_set_vector(rocket, "mins", [0.0, 0.0, 0.0]);
         server.vm.ent_set_vector(rocket, "maxs", [0.0, 0.0, 0.0]);
         let tr = server.push_entity(rocket, [200.0, 0.0, 0.0], 0.0);
-        assert!(
-            tr.fraction < 1.0,
-            "a FLYMISSILE mover detonates NEAR the monster, got {}",
-            tr.fraction
-        );
+        assert!(tr.fraction < 1.0, "a FLYMISSILE mover detonates NEAR the monster, got {}", tr.fraction);
     }
 
     #[test]
@@ -2434,16 +2356,8 @@ mod tests {
 
         let vel = server.vm.ent_get_vector(p, "velocity");
         let org = server.vm.ent_get_vector(p, "origin");
-        assert!(
-            vel[2] < 0.0,
-            "toss corpse gains downward velocity (gravity): vz = {}",
-            vel[2]
-        );
-        assert!(
-            org[2] < 120.0,
-            "toss corpse falls instead of freezing mid-air: z = {}",
-            org[2]
-        );
+        assert!(vel[2] < 0.0, "toss corpse gains downward velocity (gravity): vz = {}", vel[2]);
+        assert!(org[2] < 120.0, "toss corpse falls instead of freezing mid-air: z = {}", org[2]);
     }
 
     // -------------------------------------------- stepping: plays like 72 Hz
