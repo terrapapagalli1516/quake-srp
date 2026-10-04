@@ -60,10 +60,11 @@ fn done(f: impl FnOnce()) -> Answer {
     Answer::from(0.0)
 }
 
-/// The threads the renderer draws the next frame with (`r_threads`).
+/// The threads the renderer draws the next frame with (`r_threads`:
+/// [`crate::vid::render_threads`]).
 fn render_threads() -> i32 {
     let mut n = 1;
-    crate::app::ensure_app(|a| n = a.settings.cvars.threads);
+    crate::app::ensure_app(|a| n = crate::vid::render_threads(a));
     n as i32
 }
 

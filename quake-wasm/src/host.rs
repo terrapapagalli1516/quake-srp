@@ -200,6 +200,7 @@ pub(crate) fn step(dt: f32) -> i32 {
         let show_fps = a.settings.cvars.show_fps;
         let lerpmove = a.settings.cvars.lerpmove;
         let lerpmodels = a.settings.cvars.lerpmodels;
+        let nailbarrels = a.settings.cvars.nailbarrels;
         // Host_EndGame on the demo's svc_disconnect: once a demo has shown its
         // last frame, CL_NextDemo plays the next of the `startdemos` loop
         // (quake.rc: demo1 demo2 demo3) — or, outside the loop, the client
@@ -208,11 +209,11 @@ pub(crate) fn step(dt: f32) -> i32 {
         if a.demoplayback() && !a.cls.timedemo && dt > 0.0 && a.demo.as_ref().is_some_and(|d| d.at_end()) {
             host_end_game(a);
         }
-        // The renderer's threads (`r_threads`), to whichever game draws:
-        // every Walk and DemoPlay the host builds (a boot, a load, the
+        // The renderer's threads (`r_threads`: vid.rs), to whichever game
+        // draws: every Walk and DemoPlay the host builds (a boot, a load, the
         // attract loop's next demo) draws on the setting from its first
         // frame.
-        let threads = a.settings.cvars.threads;
+        let threads = crate::vid::render_threads(a);
         if let Some(wk) = a.walk.as_mut() {
             wk.key_move = km;
             wk.viewsize = viewsize;
@@ -222,6 +223,7 @@ pub(crate) fn step(dt: f32) -> i32 {
             wk.stepping = stepping;
             wk.lerpmove = lerpmove;
             wk.lerpmodels = lerpmodels;
+            wk.nailbarrels = nailbarrels;
             wk.renderer.set_threads(threads);
         }
         // CL_SendCmd's IN_Move: the pad's IN_JoyMove joins the keys' move.

@@ -120,6 +120,15 @@ pub(crate) fn picture_size(cvars: &Cvars, window: Option<(u32, u32)>) -> (usize,
     }
 }
 
+/// The threads the renderer draws with: `r_threads`, which the machine
+/// starts at every thread the host offers, or four at most on a touch screen
+/// ([`quake_rs::settings::Machine::render_threads`]), and the player sets to
+/// any count. The one place the frame, the present and the automation read
+/// it.
+pub(crate) fn render_threads(a: &App) -> usize {
+    a.settings.cvars.threads
+}
+
 /// Whether the picture is shown native (the page fills its box, square
 /// pixels) rather than as a mode in a 4:3 box.
 pub(crate) fn native(a: &App) -> bool {
@@ -419,6 +428,30 @@ mod tests {
                 assert!(pixel_size(&c, (w, h)) >= u32::from(p), "never finer than asked");
             }
         }
+    }
+
+    /// A touch screen draws on four threads at most (8 or 6 offered give 4,
+    /// 2 gives 2, 1 gives 1), any other screen — a desktop, a tablet whose
+    /// pointer is not coarse — on every thread the host offers; a count asked
+    /// for is that count anywhere.
+    #[test]
+    fn a_touch_screen_draws_on_four_threads() {
+        use quake_rs::settings::{Machine, Preset, Settings};
+        assert_eq!(boot(), 1);
+        let threads = |touch: bool, offered: usize| {
+            APP.with(|c| {
+                let mut b = c.borrow_mut();
+                let a = b.as_mut().unwrap();
+                a.settings = Settings::new(Preset::Slop, Machine { touch, threads: offered });
+                render_threads(a)
+            })
+        };
+        let touch = (threads(true, 8), threads(true, 6), threads(true, 2), threads(true, 1));
+        assert_eq!(touch, (Machine::TOUCH_THREADS, 4, 2, 1));
+        crate::host_cmd::execute_console_command("r_threads 8");
+        assert_eq!(APP.with(|c| render_threads(c.borrow().as_ref().unwrap())), 8, "asked for by number: that many");
+        assert_eq!(threads(false, 8), 8, "a desktop: every thread offered");
+        assert_eq!(threads(false, 16), 16, "a tablet with a fine pointer too");
     }
 
     // -- dynamic render resolution (set_resolution + clamp + reallocation) ----

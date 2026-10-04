@@ -40,6 +40,7 @@ use crate::client::host::FrameCap;
 use crate::client::in_win::JoyCvars;
 use crate::client::lerpmodels::LerpModels;
 use crate::client::lerpmove::LerpMove;
+use crate::client::nailbarrels::NailBarrels;
 use crate::render::{Crosshair, PerspSpan, SkyScroll, TorchFlicker};
 use crate::snd::SoundMode;
 use crate::screen::{SbarLayout, VIEWSIZE_DEFAULT, VIEWSIZE_MAX, VIEWSIZE_MIN, VIEWSIZE_MODERN, VIEWSIZE_STEP};
@@ -162,6 +163,10 @@ pub struct Cvars {
     /// between its frames ([`LerpModels::Smooth`], `client::lerpmodels`)
     /// instead of snapping to each one, as id's client does.
     pub lerpmodels: LerpModels,
+    /// `r_nailbarrels`: the player's nails are drawn leaving the nailgun's
+    /// barrels ([`NailBarrels::Barrels`], `client::nailbarrels`) instead of
+    /// on QuakeC's line beside and above them, as id's client draws them.
+    pub nailbarrels: NailBarrels,
     /// `r_fluidsky`: the sky's cloud layer scrolls by its exact offset
     /// ([`SkyScroll::Fluid`], `render::sky`) instead of `R_MakeSky`'s whole
     /// texels, eight jumps a second.
@@ -259,6 +264,7 @@ impl Cvars {
             alt_enter: true,
             lerpmove: LerpMove::Classic,
             lerpmodels: LerpModels::Classic,
+            nailbarrels: NailBarrels::Classic,
             sky: SkyScroll::Classic,
             sound: SoundMode::Classic,
             threads: 1,
@@ -305,6 +311,7 @@ impl Cvars {
             fov_adapt: true,
             lerpmove: LerpMove::Smooth,
             lerpmodels: LerpModels::Smooth,
+            nailbarrels: NailBarrels::Barrels,
             sky: SkyScroll::Fluid,
             sound: SoundMode::Modern,
             max_edicts: 8192,
@@ -563,6 +570,9 @@ pub const CVARS: &[Cvar] = &[
     Cvar { name: "r_lerpmodels", archive: true, departure: true, help: "animation frames blend together",
         get: |c| flag(c.lerpmodels == LerpModels::Smooth),
         set: |c, v| c.lerpmodels = if on(v) { LerpModels::Smooth } else { LerpModels::Classic } },
+    Cvar { name: "r_nailbarrels", archive: true, departure: true, help: "nailgun shots leave its barrels",
+        get: |c| flag(c.nailbarrels == NailBarrels::Barrels),
+        set: |c, v| c.nailbarrels = if on(v) { NailBarrels::Barrels } else { NailBarrels::Classic } },
     Cvar { name: "r_fluidsky", archive: true, departure: true, help: "sky clouds glide, not texel steps",
         get: |c| flag(c.sky == SkyScroll::Fluid),
         set: |c, v| c.sky = if on(v) { SkyScroll::Fluid } else { SkyScroll::Classic } },

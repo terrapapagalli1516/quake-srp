@@ -10,9 +10,10 @@ page opens as `?classic` (every slop option off):
      (Picture: the Frame rate cap row 0 stepping id's 72, 120, 144, 240,
      none, 60, the Resolution row 1 opening Video Options and back, the
      Perspective span row 5 stepping 64, 32, id's 16, 8, 4, exact, Show FPS
-     row 7; Motion: Fluid sky row 2, Gliding lights row 3, the Torch
-     flicker slider row 4, five steps to 1; Controls: Wheel weapons row 1
-     binds and unbinds the wheel: left/right/Enter), Esc returns from a page
+     row 7; Motion: Nails from barrels row 2, Fluid sky row 3, Gliding
+     lights row 4, the Torch flicker slider row 5, five steps to 1;
+     Controls: Wheel weapons row 1 binds and unbinds the wheel:
+     left/right/Enter), Esc returns from a page
      to Slop Options on its row and from there to Options; the console
      variables set the same settings, with the console's history and Tab
      completion (and the retired wasm_uncapped and wasm_exactpersp still set
@@ -199,19 +200,21 @@ with sync_playwright() as p:
     check("Esc returns to Slop Options, on Picture and sound's row", scr() == SLOP_OPTIONS and cur() == 0)
     key("ArrowDown"); key("Enter")
     check("row 1 opens Motion and light", scr() == MOTION and cur() == 0)
-    key("ArrowDown", 2); key("Enter")      # row 2: Fluid sky
-    key("ArrowDown"); key("ArrowRight")    # row 3: Gliding lights
+    key("ArrowDown", 2); key("Enter")      # row 2: Nails from barrels
+    check("Nails from barrels switches r_nailbarrels", cvar("r_nailbarrels") == "1", cvar("r_nailbarrels"))
+    key("ArrowDown"); key("Enter")         # row 3: Fluid sky
+    key("ArrowDown"); key("ArrowRight")    # row 4: Gliding lights
     check("Fluid sky and Gliding lights switch r_fluidsky and r_lerplightstyles",
           (cvar("r_fluidsky"), cvar("r_lerplightstyles")) == ("1", "1"))
-    key("ArrowDown"); key("ArrowRight", 5)  # row 4: Torch flicker, 0.2 a step
+    key("ArrowDown"); key("ArrowRight", 5)  # row 5: Torch flicker, 0.2 a step
     check("the Torch flicker slider: five steps right from Classic's 0 is slop's 1",
           cvar("r_torchflicker") == "1", cvar("r_torchflicker"))
     time.sleep(0.3)
     pg.locator("#c").screenshot(path=os.path.join(WEB, "verify_extras_motion.png"))
     key("ArrowLeft", 6)
-    key("ArrowUp"); key("ArrowLeft"); key("ArrowUp"); key("Enter")
-    check("...and all three back to Classic's",
-          (cvar("r_fluidsky"), cvar("r_lerplightstyles"), cvar("r_torchflicker")) == ("0", "0", "0"))
+    key("ArrowUp"); key("ArrowLeft"); key("ArrowUp"); key("Enter"); key("ArrowUp"); key("Enter")
+    check("...and all four back to Classic's",
+          (cvar("r_nailbarrels"), cvar("r_fluidsky"), cvar("r_lerplightstyles"), cvar("r_torchflicker")) == ("0", "0", "0", "0"))
     key("Escape"); key("ArrowDown"); key("Enter")
     check("row 2 opens Controls", scr() == CONTROLS and cur() == 0)
     key("ArrowDown"); key("Enter")         # row 1: Wheel weapons

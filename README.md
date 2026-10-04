@@ -255,9 +255,9 @@ Beyond Classic:
 - `quake-rs/target/release/quaketool framerate quake-data/ID1/PAK0.PAK --check` runs 22
   gameplay scenarios at high frame rates and compares them with id's 72 Hz, each within a
   stated tolerance ([FRAMERATE.md](FRAMERATE.md)).
-- 19 headless-browser checks (`web/verify_*.py`) cover everything from walking and the
-  menus to the gamepad, touch, quitting, sound through late frames, and reading back the
-  canvas. All 19 pass in Chromium and in Firefox (`QUAKE_BROWSER=firefox`; Firefox's touch
+- 20 headless-browser checks (`web/verify_*.py`) cover everything from walking and the
+  menus to the gamepad, touch, quitting, sound through late frames, how a refresh waits
+  for its frame, and reading back the canvas. All 20 pass in Chromium and in Firefox (`QUAKE_BROWSER=firefox`; Firefox's touch
   check runs on taps, and the Keyboard Lock checks are skipped there: `web/PLATFORM.md`,
   "Build, serve, deploy").
 

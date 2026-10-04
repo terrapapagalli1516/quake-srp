@@ -854,6 +854,38 @@ mod tests {
     }
 
     #[test]
+    fn r_nailbarrels_is_a_cvar_every_frame_hands_the_client() {
+        use quake_rs::client::nailbarrels::NailBarrels;
+        let last_line = || {
+            APP.with(|c| c.borrow().as_ref().unwrap().console.lines().last().map(str::to_string))
+        };
+        let nailbarrels = || walk_mut(|w| w.nailbarrels);
+        assert_eq!(boot(), 1);
+        close_menu();
+        console_toggle();
+        run_console_line("r_nailbarrels");
+        assert_eq!(last_line().as_deref(), Some("\"r_nailbarrels\" is \"0\""), "off in Classic");
+        step(0.0);
+        assert_eq!(nailbarrels(), NailBarrels::Classic);
+        run_console_line("r_nailbarrels 1");
+        step(0.0);
+        assert_eq!(nailbarrels(), NailBarrels::Barrels);
+        console_toggle();
+        // A game the host builds afresh draws with it from its first frame.
+        assert_eq!(boot(), 1);
+        step(0.0);
+        assert_eq!(nailbarrels(), NailBarrels::Barrels);
+        close_menu();
+        console_toggle();
+        run_console_line("r_nailbarrels 0");
+        step(0.0);
+        assert_eq!(nailbarrels(), NailBarrels::Classic);
+        run_console_line("profile 2026");
+        step(0.0);
+        assert_eq!(nailbarrels(), NailBarrels::Barrels, "on in 2026");
+    }
+
+    #[test]
     fn wasm_extra_commands_print_and_set_like_cvars() {
         use crate::menu::extras;
         let last_line = || {

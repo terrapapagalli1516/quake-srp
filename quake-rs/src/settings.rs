@@ -87,11 +87,17 @@ impl Default for Machine {
 }
 
 impl Machine {
-    /// The most threads a touch screen starts the renderer on. A phone's
-    /// cores are several times slower than a desktop's and slow further as
-    /// it warms; on an Android phone (8 threads offered), three
-    /// draw worse than four and five or six no better (`fleet/opt-phone`'s
-    /// measurements, 2026-10-03).
+    /// The most threads a touch screen starts the renderer on. The browser
+    /// offers every core it sees, but a phone's are of two or three kinds
+    /// (four or five fast ones on any current phone), the page's own thread,
+    /// the compositor, the GPU process and the sound need some of them each
+    /// frame, and every busy core is heat, which a phone pays back in clock.
+    /// Measured on an Android phone (one fast core, four middle, three small;
+    /// 8 offered), warmed up: four threads against eight showed
+    /// 70-74 frames a second against 67 at 2640x1080 with a third of the late
+    /// ones, and at 1320x540 took the frame's 99th percentile from 20.7 ms to
+    /// 9.5 (a band's thread put off its core); three were worse, five and six
+    /// no better (web/PLATFORM.md, "On an Android phone").
     pub const TOUCH_THREADS: usize = 4;
 
     /// The pixel size a touch screen starts at: on an Android phone at 1x (2640x1080)

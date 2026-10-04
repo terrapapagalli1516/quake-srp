@@ -94,6 +94,8 @@ mod test_util;
 mod census_tests;
 #[cfg(test)]
 mod content_tests;
+#[cfg(test)]
+mod nail_tests;
 
 use std::io::{self, BufWriter};
 use std::path::PathBuf;
