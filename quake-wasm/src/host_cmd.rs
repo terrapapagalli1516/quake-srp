@@ -182,7 +182,7 @@ fn cvar_command(args: &Args) -> bool {
             let value = var.get(&a.settings.cvars);
             a.console.println(format!("\"{}\" is \"{value}\"", var.name));
         } else {
-            var.set(&mut a.settings.cvars, args.argv(1));
+            a.settings.set_cvar(var, args.argv(1));
         }
     });
     true
@@ -774,11 +774,14 @@ mod tests {
         assert_eq!(last_line().as_deref(), Some("\"r_threads\" is \"6\""), "the machine's number");
         step(0.0);
         assert_eq!(threads(), 6);
+        run_console_line("r_threads 3");
+        step(0.0);
+        assert_eq!(threads(), 3);
         run_console_line("r_threads 0");
         run_console_line("r_threads");
-        assert_eq!(last_line().as_deref(), Some("\"r_threads\" is \"1\""), "0 reads as 1");
+        assert_eq!(last_line().as_deref(), Some("\"r_threads\" is \"6\""), "0 is the machine's number, printed");
         step(0.0);
-        assert_eq!(threads(), 1);
+        assert_eq!(threads(), 6);
         run_console_line("r_threads 3");
         step(0.0);
         assert_eq!(threads(), 3);

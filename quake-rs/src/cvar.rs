@@ -138,8 +138,10 @@ pub struct Cvars {
     /// `vid_pixelsize`: with [`Cvars::native`], how many device pixels a
     /// side make one of the picture's, 1..=[`PIXEL_SIZE_MAX`]: whole pixels,
     /// never smoothed. The presets start it at the machine's number
-    /// ([`crate::settings::Machine::pixel_size`]); the host takes the next
-    /// size up when a frame this size would not fit its memory.
+    /// ([`crate::settings::Machine::pixel_size`]), and 0 on the console or in
+    /// a file is that number (`Settings::set_cvar`); the host takes the next
+    /// size up when a frame this size would not fit its memory, and the next
+    /// down when it would be under 320x200 and a smaller one is not.
     pub pixel_size: u8,
     /// `fov_adapt`: Hor+ — `fov` spans a 4:3 screen and a wider one sees more
     /// at the sides ([`crate::render::FovMode::HorPlus`]).
@@ -179,7 +181,8 @@ pub struct Cvars {
     pub sound: SoundMode,
     /// `r_threads`: how many threads draw the 3-D view, at least 1. The
     /// presets start it at the machine's number
-    /// ([`crate::settings::Machine::render_threads`]). The pixels are the
+    /// ([`crate::settings::Machine::render_threads`]), and 0 on the console
+    /// or in a file is that number (`Settings::set_cvar`). The pixels are the
     /// same for any count, so it is no departure.
     pub threads: usize,
     /// `sv_max_edicts`: the `ED_Alloc` ceiling ([`crate::vm::MAX_EDICTS`] in
@@ -415,6 +418,13 @@ pub struct Cvar {
 }
 
 impl Cvar {
+    /// A number the machine picks (`settings::Machine`): the pixel size and the
+    /// renderer's threads. On the console or in a file, 0 is this machine's
+    /// number (`Settings::set_cvar`), as the value is never "auto".
+    pub fn machine_picked(&self) -> bool {
+        matches!(self.name, "vid_pixelsize" | "r_threads")
+    }
+
     /// The value as the console prints it (`var->string`).
     pub fn get(&self, c: &Cvars) -> String {
         (self.get)(c)
