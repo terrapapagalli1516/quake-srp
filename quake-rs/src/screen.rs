@@ -23,9 +23,9 @@ use crate::render::Image;
 pub const VIEWSIZE_DEFAULT: f32 = 100.0;
 /// Where the slop preset starts `viewsize`, one step past id's: the
 /// inventory strip is gone and the status bar alone is drawn, so the HUD takes
-/// less of a slop screen ([`Cvars::modern`](crate::cvar::Cvars::modern)). The
+/// less of a slop screen ([`Cvars::slop`](crate::cvar::Cvars::slop)). The
 /// cvar is still id's own, not a `departure`; a preset moves it only
-/// while the player has not (`Settings::set_profile`).
+/// while the player has not (`Settings::apply_preset`).
 pub const VIEWSIZE_MODERN: f32 = 110.0;
 pub const VIEWSIZE_MIN: f32 = 30.0;
 pub const VIEWSIZE_MAX: f32 = 120.0;

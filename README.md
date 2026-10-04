@@ -175,9 +175,11 @@ each for **Picture and sound**, **Motion and light** (the torches' flicker is th
 or how many rows differ, and a value that differs is white. **Reset to slop** (id's "Reset to
 defaults" row) sets everything to the slop preset, keys and Options included; **Reset to
 Classic** sets every slop option to Classic's and keeps your keys and Options. Both ask
-first; your saved games stay. The console's `preset slop` or `preset classic` (and the
-address, `?classic` or `?2026`) applies a preset as Reset to Classic does. `config.cfg`, in the
-browser's storage, keeps the preset and only what you changed from it.
+first; your saved games stay. The console's `preset slop` or `preset classic` applies a
+preset as Reset to Classic does; the address's `?classic` or `?slop` does too, at a load, when
+your settings were last set to the other one, so a bookmarked `?classic` keeps what you
+change on top of it. `config.cfg`, in the browser's storage, keeps the preset and only what
+you changed from it.
 [AUDIT.md](AUDIT.md) ("The slop options and the presets") lists every setting and why it
 exists. The oracle compares Classic with id's 1996 keys too (`idcontrols`).
 

@@ -25,8 +25,8 @@ are built from what the host knows at start (`settings::Machine`: a touch screen
 threads offered), never re-read in a session and never "auto": a touch screen starts at
 2x, four threads at most and a 60 fps cap; anything else at 1x, every thread offered and
 no cap; Classic's cap is id's 72 everywhere. `config.cfg` writes a number only when it
-differs from this machine's. (The page passes `-touch` from the 2026-10-03 second stage
-on; until then every machine is "not a touch screen".)
+differs from this machine's. (The page passes `-touch` from its one touch-screen test,
+`touchScreen`, which also puts up the touch controls and draws the pacing's lines.)
 
 **The controls are shared.** WASD, mouse look, the gamepad, Space swimming up, Alt+Enter,
 the touch controls and Always Run are the same in both presets (the rows below marked
@@ -44,8 +44,10 @@ on this machine — every slop option, the key bindings, id's Options, the video
 option to Classic's, the controls on the Slop Options pages and the pad's layout
 included, and keeps the player's keys (but the wheel) and id's Options (Brightness, the
 volumes, the mouse, Always Run, the look toggles). The console's `preset slop|classic`
-(its old name `profile` still runs it, and `2026`/`modern`, `id` still name a preset) and
-the page's `?classic` / `?2026` do what Reset to Classic does, without asking. Options'
+(its old name `profile` still runs it, and `2026`/`modern`, `id` still name a preset)
+does what Reset to Classic does, without asking. The page's `?classic` / `?slop` (or
+`?2026`) apply their preset at load only when the stored settings were last set to the
+other one, so a bookmarked `?classic` keeps the player's own changes on top of it. Options'
 14th row, **Slop Options**, shows where the settings stand (`Settings::standing`: slop,
 classic or custom) and opens a screen in id's Video Options idiom — a row for each of
 three pages, the slop options by kind — **Picture and sound**, **Motion and light**,
@@ -3800,3 +3802,35 @@ at the top, is the result; here what changed, and what moved against id.
   `phone_sized` (the devicePixelRatio guess) went. A desktop with a dense screen draws at
   1x on every thread now where Auto chose 2x on 1-3 threads; a phone at 2x on four
   threads once the page says `-touch`.
+
+### The second stage (2026-10-04): the page's machine, the caps, the memory
+
+- **One touch-screen test.** The page passes `-touch` from `touchScreen` (a coarse
+  primary pointer, or `?touch`), the test its touch controls and its pacing's lines
+  (`pacing.scarceCores`) already used: a touch screen starts at 2x, at most four threads
+  (`settings::Machine::TOUCH_THREADS`, which takes over `fleet/opt-phone`'s
+  `PHONE_AUTO_THREADS` and its measurements; a coarse-pointer tablet now gets four too)
+  and the 60 fps cap. `vid::render_threads` stays the one place the frame reads the count.
+- **The caps other than 72 and none** (`client::host::host_filter_time_capped`): a frame
+  on the first refresh at least 1/cap after the last one, less 5% for a refresh's time a
+  hair early. 60 on a 120 Hz display is every second refresh, evenly (id's 72 gate there
+  gave an Android phone an uneven 60, about 270 gaps over 20 ms in 45 s); a cap above the
+  display's rate draws every refresh; 60 on 144 Hz draws every third (48). 72 is still
+  `Host_FilterTime`'s gate, so Classic is untouched (`framerate --check`, the goldens, the
+  oracle).
+- **The address's preset applies only when it differs** (`sys.rs`, `address_preset`):
+  `?classic` / `?slop` are `-preset NAME`, applied after `config.cfg` only when the stored
+  settings were last set to the other preset; the console's `preset` always applies.
+- **A window's frames are bounded.** The threads build allocates every frame-sized buffer
+  once, for the largest frame (`render::reserve_frames(MAX_FRAME_PIXELS)`): a grown
+  buffer used to move and leave a hole the next larger frame could not use, so a window
+  walked up to 4224x2656 through 4 to 17 sizes held 282-307 MB where a page opened there
+  held 188; reserved, 202 MB from the first frame at any size to the end of every walk.
+  The reserve is address space in a memory made whole at start. `verify_present.py` walks
+  sixteen sizes on the fixed build. (`check_fixed_memory`'s `cfg(target_feature =
+  "atomics")` is unstable, and false on stable Rust even for the threads target: the check
+  never ran; `build.rs` now names the threads build.)
+- **A frame is not held to 320x200 when a smaller pixel size fills the box**: a touch
+  screen's 2x in a box under 640x400 (Firefox's emulated phone, whose devicePixelRatio is
+  lost on an isolated page) draws at 1x, instead of a frame held to 200 rows and drawn
+  taller than its box.
