@@ -10,14 +10,14 @@ threads build needs the browser to give it its memory and its worker threads: if
 the page says so and the game does not start (the single-threaded build is a deploy you choose,
 not a fallback).
 
-| Classic | 2026 (the default) |
+| Classic | slop (the default) |
 |:---:|:---:|
-| ![E1M1 in the Classic profile](screenshots/classic-e1m1.png) | ![E1M1 in the 2026 profile](screenshots/2026-e1m1.png) |
+| ![E1M1 in the Classic preset](screenshots/classic-e1m1.png) | ![E1M1 in the slop preset](screenshots/2026-e1m1.png) |
 | 320x200 in a 4:3 frame, id's status bar, id's 72 fps cap | the window's shape and size in whole pixels (here 960x540 shown at 2x), no frame-rate cap |
 
-Both are stills from `quaketool shot`, so the 2026 crosshair isn't drawn. The 2026 one is
+Both are stills from `quaketool shot`, so the slop crosshair isn't drawn. The slop one is
 `quaketool shot quake-data/ID1/PAK0.PAK maps/e1m1.bsp out.ppm --res 960x540 --zoom 2 --video modern --scaled2d 1 --sbaroverlay 1`,
-which draws the profile's defaults: Screen size 110 (no inventory bar) and perspective every 8 pixels.
+which draws the preset's values: Screen size 110 (no inventory bar) and perspective every 8 pixels.
 
 id Software's *Quake* (1996), ported to Rust from the WinQuake C source, with only the
 standard library and no `unsafe` code. With every extra switched off it is id's game,
@@ -56,8 +56,8 @@ dependencies, no `unsafe`, and Classic is id's game, proven for anything touched
     game's state; a demo frame's pixels are compared on a sample of frames).
 
   One command re-runs all of it; see [Proof](#proof).
-- **A 2026 profile.** It shows what software-rendered Quake looks like when the hardware is
-  no longer the limit:
+- **The slop options, and their preset.** They show what software-rendered Quake looks like
+  when the hardware is no longer the limit:
   - native resolution in whole pixels, at any window shape, with a wider field of view;
   - no frame-rate cap: a new frame on every display refresh;
   - still 8-bit, with id's palette, colormaps and lighting, and textures are never
@@ -118,7 +118,7 @@ with the page, the program and the shareware pak (with id's licence beside it), 
 `_headers` file that Cloudflare Pages and Netlify read for the two headers and the
 caching. Upload `DIR` as it is.
 
-You play with WASD and the mouse (click the game to capture the mouse), in either profile:
+You play with WASD and the mouse (click the game to capture the mouse), in either preset:
 
 | key or input | does |
 |---|---|
@@ -132,7 +132,7 @@ You play with WASD and the mouse (click the game to capture the mouse), in eithe
 | F6 / F9 | quicksave / quickload (id's F-keys: F1 help, F2/F3 save/load, F4 options, F10 quit) |
 
 A gamepad or a touch screen also works (a phone plays sideways only: held upright, a "turn your
-phone sideways" screen covers the page and the game waits behind it). The mouse wheel switches weapons in 2026 only (id's
+phone sideways" screen covers the page and the game waits behind it). The mouse wheel switches weapons in slop only (id's
 `default.cfg` leaves it unbound). The page's **keys** button lists them all. For id's own
 1996 controls (the arrows, no mouse look, no gamepad, Always Run off) type `idcontrols` in
 the console.
@@ -145,35 +145,43 @@ console goes past the slider's end), or set the mouse to poll at 125 Hz, which a
 the fine aim. The numbers are in [web/PLATFORM.md](web/PLATFORM.md#input), "The mouse
 against the trackpad".
 
-## Classic and 2026
+## The slop options and the Classic preset
 
-Every difference from id's game is a named setting. Classic turns the engine ones off; 2026,
-the default, turns most of them on. The controls are not part of the choice: both profiles
-play with the same ones, and a switch leaves them as they are.
+Every difference from id's game is a named setting, one of the port's "slop options" (its
+name: quake-srp, the slop rust port). Two fixed presets set them: **slop**, the default,
+turns most of them on; **Classic** turns them off. The controls are the same in both.
 
-| | Classic | 2026 |
+| | Classic | slop |
 |---|---|---|
-| frame rate | id's 72 fps cap | a frame every display refresh; jumps, lifts, flashes and trails are stepped to match 72 Hz, within the tolerances [FRAMERATE.md](FRAMERATE.md) states |
-| picture | a fixed mode (960x600 by default) in a 4:3 frame, id's 90° field of view | the window's own size and shape in whole pixels (pixel size Auto or 1–4), a wider view on wide screens |
+| frame rate | id's 72 fps cap | a frame every display refresh (Frame rate cap: none, or 60 to 240); jumps, lifts, flashes and trails are stepped to match 72 Hz, within the tolerances [FRAMERATE.md](FRAMERATE.md) states |
+| picture | a fixed mode (960x600 by default) in a 4:3 frame, id's 90° field of view | the window's own size and shape in whole pixels (1x, 2x on a touch screen; Video Options lists 1x to 4x with the size each gives), a wider view on wide screens |
 | status bar, menus, console | 1:1, as id drew them; Screen size 100: the status bar with the inventory bar above it | scaled up by a whole number; Screen size starts one step larger, 110: the status bar without the inventory bar, so the HUD takes less of the screen |
 | monsters | move in id's 0.1 s steps, and change pose ten times a second | glide between the steps, and blend between poses (the gun too) |
 | lights | the flickering ones snap ten times a second; most torches and flames steady, as the map baked them | the flickering ones glide; the steady torches and flames flicker gently about their light (`r_torchflicker`, a strength) |
-| controls | WASD, mouse look, Always Run, a twin-stick gamepad with rumble (the same in both; `idcontrols` is id's `default.cfg`) | the same, plus the mouse wheel for weapons, a crosshair and touch controls |
+| controls | WASD, mouse look, Always Run, a twin-stick gamepad with rumble, touch controls (the same in both; `idcontrols` is id's `default.cfg`) | the same, plus the mouse wheel for weapons and a crosshair |
 | sound | id's mixer at 11025 Hz | id's mixer at the device's rate, with four of id's bugs fixed |
 | perspective | id's spans: exact every 16 pixels, affine in between | exact every 8 pixels along walls and liquids, id's own portable-C loop (Perspective span, `r_perspspan`: 64, 32, 16, 8, 4 or exact at every pixel; 32 on a phone and 64 at 1080p are about what 1996 looked like) |
 
-In both profiles the renderer splits each frame across all CPU cores, and the picture is the
-same on any number of them.
+The numbers the machine decides are picked once, at start, and shown as numbers, never
+"auto": on a touch screen the game starts at 2x on four threads and at most 60 frames a
+second; elsewhere at 1x on every thread and no cap. A frame never gets bigger than the
+browser build's memory holds: past it, the next pixel size (5K and 8K screens draw at 2x).
+In both presets the renderer splits each frame across the CPU cores (`r_threads`), and the
+picture is the same on any number of them.
 
-To switch, use **Options > Classic / 2026** (left and right), the address (`?classic` or
-`?2026`), or the console (`profile classic`). Enter on that row opens the settings, one
-page each for **Picture and sound**, **Motion and light** (the torches' flicker is there)
-and **Controls**, where every setting can be changed alone. The choice is saved in
-`config.cfg`, in the browser's storage, and that file keeps only what you changed.
-[AUDIT.md](AUDIT.md) ("The profiles and the departures") lists every setting and why it
-exists.
+**Options** (id's screen, two rows the port's): **Slop Options** opens the settings, one page
+each for **Picture and sound**, **Motion and light** (the torches' flicker is there) and
+**Controls**, where every setting can be changed alone; it says whether yours are a preset's
+or how many rows differ, and a value that differs is white. **Reset to slop** (id's "Reset to
+defaults" row) sets everything to the slop preset, keys and Options included; **Reset to
+Classic** sets every slop option to Classic's and keeps your keys and Options. Both ask
+first; your saved games stay. The console's `preset slop` or `preset classic` (and the
+address, `?classic` or `?2026`) applies a preset as Reset to Classic does. `config.cfg`, in the
+browser's storage, keeps the preset and only what you changed from it.
+[AUDIT.md](AUDIT.md) ("The slop options and the presets") lists every setting and why it
+exists. The oracle compares Classic with id's 1996 keys too (`idcontrols`).
 
-In either profile the page can be installed as an app, and it works offline. It also
+In either preset the page can be installed as an app, and it works offline. It also
 plays the registered game and the mission packs from your own copies
 ([PLATFORM.md](web/PLATFORM.md), "Your files").
 
@@ -219,7 +227,7 @@ input, touch and offline play in detail.
 uv run oracle/classic_check.py      # about a minute once built; prints ALL PASS
 ```
 
-This runs the Classic profile through nine checks. Four compare the port with values
+This runs the Classic preset through nine checks. Four compare the port with values
 recorded from a tree known to be right. Five run id's C next to the port:
 
 | check | compares | against |
@@ -262,7 +270,7 @@ not the last digit.
   id's portable C built from the same source, from 320x200 to 960x600
   ([PERF_PLAN.md](PERF_PLAN.md)). That is id's C without id's x86 assembly, which the 1996
   game used for its inner loops and which is not compared here.
-- **2026 video, natively** (`timedemo demo1`, frames per second):
+- **slop video, natively** (`timedemo demo1`, frames per second):
 
   | threads | 1920x1080 | 2560x1440 | 3840x2160 |
   |---:|---:|---:|---:|

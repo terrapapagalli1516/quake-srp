@@ -1938,7 +1938,7 @@ impl Menu {
             let _ = self.setup_key(if step < 0 { K_LEFTARROW } else { K_RIGHTARROW }, None, s);
             return;
         }
-        // The settings hub's and pages' rows: menu3 (M_AdjustSliders plays
+        // Slop Options' and its pages' rows: menu3 (M_AdjustSliders plays
         // it on every row, a page's row too), then each row's own change (a
         // checkbox flips regardless of the direction, a slider steps).
         if let Some(rows) = self.screen.setting_rows() {
@@ -5160,8 +5160,8 @@ mod tests {
             "VID_MenuKey K_ENTER plays menu1 (not menu2)"
         );
         assert_eq!(m.screen(), MenuScreen::Video, "the mode list stays up after applying");
-        // The cursor wraps over the WHOLE list — the presets, then (2026:
-        // Settings::default() is Modern) the native rows; left/right also
+        // The cursor wraps over the WHOLE list — the presets, then (slop:
+        // Settings::default() is the slop preset) the native rows; left/right also
         // step it.
         assert_eq!(m.video_rows(), RESOLUTION_PRESETS.len() + NATIVE_ROWS);
         m.set_cursor(m.video_rows() - 1);
@@ -5679,15 +5679,15 @@ mod tests {
     //    off") -------------------------------------------------------------
 
     #[test]
-    fn video_rows_are_the_presets_alone_until_2026_native_rows_sync() {
+    fn video_rows_are_the_presets_alone_until_the_native_rows_sync() {
         // A fresh Menu (nothing synced yet) and Classic both keep id's plain
         // 7-row grid: no native rows to show or navigate onto.
         let mut m = Menu::new();
         assert_eq!(m.video_rows(), RESOLUTION_PRESETS.len());
-        m.sync_resolution(320, 200, false, false, NO_SIZES); // modern = false: Classic
+        m.sync_resolution(320, 200, false, false, NO_SIZES); // native rows off: Classic
         assert_eq!(m.video_rows(), RESOLUTION_PRESETS.len());
         assert!(!m.native_rows_shown());
-        m.sync_resolution(320, 200, false, true, NO_SIZES); // modern = true: 2026
+        m.sync_resolution(320, 200, false, true, NO_SIZES); // on: slop, or a native picture
         assert_eq!(m.video_rows(), RESOLUTION_PRESETS.len() + NATIVE_ROWS);
         assert!(m.native_rows_shown());
     }

@@ -7,6 +7,7 @@
 # sprites 2026-10-02: render/sprite.rs ports r_sprite.c/d_sprite.c (each sprite a clipped, perspective-textured polygon, id's span edges and 8-pixel steps) and R_DrawEntitiesOnList's one list (a sprite drawn after the alias models before it, so a 16-bit 1/z tie with a gib goes as id's); play.demo1 moves (its grenade explosions: 72 of the 660 frames, in 358-393 and 544-606, sampled at 360/390/570/600; demo3's frame 407 moves too, between samples); demo1's explosion frames as id's client plays them (compare.py --demo demo1 --settle 50-55 and 84-86, both aspects) now match id's C at every sprite pixel, where up to 9 pixels around each sprite were off; every other value unchanged
 # makestatic 2026-10-02: PF_makestatic frees its edict into a signon list the client draws, as id's does, so every edict number after a map's first static moves to id's (each matched entity is now id's number minus one, CENSUS L25's player-last offset, but for random fireballs and bubbles): census moves in edict numbers only (with them normalised, the report is the same but for its makestatic line's wording), edicts.start and e1m2..e1m7 lose their 'only in port' statics and the port's live counts equal id's (random fireballs and bubbles aside); e1m1 and e1m8 have no statics; goldens, play, timedemo, oracle, screen2d, demolerp, sound unchanged
 # demolights 2026-10-03: demo playback makes the dynamic lights id's client makes (CL_RelinkEntities' EF_MUZZLEFLASH/EF_BRIGHTLIGHT/EF_DIMLIGHT and an EF_ROCKET model's, CL_ParseTEnt's TE_EXPLOSION and TE_EXPLOSION2), which demo_lerp.py compares with id's cl_dlights slot for slot over the 17,500-frame loop; play.demo1..3's frame hashes move at all three resolutions (at 320x200 demo1 9 of the 22 sampled frames, demo2 4, demo3 13: the ones with a flash, a rocket or an explosion in view); the demos' sound tallies and every walk/fire/quad hash are unchanged (the live walk makes its lights through the same calls); goldens, timedemo, census, edicts, oracle, screen2d, demolerp and sound unchanged
+# slopoptions 2026-10-03: id's Options gets the port's two rows of the user's design: row 2 (id's "Reset to defaults") reads "Reset to slop", row 13 "Slop Options" (with "classic" at x=220) in the old port row's place, and a 15th row "Reset to Classic" at y=144; menu_options.options and menu_disconnected.options re-recorded by hand, those four values alone (the shots differ from id's in 1473 px at 320x200 and 640x400, was 531; the disconnected Options 1854 / 3015, was 919 / 2108); every other value unchanged (goldens, play, timedemo, census, edicts, oracle, the other 2-D shots, demolerp, sound)
 census.report 23dbb77f97b6e7ff
 edicts.e1m1 fea55149a7ee4427
 edicts.e1m2 b6e96a2fc2b69dfd
@@ -103,14 +104,14 @@ screen2d.320x200/hud.v50 100.00
 screen2d.320x200/intermission.stats 100.00
 screen2d.320x200/intermission.stats_v50 100.00
 screen2d.320x200/menu_disconnected.main 99.38
-screen2d.320x200/menu_disconnected.options 98.56
+screen2d.320x200/menu_disconnected.options 97.10
 screen2d.320x200/menu_help.help1 100.00
 screen2d.320x200/menu_help.help2 100.00
 screen2d.320x200/menu_main.main 100.00
 screen2d.320x200/menu_main.main_row2 100.00
 screen2d.320x200/menu_mp.mp 100.00
 screen2d.320x200/menu_options.keys 100.00
-screen2d.320x200/menu_options.options 99.05
+screen2d.320x200/menu_options.options 97.38
 screen2d.320x200/menu_options.video 95.49
 screen2d.320x200/menu_quit.back 100.00
 screen2d.320x200/menu_quit.quit 100.00
@@ -176,14 +177,14 @@ screen2d.640x400/hud.v50 100.00
 screen2d.640x400/intermission.stats 100.00
 screen2d.640x400/intermission.stats_v50 100.00
 screen2d.640x400/menu_disconnected.main 99.38
-screen2d.640x400/menu_disconnected.options 99.18
+screen2d.640x400/menu_disconnected.options 98.82
 screen2d.640x400/menu_help.help1 100.00
 screen2d.640x400/menu_help.help2 100.00
 screen2d.640x400/menu_main.main 100.00
 screen2d.640x400/menu_main.main_row2 100.00
 screen2d.640x400/menu_mp.mp 100.00
 screen2d.640x400/menu_options.keys 100.00
-screen2d.640x400/menu_options.options 99.74
+screen2d.640x400/menu_options.options 99.28
 screen2d.640x400/menu_options.video 98.80
 screen2d.640x400/menu_quit.back 100.00
 screen2d.640x400/menu_quit.quit 100.00

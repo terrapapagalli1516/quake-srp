@@ -106,7 +106,7 @@ round-trip tests; `wasi.js` and `index.html` carry the same constants.
 | 6 | AUDIO_READY | `ready u8`, `0 ×3`, `rate u32` (the AudioContext's sample rate; 0 none yet) |
 | 7 | CALL | `id u32`, then the UTF-8 line |
 | 8 | END | — (written by the host, not the page: "nothing more queued") |
-| 9 | WINDOW | `w u32`, `h u32`: the page's box for the picture in device pixels (its CSS size x `devicePixelRatio`; the whole screen in fullscreen), sent at start and on every resize; `dpr f32`: that `devicePixelRatio` (an older page sends none: read as 1) |
+| 9 | WINDOW | `w u32`, `h u32`: the page's box for the picture in device pixels (its CSS size x `devicePixelRatio`; the whole screen in fullscreen), sent at start and on every resize; then `dpr f32`, that `devicePixelRatio`, which the program no longer reads (a touch screen is the command line's `-touch` now: "Settings") |
 | 10 | AUDIO_CLOCK | `pos u32`: the sound ring's play position, in sample pairs (wrapping); sent before every TICK |
 | 11 | AUDIO_WAKE | `pos u32`: the same, written by the host between ticks while the worklet plays: "mix now" |
 | 12 | PRESENT | `format u8`: how the page shows frames from now on (0 RGBA8, 1 INDEXED8; RGBA8 until it says). The page sends it before the first tick |
@@ -317,8 +317,9 @@ path; there is no `fd_readdir`); anything else a newer `std` imports answers
 - **Saves and settings go through `std::fs`.** `save s0` writes
   `id1/s0.sav` (`Host_Savegame_f`), the Load and Save menus list the slots
   from the files (`M_ScanSaves`, when they open), and `config.cfg` holds the
-  settings the id way (`config.rs`, `Host_WriteConfiguration`): the profile,
-  then the `bind` lines and archived cvars that differ from it, written when
+  settings the id way (`config.rs`, `Host_WriteConfiguration`): the preset,
+  then the `bind` lines and archived cvars that differ from its values on this
+  machine, written when
   one of them changes and exec'd at startup as quake.rc does. When a written file is closed, `wasi.js` sends it
   to the page, which keeps it in IndexedDB (`quake-rs`, store `files`, keyed
   by path) and hands every kept file back at the next start. Without
@@ -329,8 +330,8 @@ path; there is no `fd_readdir`); anything else a newer `std` imports answers
   `id1/<name>`, the settings as the `config.cfg` lines the program would have
   written — and removes the keys. A migrated `viewsize 100` was the old page's
   default, not a choice, so it is dropped like the other restated defaults
-  (`LEGACY_DEFAULTS`): that player gets the profile's own Screen size, 110 in
-  2026. Any other size is kept.
+  (`LEGACY_DEFAULTS`): that player gets the preset's own Screen size, 110 in
+  slop. Any other size is kept.
 - A storage failure after the fact (quota) is printed on the console with
   `echo`, since the program's write already succeeded.
 
@@ -625,30 +626,33 @@ asked for; the element's time, loop and level; the output's RMS) and the
 ## Settings, and how the page shows the picture
 
 Every setting is the program's (`quake_rs::settings`: id's cvars and key
-bindings, and the port's departures, which the profiles **Classic** and
-**2026** switch — the engine; the controls are the player's, the same in both,
-and `idcontrols` is the console's one step to id's own). The page needs three of them, and hears
-them in the `STATE` record:
+bindings, and the port's slop options, which the presets **Classic** and
+**slop** set; the controls are the same in both, and `idcontrols` is the
+console's one step to id's own). A few are numbers the machine picks once, at
+start, from the command line (`settings::Machine`): `-touch`, a coarse pointer
+(a phone or a tablet: 2x, at most four threads, a 60 fps cap in slop), and
+`-hwthreads N`, the threads offered (all of them elsewhere, at 1x and no cap).
+Until the page passes `-touch` (the round's second stage) every machine is a
+desktop. The page needs three settings, and hears them in the `STATE` record:
 
-- **Native resolution** (`vid_native`, 2026). The page sends its box for the
-  picture in device pixels and its `devicePixelRatio` (`WINDOW`); the
-  program renders the box divided by a whole pixel size (`vid_pixelsize`:
-  1..4, or Auto, the smallest that keeps the frame within a 1080p frame's
-  pixels per whole square root of the renderer's threads, from 2 on a
-  phone: a ratio of 2 or more in a box whose shorter side is at most 540 CSS
-  pixels, since a phone's cores are several times slower than a desktop's
-  and slow further as it warms) and says the size in `pixel_size`; the page makes the canvas exactly `W x pixel_size` device
+- **Native resolution** (`vid_native`, slop). The page sends its box for the
+  picture in device pixels (`WINDOW`); the program renders the box divided
+  by a whole pixel size (`vid_pixelsize` 1..4, the machine's to start with;
+  past what the threads build's memory holds, 12 million pixels a frame,
+  the next size up: "What 512 MiB holds") and says the size in
+  `pixel_size`; the page makes the canvas exactly `W x pixel_size` device
   pixels wide and `H x pixel_size` tall (`fitCanvas`), `image-rendering:
   pixelated`, so every picture pixel is a whole square of screen pixels at
   the box's own aspect (the view is Hor+: `fov_adapt`). Off (Classic), the
   picture is the video mode (`_vid_resolution`, Options > Video Options)
   in the largest 4:3 box the window fits, as before.
-- **Alt+Enter toggles fullscreen** (`vid_altenter`, on in both profiles; with
+- **Alt+Enter toggles fullscreen** (`vid_altenter`, on in both presets; with
   `idcontrols` the chord is id's ALT `+strafe` and ENTER `+jump`): "Fullscreen", below.
-- **The profile from the address.** `?classic` and `?2026` add `+profile
+- **The preset from the address.** `?classic` and `?2026` add `+profile
   classic` / `+profile 2026` to the program's command line (`wasi.js` hands
-  it `args`), which quake.rc's `stuffcmds` runs after `config.cfg`: the same
-  switch as the menu's, so it sticks.
+  it `args`), which quake.rc's `stuffcmds` runs after `config.cfg`: the
+  console's `preset` under its old name (`2026` the slop preset's old word),
+  what Options' Reset to Classic does without asking, so it sticks.
 - **A mission pack from the address.** `?game=hipnotic` / `?game=rogue` add
   `-hipnotic` / `-rogue` to the command line — `COM_InitFilesystem`'s own
   flags (`quake-rs`'s `common.rs`): the program layers that pack's own game
@@ -663,8 +667,8 @@ them in the `STATE` record:
   id's own engine would.
 
 `verify_settings.py` checks all of it in the browser (the window filled
-with whole pixels at devicePixelRatio 1 and 2, `?classic`, the switch, the
-reload); the checks that pin id's behaviour open the page as `?classic`,
+with whole pixels at devicePixelRatio 1 and 2, `?classic`, Reset to Classic
+and `preset slop`, the reload); the checks that pin id's behaviour open the page as `?classic`,
 and `bench.py` does too, so its frames hash as `quaketool play`'s.
 
 ## Input
@@ -1248,10 +1252,10 @@ The page only plays what it paints.
   upright does the same (the game waits behind the rotate prompt, "Touch"):
   `awayNow()` is the hidden tab or that.
 
-**Classic and 2026.** The setting is `snd_modern` (`Cvars::sound`, a
-`quake_rs::snd::SoundMode`; Options > Classic / 2026 > Picture and sound >
+**Classic and slop.** The setting is `snd_modern` (`Cvars::sound`, a
+`quake_rs::snd::SoundMode`; Options > Slop Options > Picture and sound >
 "Full-rate sound"),
-a departure: off in the Classic profile, on in 2026. Classic
+a slop option: off in the Classic preset, on in slop. Classic
 is id's mixer as written (`Fixes::NONE`) at id's `desired_speed`, 11025 Hz,
 mixing id's 0.1 s ahead. The 2026 mixer (`Fixes::ALL`: the loop seam, exact
 resampling steps, the ambient ramp at any frame rate, `S_StopSound`'s range;
@@ -1498,10 +1502,17 @@ through every map of a game, each looked all the way round, in Chromium:
 id1 (pak0 and pak1) 64 MB at 1886×996 and 153 MB at 3806×2076 (4K, pixel
 size 1); Scourge of Armagon 68 and 153; Dissolution of Eternity 68 and 154
 (this round's research measured 46 MiB at 1280×720 and 152 MiB at a 4K
-window). So 512 MiB is three times what the largest frame the page's Auto
-pixel size makes needs (4K's worth of pixels at 16 threads); only a
-pixel size of 1 forced on a display past about 6K would not fit (8K, about
-500 MB, is the renderer's limit). It is half the threads build's old
+window). With 1x the default on a desktop since 2026-10-03, the program
+holds a frame to what the memory holds (`quake-wasm/src/vid.rs`,
+`MAX_FRAME_PIXELS`, 12 million pixels; past it the next pixel size, the
+player's own pick too). Measured the same way (shareware maps e1m1, e1m3,
+e1m4 and e1m7, 1x on 8 threads): a page started at a size holds about 26 MB
+and 19 bytes a pixel (1920x920 56 MB, 3840x2000 145, 5120x2720 286,
+6400x3440 437, 7680x4160 623: 8K at 1x does not fit); and a resize keeps the
+old frame's memory beside the new one (4800x2880 then 5120x3200: 618 MB,
+where a page started at 5120x3200 takes 333). So the limit is what two
+frames hold, a window's and its fullscreen's: about 482 MB of the 537. 4K
+and a 5120x2160 ultrawide draw at 1x; 5K, 6K and 8K at 2x. It is half the threads build's old
 maximum: a fixed memory is committed whole when it is made — free on Linux
 and Android until a page is touched (here the page's resident memory with it
 fixed is the growable build's: Chromium, all processes, 984 MB against 972 at
@@ -1512,16 +1523,17 @@ cleanly on the main thread — `memory allocation of N bytes failed`, then
 `std`'s abort — and the page shows "The game stopped: out of memory ...: a
 larger pixel size, in Video Options, needs less" (a 96 MiB build at 4K).
 
-**The renderer's threads** are the cvar `r_threads` (quake-wasm `App::
-render_threads`, the typed `quake_rs::render::Threads`): 0, the default,
-takes every thread the host offers (`-hwthreads`; a `wasm32-wasip1` build,
-without threads, gets 1), n takes n. `host::step` hands the resolved count
-to the renderer of whichever game draws the frame, every frame, so each
+**The renderer's threads** are the cvar `r_threads`, a number (at least 1;
+0 reads as 1): the presets start it at the machine's — every thread the host
+offers (`-hwthreads`; a `wasm32-wasip1` build, without threads, gets 1), at
+most four on a touch screen (`settings::Machine::render_threads`).
+`host::step` hands the count to the renderer of whichever game draws the
+frame, every frame, so each
 `Walk` and `DemoPlay` the host builds (a boot, a load, the attract loop's
 next demo) draws with it from its first frame. A spawn the host refuses
 (more threads asked than workers) leaves its bands to the threads that did
 start, so any count draws the frame. The `render_threads` call reports the
-resolved count. The RGBA pack runs on the same threads.
+count. The RGBA pack runs on the same threads.
 
 **Measured.** `threadcheck`'s rounds of seven scoped threads (a round:
 spawn, run, join) take 25 µs with the workers kept, against 214 µs when
@@ -1752,8 +1764,8 @@ for a release. Hidden where a pad key would be wrong: while the menu asks
 y or n (STATE 256) and while Customize controls waits for a key to bind
 (STATE 8, `BIND_GRAB`) — every other mode, and Classic too (a phone still
 has no keys). Help pages already take ◀▶ (id's `M_Help_Key`); the pad's
-presses reach them the same way, and the settings hub and its pages
-(Options > Classic / 2026) take OK, ▲▼ and ◀▶ as Options does — ◀▶ step
+presses reach them the same way, and Slop Options and its pages
+(Options' 14th row) take OK, ▲▼ and ◀▶ as Options does — ◀▶ step
 Torch flicker's slider — and BACK backs out a screen at a time; so does a
 gamepad's A, B and D-pad (`joy_menukeys`). Taps and drags on the menu are unchanged;
 the pad is in addition.
@@ -1829,8 +1841,8 @@ fullscreen and `screen.orientation.lock('landscape')` where the browser has
 them (Android; a fullscreen button stays while not fullscreen). During a game a
 Screen Wake Lock keeps the display on. Every touch resumes audio if the
 browser suspended it (iOS "interrupts" it in the background). When the
-page is hidden the audio is suspended, and with the touch controls on (not
-in Classic, where the game only stops getting ticks, as on a desktop) a
+page is hidden the audio is suspended, and with the touch controls on (in
+both presets; off by hand, the game only stops getting ticks, as on a desktop) a
 live game pauses (`pause`, id's plaque; STATE 512) under its menu; back in
 the game — the menu closed, by the player — the pause ends. Haptics:
 `QuakeTouch.rumble(weak, strong, ms)` takes the Gamepad API's dual-rumble
@@ -1838,10 +1850,13 @@ magnitudes and buzzes `navigator.vibrate` (Android; iOS Safari has none)
 for longer the stronger it is; nothing calls it yet — it is the hook for
 the `input` agent's gamepad rumble events (damage, heavy weapons).
 
-**Phones.** On an iPhone in landscape (844×390 CSS px, devicePixelRatio 3,
-so a 2532×1170 box) Auto picks a pixel size of 2 with the single-threaded
-build: a 1266×585 frame, 2×2 device pixels a picture pixel (0.67 CSS px,
-finer than the eye resolves at arm's length), and the scaled 2-D layer at
+**Phones.** *(As of 2026-09-26; since 2026-10-03 a touch screen's pixel size
+and threads are the machine's numbers, 2x on at most four threads, once the
+page passes `-touch`: "Settings, and how the page shows the picture".)* On
+an iPhone in landscape (844×390 CSS px, devicePixelRatio 3, so a 2532×1170
+box) Auto picked a pixel size of 2 with the single-threaded build: a
+1266×585 frame, 2×2 device pixels a picture pixel (0.67 CSS px, finer than
+the eye resolves at arm's length), and the scaled 2-D layer at
 2×. What that costs, measured on a desktop, not on a phone
 (`bench.py --video modern`, one thread, headless Chromium on an 8-core desktop CPU
 under load 6, median page ms per frame, demo1 / walk_e1m1): 1266×585

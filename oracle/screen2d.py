@@ -162,7 +162,7 @@ SCENARIOS: dict[str, list] = {
                      ("key", "ENTER"), ("frames", 1), ("shot", "options"),
                      ("key", "ENTER"), ("frames", 1), ("shot", "keys"),
                      # Video Options is row 12 on both sides; UP from row 0 wraps
-                     # to the port's 14th row (Classic / 2026) but id's 13th (Video)
+                     # to the port's 15th row (Reset to Classic) but id's 13th (Video)
                      ("key", "ESCAPE")] + [("key", "DOWNARROW")] * 12
                     + [("key", "ENTER"), ("frames", 1), ("shot", "video")],
     "menu_help": [("frames", 1), ("key", "ESCAPE"), ("key", "DOWNARROW"), ("key", "DOWNARROW"),
@@ -254,7 +254,7 @@ FIRST_MAP = {"hipnotic": "hip1m1", "rogue": "r1m1"}
 
 
 def c_lines(steps, out: Path, name: str, mapname: str = "e1m1", game: str | None = None) -> list[str]:
-    # id's defaults (default.cfg): the port's side runs its Classic profile,
+    # id's defaults (default.cfg): the port's side runs its Classic preset,
     # every departure off and id's key bindings
     quiet = ["con_notifytime -1"] if game else []  # the `campaign` spam (the module doc)
     lines = ["oracle_exit 0", "oracle_stage 1", f"oracle_blank {BLANK}", "crosshair 0", "viewsize 100",

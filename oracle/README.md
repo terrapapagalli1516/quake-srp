@@ -402,12 +402,12 @@ after the map loads:
   header). The client's view hook (`quake_rs::client::set_view_hook`) paints the view the same flat colour,
   and each shot is handed the C frame's clocks (`realtime` for the flashing
   cursors, `host_time` for the menu's spinning dot, the finale's reveal time).
-- The port runs its Classic profile (every engine departure off) with id's own
+- The port runs its Classic preset (every slop option off) with id's own
   controls, `default.cfg`'s bindings and id's cvars (the harness runs the console's
-  `idcontrols` after booting: the controls are the same in both profiles by
+  `idcontrols` after booting: the controls are the same in both presets by
   default now, `quake_rs::settings`), id's side its own defaults, so the Options
   and Customize screens compare values and bindings too.
-  (Before the profiles both sides were given the port's two input defaults
+  (Before the presets both sides were given the port's two input defaults
   then, Always Run and the WASD binds.)
 
 With the 3-D view one colour, what differs is the 2-D layer. `exact%` is over the
@@ -460,7 +460,7 @@ lines surviving a console toggle; the console lingering after `map`/`load`.
   menu over `Draw_ConsoleBackground (vid.height)` while `scr_con_current` is
   non-zero, not over the faded screen; the port faded the console text
   (41.5% before). What is left is the console's version stamp (below) and,
-  on Options, its "Classic / 2026" row. `oracle.c` shoots a composited frame that
+  on Options, the port's rows (Options, below). `oracle.c` shoots a composited frame that
   renders no view (disconnected) as the screen stands.
 - *Console* (and `console_scroll`, the menu over the disconnected console:
   400 px at 320x200, 1592 at 640x400, 3582 at 960x600): the version
@@ -480,13 +480,17 @@ lines surviving a console toggle; the console lingering after `map`/`load`.
   cursor (`m_singleplayer_cursor`, `m_main_cursor`, `options_cursor`, ...:
   Escape from Options lands on "Options"); the port's one cursor started every
   screen at its first row. Per-menu cursors since `quake/polish2`: 100%.
-- *Options* (531 px; 291 while it read "Web extras"): the port's 14th row,
-  "Classic / 2026" with the profile printed at x=220 (in the slot of the
-  `_WIN32` build's "Use Mouse"), which id's DOS/Linux list does not have. The
-  `menu_options` scenario reaches Video Options with twelve DOWNs, not one UP,
-  since UP from row 0 wraps to that 14th row in the port (it had been
-  comparing id's Video Modes with the port's Web extras page since the extras
-  merge).
+- *Options* (1473 px since 2026-10-03; 531 while its port row read "Classic /
+  2026", 291 while it read "Web extras"): the user's two rows, the
+  `fleet/slopoptions` design. Row 2 reads "Reset to slop" where id's reads
+  "Reset to defaults" (it resets to the slop preset); the 14th row, "Slop
+  Options" with where the settings stand printed at x=220 ("classic"), sits in
+  the slot of the `_WIN32` build's "Use Mouse"; a 15th, "Reset to Classic", is
+  under it at y=144. id's DOS/Linux list has neither. The `menu_options`
+  scenario reaches Video Options with twelve DOWNs, not one UP, since UP from
+  row 0 wraps to the port's last row (it had been comparing id's Video Modes
+  with the port's Web extras page since the extras merge). The disconnected
+  console's Options: 1854 / 3015 px at 320x200 / 640x400 (919 / 2108 before).
 - Not in the matrix: the loading plaque (the port loads within a frame and draws
   none; the pause plaque is in it since `quake/timedemo`, the `pause` row above), `SCR_ModalMessage`'s New
   Game question (it blocks in a key loop the null input driver never ends; its
@@ -641,8 +645,8 @@ uv run oracle/classic_check.py --only goldens,play    # some of it
 uv run oracle/classic_check.py --record --note "..."  # re-record, saying why
 ```
 
-The port's Classic profile (`quake_rs::settings`: every engine departure off; the
-controls are the player's, shared with 2026, and the harnesses pin id's own by name:
+The port's Classic preset (`quake_rs::settings`: every slop option off; the
+controls are shared with slop's, and the harnesses pin id's own by name:
 `Settings::id`, `idcontrols`) must stay WinQuake. One command runs every check of
 that and writes a report (`oracle/build/classic-check/classic_check.txt`, next
 to each tool's own output):
@@ -655,7 +659,7 @@ to each tool's own output):
 | `census` | `quaketool census`: all nine maps through the real QuakeC (the report, by hash) | the recorded list |
 | `edicts` | id's server edicts (this oracle) diffed against the port's, nine maps at t = 1.7 / 4.7 / 10.7 s (`census/`): the diff report, by hash. What it still shows: each matched entity's number one below id's (the player is the port's last edict, CENSUS L25); monsters' random idle frames and wandering; a door pair on e1m6 caught at another point of its slide at 1.7 s; the fireballs and bubbles random numbers start. The statics' rows are gone since `fleet/makestatic` (1,185 rows to 606) | the recorded list |
 | `oracle` | `compare.py --aspect 0.8333333 --spans 16`: the eight standard rows | id's C: none below its recorded match (100.00%; e1m7 99.9969%, two pixels) |
-| `screen2d` | `screen2d.py`, 320x200 and 640x400, the port in its Classic profile | id's C: no shot below its recorded `2d exact%` (the residues above) |
+| `screen2d` | `screen2d.py`, 320x200 and 640x400, the port in its Classic preset | id's C: no shot below its recorded `2d exact%` (the residues above) |
 | `demolerp` | `demo_lerp.py`: id's client against the port's over the attract loop, frame by frame — the camera, the entities and the dynamic lights (below) | id's C: every demo MATCH |
 | `sound` | `sound.py`: id's mixer against the engine's `Fixes::NONE`; `sound_walk.py`: a walk through id's game and the port's | id's C: every case sample-identical; every call the walk makes identical |
 

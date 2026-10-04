@@ -41,14 +41,15 @@ A bench build boots each workload in the program (`bench_start`) and scripts
 the walk's input there; a stock build gets the same boot and input as calls.
 
 Threads: a `wasm32-wasip1-threads` build draws its 3-D view on the host's
-thread workers (`r_threads`, 0 = as many as the host offers: PLATFORM.md,
-"Threads"). `--threads 1,2,4,8` runs every workload and size at each count
-(the program's `r_threads`), and `--build --threads-build` builds the bench
-program for that target. The page runs the Classic profile (`?classic`: id's
-game, the frames `quaketool play` hashes); `--video modern` switches to the
-2026 profile's video settings first (`set_video`: native picture with square
-pixels, Hor+, sizes past 1280x800, the fluid sky, gliding lights, flickering
-torches, and the profile's perspective span, 8 since 2026-10-03: earlier
+thread workers (`r_threads`, a page starts it at every thread the host
+offers: PLATFORM.md, "Threads"). `--threads 1,2,4,8` runs every workload and
+size at each count (the program's `r_threads`), and `--build --threads-build`
+builds the bench program for that target. The page runs the Classic preset
+(`?classic`: id's game, the frames `quaketool play` hashes); `--video modern`
+switches to the slop preset's video settings first (`set_video`: native
+picture with square pixels, Hor+, sizes past 1280x800, the fluid sky,
+gliding lights, flickering torches, and the preset's perspective span, 8
+since 2026-10-03: earlier
 `--video modern` runs drew id's 16-pixel spans, or exact for part of that
 day), each --res then the size of the window it
 fills. The frames are the same at every count, but the runs of one page share
@@ -104,7 +105,7 @@ ap.add_argument("--hash-every", type=int, default=0)
 ap.add_argument("--json", help="write every raw per-frame series here")
 ap.add_argument("--port", type=int, default=isolated.port(8230))
 ap.add_argument("--threads", default="",
-                help="comma list of r_threads values to run each workload at (0 = all the host offers)")
+                help="comma list of r_threads values to run each workload at (default: the page's own, every thread the host offers)")
 ap.add_argument("--threads-build", action="store_true",
                 help="with --build: build for wasm32-wasip1-threads (the renderer's threads)")
 ap.add_argument("--video", default="", help="classic or modern: the video cvars to run with (set_video)")
@@ -177,7 +178,7 @@ BENCH_JS = r"""
   window.__benchRun = async (cfg) => {
     quake.pause();
     await new Promise(r => setTimeout(r, 100));   // let the page's in-flight frame drain
-    // The picture (set_video: `modern` is the 2026 profile's native picture,
+    // The picture (set_video: `modern` is the slop preset's native picture,
     // sized as a window of cfg.w x cfg.h device pixels at one pixel a pixel;
     // else a video mode) and the renderer's threads.
     if (cfg.video) await quake.call('set_video', cfg.video);

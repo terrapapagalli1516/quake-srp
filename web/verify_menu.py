@@ -9,7 +9,7 @@
      backs out);
   3. Options rows act: sliders move real cvars (mouse_sensitivity / volume /
      viewsize — Screen size is id's viewsize, it never resizes the
-     framebuffer), Go-to-console opens the console, Reset-to-defaults
+     framebuffer), Go-to-console opens the console, Reset to slop asks and
      restores, Customize controls opens the Keys screen (bind grab works),
      Video Options applies a resolution (WinQuake's M_Video mode list);
   4. walk-mode behaviors: BRIGHTNESS visibly brightens the canvas (gamma LUT)
@@ -179,7 +179,7 @@ with sync_playwright() as p:
     # 30..120) and the framebuffer size never changes.
     w0 = pg.evaluate("exp.width()")
     key("ArrowUp", 5)       # from row 8 back to row 3
-    check("viewsize defaults to 110 in 2026 (one step past id's 100)", pg.evaluate("exp.viewsize()") == 110)
+    check("viewsize defaults to 110 in slop (one step past id's 100)", pg.evaluate("exp.viewsize()") == 110)
     key("ArrowLeft", 3)
     check("Screen size row steps viewsize", pg.evaluate("exp.viewsize()") == 80,
           f"{pg.evaluate('exp.viewsize()')}")
@@ -188,11 +188,15 @@ with sync_playwright() as p:
     check("...and never resizes the framebuffer", pg.evaluate("exp.width()") == w0)
     key("ArrowLeft", 3)     # 90
 
-    # Reset to defaults (row 2) restores the cvars.
+    # Reset to slop (row 2, id's Reset to defaults) asks first; yes restores
+    # the cvars (everything: the slop preset whole).
     key("ArrowUp"); key("Enter")
-    check("Reset to defaults restores sensitivity",
-          abs(pg.evaluate("exp.mouse_sensitivity()") - 1.0) < 1e-5)
-    check("Reset to defaults restores viewsize to the profile's own (2026's 110; Classic's is default.cfg's 100)",
+    check("Reset to slop asks first", bool(isolated.wait_until(pg, "quake.state.flags & 256", 5, raising=False))
+          and pg.evaluate("exp.viewsize()") == 90)
+    key("y")
+    check("yes: Reset to slop restores sensitivity",
+          abs(pg.evaluate("exp.mouse_sensitivity()") - 1.0) < 1e-5 and scr() == OPTIONS)
+    check("...and viewsize to slop's own 110 (Classic's is default.cfg's 100)",
           pg.evaluate("exp.viewsize()") == 110)
 
     # Customize controls (row 0): the Keys screen + a bind grab that Escape
@@ -223,13 +227,13 @@ with sync_playwright() as p:
     # to show 960x600 as current no matter what the screen actually was). In
     # this real browser the picture is already native by the time the menu
     # reaches here (the page reports its box on layout, no gesture needed),
-    # so the list opens on the live native row (Auto), not a stale preset.
+    # so the list opens on the live native row (1x), not a stale preset.
     # Four Ups reach 800x500 (preset index 3); applying it is kept for the
     # reload check at the end.
     key("ArrowDown", 12); key("Enter")
     check("Video Options opens the mode list", scr() == VIDEO)
     cur0 = pg.evaluate("exp.menu_cursor()")
-    check("...on the live native row (Auto), not a stale preset", cur0 == VIDEO_PRESETS, f"cursor={cur0}")
+    check("...on the live native row (1x), not a stale preset", cur0 == VIDEO_PRESETS, f"cursor={cur0}")
     key("ArrowUp", VIDEO_PRESETS - 3)
     check("moving the line alone keeps the picture", pg.evaluate("exp.width()") == w0)
     check("...native resolution is still on", pg.evaluate("quake.text('cvar', 'vid_native')") == "1")
@@ -255,8 +259,9 @@ with sync_playwright() as p:
     check("Esc on Video returns to Options", scr() == OPTIONS)
 
     # Go to console (row 1) opens the drop-down console. (Esc from Video left
-    # options_cursor on Video Options, row 12: down past Classic / 2026 wraps to 1.)
-    key("ArrowDown", 3)
+    # options_cursor on Video Options, row 12: down past Slop Options and
+    # Reset to Classic wraps to 1.)
+    key("ArrowDown", 4)
     key("Enter")
     check("Go to console opens the console",
           pg.evaluate("exp.console_visible()") == 1 and vis() == 0)
@@ -348,7 +353,7 @@ with sync_playwright() as p:
 
     # REBIND: Customize controls really rebinds +forward (row 3) to 'o'.
     key("Escape"); key("Enter")                   # Options, on Lookspring (10)
-    key("ArrowDown", 4); key("Enter")             # past Classic / 2026 to Customize controls
+    key("ArrowDown", 5); key("Enter")             # past Slop Options and Reset to Classic to Customize controls
     key("ArrowDown", 3); key("Enter")             # grab on +forward
     pg.keyboard.press("o"); time.sleep(0.1)
     check("the grab bound the new key", pg.evaluate("exp.menu_bind_grabbing()") == 0)

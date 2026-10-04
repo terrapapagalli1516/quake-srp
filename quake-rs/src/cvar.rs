@@ -284,8 +284,8 @@ impl Cvars {
     /// Classic's because of the resolution: id's 16-pixel affine spans were a
     /// pixel or so off at 320x200, but at 1080p and above they show as a
     /// wobble along a wall seen at a grazing angle; 8 is much nearer exact
-    /// than 16 for +7-11% of the 3-D view's cost (AUDIT.md, "The presets and
-    /// the departures"), and every value up to exact (1) stays one setting
+    /// than 16 for +7-11% of the 3-D view's cost (AUDIT.md, "The slop options and
+    /// the presets"), and every value up to exact (1) stays one setting
     /// away. Show FPS stays off: the readout is clutter. (Always Run, mouse look, the gamepad and Space-swims-up are
     /// [`Cvars::classic`]'s too now — they are controls, not engine.) The
     /// edict pool grows past id's 600 (`max_edicts`, QuakeSpasm's own
