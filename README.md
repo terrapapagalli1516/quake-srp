@@ -23,7 +23,7 @@ id Software's *Quake* (1996), ported to Rust from the WinQuake C source, with on
 standard library and no `unsafe` code. With every extra switched off it is id's game,
 checked against id's own C: every pixel but two in id's standard 3-D views, the sound
 mixer sample for sample, and in demo playback the camera, every entity and every dynamic
-light, frame by frame over 17,500 frames. What is known to differ still is a list
+light, frame by frame. What is known to differ still is a list
 ([AUDIT.md](AUDIT.md), "Open"). Every check is one command. By default it is the same software renderer given a 2026 machine. It plays
 in a browser; natively, `quaketool` runs the same engine without a window.
 
@@ -51,7 +51,7 @@ dependencies, no `unsafe`, and Classic is id's game, proven for anything touched
   - 100.00% of pixels in the standard 3-D views (two pixels differ on one map);
   - the status bar, menus and console, apart from a few explained differences (the version
     string, the video-mode list, the port's own Options rows);
-  - the mixer's output, sample for sample, on 28 scripted cases;
+  - the mixer's output, sample for sample, on scripted cases;
   - demo playback, frame by frame: the camera, the entities and the dynamic lights (the
     game's state; a demo frame's pixels are compared on a sample of frames).
 
@@ -243,7 +243,7 @@ recorded from a tree known to be right. Five run id's C next to the port:
 | `edicts` | the entities' fields against id's server on all nine maps (the known differences, such as the player's edict number and random numbers, are recorded) | id's C |
 | `oracle` | the 3-D view, pixel by pixel | id's C |
 | `screen2d` | the status bar, menus and console | id's C |
-| `demolerp` | demo playback, 17,500 frames | id's C |
+| `demolerp` | demo playback, frame by frame | id's C |
 | `sound` | the mixer, sample by sample | id's C |
 
 The id's-C checks need id's WinQuake source ([id-Software/Quake](https://github.com/id-Software/Quake))
@@ -256,45 +256,20 @@ Beyond Classic:
 - `cargo test` passes in both crates, and clippy shows zero warnings. CI runs both, and
   both browser builds, on every push (`.github/workflows/check.yml`; `ci/local.sh` runs
   the same commands on a checkout).
-- `quake-rs/target/release/quaketool framerate quake-data/ID1/PAK0.PAK --check` runs 22
+- `quake-rs/target/release/quaketool framerate quake-data/ID1/PAK0.PAK --check` runs
   gameplay scenarios at high frame rates and compares them with id's 72 Hz, each within a
   stated tolerance ([FRAMERATE.md](FRAMERATE.md)).
-- 20 headless-browser checks (`web/verify_*.py`) cover everything from walking and the
+- The headless-browser checks (`web/verify_*.py`) cover everything from walking and the
   menus to the gamepad, touch, quitting, sound through late frames, how a refresh waits
-  for its frame, and reading back the canvas. All 20 pass in Chromium and in Firefox (`QUAKE_BROWSER=firefox`; Firefox's touch
+  for its frame, and reading back the canvas. All pass in Chromium and in Firefox (`QUAKE_BROWSER=firefox`; Firefox's touch
   check runs on taps, and the Keyboard Lock checks are skipped there: `web/PLATFORM.md`,
   "Build, serve, deploy").
-
-## Numbers
-
-Measured on 2026-09-26 on an 8-core desktop CPU; timings are noisy. Read the ratios,
-not the last digit.
-
-- **Classic, against id's own C:** on one core, `timedemo demo1` runs 1.35–1.44x as fast as
-  id's portable C built from the same source, from 320x200 to 960x600
-  ([PERF_PLAN.md](PERF_PLAN.md)). That is id's C without id's x86 assembly, which the 1996
-  game used for its inner loops and which is not compared here.
-- **slop video, natively** (`timedemo demo1`, frames per second):
-
-  | threads | 1920x1080 | 2560x1440 | 3840x2160 |
-  |---:|---:|---:|---:|
-  | 1 | 208 | 120 | 54 |
-  | 8 | 689 | 455 | 210 |
-
-- **In the browser** (headless Chromium, 2560x1440): a frame takes about 3.3 ms with the
-  threads build on the GPU, and 10.8 ms on one thread.
-- **Input to canvas:** about 12 ms at 60 Hz, from the event to the frame on the page's
-  canvas.
-- **Download:** `quake.wasm` is 1.3 MB, and the pak is 18.7 MB.
-
-None of it has been measured yet on a real phone, in Safari, or on a real high-refresh
-display.
 
 ## The repository
 
 | path | what |
 |---|---|
-| [`quake-rs/`](quake-rs/README.md) | the engine (about 70,000 lines with its tests) and `quaketool` |
+| [`quake-rs/`](quake-rs/README.md) | the engine, its tests, and `quaketool` |
 | `quake-wasm/` | the browser program: the WASI `main` loop, its protocol, and end-to-end tests against the real pak |
 | `web/` | the page, the WASI host (`wasi.js`), touch controls, the service worker, the browser checks |
 | `oracle/` | id's WinQuake built headless from the C, and the scripts that compare it with the port |
