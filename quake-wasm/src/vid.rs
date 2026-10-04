@@ -123,16 +123,26 @@ pub(crate) fn native(a: &App) -> bool {
 
 /// Point Video Options at the live picture (`Menu::sync_resolution`): the
 /// render size, [`native`] (not just `vid_native`'s cvar — a window must be
-/// known too, or there's nothing to fill natively), and whether the
-/// native-resolution rows belong in the list at all (the slop preset;
-/// Classic's list is `RESOLUTION_PRESETS` alone). Every caller that used to
-/// hand `Menu::sync_resolution` the render size alone goes through this now,
-/// so the two new facts can never drift out of sync with it.
+/// known too, or there's nothing to fill natively), whether the
+/// native-resolution rows belong in the list at all (the slop preset, or a
+/// native picture in Classic — `vid_native 1` from the console; otherwise
+/// Classic's list is `RESOLUTION_PRESETS` alone), and the size each of them
+/// gives ([`picture_size`] at 1x..4x, the memory limit included). Every
+/// caller that used to hand `Menu::sync_resolution` the render size alone
+/// goes through this now, so the facts can never drift out of sync with it.
 pub(crate) fn sync_menu_resolution(a: &mut App) {
     let native = native(a);
-    let modern = a.settings.preset == quake_rs::settings::Preset::Slop;
+    let native_rows = native || a.settings.preset == quake_rs::settings::Preset::Slop;
+    let mut sizes = [(0, 0); quake_rs::menu::NATIVE_ROWS];
+    if a.window.is_some() {
+        for (p, size) in (1..).zip(&mut sizes) {
+            let cvars = Cvars { native: true, pixel_size: p, ..a.settings.cvars.clone() };
+            let (w, h) = picture_size(&cvars, a.window);
+            *size = (w as i32, h as i32);
+        }
+    }
     let (w, h) = (a.render_w as i32, a.render_h as i32);
-    a.menu.sync_resolution(w, h, native, modern);
+    a.menu.sync_resolution(w, h, native, native_rows, sizes);
 }
 
 /// Once a frame, before the client frame: the framebuffer to the size the
@@ -528,7 +538,7 @@ mod tests {
         menu_down(); // -> 2 (Options)
         menu_select(); // enter Options (cursor on row 0 = Customize controls)
         menu_down(); // -> 1 (Go to console)
-        menu_down(); // -> 2 (Reset to defaults)
+        menu_down(); // -> 2 (Reset to slop)
         menu_down(); // -> 3 (Screen size)
         assert_eq!(viewsize(), 100.0, "viewsize defaults to 100");
         menu_right();

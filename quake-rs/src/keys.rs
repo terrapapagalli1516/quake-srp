@@ -240,7 +240,7 @@ pub const BIND_MOVEUP: usize = 16;
 pub const BIND_MOVEDOWN: usize = 17;
 /// What `default.cfg` binds that `M_Keys_Draw` doesn't list: past the
 /// `bindnames` rows, so Customize controls never shows them, but a rebind
-/// over their key or `Reset to defaults` treats them like any other.
+/// over their key or Options' `Reset to slop` treats them like any other.
 /// `bind + "sizeup"`, `bind = "sizeup"`, `bind - "sizedown"`.
 pub const BIND_SIZEUP: usize = 18;
 pub const BIND_SIZEDOWN: usize = 19;
@@ -692,7 +692,7 @@ mod tests {
     /// AUDIT.md's "Missing `default.cfg` binds: F1-F4, F6, F9, F10, F12":
     /// each is a console Line (none is one of BIND_COMMANDS), so Customize
     /// controls (the BINDNAMES rows) never lists it, but a rebind over it —
-    /// or Reset to defaults — treats it like any other key. F5/F7/F8/F11
+    /// or Options' Reset to slop — treats it like any other key. F5/F7/F8/F11
     /// stay unbound, as in id's own `default.cfg`.
     #[test]
     fn default_cfg_binds_ids_function_key_shortcuts() {

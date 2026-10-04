@@ -68,7 +68,7 @@ pub(crate) mod fixtures;
 pub use crate::console::{draw_console, draw_notify, Console};
 pub use crate::draw::conchars_pic;
 pub use crate::menu::{
-    draw_menu, draw_menu_over_console, ExtrasPage, Menu, MenuAction, MenuClock, MenuPics, MenuScreen, MenuSound, RowKind,
+    draw_menu, draw_menu_over_console, SlopPage, Menu, MenuAction, MenuClock, MenuPics, MenuScreen, MenuSound, RowKind,
     SettingRow,
     BIND_ATTACK, BIND_BACK, BIND_CENTERVIEW, BIND_CHANGEWEAPON, BIND_FORWARD, BIND_JUMP,
     BIND_LEFT, BIND_LOOKDOWN, BIND_LOOKUP, BIND_MOVEDOWN, BIND_MOVELEFT, BIND_MOVERIGHT,

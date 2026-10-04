@@ -55,7 +55,7 @@ impl FrameGate {
     }
 }
 
-/// The `wasm_showfps` measurement (a departure on Options > Classic / slop's
+/// The `wasm_showfps` measurement (a departure on Options > Slop Options'
 /// settings page, off in both presets): QuakeWorld's `SCR_DrawFPS` counter. Every
 /// presented frame counts (`fps_count++`); once a second of `realtime` has
 /// passed since the window opened (`lastframetime`), the window's rate

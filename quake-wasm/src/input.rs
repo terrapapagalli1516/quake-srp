@@ -143,9 +143,9 @@ pub(crate) fn key_event_in(a: &mut App, key: u8, down: bool, ch: u32) -> Option<
     // SCR_ModalMessage: `key_count = -1` — every event is the question's.
     // (A key up still releases its `+` binding here, so nothing held when
     // the question came up sticks: id's returns before that.)
-    if a.menu.visible && a.menu.new_game_confirm() {
+    if a.menu.visible && a.menu.asking().is_some() {
         if down {
-            let action = a.menu.modal_key(key);
+            let action = a.menu.modal_key(key, &mut a.settings);
             return apply_menu_action(a, action).map(KeyAfter::Menu);
         }
         a.keys_held[k] = false;
@@ -502,7 +502,7 @@ fn pad_keys(a: &App) -> PadKeys {
     let menu = &a.menu;
     if a.key_dest() != KeyDest::Menu || menu.bind_grabbing() {
         PadKeys::Game
-    } else if menu.new_game_confirm() || menu.screen() == MenuScreen::Quit {
+    } else if menu.asking().is_some() || menu.screen() == MenuScreen::Quit {
         PadKeys::YesNo
     } else {
         PadKeys::Menu

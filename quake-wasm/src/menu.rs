@@ -61,11 +61,13 @@ pub(crate) fn apply_menu_action(a: &mut App, action: MenuAction) -> Option<MenuD
                 a.toggle_console();
             }
         }
-        MenuAction::ResetDefaults => {
-            // Options "Reset to defaults": select() ran the preset's
-            // default.cfg on the settings (read live each frame); the video
-            // mode is not a default.cfg cvar and stays.
-            crate::vid::sync_menu_resolution(a);
+        MenuAction::Reset => {
+            // Options' "Reset to slop" or "Reset to Classic", answered yes:
+            // the menu reset the settings (read live each frame); the
+            // picture follows them now, and Video Options with it. Nothing
+            // is deleted: the saves and the player's own files stay, and the
+            // next frame writes config.cfg for the settings as they are.
+            crate::vid::apply_settings(a);
         }
         MenuAction::Resume => {
             // M_Main_Key K_ESCAPE: the demo loop back (`cls.demonum =
@@ -263,8 +265,8 @@ pub(crate) fn menu_point(x: f32, y: f32) -> i32 {
 /// record carries it, and the browser checks read it (the screen transitions:
 /// Multiplayer opens, Save gates, Video applies). 0 Main, 1 SinglePlayer,
 /// 2 Load, 3 Save, 4 Multiplayer, 5 Options, 6 Keys, 7 Video, 8 Help, 9 Quit,
-/// 10 the port's settings hub (Options > Classic / slop), 11 Multiplayer >
-/// Setup, then the hub's pages: 12 Picture and sound, 13 Motion and light,
+/// 10 the port's Slop Options (Options' 14th row), 11 Multiplayer > Setup,
+/// then Slop Options' pages: 12 Picture and sound, 13 Motion and light,
 /// 14 Controls.
 pub(crate) fn menu_screen_id() -> i32 {
     APP.with(|c| {
@@ -281,11 +283,11 @@ pub(crate) fn menu_screen_id() -> i32 {
                 render::MenuScreen::Video => 7,
                 render::MenuScreen::Help => 8,
                 render::MenuScreen::Quit => 9,
-                render::MenuScreen::Extras => 10,
+                render::MenuScreen::SlopOptions => 10,
                 render::MenuScreen::Setup => 11,
-                render::MenuScreen::ExtrasPage(render::ExtrasPage::Picture) => 12,
-                render::MenuScreen::ExtrasPage(render::ExtrasPage::Motion) => 13,
-                render::MenuScreen::ExtrasPage(render::ExtrasPage::Controls) => 14,
+                render::MenuScreen::SlopPage(render::SlopPage::Picture) => 12,
+                render::MenuScreen::SlopPage(render::SlopPage::Motion) => 13,
+                render::MenuScreen::SlopPage(render::SlopPage::Controls) => 14,
             })
             .unwrap_or(0)
     })
@@ -367,7 +369,7 @@ mod tests {
         let (confirm, map) = APP.with(|c| {
             let b = c.borrow();
             let a = b.as_ref().unwrap();
-            (a.menu.new_game_confirm(), a.walk.as_ref().unwrap().map_name.clone())
+            (a.menu.asking().is_some(), a.walk.as_ref().unwrap().map_name.clone())
         });
         assert!(confirm, "the modal is up");
         assert_eq!(map, "maps/e1m1.bsp", "no new game yet");
@@ -474,35 +476,49 @@ mod tests {
         assert!(player_field("health") > 0.0);
     }
 
+    /// Options' Reset to Classic (asks; y: every slop option Classic's,
+    /// the keys and id's Options kept), then Slop Options and a row of each
+    /// page, the Resolution row opening Video Options and back.
     #[test]
-    fn classic_slop_applies_the_preset_and_its_page_each_setting() {
+    fn reset_to_classic_keeps_the_keys_and_slop_options_sets_each_row() {
+        use quake_rs::keys::BIND_JUMP;
         use quake_rs::settings::{Machine, Preset, Settings};
         let settings = || APP.with(|c| c.borrow().as_ref().unwrap().settings.clone());
         assert_eq!(boot(), 1);
         assert_eq!(settings(), Settings::new(Preset::Classic, Machine::default()), "the tests start in Classic");
+        use_slop();
+        crate::host_cmd::execute_console_command("bind j +jump; sensitivity 7; wasm_showfps 1");
         menu_down();
         menu_down();
         menu_select(); // -> Options
-        for _ in 0..13 {
-            menu_down(); // the port's row 13, Classic / slop
-        }
-        menu_right();
-        assert_eq!(settings(), Settings::new(Preset::Slop, Machine::default()), "right: every setting to slop's");
-        menu_left();
-        assert_eq!(settings().preset, Preset::Classic, "left: back");
+        menu_up(); // row 0 wraps to the 15th: Reset to Classic
         menu_select();
-        assert_eq!(menu_screen_id(), 10, "Enter opens the settings hub");
-        menu_down();
+        let asking = || APP.with(|c| c.borrow().as_ref().unwrap().menu.asking());
+        assert_eq!(asking(), Some(quake_rs::menu::Question::ResetClassic), "it asks");
+        menu_quit_no();
+        assert_eq!((asking(), settings().preset), (None, Preset::Slop), "n: nothing changed");
         menu_select();
-        assert_eq!(menu_screen_id(), 12, "...and its row Picture and sound, that page");
+        menu_quit_yes(); // the y key, as the page's YES button presses it
+        let mut want = Settings::new(Preset::Classic, Machine::default());
+        want.binds.bind(b'j', BIND_JUMP);
+        want.cvars.sensitivity = 7.0;
+        assert_eq!(settings(), want, "every slop option Classic's; his key and Mouse Speed kept");
+        assert_eq!((menu_screen_id(), menu_cursor()), (5, 14), "Options, on its row");
+
+        menu_up(); // row 13, Slop Options
+        menu_select();
+        assert_eq!(menu_screen_id(), 10, "Enter opens Slop Options");
+        menu_select();
+        assert_eq!(menu_screen_id(), 12, "...and its first row Picture and sound, that page");
         menu_right(); // Uncapped framerate
         assert_eq!(extras(), 1);
-        menu_down();
-        menu_down();
-        menu_right(); // Pixel size: 1 -> 2
-        assert_eq!(settings().cvars.pixel_size, 2);
+        menu_down(); // Resolution
+        menu_select();
+        assert_eq!(menu_screen_id(), 7, "the Resolution row opens Video Options");
         menu_cancel();
-        assert_eq!(menu_screen_id(), 10, "Esc returns to the hub");
+        assert_eq!((menu_screen_id(), menu_cursor()), (12, 1), "and Escape comes back to it");
+        menu_cancel();
+        assert_eq!(menu_screen_id(), 10, "Esc returns to Slop Options");
         menu_down();
         menu_select();
         assert_eq!(menu_screen_id(), 13, "Motion and light");
@@ -520,6 +536,7 @@ mod tests {
         assert_eq!(menu_screen_id(), 5, "Esc Esc returns to Options");
         menu_select(); // ...on its row
         assert_eq!(menu_screen_id(), 10);
+        assert_eq!(settings().standing().rows(), 2, "the uncapped frame rate and the torches");
         // The checks' shorthand for the first four; other bits are dropped.
         set_extras(-1);
         assert_eq!(extras(), 15);
@@ -539,6 +556,30 @@ mod tests {
         set_extras(2);
         assert_eq!(boot(), 1);
         assert_eq!(extras(), 2);
+    }
+
+    /// Options' Reset to slop: everything, keys and id's Options too, the
+    /// slop preset whole — and the saves stay: a reset deletes nothing.
+    #[test]
+    fn reset_to_slop_is_everything_and_keeps_a_save() {
+        use quake_rs::settings::{Machine, Preset, Settings};
+        let settings = || APP.with(|c| c.borrow().as_ref().unwrap().settings.clone());
+        assert_eq!(boot(), 1);
+        step(0.05); // the game runs: Save may open
+        do_save_command(Some("s3"));
+        let save = crate::common::read_file("s3.sav").expect("saved");
+        crate::host_cmd::execute_console_command("bind j +jump; sensitivity 7; viewsize 80; crosshair 2");
+        menu_down();
+        menu_down();
+        menu_select(); // -> Options
+        menu_down();
+        menu_down(); // row 2, Reset to slop
+        menu_select();
+        assert_eq!(APP.with(|c| c.borrow().as_ref().unwrap().menu.asking()), Some(quake_rs::menu::Question::ResetSlop));
+        menu_quit_yes();
+        assert_eq!(settings(), Settings::new(Preset::Slop, Machine::default()), "everything the slop preset's");
+        assert_eq!(crate::common::read_file("s3.sav").ok(), Some(save), "the save is there, as it was");
+        assert_eq!(crate::config::current_text().unwrap(), "// generated by quake, do not modify\npreset \"slop\"\n");
     }
 
     #[test]
