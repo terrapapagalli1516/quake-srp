@@ -385,6 +385,8 @@ def row(t, px, threads, extra, secs, cool, top):
             r = {"px": px, "threads": t.call("render_threads"), "size": t.pg.evaluate("quake.size()"),
                  "cvar": {extra[0]: t.cvar(extra[0])} if extra else {},
                  "at": time.strftime("%H:%M:%S"), "posture": posture() if t.phone else None, **t.pg.evaluate(VIEW)}
+            if not t.phone:
+                r["fullscreen"] = True   # --local: the page is the whole emulated screen
             if cool > 0:
                 r["cooled"] = t.cool(cool)
             r["timedemo"] = t.timedemo()
