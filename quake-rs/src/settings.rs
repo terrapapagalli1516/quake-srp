@@ -63,7 +63,6 @@
 //! they changed stays as they left it. (id's file lists every value: id's
 //! defaults never changed after release.)
 
-use crate::client::host::FrameCap;
 use crate::cvar::{self, Cvars};
 use crate::keys::Bindings;
 
@@ -106,12 +105,6 @@ impl Machine {
     /// under a CSS pixel there, finer than the eye resolves at arm's length.
     pub const TOUCH_PIXEL_SIZE: u8 = 2;
 
-    /// The frame-rate cap a touch screen's slop preset starts at: 60 pictures
-    /// a second, which is what a phone's cores sustain warm and every second
-    /// refresh of the 120 Hz a finger brings its panel to (web/PLATFORM.md,
-    /// "On an Android phone"); the game itself still runs every refresh.
-    pub const TOUCH_FRAME_CAP: FrameCap = FrameCap::new(60);
-
     /// The renderer's threads to start at (`r_threads`): every thread
     /// offered, or at most [`Machine::TOUCH_THREADS`] on a touch screen.
     pub fn render_threads(self) -> usize {
@@ -123,13 +116,6 @@ impl Machine {
     /// [`Machine::TOUCH_PIXEL_SIZE`] on a touch screen.
     pub fn pixel_size(self) -> u8 {
         if self.touch { Machine::TOUCH_PIXEL_SIZE } else { 1 }
-    }
-
-    /// The slop preset's frame-rate cap (`host_maxfps`): none, a frame every
-    /// display refresh, or [`Machine::TOUCH_FRAME_CAP`] on a touch screen
-    /// (the Classic preset's is id's 72 on any machine).
-    pub fn frame_cap(self) -> FrameCap {
-        if self.touch { Machine::TOUCH_FRAME_CAP } else { FrameCap::NONE }
     }
 }
 
@@ -176,14 +162,15 @@ impl Preset {
     /// The preset's cvars on `machine`: [`Cvars::classic`] or
     /// [`Cvars::slop`], with the numbers the machine picks — the renderer's
     /// threads and the pixel size, the same in both presets (Classic's
-    /// picture is a video mode, so its pixel size waits for `vid_native`),
-    /// and slop's frame-rate cap (Classic's is id's 72 everywhere).
+    /// picture is a video mode, so its pixel size waits for `vid_native`).
+    /// The frame-rate cap is the preset's on any machine: id's 72 in
+    /// Classic, none in slop (a touch screen too, since 2026-10-04).
     pub fn cvars(self, machine: Machine) -> Cvars {
-        let (values, max_fps) = match self {
-            Preset::Classic => (Cvars::classic(), FrameCap::ID),
-            Preset::Slop => (Cvars::slop(), machine.frame_cap()),
+        let values = match self {
+            Preset::Classic => Cvars::classic(),
+            Preset::Slop => Cvars::slop(),
         };
-        Cvars { threads: machine.render_threads(), pixel_size: machine.pixel_size(), max_fps, ..values }
+        Cvars { threads: machine.render_threads(), pixel_size: machine.pixel_size(), ..values }
     }
 
     /// The preset's Screen size (`viewsize`): `default.cfg`'s 100 in
@@ -406,6 +393,7 @@ impl Standing {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::client::host::FrameCap;
     use crate::keys::{BIND_ATTACK, BIND_FORWARD, BIND_LOOKUP, K_MWHEELUP};
 
     #[test]
@@ -663,7 +651,7 @@ mod tests {
             let c = preset.cvars(desktop);
             assert_eq!((c.pixel_size, c.threads), (1, 16), "{preset:?} on a desktop");
         }
-        assert_eq!((Preset::Slop.cvars(phone).max_fps, Preset::Slop.cvars(desktop).max_fps), (FrameCap::new(60), FrameCap::NONE));
+        assert_eq!((Preset::Slop.cvars(phone).max_fps, Preset::Slop.cvars(desktop).max_fps), (FrameCap::NONE, FrameCap::NONE), "no cap, a phone too");
         assert_eq!((Preset::Classic.cvars(phone).max_fps, Preset::Classic.cvars(desktop).max_fps), (FrameCap::ID, FrameCap::ID));
         assert_eq!(Machine { touch: true, threads: 2 }.render_threads(), 2, "four at most, not four at least");
         assert_eq!(Machine { touch: false, threads: 0 }.render_threads(), 1, "always one");
@@ -679,9 +667,9 @@ mod tests {
         let mut at_1x = on_phone.clone();
         at_1x.cvars.pixel_size = 1;
         at_1x.cvars.threads = 8;
-        at_1x.cvars.max_fps = FrameCap::NONE;
-        assert_eq!(at_1x.config_text(), format!("{head}host_maxfps \"0\"\nvid_pixelsize \"1\"\nr_threads \"8\"\n"),
-            "and 1x on eight with no cap choices on a phone");
+        at_1x.cvars.max_fps = FrameCap::new(60);
+        assert_eq!(at_1x.config_text(), format!("{head}host_maxfps \"60\"\nvid_pixelsize \"1\"\nr_threads \"8\"\n"),
+            "and 1x on eight, capped at 60, choices on a phone");
 
         // Applying a preset sets the machine's numbers where they are slop
         // options, and never touches the threads (no slop option).

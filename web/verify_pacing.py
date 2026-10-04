@@ -35,9 +35,10 @@ does not wait for a slow one; where the line lies depends on the device:
       nothing; 72 is id's gate (every second refresh at 144 Hz and at 120,
       the game's frames with it). Then the page's loop at 120, 144 and 110 Hz
       (its refreshes come from a clock at that rate: a headless browser's
-      are 60): a touch screen starts at 60 and draws every second, third and
-      second refresh, a host frame every one; at 120 relaxed as well as
-      waited for; 144 there draws every refresh;
+      are 60): a touch screen starts with no cap, as a desktop does, every
+      refresh drawn; at 60 it draws every second, third and second refresh,
+      a host frame every one; at 120 relaxed as well as waited for; 144
+      there draws every refresh;
   12. no console errors.
 
 `stall_ms` makes a host frame slow on demand and exists only in a
@@ -317,7 +318,7 @@ with sync_playwright() as p:
     cadence("no cap", 0, 120.0, 1)
     pg.context.close()
 
-    # The page's own loop at 144, 110 and 120 Hz, a touch screen (60).
+    # The page's own loop at 144, 110 and 120 Hz, a touch screen capped at 60.
     def evenly(w, every):
         g = gaps(w["drew"])
         share = sum(1 for x in g if x == every) / len(g) if g else 0.0
@@ -331,6 +332,8 @@ with sync_playwright() as p:
         return w
     for hz, every in [(144, 3), (110, 2)]:
         pg = page(REFRESH.replace("HZ", str(hz)), query="?slop&touch")
+        pg.evaluate("quake.callLine('exec host_maxfps 60')")
+        time.sleep(0.5)
         w = window_with_game(pg)
         ok, detail = evenly(w, every)
         check(f"a touch screen at {hz} Hz: drawn every {['', '', 'second', 'third'][every]} refresh", ok, detail)
@@ -339,7 +342,11 @@ with sync_playwright() as p:
         pg.context.close()
     pg = page(REFRESH.replace("HZ", "120"), query="?slop&touch")
     cap = pg.evaluate("quake.text('cvar', 'host_maxfps')")
-    check("a touch screen starts at a 60 fps cap (the machine's, the slop preset)", cap == "60", f"host_maxfps {cap}")
+    check("a touch screen starts with no cap, as a desktop does (the slop preset)", cap == "0", f"host_maxfps {cap}")
+    ok, detail = evenly(window(pg), 1)
+    check("...every refresh drawn at 120 Hz", ok, detail)
+    pg.evaluate("quake.callLine('exec host_maxfps 60')")
+    time.sleep(0.5)
     w = window_with_game(pg)
     ok, detail = evenly(w, 2)
     check("a touch screen at 120 Hz, waited for: drawn every second refresh", ok and w["relaxed"] == 0, detail)
