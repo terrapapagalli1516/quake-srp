@@ -158,9 +158,11 @@ fn mod_dirs() -> (Vec<String>, bool) {
 /// The threads build's startup check: its shared memory must be the fixed
 /// size `build.rs` links (initial = maximum), or a thread may trap when
 /// another grows it (web/PLATFORM.md, "Threads"). Says so on stderr if not.
+/// (`build.rs` names the threads build: `cfg(target_feature = "atomics")`
+/// is unstable, and false on stable Rust even there.)
 fn check_fixed_memory() {
-    #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
-    {
+    #[cfg(target_arch = "wasm32")]
+    if option_env!("QUAKE_WASM_THREADS").is_some() {
         let have = core::arch::wasm32::memory_size::<0>() as u64 * 65536;
         match option_env!("QUAKE_WASM_FIXED_MEMORY").and_then(|v| v.parse::<u64>().ok()) {
             Some(want) if have == want => {}
@@ -170,8 +172,21 @@ fn check_fixed_memory() {
     }
 }
 
+/// A fixed memory (the threads build's) allocates its frames' buffers once,
+/// each for the largest frame there is ([`vid::MAX_FRAME_PIXELS`]): a
+/// buffer that grew with the window would leave a hole the next larger
+/// frame's cannot use, and the memory cannot grow past it
+/// (`quake_rs::render::reserve_frames`). A growable memory grows as the
+/// frames need.
+fn reserve_frames() {
+    if option_env!("QUAKE_WASM_FIXED_MEMORY").is_some() {
+        quake_rs::render::reserve_frames(vid::MAX_FRAME_PIXELS);
+    }
+}
+
 fn main() -> ExitCode {
     check_fixed_memory();
+    reserve_frames();
     // IN_StartupJoystick's `-nojoy`: no pad is ever read.
     let nojoy = std::env::args().any(|a| a == "-nojoy");
     // COM_InitFilesystem: a Sys_Error here (a pack that is not one, a

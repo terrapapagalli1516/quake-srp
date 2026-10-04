@@ -44,20 +44,25 @@ const MIN_H: i32 = 200;
 const MAX_H: i32 = 800;
 const MAX_PIXELS: i32 = 1280 * 800;
 
-/// The most pixels a native frame may have: two frames of it fit the threads
-/// build's fixed 512 MiB (`build.rs`), with room to spare.
+/// The most pixels a native frame may have. The threads build's memory is a
+/// fixed 512 MiB (`build.rs`), and it allocates its frames' buffers once,
+/// for a frame this large (`main`'s `reserve_frames`), so a window walked
+/// up through any sizes holds what a page opened at the largest does; 12
+/// million leaves most of the memory to the game.
 ///
 /// Measured (2026-10-03, headless Chromium, a growable threads build, whose
 /// memory's size is the heap's high-water mark; 1x on 8 threads, e1m1, e1m3,
 /// e1m4 and e1m7 each turned all the way round): a page started at a size
 /// holds about 26 MB and 19 bytes a pixel — 1920x920 56 MB, 3840x2000 145,
-/// 5120x2720 286, 6400x3440 437, 7680x4160 623 (so 8K at 1x stops the
-/// game). And a resize does not hand the old frame's memory to the next,
-/// larger one: the heap then holds both (4800x2880 then 5120x3200: 618 MB,
-/// where a page started at 5120x3200 takes 333). So the limit is what a
-/// window's frame and its fullscreen's hold together: 12 million pixels,
-/// about 26 + 2 x 19 x 12 = 482 MB of the 537. 4K (8.3 million) and a
-/// 5120x2160 ultrawide (11.1) draw at 1x; 5K (14.7), 6K and 8K at 2x.
+/// 5120x2720 286, 6400x3440 437, 7680x4160 623 (so 8K at 1x would stop the
+/// game). Frame buffers that grow with the window do not hand the old
+/// frame's memory to the next, larger one (4800x2880 then 5120x3200: 618
+/// MB, where a page started at 5120x3200 takes 333), and on 2026-10-04, e1m3,
+/// walked up to 4224x2656 (11.2 million) through 4, 6 and 17 sizes, a page
+/// held 307, 284 and 282 MB where one opened there held 188. With the
+/// buffers reserved: 202 MB from the first frame, at any size, and 202 at
+/// the end of each walk. 4K (8.3 million) and a 5120x2160 ultrawide (11.1)
+/// draw at 1x; 5K (14.7), 6K and 8K at 2x.
 pub(crate) const MAX_FRAME_PIXELS: usize = 12_000_000;
 
 /// Clamp a requested `(w, h)` render resolution into the supported envelope:
