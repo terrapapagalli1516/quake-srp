@@ -596,10 +596,11 @@ frame:
 At most 0.23 ms a frame on one thread (e2m5 at 72 Hz, where nearly every
 frame rebakes every torch-lit block), 0.02–0.11 elsewhere; on eight, 0.05–0.12
 ms (before the bakes went to the threads, the same 0.22 ms as on one: up to
-25% of the frame at 72 Hz, now 13%). A frame bakes 0.08–0.38M texels here,
-two to eleven threads' worth at `BAKE_TEXELS_PER_THREAD`, so the thread
-starts are a good part of what is left. The worst frame stays well inside
-480 Hz's 2.08 ms.
+25% of the frame at 72 Hz, now 13%). A frame bakes 0.08–0.38M texels here.
+When this was measured the bakes had a round of threads of their own, two to
+eleven threads for these frames, and the thread starts were a good part of
+what is left; the bakes now run in the bands' round (PERF_PLAN.md §14). The
+worst frame stays well inside 480 Hz's 2.08 ms.
 
 ## Steady torches that flicker (`r_torchflicker`, `fleet/torchlight`)
 
@@ -1035,6 +1036,7 @@ cd quake-rs && cargo build --release
 ./target/release/quaketool framerate ../quake-data/ID1/PAK0.PAK --only jump,flash --rates 144,480
 ./target/release/quaketool framerate ../quake-data/ID1/PAK0.PAK --budget --res 1280x800
 ./target/release/quaketool framerate ../quake-data/ID1/PAK0.PAK --lerpmove  # monsters between steps (5 s)
+./target/release/quaketool framerate ../quake-data/ID1/PAK0.PAK --serial --threads 1,4,8 --res 2631x1071  # the page's 2026 frame and what it does on one thread (PERF_PLAN.md §14; --paced: at a display's rate)
 ./target/release/quaketool framerate ../quake-data/ID1/PAK0.PAK,PAK1.PAK --lightstyles --res 1920x1080  # gliding lights' cost (8 min)
 ./target/release/quaketool framerate ../quake-data/ID1/PAK0.PAK,PAK1.PAK --torchflicker 1 --res 1920x1080 --secs 3  # flickering torches' cost (7 min)
 ./target/release/quaketool framerate ../quake-data/ID1/PAK0.PAK,PAK1.PAK --bake --threads 1,2,4,8,16 --res 1920x1080  # the bakes on 1-16 threads (10 min)

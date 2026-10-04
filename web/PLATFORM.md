@@ -1422,8 +1422,8 @@ stdout stay the main program's, and a thread cannot spawn threads yet.
 
 **A thread's stack** (1 MiB, malloc'd, no guard page) is what `std` asks
 wasi-libc's `pthread_create` for:
-1 MiB (`std::thread`'s wasip1 `DEFAULT_MIN_STACK_SIZE`; the bands' and the
-bakes' scoped threads ask nothing more), allocated from the program's own
+1 MiB (`std::thread`'s wasip1 `DEFAULT_MIN_STACK_SIZE`; the frame's scoped
+threads, which bake and draw the bands, ask nothing more), allocated from the program's own
 heap, with no guard below it — linear memory has no unmapped pages. A
 thread that recurses past it does not fault: it writes over whatever the
 heap holds below its stack (the review of the bakes measured 1500 KiB of

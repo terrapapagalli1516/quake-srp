@@ -1769,12 +1769,6 @@ mod tests {
         (0..COLORMAP_LEN).map(|i| (i / 256) as u8).collect()
     }
 
-    /// The C's stepping, hand-worked: one lightmap cell with (inverted) luxels
-    /// 1000 (top left), 2000 (top right), 3000 (bottom left), 500 (bottom right).
-    /// Each row starts at the right edge's value and steps left by
-    /// `(left - right) >> 4`, flooring (-1000 >> 4 = -63), so texel 15 gets the
-    /// right luxel exactly and texel 0 gets `right + 15 * step` — not the left
-    /// luxel, which a bilinear sample (the port's old bake) gives it.
     /// [`draw_surface_block`] as it was first written, the block size a
     /// variable and every row finding its texture row: the reference the
     /// unrolled one is held to.
@@ -1875,6 +1869,12 @@ mod tests {
         assert!(compared > 500_000);
     }
 
+    /// The C's stepping, hand-worked: one lightmap cell with (inverted) luxels
+    /// 1000 (top left), 2000 (top right), 3000 (bottom left), 500 (bottom right).
+    /// Each row starts at the right edge's value and steps left by
+    /// `(left - right) >> 4`, flooring (-1000 >> 4 = -63), so texel 15 gets the
+    /// right luxel exactly and texel 0 gets `right + 15 * step` — not the left
+    /// luxel, which a bilinear sample (the port's old bake) gives it.
     #[test]
     fn surface_block_steps_light_like_r_draw_surface_block8() {
         let cm = row_colormap();

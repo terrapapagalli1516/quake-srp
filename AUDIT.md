@@ -2579,7 +2579,7 @@ Both off is **Classic**, id's: views clamped to `MAXWIDTH`x`MAXHEIGHT`, `fov` ac
   0xFFFFF` wraps from 2048 wide. The port's `Edge::u`/`u_step` are 44.20 in an `i64`
   with id's values wherever the `int` holds them (an edge that is stepped spans two or more
   rows, so `|u_step| < w`). Every other table the C sizes by `MAXWIDTH`/`MAXHEIGHT` was
-  already a run-time `Vec` (`newedges`, `removeedges`, `DPS_MAXSPANS`, the warp's `rowptr`
+  already a run-time `Vec` (`newedges`, `DPS_MAXSPANS`, the warp's `rowptr`
   and `column`, `intsintable`); `r_maxedges`/`r_maxsurfs`/`MAXSPANS` are growable, and demo1
   at 3840x2160 peaks at 1112 edges and 392 surfaces (id's pools: 2400, 800), about what it
   needs at 640x400 (950, 378). Texture, lightmap, sky and z fixed point are in texel or

@@ -1412,7 +1412,8 @@ dynamic light every block it touches. At 1080p on 8 threads the torch-lit views 
   (`web/wasi.js`), as the bands' are. Baking inside the bands, at a band's first touch of
   a face, would save the second round of thread starts but needs a lock or a once-cell
   per block in the span setup and bakes a face shared by two bands on whichever comes
-  first; not built.
+  first; not built here. (§14 built it: a once-cell per block, and every thread takes
+  the bake jobs before its first band.)
 - **When it pays.** A texel of baking costs about 0.7 ns, and a round of threads
   (spawn, run, join) about 32, 61 and 77 µs natively for 1, 3 and 7 helpers when
   threads ran a moment before, 145–415 µs after an idle gap (14 ms: a 72 Hz
@@ -1586,6 +1587,19 @@ interleaved rounds): natively at 2631×1071, 2026 video, 99.7 → 102.4 fps on o
 build, `?2026` with the overlay, a 2538×828 frame at pixel size 1): 316 → 369 fps on
 8 threads (3.17 → 2.71 ms a frame), 268 → 299 on 4, and 386 and 301 once demo playback
 drew through `client::draw_view` too (it had kept a round a view).
+
+**What one thread pays.** The 2026 frame above is level on one thread only because
+its 2-D layer got 0.12 ms cheaper: the world itself draws slower there. The review
+measured it against the branch's base, interleaved, under the lock (medians; the 3-D
+view alone, warm): Classic at 2631×1071 2.10 → 2.26 ms on e1m3 and 1.89 → 2.10 on e1m1
+(+8%, +11%), the 2026 view at that size 7.29 → 7.54 (+3%), Classic at 640×400
+0.615 → 0.623 (+1%); `timedemo demo1` on one thread, Classic, 348 → 330 fps at
+2631×1071 and 1283 → 1243 at 640×400 (−5%, −3%), 2026 native 111.8 → 111.0. Commit by
+commit it is the spans in row order (a band's run in place of each surface's list: one
+thread loses the surface-by-surface order, +11–12% on the Classic native views) and
+the bake lookup in the span's setup (+4–7%); the one-walk scan and the shared round
+give a little back. Every browser deploy and every multi-core run is faster; a run on
+one thread is the price, and `WorldDraw::draw_band` is where to win it back.
 
 **Not measured:** an Android phone. These are a desktop's cores awake; what a round of
 threads costs there when the workers slept 10 ms, and what the calling thread's part
