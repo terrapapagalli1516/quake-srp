@@ -197,6 +197,7 @@ pub(crate) fn step(dt: f32) -> i32 {
         let show_fps = a.settings.cvars.show_fps;
         let lerpmove = a.settings.cvars.lerpmove;
         let lerpmodels = a.settings.cvars.lerpmodels;
+        let nailbarrels = a.settings.cvars.nailbarrels;
         // Host_EndGame on the demo's svc_disconnect: once a demo has shown its
         // last frame, CL_NextDemo plays the next of the `startdemos` loop
         // (quake.rc: demo1 demo2 demo3) — or, outside the loop, the client
@@ -219,6 +220,7 @@ pub(crate) fn step(dt: f32) -> i32 {
             wk.stepping = stepping;
             wk.lerpmove = lerpmove;
             wk.lerpmodels = lerpmodels;
+            wk.nailbarrels = nailbarrels;
             wk.renderer.set_threads(threads);
         }
         // CL_SendCmd's IN_Move: the pad's IN_JoyMove joins the keys' move.
