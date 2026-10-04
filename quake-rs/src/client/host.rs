@@ -54,14 +54,15 @@ pub const HOST_FRAME_INTERVAL: f64 = 1.0 / 72.0;
 /// `host_filter_time_caps_every_refresh_rate_at_a_steady_cadence`.
 pub const HOST_FRAME_TOLERANCE: f64 = 0.001;
 
-/// `host_maxfps` (QuakeSpasm's name for it): the most host frames a second.
+/// `host_maxfps` (QuakeSpasm's name for it): the most frames drawn a second.
 /// id's 72 is `Host_FilterTime`'s own gate, with id's timing
-/// ([`host_filter_time`]): the Classic preset's, which the oracle proves.
-/// [`FrameCap::NONE`] is a frame on every display refresh
-/// ([`host_filter_time_display`]), the game stepped as id's 72 Hz frames
-/// (`stepping`). The other caps keep that timing and only draw fewer frames
-/// ([`host_filter_time_capped`]). On the console a number: 0 (none) or
-/// 60..=240.
+/// ([`host_filter_time`]): at most 72 host frames, each drawn — the Classic
+/// preset's, which the oracle proves. With any other cap the game is a host
+/// frame on every display refresh ([`host_filter_time_display`], stepped as
+/// id's 72 Hz frames: `stepping`), the 60 to 480 Hz `quaketool framerate
+/// --check` proves, and only the picture is held to the cap
+/// ([`FrameCap::picture_due`]): [`FrameCap::NONE`] draws every frame, 60 to
+/// 240 fewer. On the console a number: 0 (none) or 60..=240.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameCap(u32);
 
@@ -103,12 +104,31 @@ impl FrameCap {
     /// the cap still draws every refresh: a cap is at most 5% over itself.
     pub const TOLERANCE: f64 = 0.05;
 
-    /// The least real time between two host frames under this cap: 1/cap,
-    /// less [`FrameCap::TOLERANCE`] of it; none's is [`HOST_FRAMETIME_MIN`]
-    /// (`host_filter_time_display`'s). id's 72 is [`host_filter_time`]'s
-    /// own gate, not this.
+    /// The least real time between two pictures under this cap: 1/cap, less
+    /// [`FrameCap::TOLERANCE`] of it; none's is 0. (id's 72 is
+    /// [`host_filter_time`]'s own gate, not this.)
     pub fn interval(self) -> f64 {
-        if self == FrameCap::NONE { HOST_FRAMETIME_MIN } else { (1.0 - FrameCap::TOLERANCE) / f64::from(self.0) }
+        if self == FrameCap::NONE { 0.0 } else { (1.0 - FrameCap::TOLERANCE) / f64::from(self.0) }
+    }
+
+    /// Whether the host frame at `realtime` draws its picture: with no cap
+    /// every one; else the first at least [`FrameCap::interval`] after the
+    /// last picture (`last_picture`, moved to `realtime` when it draws). The
+    /// host frames between still run — the game, the sound, the clocks — and
+    /// only their pixels are skipped (`cl_main::walk_frame_undrawn`). The
+    /// page runs a host frame every display refresh, so a cap that divides
+    /// the display's rate draws every k-th refresh, evenly (60 on 120 Hz:
+    /// every second); one above it, every refresh; one that does not divide
+    /// it, below itself (60 on 144 Hz: every third, 48 pictures a second; on
+    /// 110 Hz every second, 55) — while the game steps at the display's rate
+    /// either way. A frame between refreshes (the page's relaxed pacing asks
+    /// for one the moment a late frame comes back) draws no sooner.
+    pub fn picture_due(self, realtime: f64, last_picture: &mut f64) -> bool {
+        let due = realtime - *last_picture >= self.interval();
+        if due {
+            *last_picture = realtime;
+        }
+        due
     }
 
     /// The cap a cvar value names: none for 0 (or less, or a word),
@@ -180,28 +200,14 @@ pub fn host_filter_time_uncapped(realtime: f64, oldrealtime: &mut f64) -> f64 {
 /// 2 ms, and the game would run ahead of the clock. With the cap off the
 /// game advances exactly with real time between the clamps.
 pub fn host_filter_time_display(realtime: f64, oldrealtime: &mut f64) -> Option<f64> {
-    host_filter_time_capped(realtime, oldrealtime, FrameCap::NONE)
-}
-
-/// The capped host's gate (the port's own, `host_maxfps` 60..=240 but id's
-/// 72): [`host_filter_time_display`] holding the frames to `cap`. A frame
-/// runs on the first call at least [`FrameCap::interval`] after the last
-/// one and advances the game by the whole time since, so the calls skipped
-/// between lose none of it. The page calls once a display refresh, so a cap
-/// that divides the display's rate draws every k-th refresh, evenly (60 on
-/// 120 Hz: every second), one above it draws every refresh, and one that
-/// does not divide it runs below itself (60 on 144 Hz: every third, 48). A
-/// call between refreshes (the page's relaxed pacing asks for a frame the
-/// moment a late one comes back) draws no sooner. [`FrameCap::NONE`] is
-/// [`host_filter_time_display`] exactly.
-pub fn host_filter_time_capped(realtime: f64, oldrealtime: &mut f64, cap: FrameCap) -> Option<f64> {
     let elapsed = realtime - *oldrealtime;
-    if elapsed < cap.interval() {
+    if elapsed < HOST_FRAMETIME_MIN {
         return None;
     }
     *oldrealtime = realtime;
     Some(elapsed.min(HOST_FRAMETIME_MAX))
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -387,34 +393,41 @@ mod tests {
         assert_eq!(host_filter_time_display(0.5, &mut old), Some(HOST_FRAMETIME_MAX));
     }
 
-    /// Drive [`host_filter_time_capped`] once a refresh at `hz` for ten
-    /// seconds, stamps coarsened to 0.1 ms as in [`gate_run`]: the refreshes
-    /// a frame ran on, and the game time against the real time.
-    fn capped_run(cap: FrameCap, hz: f64) -> (Vec<usize>, f64, f64) {
-        let (mut realtime, mut old, mut last, mut game) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
-        let mut at = Vec::new();
+    /// A host frame once a refresh at `hz` for ten seconds, stamps coarsened
+    /// to 0.1 ms as in [`gate_run`], the picture held to `cap`: the refreshes
+    /// that drew, how many host frames ran, and the game time against the
+    /// real time.
+    fn capped_run(cap: FrameCap, hz: f64) -> (Vec<usize>, usize, f64, f64) {
+        let (mut realtime, mut old, mut last, mut game, mut picture) = (0.0f64, 0.0f64, 0.0f64, 0.0f64, f64::MIN);
+        let (mut at, mut frames) = (Vec::new(), 0);
         for i in 1..=(hz as usize) * 10 {
             let now = ((i as f64 * 1000.0 / hz) * 10.0).round() / 10.0;
             realtime += ((now - last) / 1000.0) as f32 as f64;
             last = now;
-            if let Some(dt) = host_filter_time_capped(realtime, &mut old, cap) {
-                at.push(i);
+            if let Some(dt) = host_filter_time_display(realtime, &mut old) {
+                frames += 1;
                 game += dt;
+                if cap.picture_due(realtime, &mut picture) {
+                    at.push(i);
+                }
             }
         }
-        (at, game, old)
+        (at, frames, game, old)
     }
 
-    /// A cap draws on the first refresh at least its interval after the last
-    /// frame: every k-th refresh, evenly, where it divides the display's
-    /// rate; every refresh where it is above it; below itself where it does
-    /// not divide it — and the game loses no time to the refreshes skipped.
+    /// A cap holds the picture, not the game: every refresh is a host frame,
+    /// and the picture is drawn on the first refresh at least the cap's
+    /// interval after the last one — every k-th refresh, evenly, where the
+    /// cap divides the display's rate; every refresh where it is above it;
+    /// below itself where it does not divide it.
     #[test]
-    fn a_cap_draws_every_kth_refresh_evenly_and_keeps_time() {
+    fn a_cap_draws_every_kth_refresh_evenly_while_the_game_steps_every_one() {
         let cases = [
             (60, 120.0, 2), // a phone's panel at 120 Hz: every second refresh
             (60, 60.0, 1),
-            (60, 144.0, 3), // 48 a second: 60 does not divide 144
+            (60, 144.0, 3), // 48 pictures a second: 60 does not divide 144
+            (60, 110.0, 2), // 55: an Android phone's page with a finger down
+            (60, 90.0, 2),  // 45
             (120, 120.0, 1),
             (120, 240.0, 2),
             (120, 144.0, 2), // 72
@@ -425,35 +438,36 @@ mod tests {
             (240, 360.0, 2),
         ];
         for (fps, hz, k) in cases {
-            let (at, game, old) = capped_run(FrameCap::new(fps), hz);
+            let (at, frames, game, old) = capped_run(FrameCap::new(fps), hz);
             assert!(at.windows(2).all(|w| w[1] - w[0] == k), "{fps} on {hz} Hz: every {k}th refresh, evenly");
             let rate = at.len() as f64 / 10.0;
-            assert!((rate - hz / k as f64).abs() < 0.2, "{fps} on {hz} Hz: {rate} a second");
+            assert!((rate - hz / k as f64).abs() < 0.2, "{fps} on {hz} Hz: {rate} pictures a second");
+            assert_eq!(frames, hz as usize * 10, "{fps} on {hz} Hz: a host frame every refresh");
             assert!((game - old).abs() < 1e-6, "{fps} on {hz} Hz: game {game} against real {old}");
         }
-        // No cap: every refresh, as the display gate.
-        let (at, _, _) = capped_run(FrameCap::NONE, 480.0);
+        // No cap: every refresh draws.
+        let (at, _, _, _) = capped_run(FrameCap::NONE, 480.0);
         assert_eq!(at.len(), 4800);
     }
 
-    /// 60 against a 120 Hz refresh holds every second refresh through
-    /// +-0.3 ms of timestamp jitter, and a call between two refreshes (the
+    /// 60 against a 120 Hz refresh draws every second refresh through
+    /// +-0.3 ms of timestamp jitter, and a frame between two refreshes (the
     /// page's relaxed pacing asking the moment a late frame comes back) draws
     /// no sooner than the cap's interval.
     #[test]
-    fn a_cap_holds_through_jitter_and_calls_between_refreshes() {
+    fn a_cap_holds_through_jitter_and_frames_between_refreshes() {
         let cap = FrameCap::new(60);
         let mut seed = 0x5eed_u32;
-        let (mut realtime, mut old, mut last) = (0.0f64, 0.0f64, 0.0f64);
+        let (mut realtime, mut last, mut picture) = (0.0f64, 0.0f64, f64::MIN);
         let mut at = Vec::new();
         for i in 1..=1200usize {
             let refresh = i as f64 * 1000.0 / 120.0 + (lcg(&mut seed) - 0.5) * 0.6;
-            // A late frame's answer 3 ms after every frame's refresh.
+            // A late frame's answer 3 ms after every drawn refresh.
             let calls = if at.last() == Some(&(i - 1)) { vec![refresh - 5.33, refresh] } else { vec![refresh] };
             for now in calls {
                 realtime += ((now - last) / 1000.0) as f32 as f64;
                 last = now;
-                if host_filter_time_capped(realtime, &mut old, cap).is_some() {
+                if cap.picture_due(realtime, &mut picture) {
                     assert_eq!(now, refresh, "refresh {i}: only a refresh draws");
                     at.push(i);
                 }

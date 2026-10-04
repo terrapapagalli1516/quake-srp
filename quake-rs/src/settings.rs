@@ -106,9 +106,10 @@ impl Machine {
     /// under a CSS pixel there, finer than the eye resolves at arm's length.
     pub const TOUCH_PIXEL_SIZE: u8 = 2;
 
-    /// The frame-rate cap a touch screen's slop preset starts at: its own
-    /// 60 Hz refresh, which an Android phone's Chrome keeps the page's frames to
-    /// anyway (STATUS.md, 2026-09-30), and what its cores sustain warm.
+    /// The frame-rate cap a touch screen's slop preset starts at: 60 pictures
+    /// a second, which is what a phone's cores sustain warm and every second
+    /// refresh of the 120 Hz a finger brings its panel to (web/PLATFORM.md,
+    /// "On an Android phone"); the game itself still runs every refresh.
     pub const TOUCH_FRAME_CAP: FrameCap = FrameCap::new(60);
 
     /// The renderer's threads to start at (`r_threads`): every thread

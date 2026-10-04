@@ -103,11 +103,13 @@ pub struct Cvars {
     /// `_vid_default_mode_win`), shown in a 4:3 box; the Video Options list.
     /// Not used while [`Cvars::native`] is on.
     pub vid_resolution: (u16, u16),
-    /// `host_maxfps` (QuakeSpasm's name): the most frames a second
-    /// ([`FrameCap`]). id's 72 is `Host_FilterTime`'s gate (Classic); none, a
-    /// host frame on every display refresh, the game stepped as id's 72 Hz
-    /// frames ([`crate::stepping::Stepping::Uncapped`]); a touch screen's
-    /// slop preset starts at 60 ([`crate::settings::Machine::frame_cap`]).
+    /// `host_maxfps` (QuakeSpasm's name): the most frames drawn a second
+    /// ([`FrameCap`]). id's 72 is `Host_FilterTime`'s gate (Classic): the
+    /// game's frames too. Otherwise a host frame on every display refresh,
+    /// the game stepped as id's 72 Hz frames
+    /// ([`crate::stepping::Stepping::Uncapped`]), and only the pictures held
+    /// to the cap (none: every one drawn); a touch screen's slop preset
+    /// starts at 60 ([`crate::settings::Machine::frame_cap`]).
     /// The retired `wasm_uncapped` still sets and reads it ([`RETIRED`]).
     pub max_fps: FrameCap,
     /// `wasm_showfps`: QuakeWorld's frame-rate readout.
@@ -540,7 +542,7 @@ pub const CVARS: &[Cvar] = &[
     Cvar { name: "_vid_resolution", archive: true, departure: false, help: "video mode WxH (4:3 box)",
         get: |c| format!("{}x{}", c.vid_resolution.0, c.vid_resolution.1),
         set: |c, v| if let Some(m) = parse_mode(v) { c.vid_resolution = m } },
-    Cvar { name: "host_maxfps", archive: true, departure: true, help: "frames a second at most, 0 none",
+    Cvar { name: "host_maxfps", archive: true, departure: true, help: "frames drawn a second, 0 none",
         get: |c| c.max_fps.cvar().to_string(), set: |c, v| c.max_fps = FrameCap::from_cvar(atof(v)) },
     Cvar { name: "wasm_showfps", archive: true, departure: true, help: "frame rate readout",
         get: |c| flag(c.show_fps), set: |c, v| c.show_fps = on(v) },

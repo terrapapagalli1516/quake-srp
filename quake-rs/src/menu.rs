@@ -151,7 +151,8 @@ pub enum RowKind {
     /// A cvar that is on or off (`M_DrawCheckbox`); any key flips it.
     Toggle,
     /// `host_maxfps`: `60`, `id's 72`, `120`, `144`, `240`, `none`
-    /// ([`FrameCap::STEPS`]); left and right step it, right the more frames.
+    /// ([`FrameCap::STEPS`]), the most frames drawn a second; left and right
+    /// step it, right the more frames.
     FrameCap,
     /// The picture's size (`vid_native`, `vid_pixelsize`): shows the size the
     /// game draws at; Enter opens Video Options, the one place it is
@@ -222,7 +223,7 @@ pub const PICTURE_ROWS: [SettingRow; 9] = [
     SettingRow {
         cvar: "host_maxfps",
         label: "        Frame rate cap",
-        help: ["At most this many frames a second;", "none: one every screen refresh"],
+        help: ["Frames drawn a second, at most;", "id's 72 holds the game to it too"],
         kind: RowKind::FrameCap,
     },
     SettingRow {
