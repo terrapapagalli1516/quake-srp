@@ -247,7 +247,7 @@ fn sky_layers(pixels: &[u8], tw: usize) -> Option<&SkyLayers> {
 /// the same two texels, read with no bounds check (each index is inside the
 /// array by its masks). A tenth off a sky pixel, which still costs about
 /// twice a wall's: two texel addresses a pixel, and `D_Sky_uv_To_st`'s
-/// square root and divisions every 32 (PERF_PLAN.md, §14).
+/// square root and divisions every 32 (PERF_PLAN.md, §15).
 #[inline]
 fn sky_layers_sample(layers: &SkyLayers, s: i32, t: i32, front: i32) -> u8 {
     let texel = |c: i32| ((c >> 16) & SKYMASK) as usize;
@@ -260,31 +260,44 @@ fn sky_layers_sample(layers: &SkyLayers, s: i32, t: i32, front: i32) -> u8 {
 /// [`draw_sky_span`]'s walk of the span's 16.16 coordinates, each pixel
 /// written as `sample(s, t)` (the tests sample other composites along the
 /// same walk).
+///
+/// `D_DrawSkyScans8` works out a segment's exact end on reaching the
+/// segment, and its pixels wait for that square root and those divisions.
+/// Here each segment's end is asked for a segment ahead, before the pixels of
+/// the one before, so it is worked out while they are drawn: the same values
+/// (each end is a function of its pixel alone), a sky pixel 6-10% faster
+/// (PERF_PLAN.md, §15).
 #[inline]
 fn sky_span(out: &mut [u8], u: i32, v: i32, count: i32, view: &SkyView, sample: impl Fn(i32, i32) -> u8) {
-    let mut u = u;
-    let mut count = count;
-    let (mut s, mut t) = sky_uv_to_st(u, v, view);
-    let (mut sstep, mut tstep) = (0i32, 0i32);
-    let mut out = out;
-    while count > 0 {
-        let spancount = count.min(SKY_SPAN_MAX);
-        count -= spancount;
-        let (mut snext, mut tnext) = (s, t);
-        if count > 0 {
-            u += spancount;
-            (snext, tnext) = sky_uv_to_st(u, v, view);
-            sstep = snext.wrapping_sub(s) >> SKY_SPAN_SHIFT;
-            tstep = tnext.wrapping_sub(t) >> SKY_SPAN_SHIFT;
+    // Where the segment from pixel `k0` ends, exactly: the next segment's
+    // first pixel when one follows (the C's `count -= spancount; if
+    // (count)`), else the span's last pixel; none for a one-pixel last
+    // segment, which takes no step.
+    let end_of = |k0: i32| {
+        if k0 + SKY_SPAN_MAX < count {
+            Some(sky_uv_to_st(u + k0 + SKY_SPAN_MAX, v, view))
+        } else if count - k0 > 1 {
+            Some(sky_uv_to_st(u + count - 1, v, view))
         } else {
-            let spancountminus1 = spancount - 1;
-            if spancountminus1 > 0 {
-                u += spancountminus1;
-                (snext, tnext) = sky_uv_to_st(u, v, view);
-                sstep = snext.wrapping_sub(s) / spancountminus1;
-                tstep = tnext.wrapping_sub(t) / spancountminus1;
-            }
+            None
         }
+    };
+    let (mut s, mut t) = sky_uv_to_st(u, v, view);
+    let mut end = end_of(0);
+    let mut out = out;
+    let mut k0 = 0;
+    while k0 < count {
+        let full = k0 + SKY_SPAN_MAX < count;
+        let ahead = if full { end_of(k0 + SKY_SPAN_MAX) } else { None };
+        let spancount = (count - k0).min(SKY_SPAN_MAX);
+        let (snext, tnext) = end.unwrap_or((s, t));
+        let (sstep, tstep) = if full {
+            (snext.wrapping_sub(s) >> SKY_SPAN_SHIFT, tnext.wrapping_sub(t) >> SKY_SPAN_SHIFT)
+        } else if spancount > 1 {
+            (snext.wrapping_sub(s) / (spancount - 1), tnext.wrapping_sub(t) / (spancount - 1))
+        } else {
+            (0, 0)
+        };
         // The segment's pixels: as many as `out` still has (the callers'
         // `count` is `out`'s length).
         let n = (spancount as usize).min(out.len());
@@ -295,8 +308,8 @@ fn sky_span(out: &mut [u8], u: i32, v: i32, count: i32, view: &SkyView, sample: 
             t = t.wrapping_add(tstep);
         }
         out = rest;
-        s = snext;
-        t = tnext;
+        (s, t, end) = (snext, tnext, ahead);
+        k0 += SKY_SPAN_MAX;
     }
 }
 
@@ -478,6 +491,80 @@ mod tests {
             want.push(sky_sample(&pixels, 256, s1 + i * ss, t1 + i * ts, v.front));
         }
         assert_eq!(out, want);
+    }
+
+    /// `D_DrawSkyScans8`'s walk in its own order — each segment's end
+    /// worked out on reaching the segment — as [`sky_span`] was before it
+    /// asked for the ends a segment ahead: every pixel's `(s, t)`.
+    fn d_draw_sky_scans8_in_order(u: i32, v: i32, count: i32, view: &SkyView) -> Vec<(i32, i32)> {
+        let (mut u, mut count) = (u, count);
+        let (mut s, mut t) = sky_uv_to_st(u, v, view);
+        let (mut sstep, mut tstep) = (0i32, 0i32);
+        let mut walk = Vec::new();
+        while count > 0 {
+            let spancount = count.min(SKY_SPAN_MAX);
+            count -= spancount;
+            let (mut snext, mut tnext) = (s, t);
+            if count > 0 {
+                u += spancount;
+                (snext, tnext) = sky_uv_to_st(u, v, view);
+                sstep = snext.wrapping_sub(s) >> SKY_SPAN_SHIFT;
+                tstep = tnext.wrapping_sub(t) >> SKY_SPAN_SHIFT;
+            } else {
+                let spancountminus1 = spancount - 1;
+                if spancountminus1 > 0 {
+                    u += spancountminus1;
+                    (snext, tnext) = sky_uv_to_st(u, v, view);
+                    sstep = snext.wrapping_sub(s) / spancountminus1;
+                    tstep = tnext.wrapping_sub(t) / spancountminus1;
+                }
+            }
+            for _ in 0..spancount {
+                walk.push((s, t));
+                s = s.wrapping_add(sstep);
+                t = t.wrapping_add(tstep);
+            }
+            s = snext;
+            t = tnext;
+        }
+        walk
+    }
+
+    /// [`sky_span`], which asks for each segment's end a segment ahead, walks
+    /// the coordinates `D_DrawSkyScans8` walks: every pixel's `(s, t)` the
+    /// same, at every span length from 0 to 300 (a one-pixel last segment,
+    /// whole segments only, a tail of each length), from many starts, rows,
+    /// eyes and times, both scrolls.
+    #[test]
+    fn the_sky_span_asked_ahead_walks_d_drawskyscans8s_coordinates() {
+        let mut seed = 0x51ED_270Bu32;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed
+        };
+        for case in 0..40 {
+            let yaw = (next() % 6283) as f32 / 1000.0;
+            let pitch = (next() % 1400) as f32 / 1000.0 - 0.2;
+            let (cy, sy, cp, spi) = (yaw.cos(), yaw.sin(), pitch.cos(), pitch.sin());
+            let forward = [cp * cy, cp * sy, spi];
+            let right = [sy, -cy, 0.0];
+            let up = [-spi * cy, -spi * sy, cp];
+            let (w, h) = [(320, 200), (1920, 1080), (2640, 1080)][case % 3];
+            let scroll = if case % 2 == 0 { SkyScroll::Classic } else { SkyScroll::Fluid };
+            let view = SkyView::new(forward, right, up, w as f32, (w / 2, h / 2), (next() % 600_000) as f32 / 1000.0, scroll);
+            for count in 0..=300 {
+                let (u, v) = ((next() % w as u32) as i32 - 40, (next() % h as u32) as i32);
+                let walk = std::cell::RefCell::new(Vec::new());
+                let mut out = vec![0u8; count as usize];
+                sky_span(&mut out, u, v, count, &view, |s, t| {
+                    walk.borrow_mut().push((s, t));
+                    0
+                });
+                assert_eq!(walk.into_inner(), d_draw_sky_scans8_in_order(u, v, count, &view), "case {case}, {count} pixels at ({u}, {v})");
+            }
+        }
     }
 
     #[test]
