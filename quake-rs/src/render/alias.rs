@@ -9,7 +9,7 @@ use crate::bsp::Bsp;
 use crate::math::{dot, Vec3};
 use super::{nearest_index, Camera, Frame, ViewGeom};
 use super::light::{r_light_point_hit, COLORMAP_LEN, LIGHTSTYLES};
-use super::polyse::PolyFramebuffer;
+use super::polyse::{screen_box, PolyFramebuffer};
 use super::stats::Profiler;
 
 // ---------------------------------------------------------------------------
@@ -631,12 +631,19 @@ pub(super) struct AliasDraw<'a> {
     points: Vec<FinalVert>,
     /// The triangles in id's order, a clipped one as its fan.
     tris: Vec<PolyTri>,
+    /// The box every point and triangle lies in ([`screen_box`]; `None`
+    /// with nothing to draw): a band it does not reach skips the model
+    /// without asking each triangle.
+    reach: Option<[i64; 4]>,
 }
 
 impl AliasDraw<'_> {
     /// `D_PolysetDraw` of the model into `fb`'s rows: the points, then the
     /// triangles (those that can reach the rows).
     pub(super) fn draw(&self, fb: &mut PolyFramebuffer) {
+        if !self.reach.is_some_and(|reach| fb.touches_box(&reach)) {
+            return;
+        }
         fb.draw_final_verts(&self.setup, &self.points);
         for t in &self.tris {
             if fb.touches(&t.v) {
@@ -750,7 +757,8 @@ fn alias_prepare<'a>(
             }
         }
     }
-    Some(AliasDraw { setup, points, tris })
+    let reach = screen_box(points.iter().chain(tris.iter().flat_map(|t| &t.v)));
+    Some(AliasDraw { setup, points, tris, reach })
 }
 
 /// A clipped-polygon vertex: the final vertex and its view-space position.

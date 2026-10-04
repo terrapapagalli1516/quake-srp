@@ -31,6 +31,10 @@ fn main() {
     }
     let threads = std::env::var("TARGET").is_ok_and(|t| t == "wasm32-wasip1-threads");
     let growable = std::env::var("QUAKE_WASM_GROWABLE").is_ok_and(|v| v == "1");
+    if threads {
+        // What the program checks its memory against (`check_fixed_memory`).
+        println!("cargo:rustc-env=QUAKE_WASM_THREADS=1");
+    }
     if threads && !growable {
         println!("cargo:rustc-link-arg-bins=--initial-memory={FIXED_MEMORY}");
         println!("cargo:rustc-link-arg-bins=--max-memory={FIXED_MEMORY}");

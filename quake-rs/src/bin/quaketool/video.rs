@@ -5,9 +5,9 @@
 //! size gives `vid.aspect`), and the scaled 2-D layer.
 //!
 //! ```text
-//! --video classic|modern   every cvar at once: id's, or the 2026 profile's: Hor+, hires,
+//! --video classic|modern   every cvar at once: id's, or the slop preset's: Hor+, hires,
 //!                          the fluid sky, the gliding light styles, the flickering
-//!                          torches and exact perspective (default classic)
+//!                          torches and the perspective span 8 (default classic)
 //! --fov-mode classic|horplus  how `fov` meets the display's shape
 //! --hires 0|1              views past 1280x1024, particles and the warp at 320x200 proportions
 //! --sky classic|fluid      the clouds in id's whole-texel steps, or gliding (`r_fluidsky`)
@@ -26,6 +26,7 @@
 //!                          the pixels are the same for any N)
 //! ```
 
+use quake_rs::cvar::Cvars;
 use quake_rs::render::{FovMode, PerspSpan, SkyScroll, TorchFlicker, VideoCvars};
 use quake_rs::server::LerpLightStyles;
 
@@ -55,7 +56,7 @@ impl VideoArgs {
             "--video" => {
                 (self.cvars, self.persp_span) = match val {
                     "classic" => (VideoCvars::CLASSIC, PerspSpan::Spans16),
-                    "modern" => (VideoCvars::MODERN, PerspSpan::Exact),
+                    "modern" => (VideoCvars::MODERN, Cvars::slop().persp_span),
                     _ => return Err(format!("--video: expected classic or modern, got {val:?}")),
                 }
             }
@@ -136,7 +137,8 @@ impl VideoArgs {
 
     /// A short tag for file names and reports: `classic`, `modern`, or the mix
     /// (a preset with another perspective says so: `modern-spans` for id's
-    /// 16, `modern-span8`, `classic-span64`, `classic-exactpersp`).
+    /// 16, `modern-exactpersp`, `modern-span4`, `classic-span64`,
+    /// `classic-exactpersp`).
     pub fn tag(&self) -> String {
         let span = format!("-span{}", self.persp_span.pixels());
         let exact = match self.persp_span {
@@ -147,7 +149,7 @@ impl VideoArgs {
         match self.cvars {
             VideoCvars::CLASSIC => format!("classic{exact}"),
             VideoCvars::MODERN => match self.persp_span {
-                PerspSpan::Exact => "modern".into(),
+                p if p == Cvars::slop().persp_span => "modern".into(),
                 PerspSpan::Spans16 => "modern-spans".into(),
                 _ => format!("modern{exact}"),
             },
@@ -171,7 +173,7 @@ pub fn parse_span(val: &str) -> Result<PerspSpan, String> {
 
 /// The options as `quaketool --help` lists them (the module docs say more).
 pub const HELP: &[(&str, &str)] = &[
-    ("--video classic|modern", "every cvar at once: id's, or the 2026 profile's: Hor+, hires, fluid sky, gliding lights, torches, exact perspective (default classic)"),
+    ("--video classic|modern", "every cvar at once: id's, or the slop preset's: Hor+, hires, fluid sky, gliding lights, torches, perspective span 8 (default classic)"),
     ("--fov-mode classic|horplus", "how `fov` meets the display's shape"),
     ("--hires 0|1", "views past 1280x1024, particles and the warp at 320x200 proportions"),
     ("--sky classic|fluid", "the clouds in id's whole-texel steps, or gliding (`r_fluidsky`)"),
@@ -188,21 +190,26 @@ pub const HELP: &[(&str, &str)] = &[
 mod tests {
     use super::*;
 
-    /// `--video modern` is the whole 2026 set, exact perspective with the
-    /// rest (it was id's spans until the user turned it on in 2026);
-    /// `--video classic` is id's; `--perspspan` (or the older `--exactpersp`,
-    /// its two ends) moves it alone, and a later `--video` sets it again with
-    /// the rest, as it does every video option.
+    /// `--video modern` is the whole slop set, the preset's perspective span
+    /// (8) with the rest (it was id's 16 until the user turned exact on,
+    /// then exact until they chose 8, 2026-10-03); `--video classic` is id's;
+    /// `--perspspan` (or the older `--exactpersp`, its two ends) moves it
+    /// alone, and a later `--video` sets it again with the rest, as it does
+    /// every video option.
     #[test]
-    fn video_modern_carries_exact_perspective() {
+    fn video_modern_carries_the_slop_presets_perspective_span() {
         let mut v = VideoArgs::default();
         assert_eq!(v.persp_span, PerspSpan::Spans16, "id's spans by default");
         assert_eq!(v.parse("--video", "modern"), Ok(true));
-        assert_eq!((v.cvars, v.persp_span, v.tag().as_str()), (VideoCvars::MODERN, PerspSpan::Exact, "modern"));
+        assert_eq!((v.cvars, v.persp_span, v.tag().as_str()), (VideoCvars::MODERN, PerspSpan::Spans8, "modern"));
         assert_eq!(v.parse("--exactpersp", "0"), Ok(true));
         assert_eq!((v.cvars, v.persp_span, v.tag().as_str()), (VideoCvars::MODERN, PerspSpan::Spans16, "modern-spans"));
+        assert_eq!(v.parse("--exactpersp", "1"), Ok(true));
+        assert_eq!((v.persp_span, v.tag().as_str()), (PerspSpan::Exact, "modern-exactpersp"));
+        assert_eq!(v.parse("--perspspan", "4"), Ok(true));
+        assert_eq!((v.persp_span, v.tag().as_str()), (PerspSpan::Spans4, "modern-span4"));
         assert_eq!(v.parse("--perspspan", "8"), Ok(true));
-        assert_eq!((v.persp_span, v.tag().as_str()), (PerspSpan::Spans8, "modern-span8"));
+        assert_eq!((v.persp_span, v.tag().as_str()), (PerspSpan::Spans8, "modern"));
         assert_eq!(v.parse("--video", "classic"), Ok(true));
         assert_eq!((v.cvars, v.persp_span, v.tag().as_str()), (VideoCvars::CLASSIC, PerspSpan::Spans16, "classic"));
         assert_eq!(v.parse("--exactpersp", "1"), Ok(true));

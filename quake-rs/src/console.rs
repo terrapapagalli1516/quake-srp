@@ -15,7 +15,7 @@ use std::collections::VecDeque;
 
 /// Draw the notify lines (`bprint`/`sprint`, Con_DrawNotify): stacked from
 /// row `top` of the [`screen_2d`] screen, each character at `(x+1)<<3`. id's
-/// `top` is 0, the very top (`v = 0`); the 2026 Show FPS readout takes that
+/// `top` is 0, the very top (`v = 0`); the slop Show FPS readout takes that
 /// row while it shows ([`crate::screen::notify_top`]).
 pub fn draw_notify(
     image: &mut Image,

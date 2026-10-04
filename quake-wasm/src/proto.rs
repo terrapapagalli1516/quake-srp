@@ -17,7 +17,7 @@
 //! | 6 | `AudioReady` | `ready u8`, `0 u8 ×3`, `rate u32` (the device's sample rate; 0 unknown) |
 //! | 7 | `Call` | `id u32`, then a UTF-8 line `name arg...` (automation, [`crate::automation`]) |
 //! | 8 | `End` | — (the host's "nothing more is queued", the answer to a polling `Sync`) |
-//! | 9 | `Window` | `w u32`, `h u32`: the page's box for the picture in device pixels (CSS size x `devicePixelRatio`), which native resolution renders into; `dpr f32`: that `devicePixelRatio` (absent from an older page: read as 1) |
+//! | 9 | `Window` | `w u32`, `h u32`: the page's box for the picture in device pixels (CSS size x `devicePixelRatio`), which native resolution renders into; a page may send its `devicePixelRatio` after them (`f32`), which the program no longer reads: a touch screen is the command line's `-touch` |
 //! | 10 | `AudioClock` | `pos u32`: the sample pairs the page's audio device has played (a wrapping count; the page sends it before each `Tick`) |
 //! | 11 | `AudioWake` | `pos u32`: the same, from the host between ticks while the device plays: mix now (`S_ExtraUpdate`) |
 //! | 12 | `Present` | `format u8`: how the page shows frames ([`FORMAT_RGBA8`] or [`FORMAT_INDEXED8`]; RGBA until it says) |
@@ -35,11 +35,11 @@
 //! | 12 | `Reply` | `id u32`, `value f64`, then UTF-8 text (the answer to a `Call`) |
 //! | 13 | `Bench` | `f64` per value (`--features bench`: the frame's phase times) |
 //! | 14 | `Pcm` | `start u32` (the pair it plays at, in the `AudioClock`'s count), `rate u32`, `flags u32` (1: silence what was mixed ahead first, `S_ClearBuffer`), then 16-bit stereo pairs: what the mixer painted this tick, for the page's ring |
-//! | 15 | `Audio` | `rate u32`, `mode u32` (0 Classic, 1 2026), `starts u32`, `local u32`, `stops u32`, `clears u32`, `painted u32`: the sound device's counts |
+//! | 15 | `Audio` | `rate u32`, `mode u32` (0 Classic, 1 slop), `starts u32`, `local u32`, `stops u32`, `clears u32`, `painted u32`: the sound device's counts |
 //! | 16 | `Cd` | `serial u32` (a new value: play `track` from its top), `track u8`, `looping u8`, `mode u8` (0 stopped, 1 playing, 2 paused), `0 u8`, `volume f32` (0..1): the CD player's state, written when it changes (only with a disc: the player's music) |
 //! | 17 | `FrameAt` | `w u16`, `h u16`, `format u8`, `slot u8`, `0 u16`, `pixels u32`, `palette u32`: a frame left in the program's shared memory, at those addresses ([`crate::present`]) |
 //! | 18 | `Quit` | `registered u8`, `0 u8 ×3`, then (if the pak had the file) 4000 bytes: id's end screen (`end2.bin` registered, else `end1.bin` — 80x25 of (character, attribute) VGA text-mode pairs, the DOS build's version stamped into row 0 as `Sys_Quit` did). Written once, the game's last message: `Host_Quit_f`/`M_Quit_Key` decided to quit, the host should leave fullscreen and release the pointer, and the program ends right after (as id's `exit(0)` did) |
-//! | 20 | `Rumble` | `strong f32`, `weak f32`, `ms u32`, `pad u32` (1: the pad is read, rumble it; 0: a phone's vibration): the 2026 `joy_rumble` |
+//! | 20 | `Rumble` | `strong f32`, `weak f32`, `ms u32`, `pad u32` (1: the pad is read, rumble it; 0: a phone's vibration): the slop `joy_rumble` |
 //!
 //! A `Sync` ends each turn of the program's loop: everything before it is
 //! one turn's output, and the host publishes it then.
@@ -93,7 +93,7 @@ pub(crate) enum Event {
     /// The host has nothing more queued (the answer to a polling sync).
     End,
     /// The page's box for the picture, in device pixels.
-    Window { w: u32, h: u32, dpr: f32 },
+    Window { w: u32, h: u32 },
     /// How the page shows the frames from now on: [`FORMAT_RGBA8`] or
     /// [`FORMAT_INDEXED8`] (another value is RGBA).
     Present(u8),
@@ -141,7 +141,7 @@ pub(crate) fn read_event(r: &mut impl Read) -> io::Result<Option<Event>> {
             Event::Call { id, line: String::from_utf8_lossy(p.rest()).into_owned() }
         }
         IN_END => Event::End,
-        IN_WINDOW => Event::Window { w: p.u32(), h: p.u32(), dpr: p.f32() },
+        IN_WINDOW => Event::Window { w: p.u32(), h: p.u32() },
         IN_PRESENT => Event::Present(p.u8()),
         IN_GAMEPAD => Event::Gamepad(read_pad(&mut p)),
         other => Event::Unknown(other),
@@ -249,7 +249,7 @@ pub(crate) const PCM_CLEAR: u32 = 1;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct AudioCounts {
     pub(crate) rate: u32,
-    /// 0 Classic, 1 2026.
+    /// 0 Classic, 1 slop.
     pub(crate) mode: u32,
     pub(crate) starts: u32,
     pub(crate) local: u32,

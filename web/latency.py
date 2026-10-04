@@ -2,7 +2,7 @@
 """Input-to-present latency in the page: from each input event's timeStamp
 (when the browser got it, so the wait for the next refresh counts) to the
 putImageData of the first frame that consumed it — a key, the mouse, the
-gamepad — in the live game on the 2026 profile (a frame every refresh), at
+gamepad — in the live game on the slop preset (a frame every refresh), at
 960x600 (`vid_native 0`, the size PLATFORM.md's older table used).
 
 Two refresh rates:
@@ -140,7 +140,7 @@ with sync_playwright() as p:
     br = isolated.launch(p, ["--no-sandbox", "--autoplay-policy=no-user-gesture-required"])
     pg = br.new_page(viewport={"width": 1280, "height": 860})
     pg.add_init_script(FAKE_PAD)
-    pg.goto(f"http://127.0.0.1:{PORT}/index.html?2026", wait_until="load")
+    pg.goto(f"http://127.0.0.1:{PORT}/index.html?slop", wait_until="load")
     pg.wait_for_function("window.quake && quake.ready", timeout=120000)
     pg.evaluate("hideOverlayForever()")
     for line in ("boot", "menu_cancel", "exec vid_native 0", "set_resolution 960 600"):
@@ -173,7 +173,7 @@ with sync_playwright() as p:
     br.close()
 httpd.shutdown()
 
-print(f"input -> present, ms (median / p95 / max, samples); frame {res[0]}x{res[1]}, 2026 profile;")
+print(f"input -> present, ms (median / p95 / max, samples); frame {res[0]}x{res[1]}, slop preset;")
 print("the event's wait for its handler (median) in brackets")
 for name, (lat, disp) in results.items():
     d = stats(disp)

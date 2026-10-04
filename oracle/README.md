@@ -6,7 +6,7 @@ drivers, renders the **same view, clock and entities** as the port, and a script
 diffs the two frames pixel for pixel.
 
 ```sh
-oracle/build.sh               # once (~20 s, docker); again after editing oracle/c/*
+oracle/build.sh               # ~20 s, docker (the tools run it themselves when the binary is missing or older than oracle/c/*)
 uv run oracle/compare.py      # e1m1/2/3/7 x world/ents, 320x200: table + side-by-side PNGs
 oracle/characterise.sh        # re-derive every number and crop in this README (~10 s)
 uv run oracle/screen2d.py     # the 2-D layer (status bar, menus, console, ...): see its section
@@ -40,6 +40,9 @@ Needs docker (for the build only), uv, cargo, and the shareware pak at
 | `--quaketool PATH` / `--oracle PATH` | A/B a different build of either side |
 | `--c-post CMD` | a console command for id's side once the map is loaded (repeatable; each `--c-post wait` holds what follows one frame): six waits then `--c-post "impulse 9"` with `--c-cmd +attack` fires rockets, `--settle 14`..`19` on e1m1 catches the explosion sprite on the far wall |
 | `--demo NAME` | id's side plays the demo (`playdemo NAME`) instead of loading a map, and the shot is frame `--settle` of its playback; `--maps` names the demo's map for the port (`--maps e1m3 --demo demo1 --settle 52`: a grenade explosion among gibs) |
+| `--oracle-dt DT` | id's host frame step in seconds (default 0.1, the oracle's own); `0.01388888899236917` is the port's 1/72 s, the step `quaketool play` and `demo_lerp.py` run at, so `--demo demo1 --settle K` is frame K of `quaketool play demo1 --trace` |
+| `--dlights none\|id\|demoN` | the lights the port's frame is lit with: id's own `cl_dlights` of the frame (default), none (what a demo's playback drew before `fleet/demolights`), or the lights the port's own playback of demo N makes at id's `cl.time` (`quaketool play demoN --trace`; needs `--oracle-dt` as above) |
+| `--id-lightstyles` | hand the port id's `d_lightstylevalue[]` of the frame (`quaketool view --style-values`) instead of the styles it derives from the clock: a demo frame's are the recording's, which the map's own animation does not know |
 | `--game-dir NAME DIR` `--pak1 PAK` | a mission pack: `DIR`'s `pak0.pak`/`pak1.pak` layered over id1 as id's `-NAME` does (`-hipnotic`, `-rogue`), with id1's registered `pak1.pak` (id's own `-hipnotic` refuses the shareware id1); the port's `quaketool view` takes the same paks as a comma list |
 
 ### Reading the output
@@ -399,12 +402,12 @@ after the map loads:
   header). The client's view hook (`quake_rs::client::set_view_hook`) paints the view the same flat colour,
   and each shot is handed the C frame's clocks (`realtime` for the flashing
   cursors, `host_time` for the menu's spinning dot, the finale's reveal time).
-- The port runs its Classic profile (every engine departure off) with id's own
+- The port runs its Classic preset (every slop option off) with id's own
   controls, `default.cfg`'s bindings and id's cvars (the harness runs the console's
-  `idcontrols` after booting: the controls are the same in both profiles by
+  `idcontrols` after booting: the controls are the same in both presets by
   default now, `quake_rs::settings`), id's side its own defaults, so the Options
   and Customize screens compare values and bindings too.
-  (Before the profiles both sides were given the port's two input defaults
+  (Before the presets both sides were given the port's two input defaults
   then, Always Run and the WASD binds.)
 
 With the 3-D view one colour, what differs is the 2-D layer. `exact%` is over the
@@ -457,7 +460,7 @@ lines surviving a console toggle; the console lingering after `map`/`load`.
   menu over `Draw_ConsoleBackground (vid.height)` while `scr_con_current` is
   non-zero, not over the faded screen; the port faded the console text
   (41.5% before). What is left is the console's version stamp (below) and,
-  on Options, its "Classic / 2026" row. `oracle.c` shoots a composited frame that
+  on Options, the port's rows (Options, below). `oracle.c` shoots a composited frame that
   renders no view (disconnected) as the screen stands.
 - *Console* (and `console_scroll`, the menu over the disconnected console:
   400 px at 320x200, 1592 at 640x400, 3582 at 960x600): the version
@@ -477,13 +480,19 @@ lines surviving a console toggle; the console lingering after `map`/`load`.
   cursor (`m_singleplayer_cursor`, `m_main_cursor`, `options_cursor`, ...:
   Escape from Options lands on "Options"); the port's one cursor started every
   screen at its first row. Per-menu cursors since `quake/polish2`: 100%.
-- *Options* (531 px; 291 while it read "Web extras"): the port's 14th row,
-  "Classic / 2026" with the profile printed at x=220 (in the slot of the
-  `_WIN32` build's "Use Mouse"), which id's DOS/Linux list does not have. The
-  `menu_options` scenario reaches Video Options with twelve DOWNs, not one UP,
-  since UP from row 0 wraps to that 14th row in the port (it had been
-  comparing id's Video Modes with the port's Web extras page since the extras
-  merge).
+- *Options* (6398 px since 2026-10-04; 1473 with the port's rows of 2026-10-03,
+  531 while its port row read "Classic / 2026", 291 while it read "Web
+  extras"): the user's order. id's "Reset to defaults" (row 2) is gone, so
+  id's rows from Screen size on sit one higher than id's own, and the port's
+  three come last: "Slop Options" (no value at x=220: the menus do not say
+  where the settings stand) in the slot of the `_WIN32` build's "Use Mouse",
+  "Reset to Classic" under it and "Reset to slop" at y=144. id's DOS/Linux
+  list has none of them. The `menu_options` scenario reaches Video Options
+  with eleven DOWNs on the port's side and id's twelve on the C's
+  (`screen2d.py`'s `id_key` step: a key id's side alone is sent), not with
+  an UP, since UP from row 0 wraps to the port's last row. The disconnected
+  console's Options: 6699 / 7820 px at 320x200 / 640x400 (1854 / 3015 before,
+  919 / 2108 before that).
 - Not in the matrix: the loading plaque (the port loads within a frame and draws
   none; the pause plaque is in it since `quake/timedemo`, the `pause` row above), `SCR_ModalMessage`'s New
   Game question (it blocks in a key loop the null input driver never ends; its
@@ -638,8 +647,8 @@ uv run oracle/classic_check.py --only goldens,play    # some of it
 uv run oracle/classic_check.py --record --note "..."  # re-record, saying why
 ```
 
-The port's Classic profile (`quake_rs::settings`: every engine departure off; the
-controls are the player's, shared with 2026, and the harnesses pin id's own by name:
+The port's Classic preset (`quake_rs::settings`: every slop option off; the
+controls are shared with slop's, and the harnesses pin id's own by name:
 `Settings::id`, `idcontrols`) must stay WinQuake. One command runs every check of
 that and writes a report (`oracle/build/classic-check/classic_check.txt`, next
 to each tool's own output):
@@ -652,8 +661,8 @@ to each tool's own output):
 | `census` | `quaketool census`: all nine maps through the real QuakeC (the report, by hash) | the recorded list |
 | `edicts` | id's server edicts (this oracle) diffed against the port's, nine maps at t = 1.7 / 4.7 / 10.7 s (`census/`): the diff report, by hash. What it still shows: each matched entity's number one below id's (the player is the port's last edict, CENSUS L25); monsters' random idle frames and wandering; a door pair on e1m6 caught at another point of its slide at 1.7 s; the fireballs and bubbles random numbers start. The statics' rows are gone since `fleet/makestatic` (1,185 rows to 606) | the recorded list |
 | `oracle` | `compare.py --aspect 0.8333333 --spans 16`: the eight standard rows | id's C: none below its recorded match (100.00%; e1m7 99.9969%, two pixels) |
-| `screen2d` | `screen2d.py`, 320x200 and 640x400, the port in its Classic profile | id's C: no shot below its recorded `2d exact%` (the residues above) |
-| `demolerp` | `demo_lerp.py`: id's client against the port's over the attract loop, frame by frame (below) | id's C: every demo MATCH |
+| `screen2d` | `screen2d.py`, 320x200 and 640x400, the port in its Classic preset | id's C: no shot below its recorded `2d exact%` (the residues above) |
+| `demolerp` | `demo_lerp.py`: id's client against the port's over the attract loop, frame by frame — the camera, the entities and the dynamic lights (below) | id's C: every demo MATCH |
 | `sound` | `sound.py`: id's mixer against the engine's `Fixes::NONE`; `sound_walk.py`: a walk through id's game and the port's | id's C: every case sample-identical; every call the walk makes identical |
 
 The recorded list is `oracle/classic_expected.txt`, with a note for each
@@ -692,8 +701,9 @@ boot with every host frame exactly the port's 1/72 s step (`-oracle_dt`),
 and `oracle_trace path [frames]` writes one record per rendered frame as
 `R_RenderView` starts: `cl.time`, `cl.oldtime`, `cl.mtime[0..1]` as
 `CL_LerpPoint` left them, `cl.viewangles`, the view entity's origin,
-`cl.velocity`, and every entity on `cl_visedicts` (number, model, origin,
-angles, frame). `quaketool play demo1 N --trace PATH` writes the same from
+`cl.velocity`, every entity on `cl_visedicts` (number, model, origin,
+angles, frame) and every dynamic light `R_PushDlights` marks (pool slot, key,
+origin, radius, `die`, decay, minlight). `quaketool play demo1 N --trace PATH` writes the same from
 the port's client; the script runs both, splits the traces at each demo's
 first frame and compares them.
 
@@ -706,3 +716,53 @@ Result (2026-09-26, `q26/lerp`): 17,500 frames over the whole loop, the
 same frame count per demo, `cl.time` identical in every frame, camera,
 velocity and every entity within 2.5e-4 (the oracle's x87 floats), the same
 entities everywhere.
+
+**Dynamic lights** (2026-10-03, `fleet/demolights`). The trace also carries the
+lights `R_PushDlights` marks (`D` lines: slot in `cl_dlights`, key, origin,
+radius, `die`, decay, minlight), and `demo_lerp.py` compares them: in every one
+of the 17,500 frames the same slots hold the same lights — key, origin (within
+the position tolerance), decay, minlight and `die` (to 1e-4: a float made from a
+double clock) — 618 + 73 + 1,055 + 399 explosion light-frames, 1,467 + 1,174 +
+589 + 180 muzzle-flash ones and 8,184 rocket ones, the view entity's flashes
+included. The radius is exact for explosions (350, decaying 300 a second) and
+rockets (200); a flash's `200 + (rand()&31)` is held to its window, which is all
+two generators can share (id's `rand()` is stirred every host frame, so id's own
+draws differ from run to run).
+
+The first run differed in 36 frames, all one cause: `dl->die` is a float and
+`cl.time` a double, and in a demo `cl.time` is the host's running sum, so an
+explosion's last frame (0.5 s on, a whole number of 1/72 s steps) turns on bits
+a float clock does not have; the pool takes `cl.time` as an `f64` now.
+
+### Demo lights in pixels (`demo_lights.py`)
+
+```sh
+uv run oracle/demo_lights.py                  # twelve standard frames: a table and 4-up images
+uv run oracle/demo_lights.py --sample 40      # + 40 lit frames spread over the loop
+uv run oracle/demo_lights.py --frames demo1:323,demo3:371
+```
+
+id's side plays the demo at 1/72 s and shoots frame K of it (`compare.py --demo
+demoN --settle K --oracle-dt 0.01388888899236917`, the 3-D view at 320x200 and the
+page's aspect, the weapon drawn, id's light styles handed over); the port draws the
+same view from id's camera, clock, entities and particles, lit three ways
+(`--dlights`): by none, by the lights its own playback makes at that clock, and by
+id's own `cl_dlights`. Result, 51 frames (the 12 standard and 39 spread over the
+three demos; in 39 of them the lights change more than 1% of the frame), exact% of the 3-D view:
+
+| frames | no lights (before) | the port's playback lights (after) | id's lights |
+|---|---:|---:|---:|
+| 26 whose lights have exact radii (explosions, rockets) | min 3.72, median 95.55 | min 99.96, median 100.00 | min 99.96, median 100.00 |
+| 25 with a muzzle flash (`rand()&31`) | min 18.17, median 65.76 | min 44.53, median 90.54 | min 99.83, median 99.99 |
+
+With exact radii the port's playback frame is id's frame to the pixel the renderer
+reproduces (the 0.04% left is the renderer's: the same in both columns, where
+nothing about a light is involved). A flash's radius is the port's own draw, and a
+different radius moves the colormap rows of every lit pixel: the match falls with
+the distance between the two draws (6 frames within 2 units: median 99.63, worst
+92.20; 11 frames 9 to 16 apart: median 84.41), and with id's own radius handed over
+(the last column) it is 99.83 to 100.00 every time. Single frames, before / after,
+saved by the run: `demo1:323` (the player's shotgun flash) 75.65 -> 91.34 (id's
+radius 218, the port's 211) -> 100.00; `demo1:358` (a grenade explosion on the frame
+it is made) 14.42 -> 100.00; `demo1:376` (the same, fading, radius 275) 52.13 ->
+99.99; `demo1:601` (two explosions at once) 46.23 -> 100.00.

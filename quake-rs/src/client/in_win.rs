@@ -2,10 +2,10 @@
 //! `Joy_AdvancedUpdate_f`, `IN_ReadJoystick`, `IN_Commands` and `IN_JoyMove`,
 //! reading a pad the platform hands it ([`Pad`]: the browser's Gamepad API)
 //! the way WinQuake read winmm's first joystick. And the port's additions for
-//! a 2026 pad, each a setting in [`JoyCvars`]: a round dead zone and a
+//! a slop pad, each a setting in [`JoyCvars`]: a round dead zone and a
 //! response curve for the sticks, the pad's buttons in the menus, and
 //! rumble. The gamepad is a *control* ([`crate::settings`]'s module docs):
-//! on by default in both profiles, off only with id's own 1996 controls
+//! on by default in both presets, off only with id's own 1996 controls
 //! ([`JoyCvars::classic`], [`crate::cvar::Cvars::with_id_controls`]).
 //!
 //! Ported from Quake (GPLv2). Copyright (C) 1996-1997 Id Software, Inc.
@@ -54,7 +54,7 @@ use crate::cvar::Cvars;
 use crate::keys::{
     K_AUX1, K_AUX29, K_AUX32, K_DOWNARROW, K_ENTER, K_ESCAPE, K_JOY1, K_LEFTARROW, K_RIGHTARROW, K_UPARROW,
 };
-use crate::settings::Profile;
+use crate::settings::Preset;
 
 use super::cl_input::{CL_MOVESPEEDKEY, CL_PITCHSPEED, CL_SIDESPEED, CL_YAWSPEED};
 
@@ -65,16 +65,16 @@ pub const JOY_MAX_AXES: usize = 6;
 ///
 /// id's are the `joystick` switch and the "advanced controller
 /// configuration": `joyadvanced`, which axis drives what (`joyadvaxis*`), and
-/// each control's threshold and sensitivity. The 2026 profile's twin-stick
-/// layout is id's own advanced configuration ([`JoyCvars::modern`]), plus
-/// the port's stick shaping. (in_win.c archives none of them but `joystick`:
+/// each control's threshold and sensitivity. The presets' twin-stick layout
+/// (the controls are shared: both have it) is id's own advanced
+/// configuration ([`JoyCvars::twin_stick`]), plus the port's stick shaping. (in_win.c archives none of them but `joystick`:
 /// "advanced controller configuration needs to be executed each time". The
-/// port keeps them in `config.cfg` like every setting a profile sets, so a
+/// port keeps them in `config.cfg` like every setting a preset sets, so a
 /// player's changes to the layout last.)
 #[derive(Debug, Clone, PartialEq)]
 pub struct JoyCvars {
     /// `joystick` (`in_joystick`): read the joystick at all. id's default
-    /// is off; on in 2026.
+    /// is off; on in slop.
     pub enabled: bool,
     /// `joyname`: the controller's name, which `Joy_AdvancedUpdate_f` prints
     /// ("%s configured") when it is not "joystick".
@@ -145,13 +145,13 @@ impl JoyCvars {
         }
     }
 
-    /// The 2026 profile's pad: a modern twin-stick layout as id's advanced
+    /// The presets' pad: a modern twin-stick layout as id's advanced
     /// configuration — the left stick (X, Y) walks and strafes, the right
     /// stick (U, R) turns and looks — with no thresholds (the port's round
     /// dead zone does their work), the strafe the right way round for a side
     /// axis (id's -1 suits a turn axis strafing with `+strafe`), a 245°/s
     /// turn at full tilt (id's 140), the look curve, menu keys and rumble.
-    pub fn modern() -> JoyCvars {
+    pub fn twin_stick() -> JoyCvars {
         JoyCvars {
             enabled: true,
             advanced: true,
@@ -314,7 +314,7 @@ pub enum PadKeys {
 }
 
 /// The keys `CL_BaseMove` holds that `IN_JoyMove` reads: `in_speed`,
-/// `in_strafe` and `in_mlook` (with the 2026 `freelook`, mouse look is on).
+/// `in_strafe` and `in_mlook` (with the slop `freelook`, mouse look is on).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Held {
     pub speed: bool,
@@ -349,9 +349,9 @@ pub struct Joystick {
     /// seen, so a pad that goes away still has its keys let go.
     num_buttons: u32,
     has_pov: bool,
-    /// `joy_advancedinit`, as the profile the axis maps were made under: a
-    /// profile switch makes them again, as `joyadvancedupdate` would.
-    advanced_init: Option<Profile>,
+    /// `joy_advancedinit`, as the preset the axis maps were made under: a
+    /// preset makes them again, as `joyadvancedupdate` would.
+    advanced_init: Option<Preset>,
     /// `dwAxisMap`, and `dwControlMap` (true: `JOY_RELATIVE_AXIS`).
     axis_map: [AxisControl; JOY_MAX_AXES],
     relative: [bool; JOY_MAX_AXES],
@@ -507,13 +507,13 @@ impl Joystick {
 
     /// `IN_JoyMove`: the frame's joystick move and turn, for `frametime`
     /// (`host_frametime`) seconds with the keys `held`. The axis maps are
-    /// made on the first call (`joy_advancedinit`), and again after a switch
-    /// of `profile`. Nothing without a reading (`Joystick::read`).
-    pub fn joy_move(&mut self, cvars: &Cvars, profile: Profile, held: Held, frametime: f32) -> JoyMove {
+    /// made on the first call (`joy_advancedinit`), and again after another
+    /// `preset` is applied. Nothing without a reading (`Joystick::read`).
+    pub fn joy_move(&mut self, cvars: &Cvars, preset: Preset, held: Held, frametime: f32) -> JoyMove {
         let cv = &cvars.joy;
-        if self.advanced_init != Some(profile) {
+        if self.advanced_init != Some(preset) {
             self.advanced_update(cv);
-            self.advanced_init = Some(profile);
+            self.advanced_init = Some(preset);
         }
         let Some(ji) = self.read(cv) else { return JoyMove::default() };
         let speed = if held.speed { CL_MOVESPEEDKEY } else { 1.0 };
@@ -728,7 +728,7 @@ mod tests {
     }
 
     /// id's own joystick (the pad is a shared control, on by default in
-    /// both profiles now, so this forces id's 1996 one — [`JoyCvars::classic`]
+    /// both presets now, so this forces id's 1996 one — [`JoyCvars::classic`]
     /// — on explicitly, as [`Cvars::with_id_controls`] leaves it).
     fn classic_on() -> Cvars {
         let mut c = Cvars::classic().with_id_controls();
@@ -801,7 +801,7 @@ mod tests {
     /// wherever the keyboard went in between.
     #[test]
     fn menu_keys_translate_and_release_symmetrically() {
-        let mut cv = Cvars::modern();
+        let mut cv = Cvars::slop();
         let mut j = detected(pad());
         j.set_pad(Some(Pad { pressed: 1 | (1 << DPAD_UP), ..pad() }));
         assert_eq!(j.commands(&cv.joy, PadKeys::Menu), [(K_ENTER, true), (K_UPARROW, true)]);
@@ -827,57 +827,57 @@ mod tests {
         let mut j = detected(pad());
         let held = Held::default();
         j.set_pad(Some(Pad { axes: [1.0, -0.5, 0.0, 0.0, 0.0, 0.0], ..pad() }));
-        let m = j.joy_move(&cv, Profile::Classic, held, 0.1);
+        let m = j.joy_move(&cv, Preset::Classic, held, 0.1);
         assert!((m.yaw - -(32767.0 / 32768.0) * 14.0).abs() < 1e-4, "right turns right, 140°/s: {}", m.yaw);
         assert_eq!(m.forward, 100.0, "up walks: 0.5 x 200");
-        let fast = j.joy_move(&cv, Profile::Classic, Held { speed: true, ..held }, 0.1);
+        let fast = j.joy_move(&cv, Preset::Classic, Held { speed: true, ..held }, 0.1);
         assert_eq!((fast.forward, fast.yaw), (200.0, m.yaw * 2.0));
         j.set_pad(Some(Pad { axes: [0.1, 0.1, 0.0, 0.0, 0.0, 0.0], ..pad() }));
-        assert_eq!(j.joy_move(&cv, Profile::Classic, held, 0.1), JoyMove::default(), "under the thresholds");
+        assert_eq!(j.joy_move(&cv, Preset::Classic, held, 0.1), JoyMove::default(), "under the thresholds");
         j.set_pad(Some(Pad { axes: [0.0, 0.5, 0.0, 0.0, 0.0, 0.0], ..pad() }));
-        let look = j.joy_move(&cv, Profile::Classic, Held { mlook: true, ..held }, 0.1);
+        let look = j.joy_move(&cv, Preset::Classic, Held { mlook: true, ..held }, 0.1);
         assert_eq!((look.forward, look.pitch, look.stop_drift), (0.0, 7.5, true), "+mlook: Y pitches at 150°/s");
         let mut inv = cv.clone();
         inv.m_pitch = -inv.m_pitch;
-        assert_eq!(j.joy_move(&inv, Profile::Classic, Held { mlook: true, ..held }, 0.1).pitch, -7.5, "Invert Mouse");
+        assert_eq!(j.joy_move(&inv, Preset::Classic, Held { mlook: true, ..held }, 0.1).pitch, -7.5, "Invert Mouse");
         let id = Cvars::classic().with_id_controls();
-        assert_eq!(j.joy_move(&id, Profile::Classic, held, 0.1), JoyMove::default(), "id's own controls: joystick 0");
+        assert_eq!(j.joy_move(&id, Preset::Classic, held, 0.1), JoyMove::default(), "id's own controls: joystick 0");
     }
 
     /// joyadvanced: the maps come from joyadvaxis* (bits 0..3, 16 relative)
-    /// and only after joyadvancedupdate — or a new profile.
+    /// and only after joyadvancedupdate — or another preset.
     #[test]
     fn joyadvanced_maps_axes_after_joyadvancedupdate() {
         let mut cv = classic_on();
         let mut j = detected(pad());
         j.set_pad(Some(Pad { axes: [0.0, 0.0, 1.0, 0.0, 0.0, 0.0], ..pad() }));
         let held = Held::default();
-        assert_eq!(j.joy_move(&cv, Profile::Classic, held, 0.1), JoyMove::default(), "U drives nothing by default");
+        assert_eq!(j.joy_move(&cv, Preset::Classic, held, 0.1), JoyMove::default(), "U drives nothing by default");
         cv.joy.advanced = true;
         cv.joy.name = "pad".into();
         cv.joy.advaxis[4] = 4.0 + 16.0; // U: relative turn
-        assert_eq!(j.joy_move(&cv, Profile::Classic, held, 0.1), JoyMove::default(), "not until joyadvancedupdate");
+        assert_eq!(j.joy_move(&cv, Preset::Classic, held, 0.1), JoyMove::default(), "not until joyadvancedupdate");
         j.advanced_update(&cv.joy);
         assert_eq!(j.take_prints().last().map(String::as_str), Some("\npad configured\n\n"));
-        let m = j.joy_move(&cv, Profile::Classic, held, 0.1);
+        let m = j.joy_move(&cv, Preset::Classic, held, 0.1);
         let full = 32767.0 / 32768.0;
         assert!((m.yaw + 180.0 * full).abs() < 1e-3, "a relative axis: 180 a read, not per second: {}", m.yaw);
         cv.joy.advaxis[4] = 0.0;
-        let m = j.joy_move(&cv, Profile::Modern, held, 0.1);
-        assert_eq!(m.yaw, 0.0, "a new profile remakes the maps");
+        let m = j.joy_move(&cv, Preset::Slop, held, 0.1);
+        assert_eq!(m.yaw, 0.0, "another preset remakes the maps");
         assert_eq!([0, 1, 2, 3, 4, 5, 20].map(AxisControl::from_bits)[6], AxisControl::Turn);
     }
 
-    /// The 2026 layout: left stick walks and strafes, right stick turns and
+    /// The slop layout: left stick walks and strafes, right stick turns and
     /// looks through the round dead zone and the curve; a rest drifts nothing.
     #[test]
-    fn the_2026_pad_is_twin_stick_with_a_round_dead_zone_and_a_curve() {
-        let cv = Cvars::modern();
+    fn the_slop_pad_is_twin_stick_with_a_round_dead_zone_and_a_curve() {
+        let cv = Cvars::slop();
         let mut j = detected(pad());
         let held = Held { mlook: true, ..Held::default() };
         let at = |j: &mut Joystick, axes: [f32; 6]| {
             j.set_pad(Some(Pad { axes, ..pad() }));
-            j.joy_move(&cv, Profile::Modern, held, 0.1)
+            j.joy_move(&cv, Preset::Slop, held, 0.1)
         };
         let rest = at(&mut j, [0.15, -0.1, 0.12, 0.1, 0.0, 0.0]);
         assert_eq!((rest.forward, rest.side, rest.yaw, rest.pitch), (0.0, 0.0, 0.0, 0.0), "inside the dead zone");
@@ -900,11 +900,11 @@ mod tests {
 
     #[test]
     fn frame_rate_does_not_change_how_far_the_stick_turns() {
-        let cv = Cvars::modern();
+        let cv = Cvars::slop();
         let mut j = detected(Pad { axes: [0.0, 0.0, 0.7, 0.0, 0.0, 0.0], ..pad() });
         let held = Held { mlook: true, ..Held::default() };
         let turn = |j: &mut Joystick, hz: f32| {
-            (0..hz as usize).map(|_| j.joy_move(&cv, Profile::Modern, held, 1.0 / hz).yaw).sum::<f32>()
+            (0..hz as usize).map(|_| j.joy_move(&cv, Preset::Slop, held, 1.0 / hz).yaw).sum::<f32>()
         };
         let (at60, at480) = (turn(&mut j, 60.0), turn(&mut j, 480.0));
         assert!((at60 - at480).abs() < 1e-3, "a second of stick at 60 and 480 Hz: {at60} {at480}");

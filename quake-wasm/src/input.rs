@@ -143,9 +143,9 @@ pub(crate) fn key_event_in(a: &mut App, key: u8, down: bool, ch: u32) -> Option<
     // SCR_ModalMessage: `key_count = -1` — every event is the question's.
     // (A key up still releases its `+` binding here, so nothing held when
     // the question came up sticks: id's returns before that.)
-    if a.menu.visible && a.menu.new_game_confirm() {
+    if a.menu.visible && a.menu.asking().is_some() {
         if down {
-            let action = a.menu.modal_key(key);
+            let action = a.menu.modal_key(key, &mut a.settings);
             return apply_menu_action(a, action).map(KeyAfter::Menu);
         }
         a.keys_held[k] = false;
@@ -262,7 +262,7 @@ fn key_up_binding(a: &mut App, key: u8) -> Option<KeyAfter> {
     }
 }
 
-/// `in_mlook`: mouse look is on — `+mlook` held, or the 2026 `freelook`
+/// `in_mlook`: mouse look is on — `+mlook` held, or the slop `freelook`
 /// holding it for good.
 fn mouse_look(a: &App) -> bool {
     a.settings.cvars.freelook || a.settings.binds.held(BIND_MLOOK, &a.keys_held)
@@ -369,7 +369,7 @@ pub(crate) fn key_is_down(keynum: i32) -> i32 {
 /// IN_MouseMove (in_win.c): counts scale by the `sensitivity` cvar; mouse X
 /// turns yaw, OR strafes (`m_side`) while `+strafe` is held or `lookstrafe`
 /// is on in mouse look; in mouse look ([`mouse_look`]: `+mlook` held, or the
-/// 2026 `freelook`) mouse Y drives pitch (sign = Invert Mouse, `m_pitch.value
+/// slop `freelook`) mouse Y drives pitch (sign = Invert Mouse, `m_pitch.value
 /// < 0`), clamped 80/-70, and stops an active pitch drift (V_StopPitchDrift);
 /// otherwise — id's default, or with `+strafe` held — it feeds forwardmove
 /// (`m_forward`). Gated behind the menu/console like `look`.
@@ -438,7 +438,7 @@ pub(crate) fn mouse_count() -> String {
     })
 }
 
-/// The pointer lock was released. With `freelook` (2026) `+mlook` is held
+/// The pointer lock was released. With `freelook` (slop) `+mlook` is held
 /// for as long as the pointer is locked, so unlock IS the mlook release — the
 /// `lookspring` trigger (`IN_MLookUp`, cl_input.c: when `+mlook` releases and
 /// `lookspring.value` is set, `V_StartPitchDrift()` re-centres the view).
@@ -458,7 +458,7 @@ pub(crate) fn pointer_unlocked() {
 // --- in_win.c's joystick: the page's gamepad --------------------------------
 
 /// The gamepad's host state: in_win.c's joystick ([`Joystick`]: its reading,
-/// `IN_Commands`' keys, `IN_JoyMove`'s axis maps) and the 2026 rumble's.
+/// `IN_Commands`' keys, `IN_JoyMove`'s axis maps) and the slop rumble's.
 #[derive(Debug, Default)]
 pub(crate) struct PadHost {
     pub(crate) joy: Joystick,
@@ -495,14 +495,14 @@ fn joy_prints(a: &mut App) {
     }
 }
 
-/// Where the pad's keys go now (for the 2026 `joy_menukeys`): the menu's,
+/// Where the pad's keys go now (for the slop `joy_menukeys`): the menu's,
 /// unless a key is being bound (it is the key to bind), or a yes/no
 /// prompt's.
 fn pad_keys(a: &App) -> PadKeys {
     let menu = &a.menu;
     if a.key_dest() != KeyDest::Menu || menu.bind_grabbing() {
         PadKeys::Game
-    } else if menu.new_game_confirm() || menu.screen() == MenuScreen::Quit {
+    } else if menu.asking().is_some() || menu.screen() == MenuScreen::Quit {
         PadKeys::YesNo
     } else {
         PadKeys::Menu
@@ -538,7 +538,7 @@ pub(crate) fn in_joy_move(a: &mut App, frametime: f64, gated: bool) {
         strafe: a.settings.binds.held(BIND_STRAFE, &a.keys_held),
         mlook: mouse_look(a),
     };
-    let m = a.pad.joy.joy_move(&a.settings.cvars, a.settings.profile, held, frametime as f32);
+    let m = a.pad.joy.joy_move(&a.settings.cvars, a.settings.preset, held, frametime as f32);
     joy_prints(a);
     let Some(w) = a.walk.as_mut().filter(|_| !gated) else { return };
     w.key_move.fwd += m.forward;
@@ -552,7 +552,7 @@ pub(crate) fn in_joy_move(a: &mut App, frametime: f64, gated: bool) {
     }
 }
 
-/// The 2026 rumble (`joy_rumble`) after a live frame: on the damage the
+/// The slop rumble (`joy_rumble`) after a live frame: on the damage the
 /// frame's `V_ParseDamage` counted, and on a weapon's kick (the player's
 /// `punchangle` pitch jumping down) with a heavy weapon up. The page plays
 /// it on the pad while the pad is read ([`PadHost::pad_read`]), else on a
@@ -857,10 +857,10 @@ mod tests {
         reset_queue();
         assert_eq!(boot(), 1);
         close_menu();
-        use_2026();
+        use_slop();
 
-        // The 2026 binding: w = +forward at cl_forwardspeed 400 — Always Run
-        // on in the 2026 profile.
+        // The slop binding: w = +forward at cl_forwardspeed 400 — Always Run
+        // on in the slop preset.
         key_down(i32::from(b'w'));
         step(0.05);
         let fwd_run = walk_mut(|w| w.key_move.fwd);
@@ -881,13 +881,13 @@ mod tests {
         let dist = ((listener().pos[0] - x0).powi(2) + (listener().pos[1] - y0).powi(2)).sqrt();
         assert!(dist > 100.0, "held +forward displaces the player (moved {dist:.1}u)");
 
-        // Always Run (Options row 8) swaps cl_forwardspeed 400 -> 200.
+        // Always Run (Options row 7) swaps cl_forwardspeed 400 -> 200.
         menu_cancel(); // open the menu
         menu_down();
         menu_down();
         menu_select(); // -> Options (Main cursor 2)
-        for _ in 0..8 {
-            menu_down(); // ROW_ALWAYSRUN (M_AdjustSliders case 8)
+        for _ in 0..7 {
+            menu_down(); // ROW_ALWAYSRUN (id's M_AdjustSliders case 8)
         }
         menu_right(); // toggle OFF
         menu_cancel(); // Options -> Main
@@ -907,7 +907,7 @@ mod tests {
     }
 
     /// Space is `+jump` (`button2`: QuakeC's own swim stroke in water); with
-    /// the 2026 `cl_jumpswim` it swims up too (`upmove`, at `cl_upspeed`).
+    /// the slop `cl_jumpswim` it swims up too (`upmove`, at `cl_upspeed`).
     #[test]
     fn space_swims_up_only_with_cl_jumpswim() {
         use quake_rs::keys::K_SPACE;
@@ -997,7 +997,7 @@ mod tests {
         reset_queue();
         assert_eq!(boot(), 1);
         close_menu();
-        use_2026(); // freelook: the mouse looks while the pointer is locked
+        use_slop(); // freelook: the mouse looks while the pointer is locked
 
         // Mouse pulled down (positive movementY) looks DOWN (positive pitch).
         walk_mut(|w| w.pitch = 0.0);
@@ -1005,13 +1005,13 @@ mod tests {
         let p = player_pitch();
         assert!(p > 0.0, "non-inverted mouse-down looks down (pitch {p})");
 
-        // Toggle Invert Mouse (Options row 9): the m_pitch sign flips.
+        // Toggle Invert Mouse (Options row 8): the m_pitch sign flips.
         menu_cancel();
         menu_down();
         menu_down();
         menu_select(); // -> Options
-        for _ in 0..9 {
-            menu_down(); // ROW_INVERTMOUSE (M_AdjustSliders case 9)
+        for _ in 0..8 {
+            menu_down(); // ROW_INVERTMOUSE (id's M_AdjustSliders case 9: no "Reset to defaults" above it)
         }
         menu_right();
         menu_cancel();
@@ -1100,16 +1100,16 @@ mod tests {
         pad_frame(0, [0.0; 6]);
     }
 
-    /// The 2026 pad: the left stick walks, the right stick turns, the right
+    /// The slop pad: the left stick walks, the right stick turns, the right
     /// trigger fires (`AUX8` `+attack`) — and a rocket's kick rumbles, as
     /// does damage.
     #[test]
-    fn the_2026_pad_walks_turns_fires_and_rumbles() {
+    fn the_slop_pad_walks_turns_fires_and_rumbles() {
         use quake_rs::keys::K_AUX1;
         reset_queue();
         assert_eq!(boot(), 1);
         close_menu();
-        use_2026();
+        use_slop();
         pad_frame(0, [0.0; 6]);
         let (x0, y0, yaw0) = (listener().pos[0], listener().pos[1], yaw());
         for _ in 0..30 {
@@ -1155,14 +1155,14 @@ mod tests {
         assert!(take().is_empty(), "joy_rumble 0: none");
     }
 
-    /// The 2026 pad in the menus (`joy_menukeys`): Start opens the menu
+    /// The slop pad in the menus (`joy_menukeys`): Start opens the menu
     /// (`togglemenu`), the D-pad moves, A enters, B backs out and closes it.
     #[test]
-    fn the_2026_pad_works_the_menus() {
+    fn the_slop_pad_works_the_menus() {
         reset_queue();
         assert_eq!(boot(), 1);
         close_menu();
-        use_2026();
+        use_slop();
         let rest = [0.0; 6];
         let press = |bit: u32| {
             pad_frame(1 << bit, rest);
@@ -1196,7 +1196,7 @@ mod tests {
         reset_queue();
         assert_eq!(boot(), 1);
         close_menu();
-        use_2026();
+        use_slop();
         let turn = |hz: u32, per_frame: u32| {
             walk_mut(|w| w.yaw = 0.0);
             for _ in 0..hz {
@@ -1225,14 +1225,14 @@ mod tests {
         assert!(walk_mut(|w| w.yaw) < yaw0, "mouse-right turns right (yaw -= m_yaw*mx)");
         assert_eq!(walk_mut(|w| w.mouse_side), 0.0);
 
-        // Lookstrafe ON (Options row 11): in mouse look, mouse X strafes
+        // Lookstrafe ON (Options row 10): in mouse look, mouse X strafes
         // instead (in_win.c: `lookstrafe.value && (in_mlook.state & 1)`).
         menu_cancel();
         menu_down();
         menu_down();
         menu_select();
-        for _ in 0..11 {
-            menu_down(); // ROW_LOOKSTRAFE (M_AdjustSliders case 11)
+        for _ in 0..10 {
+            menu_down(); // ROW_LOOKSTRAFE (id's M_AdjustSliders case 11)
         }
         menu_right();
         menu_cancel();

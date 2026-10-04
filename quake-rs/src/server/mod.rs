@@ -83,7 +83,7 @@ pub use msg::{
     StaticSound, SvcEvent, TempEntityEvent,
 };
 pub use pr_cmds::install_engine_builtins;
-pub use sv_main::{EntityDlight, EF_BRIGHTLIGHT, EF_DIMLIGHT, EF_MUZZLEFLASH};
+pub use sv_main::{LitEntity, EF_BRIGHTLIGHT, EF_DIMLIGHT, EF_MUZZLEFLASH};
 pub use sv_move::{
     sv_check_bottom, sv_move_to_goal, sv_movestep, sv_new_chase_dir, sv_step_direction,
 };

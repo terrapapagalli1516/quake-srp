@@ -446,21 +446,21 @@ mod tests {
     fn load_keeps_every_option_and_binding() {
         use crate::menu::{menu_bind_key, menu_down, menu_right, menu_select, menu_up};
         assert_eq!(boot(), 1); // menu open on Main
-        crate::test_util::use_2026(); // Always Run on, to toggle off
+        crate::test_util::use_slop(); // Always Run on, to toggle off
         set_resolution(320, 200);
         // Options through the real menu exports: Brightness and Always Run.
         menu_down();
         menu_down();
         menu_select(); // Main > Options
+        for _ in 0..3 {
+            menu_down();
+        }
+        menu_right(); // Brightness (row 3): v_gamma 1.0 -> 0.95
         for _ in 0..4 {
             menu_down();
         }
-        menu_right(); // Brightness: v_gamma 1.0 -> 0.95
-        for _ in 0..4 {
-            menu_down();
-        }
-        menu_right(); // Always Run: on -> off
-        for _ in 0..8 {
+        menu_right(); // Always Run (row 7): on -> off
+        for _ in 0..7 {
             menu_up();
         }
         menu_select(); // Customize controls
@@ -679,7 +679,7 @@ mod tests {
         // Drawn once: the same alias models reach the renderer, the same pixels.
         let draw = |w: &mut Walk| {
             w.renderer.stats_begin();
-            let (img, _) = crate::cl_walk::step_walk(w, 0.0, true, &crate::vid::mode_vid(320, 200));
+            let (img, _) = crate::cl_walk::step_walk(w, 0.0, true, &crate::vid::mode_vid(320, 200), true);
             (img, w.renderer.stats_end().alias_models)
         };
         let ((new_img, new_models), (old_img, old_models)) = (draw(&mut new), draw(&mut old));

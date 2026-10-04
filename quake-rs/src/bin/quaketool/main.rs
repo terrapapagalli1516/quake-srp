@@ -169,7 +169,7 @@ const COMMANDS: &[Command] = &[
         name: "view",
         usage: "<pak> <map.bsp> <out.ppm> [--res WxH] [--origin x,y,z] [--angles p,y,r] [--time T] [--fov F] \
                 [--aspect A] [--vrect x,y,w,h] [--ents FILE] [--particles FILE] \
-                [--dlight x,y,z,radius[,minlight]]... [--viewmodel M:F] [--viewent x,y,z,p,y,r] [--bench N] \
+                [--dlight x,y,z,radius[,minlight]]... [--style-values V0,V1,...] [--viewmodel M:F] [--viewent x,y,z,p,y,r] [--bench N] \
                 [--d-mipscale X] [--d-mipcap N] [video options]",
         about: "render one exact view (Quake camera convention), for the C oracle diff",
         run: render::view::cmd_view,
@@ -273,6 +273,7 @@ const COMMANDS: &[Command] = &[
                 | --lightstyles [--rates LIST] [--res WxH] [--threads N] [--reps N] [--secs S] [--view NAME=MAP:X,Y,Z:YAW]... \
                 | --torchflicker S [the same] [--dump DIR [--strengths LIST]] \
                 | --bake [--threads LIST] [--paced] [the same] \
+                | --serial [--threads LIST] [--paced] [the same] \
                 | --perspspan [--spans 16,8,4,1] [the same] [--dump DIR [--turn DEG_S] [--strafe UNITS_S] [--crop X,Y,W,H]]",
         about: "play scripted scenarios at 72 Hz and each rate; how each quantity differs (FRAMERATE.md)",
         run: |a| Ok(Out::Text(framerate::cmd_framerate(&a[0], &a[1..])?)),

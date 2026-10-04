@@ -15,12 +15,12 @@
 //! | [`cl_demo`]  | cl_demo.c, cl_parse.c, view.c     | `CL_PlayDemo_f`'s build, quake.rc's demo loop, [`cl_demo::demo_frame`]: the recorded stream rendered like live play |
 //! | [`cl_tent`]  | cl_tent.c, r_part.c               | temp-entity effects (explosions, impacts, their sounds), the model-flag trails |
 //! | [`cl_input`] | cl_input.c                        | [`cl_input::KeyMove`]: `CL_BaseMove`/`CL_AdjustAngles` over the held keys and bindings, the `cl_*` move cvars |
-//! | [`in_win`]   | in_win.c (the joystick)           | [`in_win::Joystick`]: a pad as winmm's joystick — `IN_Commands`' `JOY`/`AUX` keys, `IN_JoyMove`'s move and turn with the `joy*` cvars — and the 2026 pad's stick shaping, menu keys and rumble |
+//! | [`in_win`]   | in_win.c (the joystick)           | [`in_win::Joystick`]: a pad as winmm's joystick — `IN_Commands`' `JOY`/`AUX` keys, `IN_JoyMove`'s move and turn with the `joy*` cvars — and the slop pad's stick shaping, menu keys and rumble |
 //! | [`view`]     | view.c                            | `V_ParseDamage`, the damage kick, `V_BonusFlash_f`, the item get-times (the renderer's half of view.c is `render`'s) |
 //! | [`host`]     | host.c                            | `Host_FilterTime`: the 72 fps gate and the frame time it hands the game |
 //! | [`host_cmd`] | host_cmd.c                        | the level loads (`map`, changelevel, restart, a savegame's rebuild) and the cheats (god, noclip, fly, kill, give, impulse) |
-//! | [`lerpmove`] | (QuakeSpasm's `r_lerpmove`)       | the 2026 extra: monsters glide between their steps ([`lerpmove::LerpMove`]) |
-//! | [`lerpmodels`] | (QuakeSpasm's `r_lerpmodels`)  | the 2026 extra: an alias model's animation blends between frames ([`lerpmodels::LerpModels`]) |
+//! | [`lerpmove`] | (QuakeSpasm's `r_lerpmove`)       | the slop extra: monsters glide between their steps ([`lerpmove::LerpMove`]) |
+//! | [`lerpmodels`] | (QuakeSpasm's `r_lerpmodels`)  | the slop extra: an alias model's animation blends between frames ([`lerpmodels::LerpModels`]) |
 //!
 //! ## What a frame takes and gives
 //!
@@ -51,6 +51,7 @@ pub mod host_cmd;
 pub mod in_win;
 pub mod lerpmodels;
 pub mod lerpmove;
+pub mod nailbarrels;
 pub mod view;
 
 use std::cell::Cell;
@@ -72,6 +73,7 @@ use crate::wad::Qpic;
 use cl_input::{clamp_pitch, KeyMove};
 use lerpmodels::{FrameLerps, LerpModels};
 use lerpmove::{LerpMove, StepGlides};
+use nailbarrels::{NailBarrels, NailLaunches};
 
 // ---------------------------------------------------------------------------
 // The client state
@@ -184,6 +186,12 @@ pub struct Walk {
     /// Every drawn alias entity's (and the view weapon's) animation blend
     /// while [`LerpModels::Smooth`] is on.
     pub frame_lerps: FrameLerps,
+    /// Whether the player's nails are drawn leaving the nailgun's barrels
+    /// ([`NailBarrels`], `r_nailbarrels`): Classic unless the host turns the
+    /// extra on. Set by the host each frame, like `lerpmove`.
+    pub nailbarrels: NailBarrels,
+    /// The player's nails in flight while [`NailBarrels::Barrels`] is on.
+    pub nail_launches: NailLaunches,
     /// Accumulated mouse-strafe sidemove units (in_win.c IN_MouseMove's
     /// `cmd->sidemove += m_side.value * mouse_x` when lookstrafe / +strafe route
     /// mouse X away from yaw). Drained into the next UserCmd then cleared.
@@ -219,7 +227,7 @@ pub struct Walk {
     /// `cl.faceanimtime` (V_ParseDamage: `cl.time + 0.2`, on the server clock
     /// like the HUD's `time`): the status bar shows the pain face until then.
     pub faceanimtime: f32,
-    /// `V_ParseDamage`'s `count`s since the platform last took them: the 2026
+    /// `V_ParseDamage`'s `count`s since the platform last took them: the slop
     /// pad's rumble on damage ([`in_win::Rumble::damage`]). Nothing in the
     /// game reads it.
     pub damage_count: f32,
@@ -265,7 +273,7 @@ pub struct Walk {
     /// Deterministic RNG for particle spawns (no `rand` crate; std-only).
     pub prng: Lcg,
     /// Live dynamic lights (explosions, muzzle flashes, EF_* lights). Allocated
-    /// each frame from the drained temp entities + the server's entity_dlights,
+    /// each frame from the drained temp entities + the server's lit entities,
     /// decayed under `advance`, and passed to the renderer to light the walls.
     pub dlights: DynamicLights,
     /// The beam temp-entity slots (`cl_beams`): lightning bolts the drained
@@ -361,8 +369,14 @@ pub struct DemoPlay {
     /// its z-buffer) — so the demo shows blood, gunshot puffs and explosions just
     /// like [`walk_frame`](cl_main::walk_frame) does for live play.
     pub particles: ParticleSystem,
-    /// Deterministic RNG for the demo's particle spawns (std-only, like Walk).
+    /// Deterministic RNG for the demo's particle spawns and light jitter (std-only, like Walk).
     pub prng: Lcg,
+    /// `cl_dlights`: the lights the recorded stream makes — the explosions of
+    /// its temp entities as each message is read, the light effects (and a
+    /// rocket's) of its entities each frame they are relinked — by the same
+    /// calls the live walk's lights are made with. Decayed after each frame is
+    /// drawn (`CL_DecayLights`), reset when playback starts over.
+    pub dlights: DynamicLights,
     /// The message whose effects were last spawned, so each message's bursts
     /// spawn once, in the frame that reads it; `None` until the first frame of
     /// playback reads one.
@@ -501,6 +515,7 @@ impl DemoPlay {
             view: cl_demo::DemoView::default(),
             particles: ParticleSystem::new(),
             prng: Lcg::new(0x9E37_79B9),
+            dlights: DynamicLights::new(),
             last_spawned_idx: None,
             beams: Beams::new(),
             beam_scratch: Vec::new(),
@@ -654,6 +669,8 @@ pub fn assemble_walk(
         glides: StepGlides::default(),
         lerpmodels: LerpModels::Classic,
         frame_lerps: FrameLerps::default(),
+        nailbarrels: NailBarrels::Classic,
+        nail_launches: NailLaunches::default(),
         clock,
         host_time: 0.0,
         host_clock: 0.0,
@@ -694,7 +711,7 @@ pub struct Vid {
     /// How often walls and liquids find their texel exactly
     /// ([`render::PerspSpan`]): id's 16-pixel spans (`D_DrawSpans16`) in id's
     /// Quake and in Classic, 64, 32, 8, 4, or every pixel — `r_perspspan`, exact in
-    /// the 2026 profile.
+    /// the slop preset.
     pub persp_span: render::PerspSpan,
     /// The port's video cvars (Hor+, views past id's largest mode): Classic
     /// in id's Quake.
@@ -737,16 +754,25 @@ pub fn backtile_for(
     gfx_wad.and_then(|g| g.qpic("backtile").ok())
 }
 
-/// EXTRA (2026's status bar overlay, [`render::SbarLayout::Overlay`]), not
-/// id: the world under the view, beside the status bar, drawn into `img` once
-/// the view is — each part of [`render::Refdef::below_parts`] a window onto
-/// `scene`'s view ([`render::Renderer::render_window`]), so no pixel of the
-/// view changes. Nothing without [`render::Refdef::below`].
-pub fn draw_world_below(renderer: &mut render::Renderer, scene: &render::Scene, refdef: &render::Refdef, img: &mut render::Image) {
+/// The frame's 3-D view straight into `img` at its place
+/// ([`render::Renderer::render_into`]) and — EXTRA (slop's status bar
+/// overlay, [`render::SbarLayout::Overlay`]), not id — the world under the
+/// view, beside the status bar: each part of
+/// [`render::Refdef::below_parts`] a window onto `scene`'s view
+/// ([`render::Renderer::render_window`]), so no pixel of the view changes;
+/// none without [`render::Refdef::below`]. The view and its windows are
+/// drawn in one pass: one round of the renderer's threads a frame, where
+/// the view and then each window were three. The same pixels.
+pub fn draw_view(renderer: &mut render::Renderer, scene: &render::Scene, refdef: &render::Refdef, img: &mut render::Image) {
     let bar = render::status_bar_rect(img.w, img.h, refdef.sb_lines);
+    // (At most three parts: no list on the heap.)
+    let mut windows = [render::ViewRect { x: 0, y: 0, w: 0, h: 0 }; 3];
+    let mut n = 0;
     for part in refdef.below_parts(bar) {
-        renderer.render_window(scene, part, img);
+        windows[n] = part;
+        n += 1;
     }
+    renderer.render_into_with(scene, &windows[..n], img);
 }
 
 /// How many rows under the view an underwater frame renders and wobbles

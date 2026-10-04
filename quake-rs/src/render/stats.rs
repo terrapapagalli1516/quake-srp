@@ -79,8 +79,9 @@ pub struct RenderStats {
     /// Surfaces asked of the surface cache that a steady torch flickers on
     /// (the 2026 `r_torchflicker`): the blocks a torch's change rebakes.
     pub surf_torchlit: u64,
-    /// The wall time of the frame's lit-surface bakes (`SurfaceCaches`'
-    /// jobs, on the render threads), before the bands.
+    /// The time of the frame's lit-surface bakes (`SurfaceCaches`' jobs),
+    /// every thread's added: each thread of the bands' round bakes before
+    /// its first band, so `bands_ns` has their wall time.
     pub surf_bake_ns: u64,
     /// Alias models handed to the renderer (`cl_visedicts` entries that reach
     /// `R_DrawEntitiesOnList`), those `R_AliasCheckBBox` accepted, and the
@@ -101,8 +102,25 @@ pub struct RenderStats {
     /// entities, on every thread): with one thread their sum, with several
     /// less — the timers above add each thread's time.
     pub bands_ns: u64,
-    /// The threads that drew the bands, summed over the frames.
+    /// The threads that drew the bands, summed over the frames, and the
+    /// rounds of threads started for them (none with one thread): each wakes
+    /// its helpers, asleep since the last frame on a display's pace.
     pub band_threads: u64,
+    pub thread_rounds: u64,
+    /// The views drawn (`R_RenderView`s: a frame's view, and with the 2026
+    /// status bar overlay the windows beside the bar), and their whole wall
+    /// time: less `bands_ns`, what a frame does on the calling thread alone.
+    pub views: u64,
+    pub view_ns: u64,
+    /// That serial part's pieces the timers above do not have: a view's
+    /// setup before the edge pass (the z-buffer's size, the torches' scales),
+    /// `D_DrawSurfaces`' lookups (each surface's paint, lightmap and
+    /// surface-cache entry; not the bakes, `surf_bake_ns`), and the
+    /// entities' setup (the models' vertices, light and clipped triangles,
+    /// the sprites, the particles' squares).
+    pub view_setup_ns: u64,
+    pub surf_lookup_ns: u64,
+    pub entity_setup_ns: u64,
 }
 
 impl RenderStats {
@@ -119,7 +137,8 @@ impl RenderStats {
         surf_torchlit: 0, surf_bake_ns: 0,
         alias_models: 0, alias_accepted: 0, alias_tris: 0,
         edges_emitted: 0, surfs_emitted: 0, spans_emitted: 0, edges_peak: 0, surfs_peak: 0,
-        bands_ns: 0, band_threads: 0,
+        bands_ns: 0, band_threads: 0, thread_rounds: 0,
+        views: 0, view_ns: 0, view_setup_ns: 0, surf_lookup_ns: 0, entity_setup_ns: 0,
     };
 
     /// Add `o`'s counts and times to these (the peaks as the larger).
@@ -132,7 +151,8 @@ impl RenderStats {
             world_surf_ns, surf_cache_hits, surf_baked, surf_bypass_baked, surf_texels_baked, surf_styled,
             surf_torchlit, surf_bake_ns,
             alias_models, alias_accepted, alias_tris, edges_emitted, surfs_emitted, spans_emitted,
-            edges_peak, surfs_peak, bands_ns, band_threads,
+            edges_peak, surfs_peak, bands_ns, band_threads, thread_rounds,
+            views, view_ns, view_setup_ns, surf_lookup_ns, entity_setup_ns,
         } = *o;
         for (sum, add) in [
             (&mut self.world_ns, world_ns), (&mut self.submodel_ns, submodel_ns),
@@ -155,6 +175,9 @@ impl RenderStats {
             (&mut self.alias_tris, alias_tris), (&mut self.edges_emitted, edges_emitted),
             (&mut self.surfs_emitted, surfs_emitted), (&mut self.spans_emitted, spans_emitted),
             (&mut self.bands_ns, bands_ns), (&mut self.band_threads, band_threads),
+            (&mut self.thread_rounds, thread_rounds), (&mut self.views, views), (&mut self.view_ns, view_ns),
+            (&mut self.view_setup_ns, view_setup_ns), (&mut self.surf_lookup_ns, surf_lookup_ns),
+            (&mut self.entity_setup_ns, entity_setup_ns),
         ] {
             *sum += add;
         }

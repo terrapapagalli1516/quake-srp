@@ -13,7 +13,7 @@ use quake_rs::client::{cl_demo, host_cmd};
 use quake_rs::pak::Pak;
 use quake_rs::qrand::QRand;
 use quake_rs::render::{self, build_gamma_table, Console, Menu, MenuPics};
-use quake_rs::settings::{Profile, Settings};
+use quake_rs::settings::{Machine, Preset, Settings};
 use quake_rs::wad::Qpic;
 
 use crate::common::{pak, registered};
@@ -26,13 +26,13 @@ pub(crate) use quake_rs::client::{DemoPlay, Walk};
 
 const WALK_MAP: &str = "maps/e1m1.bsp";
 
-/// The profile a session starts in, before `config.cfg`: 2026. (The tests
+/// The preset a session starts in, before `config.cfg`: slop. (The tests
 /// start in Classic: most of them pin id's game, and the ones about the
-/// 2026-only engine switch to it — the controls are the shared default in
+/// slop-only engine switch to it — the controls are the shared default in
 /// both now, so a test that specifically wants id's 1996 ones, not just
-/// Classic's engine, names them: `Settings::id(Profile::Classic)`, or the
+/// Classic's engine, names them: `Settings::id(Preset::Classic)`, or the
 /// console's `idcontrols`.)
-const START_PROFILE: Profile = if cfg!(test) { Profile::Classic } else { Profile::Modern };
+pub(crate) const START_PRESET: Preset = if cfg!(test) { Preset::Classic } else { Preset::Slop };
 
 /// quake.rc's `startdemos demo1 demo2 demo3`: the attract loop.
 pub(crate) const QUAKE_RC_DEMOS: [&str; 3] = ["demo1", "demo2", "demo3"];
@@ -61,7 +61,8 @@ pub(crate) struct App {
     /// 0 = walk, 1 = demo.
     pub(crate) mode: u8,
     /// The session's settings: id's cvars and key bindings, with the port's
-    /// departures and the profile they came from (`quake_rs::settings`).
+    /// departures, the preset they came from and the machine whose numbers
+    /// it has (`quake_rs::settings`; `main` names the machine at start).
     /// The menu, the console, the input and the frame all read and change
     /// this one value; `config.cfg` keeps it.
     pub(crate) settings: Settings,
@@ -69,10 +70,6 @@ pub(crate) struct App {
     /// its CSS size times `devicePixelRatio`), which `vid_native` renders
     /// into. `None` until the page says (natively, in the tests).
     pub(crate) window: Option<(u32, u32)>,
-    /// The page's `devicePixelRatio` (the `Window` record; 1 until it says):
-    /// how many device pixels make a CSS pixel, which tells a phone's small,
-    /// dense screen from a desktop's ([`crate::vid::phone_sized`]).
-    pub(crate) dpr: f32,
     /// The main-menu engine. Lives at the App level (mode-independent) so it can
     /// overlay WHATEVER is playing — the walk OR the attract demo (any key
     /// during demo playback brings it up, as in Quake); while `menu.visible`,
@@ -115,6 +112,9 @@ pub(crate) struct App {
     /// [`host_filter_time`](quake_rs::client::host::host_filter_time)'s gate
     /// measures the time since then.
     pub(crate) oldrealtime: f64,
+    /// `realtime` when the last host frame drew its picture: a frame-rate cap
+    /// holds the pictures to it (`FrameCap::picture_due`), not the frames.
+    pub(crate) last_picture: f64,
     /// Current render resolution (runtime; defaults to [`DEFAULT_W`] x
     /// [`DEFAULT_H`]): the size of the frames the scene renders.
     pub(crate) render_w: usize,
@@ -166,12 +166,7 @@ pub(crate) struct App {
     /// outside it (`M_Menu_Main_f` switches the demo loop off while the menu
     /// is up; `M_Main_Key`'s Escape puts it back). 0 at start, a C static.
     pub(crate) m_save_demonum: i32,
-    /// The threads the host offers the program: the page's pool of thread
-    /// workers plus the program's own (`-hwthreads`, from `wasi.js`), else
-    /// `std::thread::available_parallelism`; 1 without threads. The
-    /// `r_threads` setting resolves against it each frame.
-    pub(crate) hw_threads: usize,
-    /// The gamepad: in_win.c's joystick state and the 2026 rumble's
+    /// The gamepad: in_win.c's joystick state and the slop rumble's
     /// ([`crate::input::PadHost`]).
     pub(crate) pad: crate::input::PadHost,
     /// The mouse's records, counts and turn so far, for the page's
@@ -539,7 +534,7 @@ pub(crate) fn build_walk() -> Option<Walk> {
 pub(crate) fn build_walk_map(map: &str) -> Option<Walk> {
     let pak = pak()?;
     let mut sound = Vec::new();
-    // The live sv_max_edicts cvar (id's 600 in Classic, higher in 2026 —
+    // The live sv_max_edicts cvar (id's 600 in Classic, higher in slop —
     // crate::cvar::CVARS' `sv_max_edicts` row), sized onto the new server
     // exactly where SV_SpawnServer would size sv.edicts. ensure_app (not a
     // bare APP.with) because this runs at boot, before anything else has
@@ -590,9 +585,8 @@ pub(crate) fn ensure_app(f: impl FnOnce(&mut App)) {
                 walk: None,
                 demo: None,
                 mode: 0,
-                settings: Settings::new(START_PROFILE),
+                settings: Settings::new(START_PRESET, Machine::default()),
                 window: None,
-                dpr: 1.0,
                 menu: Menu::new(),
                 menu_pics: MenuPics::default(),
                 conchars: None,
@@ -602,6 +596,7 @@ pub(crate) fn ensure_app(f: impl FnOnce(&mut App)) {
                 clock: 0.0,
                 realtime: 0.0,
                 oldrealtime: 0.0,
+                last_picture: f64::MIN,
                 render_w: DEFAULT_W,
                 render_h: DEFAULT_H,
                 present: Present::new(false),
@@ -617,7 +612,6 @@ pub(crate) fn ensure_app(f: impl FnOnce(&mut App)) {
                 key_repeats: [0; 256],
                 shift_down: false,
                 m_save_demonum: 0,
-                hw_threads: 1,
                 pad: crate::input::PadHost::default(),
                 mouse: crate::input::MouseCount::default(),
                 quit: false,
@@ -813,19 +807,19 @@ mod tests {
         // real export paths the page uses.
         reset_queue();
         assert_eq!(boot(), 1); // opens the menu on Main, cursor 0
-        use_2026(); // Always Run on, WASD
+        use_slop(); // Always Run on, WASD
         menu_down();
         menu_down();
         menu_select(); // Main row 2 -> Options (cursor 0 = Customize controls)
+        for _ in 0..3 {
+            menu_down();
+        }
+        menu_right(); // Brightness row (3): v_gamma 1.0 -> 0.95
         for _ in 0..4 {
             menu_down();
         }
-        menu_right(); // Brightness row: v_gamma 1.0 -> 0.95
-        for _ in 0..4 {
-            menu_down();
-        }
-        menu_right(); // Always Run row: toggle OFF (this port defaults it on)
-        for _ in 0..8 {
+        menu_right(); // Always Run row (7): toggle OFF (this port defaults it on)
+        for _ in 0..7 {
             menu_up();
         }
         menu_select(); // Customize controls -> Keys screen
@@ -1122,8 +1116,8 @@ mod tests {
             let d = a.demo.as_mut().unwrap();
             // Render the current demo frame with a tiny dt twice; with the menu
             // OFF and ON. (A tiny dt keeps both renders on the same frame.)
-            let (plain, _) = step_demo(d, 0.0001, false, &crate::vid::mode_vid(w, h));
-            let (mut withm, _) = step_demo(d, 0.0001, false, &crate::vid::mode_vid(w, h));
+            let (plain, _) = step_demo(d, 0.0001, false, &crate::vid::mode_vid(w, h), true);
+            let (mut withm, _) = step_demo(d, 0.0001, false, &crate::vid::mode_vid(w, h), true);
             let clock = render::MenuClock { host_time: a.clock, realtime: a.realtime };
             render::draw_menu(&mut withm, &a.menu, &a.settings, &a.menu_pics, a.conchars.as_ref(), clock);
             // The two frames are the same scene; only the menu overlay differs.

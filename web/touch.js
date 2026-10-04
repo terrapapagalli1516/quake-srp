@@ -15,13 +15,13 @@
 //
 // What shows depends on the game's state (the State record):
 //
-//   the game, with in_touch (2026)  a stick under the left thumb wherever it
+//   the game, with in_touch (on)    a stick under the left thumb wherever it
 //                                   lands, look by dragging on the right,
 //                                   FIRE (hold; drag it to aim too), JUMP,
 //                                   next weapon, MENU
-//   the game, in_touch off          MENU only (Classic: id's game has no
-//                                   touch controls, but a phone must never be
-//                                   left without a way to the menu)
+//   the game, in_touch off          MENU only (id's game had no touch
+//                                   controls, but a phone must never be left
+//                                   without a way to the menu)
 //   a demo (the attract loop)       MENU; a tap anywhere is Escape, as any
 //                                   key is in id's demo playback
 //   the menu                        taps and drags on the menu; a pad
@@ -37,12 +37,14 @@
 //                                   closes it; a drag scrolls
 //   Multiplayer > Setup             KEYBOARD, for the names
 //
-// Around them: a prompt to turn the phone sideways, fullscreen and a
-// landscape lock where the browser allows (Android), the screen kept awake
-// in a game (Screen Wake Lock), audio resumed by any touch (iOS suspends
-// it), and (2026) a live game paused under its menu when the page is
-// hidden, until the player is back in the game. Haptics: rumble(), a hook
-// for the gamepad's rumble events.
+// Around them: Quake plays only sideways — held upright, a prompt covers
+// the page and the game waits behind it (index.html's frame loop: no ticks,
+// no frames, until the phone is turned back) — fullscreen and a landscape
+// lock where the browser allows (Android), the screen kept awake in a game
+// (Screen Wake Lock), audio resumed by any touch (iOS suspends it), and
+// (in_touch) a live game paused under its menu when the page is hidden, until
+// the player is back in the game. Haptics: rumble(), a hook for the
+// gamepad's rumble events.
 (function () {
   'use strict';
 
@@ -84,6 +86,7 @@
   let menuPoint = null;           // a menu point to send on the next frame
   let flushQueued = false;
   let autoPaused = false;         // hidden while playing: paused under the menu
+  let held = false;               // held upright: the prompt is up and the game waits (hold())
   let wakeLock = null;
   let barRows = 0;                // sbar_height's last answer: frame pixels, bottom-anchored
   const padTimers = new Map();    // each held pad arrow's repeat (a setTimeout chain), by keynum
@@ -131,7 +134,7 @@
     // would be bound, so hide it (`menuonly` still shows it any other time
     // the menu is up).
     ui.menuPad.hidden = has(host.ST.BIND_GRAB);
-    keepAwake(has(host.ST.WALK));
+    keepAwake(has(host.ST.WALK) && !held);
   }
   // menu_screen_id's Multiplayer > Setup (quake-wasm menu.rs).
   const SETUP_SCREEN = 11;
@@ -222,6 +225,7 @@
   // Any touch may resume audio: iOS suspends (or "interrupts") it when the
   // page is hidden, and resuming needs a gesture.
   function wakeAudio() {
+    if (held) return;                // a finger let go as the phone turned: the sound stays off
     host.unlockAudio();
     const ctx = host.audio();
     if (ctx && ctx.state !== 'running') ctx.resume().catch(() => {});
@@ -392,6 +396,30 @@
       .then(() => screen.orientation?.lock?.('landscape'))
       .catch(() => {});
   }
+
+  // Held upright: the page's own box is taller than wide (CSS's `portrait`:
+  // the height at least the width), not the device's orientation — a split
+  // screen or a foldable's half is judged by the room the page has. The same
+  // query as the prompt's CSS below, so the two cannot disagree; the prompt
+  // is up the moment the box turns, before any script runs, and this is
+  // what the game asks (index.html's frame loop, once a refresh — not in a
+  // resize event: Firefox evaluates a query at layout, after it) to wait.
+  const portraitQuery = matchMedia('(orientation: portrait)');
+  const portrait = () => portraitQuery.matches;
+  // The game starts waiting (index.html holdGame) or goes on (releaseGame):
+  // every finger and held key let go — the prompt takes the touches from
+  // here, so no release would come — the phone's keyboard down, and no
+  // reason left to keep the screen on.
+  function hold(on) {
+    held = on;
+    if (on) {
+      releaseAll();
+      padHoldStopAll();
+      menuPoint = null;
+      closeKeyboard();
+    }
+    keepAwake(has(host.ST.WALK) && !held);
+  }
   function syncFullscreenButton() {
     ui.full.hidden = !canFullscreen() || !!document.fullscreenElement;
   }
@@ -416,10 +444,10 @@
   }
 
   // The page hidden (another app, the lock button): with the touch
-  // controls (2026) a live game pauses (id's `pause`, its plaque) under its
-  // menu, and going back to the game resumes it. (In Classic the game only
-  // stops getting ticks, as on a desktop.) The sound stops until the page
-  // is back.
+  // controls (in_touch, on in both presets) a live game pauses (id's
+  // `pause`, its plaque) under its menu, and going back to the game resumes
+  // it. (With them off the game only stops getting ticks, as on a desktop.)
+  // The sound stops until the page is back.
   function onVisibility() {
     const ctx = host.audio();
     if (document.hidden) {
@@ -428,12 +456,14 @@
       if (has(host.ST.WALK) && has(host.ST.TOUCH) && !has(host.ST.PAUSED)) {
         call('exec pause');
         autoPaused = true;
-        if (mode === 'play') press(K.ESCAPE);   // togglemenu: the menu opens
+        // The menu opens (Escape's own `togglemenu`; as a call, so it also
+        // gets through while the phone is held upright and keys are not heard).
+        if (mode === 'play') call('exec togglemenu');
       }
       if (ctx && ctx.state === 'running') ctx.suspend().catch(() => {});
     } else {
-      if (ctx) ctx.resume().catch(() => {});
-      keepAwake(has(host.ST.WALK));
+      if (ctx && !held) ctx.resume().catch(() => {});
+      keepAwake(has(host.ST.WALK) && !held);
     }
   }
 
@@ -444,7 +474,7 @@
   // vibrate.
   function rumble(weak, strong, ms) {
     const s = Math.max(weak || 0, strong || 0);
-    if (!navigator.vibrate || document.hidden || s < 0.1 || !(mode === 'play' || mode === 'game')) return;
+    if (!navigator.vibrate || document.hidden || held || s < 0.1 || !(mode === 'play' || mode === 'game')) return;
     navigator.vibrate(Math.round(Math.min(ms || 100, 400) * s));
   }
 
@@ -534,12 +564,16 @@
   #tPadOk { left:29px; top:192px; width:62px; height:62px; font-size:14px; font-weight:700; }
   #tType { position:absolute; left:0; top:0; width:1px; height:1px; opacity:0; border:0; padding:0;
     font-size:16px; /* iOS zooms into a smaller field */ }
-  /* Held upright: turn the phone. A tap dismisses it for the session. */
-  #tRotate { position:absolute; inset:0; z-index:3; display:none; flex-direction:column; gap:18px;
-    align-items:center; justify-content:center; background:rgba(0,0,0,.88); color:#cfc6b6;
+  /* Held upright: turn the phone. Nothing plays upright, so this is not a
+     notice to dismiss: it covers everything (the start prompt, the layer, a
+     menu), opaque — the game's last picture is not to show through — and
+     stays until the box is wider than tall. It is the page's own CSS: up the
+     moment the box turns, whatever the scripts are doing. */
+  #tRotate { position:absolute; inset:0; z-index:10; display:none; flex-direction:column; gap:18px;
+    align-items:center; justify-content:center; background:#000; color:#cfc6b6; touch-action:none;
     font:14px ui-monospace,'SF Mono',Menlo,monospace; letter-spacing:.08em; text-align:center; padding:24px; }
-  #tRotate small { color:#8a7d68; font-size:12px; }
-  @media (orientation: portrait) { html.touch:not(.upright) #tRotate { display:flex; } }
+  #tRotate small { color:#8a7d68; font-size:12px; letter-spacing:.04em; }
+  @media (orientation: portrait) { html.touch #tRotate { display:flex; } }
   `;
 
   const ROTATE_SVG = `<svg width="72" height="72" viewBox="0 0 72 72" fill="none" stroke="#d9a546" stroke-width="3" aria-hidden="true">
@@ -633,12 +667,19 @@
     ui.type.addEventListener('keydown', onTypeKey);
     ui.type.addEventListener('keyup', onTypeKey);
     // Held upright: turn the phone (over the start prompt too, so outside
-    // the layer). A tap dismisses it for the session.
+    // the layer). A tap cannot dismiss it, but it may turn the screen: a
+    // phone whose rotation is locked never reports landscape by itself,
+    // and Android Chrome's landscape lock (in fullscreen) overrides the
+    // lock — this tap is the user gesture fullscreen needs, as the start
+    // prompt's tap is, which the prompt covers. Where there is no
+    // fullscreen (an iPhone's page has none) the hint says to unlock.
     const rotate = document.createElement('div');
     rotate.id = 'tRotate';
-    rotate.setAttribute('role', 'button');
-    rotate.innerHTML = `${ROTATE_SVG}<div>TURN YOUR PHONE SIDEWAYS</div><small>or tap to play upright</small>`;
-    rotate.addEventListener('click', () => document.documentElement.classList.add('upright'));
+    rotate.setAttribute('role', 'dialog');
+    rotate.setAttribute('aria-label', 'turn your phone sideways');
+    rotate.innerHTML = `${ROTATE_SVG}<div>TURN YOUR PHONE SIDEWAYS</div>`
+      + `<small>rotation locked? ${canFullscreen() ? 'tap for fullscreen' : 'unlock it'}</small>`;
+    rotate.addEventListener('click', goFullscreen);
     host.wrap.appendChild(rotate);
 
     document.addEventListener('visibilitychange', onVisibility);
@@ -666,7 +707,7 @@
       build();
       readSettings();
       state();
-      return { state, rumble };
+      return { state, rumble, portrait, hold };
     },
     rumble: (weak, strong, ms) => rumble(weak, strong, ms),
   };

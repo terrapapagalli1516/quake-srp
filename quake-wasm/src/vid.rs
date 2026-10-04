@@ -10,7 +10,7 @@
 //!   `_vid_resolution` (Options > Video Options), at most 1280x800, which the
 //!   page shows in the largest 4:3 box the window fits, as a 1996 monitor
 //!   showed WinQuake's 16:10 modes (so `vid.aspect` folds the stretch in).
-//! - **Native** (`vid_native 1`, 2026): the picture fills the page's box for
+//! - **Native** (`vid_native 1`, slop): the picture fills the page's box for
 //!   it (the `Window` record, in device pixels) at the box's own aspect, with
 //!   square pixels, [`pixel_size`] device pixels to one of the picture's; the
 //!   renderer's `hires` lets it past id's 1280x1024 and Hor+ (`fov_adapt`)
@@ -25,7 +25,7 @@ use quake_rs::cvar::Cvars;
 use quake_rs::render::{self, FovMode, MipCvars, SkyScroll, TorchFlicker, VideoCvars};
 use quake_rs::server::LerpLightStyles;
 
-use crate::app::{ensure_app, App, APP};
+use crate::app::{ensure_app, App, APP, START_PRESET};
 
 /// The default (boot) render resolution. A crisp `960x600` (preset index 4 — must
 /// stay a member of [`render::RESOLUTION_PRESETS`] so the Video Options list
@@ -44,38 +44,26 @@ const MIN_H: i32 = 200;
 const MAX_H: i32 = 800;
 const MAX_PIXELS: i32 = 1280 * 800;
 
-/// The most pixels an Auto pixel size ([`pixel_size`]) renders on one
-/// thread: a 1080p frame. The renderer costs about 2.8 ns a pixel natively
-/// on one core (a little more in the browser), so a frame this size is about
-/// 6 ms: 60-144 Hz displays keep up, and a 4K or 5K screen gets 2x2 or 3x3
-/// pixels instead of a frame four to seven times the cost.
-pub(crate) const AUTO_PIXEL_BUDGET: usize = 1920 * 1080;
-
-/// [`AUTO_PIXEL_BUDGET`] for a renderer drawing on `threads` threads: times
-/// the whole square root of their number, as the row bands do not scale
-/// perfectly (demo1 at 1080p draws 3.5x as fast on 8 threads as on one):
-/// 1-3 threads a 1080p frame, 4-8 two (a 1440p screen at 1x1), 9-15 three.
-pub(crate) fn auto_pixel_budget(threads: usize) -> usize {
-    AUTO_PIXEL_BUDGET * threads.max(1).isqrt()
-}
-
-/// The shorter side, in CSS pixels, of a box [`phone_sized`] takes for a
-/// phone's: a phone held either way is 320-480 wide in CSS pixels; a tablet
-/// or a laptop is 700 or more.
-const PHONE_CSS_SIDE: f32 = 540.0;
-
-/// A phone's screen: dense pixels (`devicePixelRatio` 2 or more) in a small
-/// box (its shorter side at most [`PHONE_CSS_SIDE`] CSS pixels). Auto starts
-/// such a screen at 2x2 ([`pixel_size`]): a phone's cores are several times
-/// slower than a desktop's and slow down further as the phone warms, which
-/// the thread count behind [`auto_pixel_budget`] cannot see (an Android
-/// phone at 1x1, 2640x1080 on 8 threads, took 13 ms a frame dry and 19 ms
-/// underwater against 60 Hz's 16.7, throttled at 40 C; at 2x2, 8 and 9 ms).
-/// At 2x2 a game pixel is still under a CSS pixel there, finer than the eye
-/// resolves at arm's length.
-pub(crate) fn phone_sized((win_w, win_h): (u32, u32), dpr: f32) -> bool {
-    dpr >= 2.0 && win_w.min(win_h) as f32 / dpr <= PHONE_CSS_SIDE
-}
+/// The most pixels a native frame may have. The threads build's memory is a
+/// fixed 512 MiB (`build.rs`), and it allocates its frames' buffers once,
+/// for a frame this large (`main`'s `reserve_frames`), so a window walked
+/// up through any sizes holds what a page opened at the largest does; 12
+/// million leaves most of the memory to the game.
+///
+/// Measured (2026-10-03, headless Chromium, a growable threads build, whose
+/// memory's size is the heap's high-water mark; 1x on 8 threads, e1m1, e1m3,
+/// e1m4 and e1m7 each turned all the way round): a page started at a size
+/// holds about 26 MB and 19 bytes a pixel — 1920x920 56 MB, 3840x2000 145,
+/// 5120x2720 286, 6400x3440 437, 7680x4160 623 (so 8K at 1x would stop the
+/// game). Frame buffers that grow with the window do not hand the old
+/// frame's memory to the next, larger one (4800x2880 then 5120x3200: 618
+/// MB, where a page started at 5120x3200 takes 333), and on 2026-10-04, e1m3,
+/// walked up to 4224x2656 (11.2 million) through 4, 6 and 17 sizes, a page
+/// held 307, 284 and 282 MB where one opened there held 188. With the
+/// buffers reserved: 202 MB from the first frame, at any size, and 202 at
+/// the end of each walk. 4K (8.3 million) and a 5120x2160 ultrawide (11.1)
+/// draw at 1x; 5K (14.7), 6K and 8K at 2x.
+pub(crate) const MAX_FRAME_PIXELS: usize = 12_000_000;
 
 /// Clamp a requested `(w, h)` render resolution into the supported envelope:
 /// width `MIN_W..=MAX_W`, height `MIN_H..=MAX_H`, and the total pixel count capped
@@ -98,31 +86,44 @@ pub(crate) fn clamp_resolution(w: i32, h: i32) -> (usize, usize) {
     (cw as usize, ch as usize)
 }
 
-/// How many device pixels make one of the picture's in native mode: the
-/// setting's 1..=4, or for Auto (0) the smallest that keeps a `win_w x win_h`
-/// box's frame within [`auto_pixel_budget`] for the renderer's `threads` (4
-/// at most), from 2 on a [`phone_sized`] screen.
-pub(crate) fn pixel_size(cvars: &Cvars, (win_w, win_h): (u32, u32), dpr: f32, threads: usize) -> u32 {
-    let max = u32::from(quake_rs::cvar::PIXEL_SIZE_MAX);
-    let budget = auto_pixel_budget(threads);
-    let first = if phone_sized((win_w, win_h), dpr) { 2 } else { 1 };
-    match u32::from(cvars.pixel_size) {
-        0 => (first..=max).find(|p| (win_w / p) as usize * (win_h / p) as usize <= budget).unwrap_or(max),
-        n => n.min(max),
-    }
+/// How many device pixels a side make one of the picture's in native mode:
+/// the setting (`vid_pixelsize`), or the next size up whose frame fits the
+/// memory ([`MAX_FRAME_PIXELS`]) when a `win_w x win_h` box at the setting
+/// would not — the player's own pick included, so a forced 1x on an 8K
+/// screen draws at 2x instead of stopping the game. 4 at most. And the next
+/// size down when the box at the setting is smaller than id's smallest mode,
+/// 320x200, and a smaller size is not: the frame would be held to 320x200
+/// and the picture drawn larger than its box (a touch screen's 2x in a box
+/// under 640x400 draws at 1x).
+pub(crate) fn pixel_size(cvars: &Cvars, window: (u32, u32)) -> u32 {
+    pixel_size_for(cvars.pixel_size, window)
 }
 
-/// The picture's size for these settings: native, the page's box divided by
-/// the pixel size (at least 320x200, at most the renderer's hires limit);
-/// otherwise the video mode, clamped.
-pub(crate) fn picture_size(cvars: &Cvars, window: Option<(u32, u32)>, dpr: f32, threads: usize) -> (usize, usize) {
+/// [`pixel_size`] for the setting `asked`.
+fn pixel_size_for(asked: u8, (win_w, win_h): (u32, u32)) -> u32 {
+    let max = u32::from(quake_rs::cvar::PIXEL_SIZE_MAX);
+    let fits = |&p: &u32| {
+        let (w, h) = frame_size((win_w, win_h), p);
+        w * h <= MAX_FRAME_PIXELS
+    };
+    let whole = |&p: &u32| win_w / p >= MIN_W as u32 && win_h / p >= MIN_H as u32;
+    let p = (u32::from(asked).clamp(1, max)..=max).find(fits).unwrap_or(max);
+    (1..=p).rev().find(whole).unwrap_or(1)
+}
+
+/// The native picture's size for a `win_w x win_h` box at pixel size `p`:
+/// the box divided by it, at least 320x200, at most the renderer's hires
+/// limit.
+fn frame_size((win_w, win_h): (u32, u32), p: u32) -> (usize, usize) {
+    let (w, h) = ((win_w / p) as usize, (win_h / p) as usize);
+    (w.clamp(MIN_W as usize, render::HIRES_MAXWIDTH), h.clamp(MIN_H as usize, render::HIRES_MAXHEIGHT))
+}
+
+/// The picture's size for these settings: native, the page's box at the
+/// pixel size [`pixel_size`] gives; otherwise the video mode, clamped.
+pub(crate) fn picture_size(cvars: &Cvars, window: Option<(u32, u32)>) -> (usize, usize) {
     match window.filter(|_| cvars.native) {
-        Some(win) => {
-            let p = pixel_size(cvars, win, dpr, threads);
-            let (w, h) = ((win.0 / p) as usize, (win.1 / p) as usize);
-            let (mw, mh) = (render::HIRES_MAXWIDTH, render::HIRES_MAXHEIGHT);
-            (w.clamp(MIN_W as usize, mw), h.clamp(MIN_H as usize, mh))
-        }
+        Some(win) => frame_size(win, pixel_size(cvars, win)),
         None => {
             let (w, h) = cvars.vid_resolution;
             clamp_resolution(i32::from(w), i32::from(h))
@@ -130,10 +131,13 @@ pub(crate) fn picture_size(cvars: &Cvars, window: Option<(u32, u32)>, dpr: f32, 
     }
 }
 
-/// The threads the renderer draws with: `r_threads` against what the host
-/// offers.
+/// The threads the renderer draws with: `r_threads`, which the machine
+/// starts at every thread the host offers, or four at most on a touch screen
+/// ([`quake_rs::settings::Machine::render_threads`]), and the player sets to
+/// any count. The one place the frame, the present and the automation read
+/// it.
 pub(crate) fn render_threads(a: &App) -> usize {
-    a.settings.cvars.threads.resolve(a.hw_threads)
+    a.settings.cvars.threads
 }
 
 /// Whether the picture is shown native (the page fills its box, square
@@ -144,32 +148,46 @@ pub(crate) fn native(a: &App) -> bool {
 
 /// Point Video Options at the live picture (`Menu::sync_resolution`): the
 /// render size, [`native`] (not just `vid_native`'s cvar — a window must be
-/// known too, or there's nothing to fill natively), and whether the
-/// native-resolution rows belong in the list at all (the 2026 profile;
-/// Classic's list is `RESOLUTION_PRESETS` alone). Every caller that used to
-/// hand `Menu::sync_resolution` the render size alone goes through this now,
-/// so the two new facts can never drift out of sync with it.
+/// known too, or there's nothing to fill natively), whether the
+/// native-resolution rows belong in the list at all (the slop preset, or a
+/// native picture in Classic — `vid_native 1` from the console; otherwise
+/// Classic's list is `RESOLUTION_PRESETS` alone), and the size each of them
+/// gives (1x..4x on the box, the memory limit included). Every
+/// caller that used to hand `Menu::sync_resolution` the render size alone
+/// goes through this now, so the facts can never drift out of sync with it.
 pub(crate) fn sync_menu_resolution(a: &mut App) {
     let native = native(a);
-    let modern = a.settings.profile == quake_rs::settings::Profile::Modern;
+    let native_rows = native || a.settings.preset == quake_rs::settings::Preset::Slop;
+    // A pixel size the box cannot be drawn at — `pixel_size_for` would draw
+    // another — is left out of the list rather than offered under another's
+    // size.
+    let mut sizes: quake_rs::menu::NativeSizes = [Some((0, 0)); quake_rs::menu::NATIVE_ROWS];
+    if let Some(win) = a.window {
+        for (p, size) in (1u8..).zip(&mut sizes) {
+            *size = (pixel_size_for(p, win) == u32::from(p)).then(|| {
+                let (w, h) = frame_size(win, u32::from(p));
+                (w as i32, h as i32)
+            });
+        }
+    }
     let (w, h) = (a.render_w as i32, a.render_h as i32);
-    a.menu.sync_resolution(w, h, native, modern);
+    a.menu.sync_resolution(w, h, native, native_rows, sizes);
 }
 
 /// Once a frame, before the client frame: the framebuffer to the size the
 /// settings ask for, and the 2-D layer's scale (a setting `draw` still keeps
 /// per thread). The renderer's settings go with the frame, in [`vid`].
 pub(crate) fn apply_settings(a: &mut App) {
-    let (w, h) = picture_size(&a.settings.cvars, a.window, a.dpr, render_threads(a));
+    let (w, h) = picture_size(&a.settings.cvars, a.window);
     a.set_render_size(w, h);
     quake_rs::draw::set_scaled_2d(a.settings.cvars.scaled_2d);
     sync_menu_resolution(a);
 }
 
 /// The checks' and the benchmark's shorthand for the picture (the
-/// `set_video` call): `modern` is the 2026 profile's — native resolution at
+/// `set_video` call): `modern` is the slop preset's — native resolution at
 /// one device pixel a pixel, Hor+, the fluid sky, the gliding light styles,
-/// the flickering torches, exact perspective:
+/// the flickering torches, the preset's perspective span (8):
 /// `quaketool --video modern` — whose size then follows the window
 /// (`set_window`); `classic` a video mode in the 4:3 box with id's field of
 /// view, sky and light styles. Returns 1 for a known name.
@@ -182,7 +200,7 @@ pub(crate) fn set_video(name: &str) -> i32 {
     ensure_app(|a| {
         let c = &mut a.settings.cvars;
         (c.native, c.fov_adapt) = (modern, modern);
-        c.persp_span = if modern { render::PerspSpan::Exact } else { render::PerspSpan::Spans16 };
+        c.persp_span = if modern { Cvars::slop().persp_span } else { Cvars::classic().persp_span };
         c.sky = if modern { SkyScroll::Fluid } else { SkyScroll::Classic };
         c.lightstyles = if modern { LerpLightStyles::Smooth } else { LerpLightStyles::Classic };
         c.torches = if modern { TorchFlicker::MODERN } else { TorchFlicker::OFF };
@@ -220,13 +238,8 @@ pub(crate) fn set_resolution(w: i32, h: i32) {
 
 /// The page's box for the picture, in device pixels (the `Window` record);
 /// native mode renders into it from the next frame.
-/// The `Window` record: the page's box in device pixels and its
-/// `devicePixelRatio` (an older page sends none, read as 0: taken as 1).
-pub(crate) fn set_window(w: u32, h: u32, dpr: f32) {
-    ensure_app(|a| {
-        a.window = (w > 0 && h > 0).then_some((w, h));
-        a.dpr = if dpr.is_finite() && dpr >= 1.0 { dpr } else { 1.0 };
-    });
+pub(crate) fn set_window(w: u32, h: u32) {
+    ensure_app(|a| a.window = (w > 0 && h > 0).then_some((w, h)));
 }
 
 /// The width:height ratio the page shows a video mode at, whatever its
@@ -269,11 +282,10 @@ pub(crate) fn mode_vid(w: usize, h: usize) -> Vid {
 }
 
 /// The `viewsize` cvar (Options "Screen size", `sizeup`/`sizedown`), 30..=120.
-/// Read-only, for the page/verification harness.
+/// Read-only, for the page/verification harness. Before the App exists, the
+/// start preset's ([`START_PRESET`]: slop's one step past id's 100).
 pub(crate) fn viewsize() -> f32 {
-    APP.with(|c| {
-        c.borrow().as_ref().map(|a| a.settings.cvars.viewsize).unwrap_or(render::VIEWSIZE_DEFAULT)
-    })
+    APP.with(|c| c.borrow().as_ref().map_or_else(|| START_PRESET.viewsize(), |a| a.settings.cvars.viewsize))
 }
 
 /// Set the `viewsize` cvar, bounded to 30..=120 (the console's `viewsize n`).
@@ -305,28 +317,26 @@ mod tests {
     use crate::test_util::*;
     use quake_rs::render::PerspSpan;
 
-    /// Auto picks the smallest whole pixel that keeps the frame within a
-    /// 1080p frame's pixels per whole square root of the renderer's threads;
-    /// a fixed size is what it says; Classic ignores the window.
+    /// The picture is the window over the pixel size, any aspect, at least
+    /// 320x200; Classic's is the video mode, whatever the window.
     #[test]
     fn native_pictures_are_whole_fractions_of_the_window() {
-        let mut c = quake_rs::cvar::Cvars::modern();
-        let size = |c: &Cvars, win, threads| (picture_size(c, Some(win), 1.0, threads), pixel_size(c, win, 1.0, threads));
-        assert_eq!(size(&c, (1920, 1080), 1), ((1920, 1080), 1));
-        assert_eq!(size(&c, (2560, 1440), 1), ((1280, 720), 2), "1440p on one thread: 2x2");
-        assert_eq!(size(&c, (2560, 1440), 8), ((2560, 1440), 1), "and 1x1 on eight");
-        assert_eq!(size(&c, (3840, 2160), 8), ((1920, 1080), 2));
-        assert_eq!(size(&c, (7680, 4320), 1), ((1920, 1080), 4), "8K: at most 4x4");
-        assert_eq!(size(&c, (1000, 640), 1), ((1000, 640), 1), "any aspect");
-        assert_eq!(size(&c, (300, 150), 1), ((320, 200), 1), "at least 320x200");
+        let mut c = quake_rs::cvar::Cvars::slop();
+        let size = |c: &Cvars, win| (picture_size(c, Some(win)), pixel_size(c, win));
+        assert_eq!(size(&c, (1920, 1080)), ((1920, 1080), 1));
+        assert_eq!(size(&c, (2560, 1440)), ((2560, 1440), 1), "1x is 1x: no budget, no guess");
+        assert_eq!(size(&c, (1000, 640)), ((1000, 640), 1), "any aspect");
+        assert_eq!(size(&c, (300, 150)), ((320, 200), 1), "at least 320x200");
         c.pixel_size = 3;
-        assert_eq!(size(&c, (1920, 1080), 1), ((640, 360), 3));
+        assert_eq!(size(&c, (1920, 1080)), ((640, 360), 3));
+        c.pixel_size = 2;
+        assert_eq!(size(&c, (2640, 1080)), ((1320, 540), 2), "a phone's 2x");
         c.native = false;
-        assert_eq!(picture_size(&c, Some((1920, 1080)), 1.0, 1), (960, 600), "the mode");
-        assert_eq!((auto_pixel_budget(0), auto_pixel_budget(3), auto_pixel_budget(4)), (AUTO_PIXEL_BUDGET, AUTO_PIXEL_BUDGET, 2 * AUTO_PIXEL_BUDGET));
+        assert_eq!(picture_size(&c, Some((1920, 1080))), (960, 600), "the mode");
+        assert_eq!(picture_size(&c, None), (960, 600));
     }
 
-    /// The renderer's sky follows `r_fluidsky`: off in Classic, on in 2026,
+    /// The renderer's sky follows `r_fluidsky`: off in Classic, on in slop,
     /// and `set_video`'s `modern` is `quaketool --video modern`'s, the fluid
     /// sky with the rest.
     #[test]
@@ -334,7 +344,7 @@ mod tests {
         let sky = || APP.with(|c| vid(c.borrow().as_ref().unwrap()).video.sky);
         assert_eq!(boot(), 1);
         assert_eq!(sky(), SkyScroll::Classic, "the tests start in Classic");
-        use_2026();
+        use_slop();
         assert_eq!(sky(), SkyScroll::Fluid);
         crate::host_cmd::execute_console_command("r_fluidsky 0");
         assert_eq!(sky(), SkyScroll::Classic);
@@ -345,38 +355,40 @@ mod tests {
     }
 
     /// The renderer's perspective follows `r_perspspan`: id's 16-pixel spans
-    /// in Classic, exact at every pixel in 2026 (the user's call: at 1080p
-    /// and above the spans' affine steps show), 8 or 4 when set; the old
-    /// `wasm_exactpersp` sets its two ends; and `set_video`'s `modern` is
-    /// `quaketool --video modern`'s, exact perspective with the rest.
+    /// in Classic, every 8 in slop (the user's call: at 1080p and above the
+    /// 16-pixel affine steps show; 8 is id's own portable-C loop), the other
+    /// spans and exact when set; the old `wasm_exactpersp` sets its two ends;
+    /// and `set_video`'s `modern` is `quaketool --video modern`'s, the
+    /// preset's span with the rest.
     #[test]
     fn the_perspective_follows_r_perspspan() {
         let span = || APP.with(|c| vid(c.borrow().as_ref().unwrap()).persp_span);
         assert_eq!(boot(), 1);
         assert_eq!(span(), PerspSpan::Spans16, "the tests start in Classic: id's spans");
-        use_2026();
-        assert_eq!(span(), PerspSpan::Exact, "2026: exact at every pixel");
-        for (line, want) in [("r_perspspan 8", PerspSpan::Spans8), ("r_perspspan 4", PerspSpan::Spans4),
+        use_slop();
+        assert_eq!(span(), PerspSpan::Spans8, "slop: id's portable C loop, every 8 pixels");
+        for (line, want) in [("r_perspspan 4", PerspSpan::Spans4), ("r_perspspan 1", PerspSpan::Exact),
                              ("r_perspspan 64", PerspSpan::Spans64), ("r_perspspan 32", PerspSpan::Spans32),
                              ("wasm_exactpersp 0", PerspSpan::Spans16), ("wasm_exactpersp 1", PerspSpan::Exact),
-                             ("r_perspspan 16", PerspSpan::Spans16)] {
+                             ("r_perspspan 16", PerspSpan::Spans16), ("r_perspspan 8", PerspSpan::Spans8)] {
             crate::host_cmd::execute_console_command(line);
             assert_eq!(span(), want, "{line}");
         }
+        assert_eq!(set_video("classic"), 1);
         assert_eq!(set_video("modern"), 1);
-        assert_eq!(span(), PerspSpan::Exact);
+        assert_eq!(span(), PerspSpan::Spans8);
         assert_eq!(set_video("classic"), 1);
         assert_eq!(span(), PerspSpan::Spans16);
     }
 
     /// The light styles the client animates follow `r_lerplightstyles` the
-    /// same way: off in Classic, on in 2026, and in `set_video`'s `modern`.
+    /// same way: off in Classic, on in slop, and in `set_video`'s `modern`.
     #[test]
     fn the_light_styles_follow_r_lerplightstyles() {
         let lerp = || APP.with(|c| vid(c.borrow().as_ref().unwrap()).video.lightstyles);
         assert_eq!(boot(), 1);
         assert_eq!(lerp(), LerpLightStyles::Classic, "the tests start in Classic");
-        use_2026();
+        use_slop();
         assert_eq!(lerp(), LerpLightStyles::Smooth);
         crate::host_cmd::execute_console_command("r_lerplightstyles 0");
         assert_eq!(lerp(), LerpLightStyles::Classic);
@@ -387,14 +399,14 @@ mod tests {
     }
 
     /// The steady torches' flicker follows `r_torchflicker`, a strength: off
-    /// in Classic, on in 2026 and `set_video`'s `modern`, any value between 0
+    /// in Classic, on in slop and `set_video`'s `modern`, any value between 0
     /// and 2 from the console (the user tunes it by eye), read back as set.
     #[test]
     fn the_torches_follow_r_torchflicker() {
         let torches = || APP.with(|c| vid(c.borrow().as_ref().unwrap()).video.torches);
         assert_eq!(boot(), 1);
         assert_eq!(torches(), TorchFlicker::OFF, "the tests start in Classic");
-        use_2026();
+        use_slop();
         assert_eq!(torches(), TorchFlicker::MODERN);
         crate::host_cmd::execute_console_command("r_torchflicker 0.35");
         assert_eq!(torches().value(), 0.35);
@@ -410,29 +422,76 @@ mod tests {
         assert_eq!(torches(), TorchFlicker::OFF);
     }
 
-    /// A phone's small, dense screen starts Auto at 2x2 whatever its threads;
-    /// a tablet, a laptop's dense screen and a desktop keep the budget's
-    /// answer; a fixed pixel size is what it says everywhere.
+    /// No frame is bigger than the memory holds ([`MAX_FRAME_PIXELS`]): the
+    /// next pixel size that fits instead, for the machine's number and for
+    /// the player's own pick alike — and never a frame past it at any
+    /// window the renderer draws.
     #[test]
-    fn auto_starts_a_phone_at_two_pixels() {
-        let mut c = quake_rs::cvar::Cvars::modern();
-        // A phone-sized landscape viewport: 880x360 CSS at 3x, 8 threads.
-        assert!(phone_sized((2640, 1080), 3.0));
-        assert_eq!(pixel_size(&c, (2640, 1080), 3.0, 8), 2);
-        assert_eq!(picture_size(&c, Some((2640, 1080)), 3.0, 8), (1320, 540));
-        assert!(phone_sized((1080, 2160), 3.0), "and held upright");
-        // Not phones: an iPad (1024x768 CSS at 2x), a MacBook (1440x900 at 2x),
-        // a desktop at 1x, and a phone-sized box at 1x (a small desktop window).
-        assert!(!phone_sized((2048, 1536), 2.0));
-        assert!(!phone_sized((2880, 1800), 2.0));
-        assert!(!phone_sized((1920, 1080), 1.0));
-        assert!(!phone_sized((880, 360), 1.0));
-        assert_eq!(pixel_size(&c, (1920, 1080), 1.0, 8), 1);
-        c.pixel_size = 1;
-        assert_eq!(pixel_size(&c, (2640, 1080), 3.0, 8), 1, "1x1 when asked");
-        // An older page sends no ratio (0): a desktop's 1.
-        set_window(2640, 1080, 0.0);
-        assert_eq!(APP.with(|a| a.borrow().as_ref().map(|a| a.dpr)), Some(1.0));
+    fn no_frame_is_bigger_than_the_memory_holds() {
+        let mut c = quake_rs::cvar::Cvars::slop();
+        assert_eq!(pixel_size(&c, (7680, 4320)), 2, "8K at 1x would not fit: 2x");
+        assert_eq!(picture_size(&c, Some((7680, 4320))), (3840, 2160));
+        assert_eq!(pixel_size(&c, (5120, 2880)), 2, "5K: 2x");
+        assert_eq!(pixel_size(&c, (3840, 2160)), 1, "4K: 1x");
+        assert_eq!(pixel_size(&c, (5120, 2160)), 1, "a 5K ultrawide: 1x");
+        c.pixel_size = 3;
+        assert_eq!(pixel_size(&c, (7680, 4320)), 3, "a size that fits is what it says");
+        for (w, h) in [(1920, 1080), (3840, 2160), (5120, 2880), (6016, 3384), (7680, 4320), (15360, 8640)] {
+            for p in 1..=quake_rs::cvar::PIXEL_SIZE_MAX {
+                c.pixel_size = p;
+                let (fw, fh) = picture_size(&c, Some((w, h)));
+                assert!(fw * fh <= MAX_FRAME_PIXELS, "{w}x{h} at {p}x: {fw}x{fh}");
+                assert!(pixel_size(&c, (w, h)) >= u32::from(p), "never finer than asked");
+            }
+        }
+    }
+
+    /// No frame is smaller than id's smallest mode, 320x200, where a smaller
+    /// pixel size gives one: the picture would be held to it and drawn larger
+    /// than its box. A box too small for 1x stays at 1x.
+    #[test]
+    fn no_frame_is_held_to_320x200_when_a_smaller_pixel_size_fills_the_box() {
+        let mut c = quake_rs::cvar::Cvars::slop();
+        c.pixel_size = 2;
+        assert_eq!(pixel_size(&c, (844, 390)), 1, "a touch screen's 2x in a box under 400 rows: 1x");
+        assert_eq!(picture_size(&c, Some((844, 390))), (844, 390));
+        assert_eq!(pixel_size(&c, (1320, 540)), 2, "a 1320x540 box at 2x: 660x270");
+        c.pixel_size = 4;
+        assert_eq!(pixel_size(&c, (1280, 720)), 3, "4x: 320x180; 3x: 426x240");
+        assert_eq!(pixel_size(&c, (2640, 1080)), 4, "the phone at 4x: 660x270");
+        assert_eq!(pixel_size(&c, (300, 180)), 1, "too small for 1x: 1x");
+        for (w, h) in [(640, 400), (700, 420), (1280, 720), (1920, 1080), (2640, 1080)] {
+            for p in 1..=quake_rs::cvar::PIXEL_SIZE_MAX {
+                c.pixel_size = p;
+                let s = pixel_size(&c, (w, h));
+                assert!(w / s >= 320 && h / s >= 200, "{w}x{h} at {p}x: {s}x");
+                assert!(s <= u32::from(p), "never coarser than asked in a small box");
+            }
+        }
+    }
+
+    /// A touch screen draws on four threads at most (8 or 6 offered give 4,
+    /// 2 gives 2, 1 gives 1), any other screen — a desktop, a tablet whose
+    /// pointer is not coarse — on every thread the host offers; a count asked
+    /// for is that count anywhere.
+    #[test]
+    fn a_touch_screen_draws_on_four_threads() {
+        use quake_rs::settings::{Machine, Preset, Settings};
+        assert_eq!(boot(), 1);
+        let threads = |touch: bool, offered: usize| {
+            APP.with(|c| {
+                let mut b = c.borrow_mut();
+                let a = b.as_mut().unwrap();
+                a.settings = Settings::new(Preset::Slop, Machine { touch, threads: offered });
+                render_threads(a)
+            })
+        };
+        let touch = (threads(true, 8), threads(true, 6), threads(true, 2), threads(true, 1));
+        assert_eq!(touch, (Machine::TOUCH_THREADS, 4, 2, 1));
+        crate::host_cmd::execute_console_command("r_threads 8");
+        assert_eq!(APP.with(|c| render_threads(c.borrow().as_ref().unwrap())), 8, "asked for by number: that many");
+        assert_eq!(threads(false, 8), 8, "a desktop: every thread offered");
+        assert_eq!(threads(false, 16), 16, "a tablet with a fine pointer too");
     }
 
     // -- dynamic render resolution (set_resolution + clamp + reallocation) ----
@@ -556,8 +615,7 @@ mod tests {
         menu_down(); // -> 2 (Options)
         menu_select(); // enter Options (cursor on row 0 = Customize controls)
         menu_down(); // -> 1 (Go to console)
-        menu_down(); // -> 2 (Reset to defaults)
-        menu_down(); // -> 3 (Screen size)
+        menu_down(); // -> 2 (Screen size)
         assert_eq!(viewsize(), 100.0, "viewsize defaults to 100");
         menu_right();
         assert_eq!(viewsize(), 110.0, "right steps viewsize +10");

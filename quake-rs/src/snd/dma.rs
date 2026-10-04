@@ -87,7 +87,7 @@ const AMBIENT_MAX_FRAME: f64 = 0.1;
 // ---------------------------------------------------------------------------
 
 /// What the default mixer repairs in id's. Classic is [`Fixes::NONE`]; the
-/// 2026 default is [`Fixes::ALL`]. None of them changes the character of the
+/// slop default is [`Fixes::ALL`]. None of them changes the character of the
 /// sound: the samples stay 8-bit and point-resampled, the spatialization and
 /// attenuation stay id's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,7 +118,7 @@ pub struct Fixes {
 impl Fixes {
     /// id's mixer as written: Classic.
     pub const NONE: Fixes = Fixes { loop_seam: false, exact_resample: false, ambient_steps: false, stop_range: false };
-    /// Every fix: the 2026 default.
+    /// Every fix: the slop default.
     pub const ALL: Fixes = Fixes { loop_seam: true, exact_resample: true, ambient_steps: true, stop_range: true };
 }
 
@@ -129,7 +129,7 @@ impl Default for Fixes {
 }
 
 /// Which mixer the player hears: the typed setting a platform (and the
-/// settings' profiles) choose with. Each mode is a rate, a set of [`Fixes`]
+/// settings' presets) choose with. Each mode is a rate, a set of [`Fixes`]
 /// and a mix-ahead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SoundMode {
@@ -138,19 +138,20 @@ pub enum SoundMode {
     /// device, as a sound card's DAC and output filter did), mixing
     /// `_snd_mixahead`'s default 0.1 s ahead.
     Classic,
-    /// The 2026 mixer: [`Fixes::ALL`], at the device's own rate (id's
+    /// The slop mixer: [`Fixes::ALL`], at the device's own rate (id's
     /// algorithms at `-sspeed` rate: point-resampled 8-bit samples, id's
-    /// spatialization), mixing [`MODERN_MIXAHEAD`] ahead.
+    /// spatialization), mixing [`SLOP_MIXAHEAD`] ahead. (`snd_modern 1`: the
+    /// cvar keeps its first name, which old `config.cfg` files carry.)
     #[default]
-    Modern,
+    Slop,
 }
 
-/// The 2026 mixer's `_snd_mixahead`: how far ahead of the device it mixes.
+/// The slop mixer's `_snd_mixahead`: how far ahead of the device it mixes.
 /// A sound starts this long after its frame at the least (plus the device's
 /// own output latency). It must outlast the time between two host frames
 /// plus the device's callback, or the device runs dry: 50 ms holds at 30 fps
 /// and above (`web/verify_ambient.py` counts the device's underruns).
-pub const MODERN_MIXAHEAD: f32 = 0.05;
+pub const SLOP_MIXAHEAD: f32 = 0.05;
 
 /// id's `desired_speed` (snd_dma.c): the rate WinQuake asked its sound
 /// device for.
@@ -161,7 +162,7 @@ impl SoundMode {
     pub fn fixes(self) -> Fixes {
         match self {
             SoundMode::Classic => Fixes::NONE,
-            SoundMode::Modern => Fixes::ALL,
+            SoundMode::Slop => Fixes::ALL,
         }
     }
 
@@ -170,8 +171,8 @@ impl SoundMode {
     pub fn rate(self, device_rate: u32) -> u32 {
         match self {
             SoundMode::Classic => ID_RATE,
-            SoundMode::Modern if device_rate == 0 => 48000,
-            SoundMode::Modern => device_rate,
+            SoundMode::Slop if device_rate == 0 => 48000,
+            SoundMode::Slop => device_rate,
         }
     }
 
@@ -179,7 +180,7 @@ impl SoundMode {
     pub fn mixahead(self) -> f32 {
         match self {
             SoundMode::Classic => 0.1,
-            SoundMode::Modern => MODERN_MIXAHEAD,
+            SoundMode::Slop => SLOP_MIXAHEAD,
         }
     }
 
@@ -187,15 +188,16 @@ impl SoundMode {
     pub fn name(self) -> &'static str {
         match self {
             SoundMode::Classic => "classic",
-            SoundMode::Modern => "2026",
+            SoundMode::Slop => "slop",
         }
     }
 
-    /// The mode a console argument names (`classic`/`0`, `2026`/`1`).
+    /// The mode a console argument names (`classic`/`0`, `slop`/`1`; `2026`
+    /// and `modern`, its older names, too).
     pub fn parse(s: &str) -> Option<SoundMode> {
         match s.trim().to_ascii_lowercase().as_str() {
             "classic" | "id" | "0" => Some(SoundMode::Classic),
-            "2026" | "modern" | "1" => Some(SoundMode::Modern),
+            "slop" | "2026" | "modern" | "1" => Some(SoundMode::Slop),
             _ => None,
         }
     }
@@ -1090,15 +1092,15 @@ mod tests {
     }
 
     #[test]
-    fn the_modes_are_ids_mixer_at_11025_and_the_2026_one_at_the_device_rate() {
+    fn the_modes_are_ids_mixer_at_11025_and_the_slop_one_at_the_device_rate() {
         let p = test_pak();
         let classic = SoundMode::Classic.mixer(&p, 48000);
         assert_eq!((classic.rate(), classic.fixes, classic.cvars.mixahead), (11025, Fixes::NONE, 0.1));
-        let modern = SoundMode::Modern.mixer(&p, 44100);
-        assert_eq!((modern.rate(), modern.fixes, modern.cvars.mixahead), (44100, Fixes::ALL, MODERN_MIXAHEAD));
-        assert_eq!(SoundMode::Modern.rate(0), 48000, "an unknown device");
-        assert_eq!(SoundMode::default(), SoundMode::Modern);
-        for m in [SoundMode::Classic, SoundMode::Modern] {
+        let modern = SoundMode::Slop.mixer(&p, 44100);
+        assert_eq!((modern.rate(), modern.fixes, modern.cvars.mixahead), (44100, Fixes::ALL, SLOP_MIXAHEAD));
+        assert_eq!(SoundMode::Slop.rate(0), 48000, "an unknown device");
+        assert_eq!(SoundMode::default(), SoundMode::Slop);
+        for m in [SoundMode::Classic, SoundMode::Slop] {
             assert_eq!(SoundMode::parse(m.name()), Some(m));
         }
         assert_eq!(SoundMode::parse("x"), None);

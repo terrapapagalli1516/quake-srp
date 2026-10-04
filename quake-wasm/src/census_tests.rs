@@ -41,7 +41,7 @@ fn centre(w: &Walk, e: i32) -> [f32; 3] {
 
 /// One walk frame; returns its colour shifts (`cl.cshifts`, in order).
 fn step(w: &mut Walk, dt: f64) -> Vec<([u8; 3], f32)> {
-    step_walk(w, dt, false, &crate::vid::mode_vid(320, 200)).1
+    step_walk(w, dt, false, &crate::vid::mode_vid(320, 200), true).1
 }
 
 fn angle_diff(a: f32, b: f32) -> f32 {
@@ -104,7 +104,7 @@ fn census_single_player_pauses_behind_the_menu() {
     }
     let t0 = w.server.time();
     for _ in 0..10 {
-        let _ = step_walk(&mut w, 0.1, true, &crate::vid::mode_vid(320, 200)); // menu up
+        let _ = step_walk(&mut w, 0.1, true, &crate::vid::mode_vid(320, 200), true); // menu up
     }
     assert_eq!(w.server.time(), t0, "sv.time must not advance while key_dest != key_game");
 }
@@ -299,13 +299,13 @@ fn census_rune_icons_reach_the_status_bar() {
     // Render the status bar before and after the pickup; the rune slot
     // (Sbar_DrawInventory: x = 320-32+i*8, y = -8 above the sbar, i.e. the
     // inventory strip's right end) changes when the icon is drawn.
-    let before = step_walk(&mut w, 0.0, false, &crate::vid::mode_vid(320, 200)).0;
+    let before = step_walk(&mut w, 0.0, false, &crate::vid::mode_vid(320, 200), true).0;
     let p = w.player;
     let c = centre(&w, rune);
     set_origin(&mut w, p, c);
     step(&mut w, 0.1);
     assert_eq!(w.server.serverflags() as i32 & 1, 1, "sigil_touch set serverflags bit 0");
-    let after = step_walk(&mut w, 0.0, false, &crate::vid::mode_vid(320, 200)).0;
+    let after = step_walk(&mut w, 0.0, false, &crate::vid::mode_vid(320, 200), true).0;
     // Sbar_DrawInventory draws sigil i with Sbar_DrawPic (320-32 + i*8, -16):
     // x 288.., y 200-24-16 = 160.. at 320x200 (viewsize 100: sb_lines 48, the
     // inventory strip is drawn). The rune-1 cell is 8x16.

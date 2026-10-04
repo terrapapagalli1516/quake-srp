@@ -10,7 +10,7 @@ sample.
 
     uv run oracle/sound.py                          # every scenario at 11025/22050/44100/48000
     uv run oracle/sound.py --scenarios statics,loops --rates 11025
-    uv run oracle/sound.py --fixes                  # also: how far the 2026 mixer departs from id's
+    uv run oracle/sound.py --fixes                  # also: how far the slop mixer departs from id's
     uv run oracle/sound.py --sse                    # the C built with SSE2 floats instead of x87
 
 A script is a list of snd_oracle.c's commands (see its header): sound calls,
@@ -351,7 +351,7 @@ def main() -> None:
     ap.add_argument("--scenarios", default=",".join(SCENARIOS), help="comma list of: " + ", ".join(SCENARIOS))
     ap.add_argument("--rates", default=",".join(map(str, RATES)))
     ap.add_argument("--seed", type=int, default=1996)
-    ap.add_argument("--fixes", action="store_true", help="also run the port with every fix (the 2026 mixer)")
+    ap.add_argument("--fixes", action="store_true", help="also run the port with every fix (the slop mixer)")
     ap.add_argument("--sse", action="store_true", help="the C built with SSE2 float math instead of x87")
     ap.add_argument("--quaketool", help="use this quaketool binary instead of building quake-rs")
     ap.add_argument("--out", type=Path, default=HERE / "build" / "sound-out")
@@ -392,7 +392,7 @@ def main() -> None:
                 run([str(qt), "sndscript", str(args.pak), str(script), str(f_raw), "--rate", str(rate), "--fixes"])
                 fix_rows.append((case, compare(c_raw, f_raw)))
     if fix_rows:
-        print("\nthe 2026 mixer (every fix) against id's:")
+        print("\nthe slop mixer (every fix) against id's:")
         print(f"{'case':<20} {'pairs C':>9} {'pairs port':>10} {'differing':>9} {'max|d|':>7}")
         for case, r in fix_rows:
             print(f"{case:<20} {r['pairs'][0]:>9} {r['pairs'][1]:>10} {r['differing']:>9} {r['maxdiff']:>7}")

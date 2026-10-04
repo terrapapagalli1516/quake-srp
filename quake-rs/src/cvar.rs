@@ -15,34 +15,40 @@
 //! which `Cvar_Command`'s `"viewsize" is "100"`, Tab completion and
 //! `Cvar_WriteVariables` go through.
 //!
-//! Two kinds of field. **id's cvars**, with id's defaults. And **the port's
-//! departures** from id's game, each marked [`Cvar::departure`]
-//! ([`crate::settings::Profile`] switches them: off in [`Cvars::classic`],
-//! on in [`Cvars::modern`]) — `crosshair`, the renderer and stepping
-//! extras, the 2026 mixer, the bigger edict pool.
+//! Two kinds of field. **id's cvars**, with id's defaults (one exception:
+//! `viewsize` starts one step larger in [`Cvars::slop`], so the HUD takes
+//! less of a slop screen; it stays id's own cvar, and
+//! [`crate::settings::Settings::apply_preset`] moves it with the preset only
+//! while the player has not moved it). And **the slop options**, the port's
+//! departures from id's game, each marked [`Cvar::departure`]: a preset
+//! ([`crate::settings::Preset`]) sets them all, off in [`Cvars::classic`]
+//! and on in [`Cvars::slop`] — `crosshair`, the renderer and stepping
+//! options, the slop mixer, the bigger edict pool.
 //!
-//! A departure can still be a *control* rather than the engine: Always Run
-//! (`cl_forwardspeed`/`cl_backspeed`), mouse look (`freelook`), the
-//! gamepad (`joystick` and in_win.c's advanced configuration, the 2026
-//! pad layout), Space-swims-up (`cl_jumpswim`) and Alt+Enter
-//! (`vid_altenter`) are departures from id's own defaults, but not from
-//! each other's — they are the player's, the same whichever profile is
-//! live, and [`crate::settings::Settings::set_profile`] leaves them alone
-//! on a switch, like id's own settings (Screen size, Mouse Speed). id's
-//! 1996 ones are one explicit step away, never a profile switch:
+//! A slop option can be a *control* rather than the engine: mouse look
+//! (`freelook`), the gamepad (`joystick`, in_win.c's advanced configuration
+//! as the slop pad layout, and the port's `joy_*`), Space-swims-up
+//! (`cl_jumpswim`), Alt+Enter (`vid_altenter`) and the touch controls
+//! (`in_touch`) depart from id's own defaults but not from each other's:
+//! both presets have them on, so applying either changes one only where the
+//! player changed it. Always Run (`cl_forwardspeed`/`cl_backspeed`) is
+//! on in both too, but it is id's own Options row, so no preset touches it.
+//! id's 1996 controls are one explicit step away, never a preset:
 //! [`Cvars::with_id_controls`], the console's `idcontrols`.
 
+use crate::client::host::FrameCap;
 use crate::client::in_win::JoyCvars;
 use crate::client::lerpmodels::LerpModels;
 use crate::client::lerpmove::LerpMove;
-use crate::render::{Crosshair, PerspSpan, SkyScroll, Threads, TorchFlicker};
+use crate::client::nailbarrels::NailBarrels;
+use crate::render::{Crosshair, PerspSpan, SkyScroll, TorchFlicker};
 use crate::snd::SoundMode;
-use crate::screen::{SbarLayout, VIEWSIZE_DEFAULT, VIEWSIZE_MAX, VIEWSIZE_MIN, VIEWSIZE_STEP};
+use crate::screen::{SbarLayout, VIEWSIZE_DEFAULT, VIEWSIZE_MAX, VIEWSIZE_MIN, VIEWSIZE_MODERN, VIEWSIZE_STEP};
 use crate::server::LerpLightStyles;
 use crate::vm::{MAX_EDICTS, MAX_EDICTS_LIMIT};
 
-/// The port's pixel sizes for [`Cvars::pixel_size`]: 0 is Auto, 1..=4 a
-/// fixed size.
+/// The largest of the port's pixel sizes, [`Cvars::pixel_size`]: 1 to 4
+/// device pixels a side to one of the picture's.
 pub const PIXEL_SIZE_MAX: u8 = 4;
 
 /// The longest player name: `Host_Name_f` cuts it to 15 characters
@@ -79,8 +85,8 @@ pub struct Cvars {
     /// `lookstrafe` (cl_main.c): mouse X strafes while mouse-looking.
     pub lookstrafe: bool,
     /// `crosshair` (view.c): what `V_RenderView` draws at the view's centre
-    /// ([`Crosshair`]: 0 none, 1 the 2026 cross, 2 id's `+`). A departure:
-    /// the cross in the 2026 profile.
+    /// ([`Crosshair`]: 0 none, 1 the slop cross, 2 id's `+`). A departure:
+    /// the cross in the slop preset.
     pub crosshair: Crosshair,
     /// `_cl_name` (cl_main.c): the player's name.
     pub cl_name: String,
@@ -97,18 +103,22 @@ pub struct Cvars {
     /// `_vid_default_mode_win`), shown in a 4:3 box; the Video Options list.
     /// Not used while [`Cvars::native`] is on.
     pub vid_resolution: (u16, u16),
-    /// `wasm_uncapped`: no 72 fps cap (`Host_FilterTime`); a host frame on
-    /// every display refresh, the game stepped as id's 72 Hz frames
-    /// ([`crate::stepping::Stepping::Uncapped`]).
-    pub uncapped: bool,
+    /// `host_maxfps` (QuakeSpasm's name): the most frames drawn a second
+    /// ([`FrameCap`]). id's 72 is `Host_FilterTime`'s gate (Classic): the
+    /// game's frames too. Otherwise a host frame on every display refresh,
+    /// the game stepped as id's 72 Hz frames
+    /// ([`crate::stepping::Stepping::Uncapped`]), and only the pictures held
+    /// to the cap (none, slop's on every machine: every one drawn).
+    /// The retired `wasm_uncapped` still sets and reads it ([`RETIRED`]).
+    pub max_fps: FrameCap,
     /// `wasm_showfps`: QuakeWorld's frame-rate readout.
     pub show_fps: bool,
     /// `r_perspspan`: how often the walls and liquids find their texel
     /// exactly ([`PerspSpan`]): every 16 pixels and affine between, id's
     /// `D_DrawSpans16` (Classic); 64 or 32, longer, about 1996's look on a
-    /// 1080p or a phone's frame; 8, id's portable C; 4; or 1, exact at every
-    /// pixel (2026). The retired `wasm_exactpersp` still sets and reads it
-    /// ([`RETIRED`]).
+    /// 1080p or a phone's frame; 8, id's portable C `D_DrawSpans8` (slop);
+    /// 4; or 1, exact at every pixel. The retired `wasm_exactpersp` still
+    /// sets and reads it ([`RETIRED`]).
     pub persp_span: PerspSpan,
     /// `wasm_scaled2d`: the 2-D layer (status bar, menus, console) at the
     /// largest whole multiple of id's 320x200 that fits, where id draws it
@@ -124,10 +134,13 @@ pub struct Cvars {
     /// off, the video mode [`Cvars::vid_resolution`] in a 4:3 box, as a 1996
     /// monitor showed it.
     pub native: bool,
-    /// `vid_pixelsize`: with [`Cvars::native`], how many device pixels make
-    /// one of the picture's (0: Auto, the smallest that keeps a frame
-    /// affordable; 1..=[`PIXEL_SIZE_MAX`]). Whole pixels either way, never
-    /// smoothed.
+    /// `vid_pixelsize`: with [`Cvars::native`], how many device pixels a
+    /// side make one of the picture's, 1..=[`PIXEL_SIZE_MAX`]: whole pixels,
+    /// never smoothed. The presets start it at the machine's number
+    /// ([`crate::settings::Machine::pixel_size`]), and 0 on the console or in
+    /// a file is that number (`Settings::set_cvar`); the host takes the next
+    /// size up when a frame this size would not fit its memory, and the next
+    /// down when it would be under 320x200 and a smaller one is not.
     pub pixel_size: u8,
     /// `fov_adapt`: Hor+ — `fov` spans a 4:3 screen and a wider one sees more
     /// at the sides ([`crate::render::FovMode::HorPlus`]).
@@ -153,20 +166,26 @@ pub struct Cvars {
     /// between its frames ([`LerpModels::Smooth`], `client::lerpmodels`)
     /// instead of snapping to each one, as id's client does.
     pub lerpmodels: LerpModels,
+    /// `r_nailbarrels`: the player's nails are drawn leaving the nailgun's
+    /// barrels ([`NailBarrels::Barrels`], `client::nailbarrels`) instead of
+    /// on QuakeC's line beside and above them, as id's client draws them.
+    pub nailbarrels: NailBarrels,
     /// `r_fluidsky`: the sky's cloud layer scrolls by its exact offset
     /// ([`SkyScroll::Fluid`], `render::sky`) instead of `R_MakeSky`'s whole
     /// texels, eight jumps a second.
     pub sky: SkyScroll,
-    /// `snd_modern`: which of id's mixers plays ([`SoundMode`]): the 2026 one
+    /// `snd_modern`: which of id's mixers plays ([`SoundMode`]): the slop one
     /// (its faults fixed, `snd::Fixes::ALL`, at the device's rate) instead
     /// of id's as written at 11025 Hz.
     pub sound: SoundMode,
-    /// `r_threads`: how many threads draw the 3-D view (0: Auto, as many as
-    /// the platform offers). The pixels are the same for any count, so it is
-    /// no departure.
-    pub threads: Threads,
+    /// `r_threads`: how many threads draw the 3-D view, at least 1. The
+    /// presets start it at the machine's number
+    /// ([`crate::settings::Machine::render_threads`]), and 0 on the console
+    /// or in a file is that number (`Settings::set_cvar`). The pixels are the
+    /// same for any count, so it is no departure.
+    pub threads: usize,
     /// `sv_max_edicts`: the `ED_Alloc` ceiling ([`crate::vm::MAX_EDICTS`] in
-    /// Classic, where id's own 600 is also the port's; higher in 2026). A
+    /// Classic, where id's own 600 is also the port's; higher in slop). A
     /// departure, but an unusual one: it never changes anything *drawn* —
     /// id's `MAX_EDICTS` is an engine limit, not game design — only whether
     /// a map that needs more than 600 edicts can be played at all. No map of
@@ -177,14 +196,16 @@ pub struct Cvars {
     /// `in_touch`: on a touch screen, the page's touch controls for play —
     /// a stick, look by dragging, fire, jump and next weapon (quake-wasm's
     /// `web/touch.js`). id's Quake has none; without them a phone can only
-    /// open the menu, which stays tappable either way.
+    /// open the menu, which stays tappable either way — so they are on in
+    /// both presets (input, not the engine): the Classic preset must not
+    /// leave a phone unplayable.
     pub touch: bool,
     /// `in_touchaccel`: how much a fast drag turns further than a slow one
     /// of the same length (0: none, the view turns with the finger).
     /// Nothing reads it but the touch controls, so it is no departure.
     pub touch_accel: f32,
     /// The joystick's: in_win.c's `joystick` and `joy*`, and the port's
-    /// `joy_*` (2026's pad layout, stick shaping, menu keys, rumble).
+    /// `joy_*` (slop's pad layout, stick shaping, menu keys, rumble).
     pub joy: JoyCvars,
     /// `r_lerplightstyles` (DarkPlaces' name): an animated light's brightness
     /// glides between its pattern's letters ([`LerpLightStyles::Smooth`],
@@ -208,9 +229,13 @@ impl Cvars {
     /// id's WinQuake: every *engine* departure off (rendering, stepping,
     /// timing — everything `oracle/classic_check.py` compares). The
     /// *controls* — Always Run, mouse look, the gamepad, Space swims up,
-    /// Alt+Enter — are already the shared default here too (the module
+    /// Alt+Enter, the touch controls — are already the shared default here
+    /// too (the module
     /// docs say why); id's own 1996 ones (arrows, no mouse look, no
-    /// gamepad, Always Run off) are [`Cvars::with_id_controls`].
+    /// gamepad, Always Run off) are [`Cvars::with_id_controls`]. The numbers
+    /// a machine picks (the renderer's threads, the pixel size) are a plain
+    /// machine's here, one thread at 1x: the presets give them the host's
+    /// ([`crate::settings::Preset::cvars`]).
     pub fn classic() -> Cvars {
         Cvars {
             viewsize: VIEWSIZE_DEFAULT,
@@ -230,62 +255,70 @@ impl Cvars {
             d_mipscale: 1.0,
             d_mipcap: 0.0,
             vid_resolution: (960, 600),
-            uncapped: false,
+            max_fps: FrameCap::ID,
             show_fps: false,
             persp_span: PerspSpan::Spans16,
             scaled_2d: false,
             sbar_layout: SbarLayout::Classic,
             native: false,
-            pixel_size: 0,
+            pixel_size: 1,
             fov_adapt: false,
             freelook: true,
             jumpswim: true,
             alt_enter: true,
             lerpmove: LerpMove::Classic,
             lerpmodels: LerpModels::Classic,
+            nailbarrels: NailBarrels::Classic,
             sky: SkyScroll::Classic,
             sound: SoundMode::Classic,
-            threads: Threads::Auto,
+            threads: 1,
             max_edicts: MAX_EDICTS as u32,
-            touch: false,
+            touch: true,
             touch_accel: 0.0,
-            joy: JoyCvars::modern(),
+            joy: JoyCvars::twin_stick(),
             lightstyles: LerpLightStyles::Classic,
             torches: TorchFlicker::OFF,
         }
     }
 
-    /// The 2026 profile's: an idealized software-rendered Quake on a 2026
+    /// The slop preset's: an idealized software-rendered Quake on a 2026
     /// machine. A frame every display refresh, the window filled at native
     /// resolution in whole chunky pixels with a Hor+ field of view, the 2-D
     /// layer at id's proportions with the world on beside the status bar,
     /// the crosshair, monsters that glide between their steps and whose
     /// animation blends between frames, clouds that glide across the sky,
-    /// flickering lights that glide between their brightnesses, and touch
-    /// controls on a phone, and perspective exact at every pixel of the
-    /// walls and liquids. That one is on because of the resolution: id's
-    /// 16-pixel affine spans were a pixel or so off at 320x200, but at
-    /// 1080p and above they show as a wobble along a wall seen at a grazing
-    /// angle. Show FPS stays off: the readout is clutter. (Always Run, mouse look, the gamepad and Space-swims-up are
+    /// flickering lights that glide between their brightnesses, and
+    /// perspective found exactly every 8 pixels
+    /// along the walls and liquids (id's own portable-C loop, `D_DrawSpans8`:
+    /// the user's call, 2026-10-03, for every device). That one is not
+    /// Classic's because of the resolution: id's 16-pixel affine spans were a
+    /// pixel or so off at 320x200, but at 1080p and above they show as a
+    /// wobble along a wall seen at a grazing angle; 8 is much nearer exact
+    /// than 16 for +7-11% of the 3-D view's cost (AUDIT.md, "The slop options and
+    /// the presets"), and every value up to exact (1) stays one setting
+    /// away. Show FPS stays off: the readout is clutter. (Always Run, mouse look, the gamepad and Space-swims-up are
     /// [`Cvars::classic`]'s too now — they are controls, not engine.) The
     /// edict pool grows past id's 600 (`max_edicts`, QuakeSpasm's own
     /// default) — invisible on every map id or the mission packs shipped,
-    /// room for bigger ones.
-    pub fn modern() -> Cvars {
+    /// room for bigger ones. Screen size (`viewsize`, id's own cvar) starts at
+    /// [`VIEWSIZE_MODERN`], one step past id's 100: the inventory strip goes
+    /// and the status bar stays, so the HUD takes less of a slop screen.
+    pub fn slop() -> Cvars {
         Cvars {
+            viewsize: VIEWSIZE_MODERN,
             crosshair: Crosshair::Cross,
-            uncapped: true,
-            persp_span: PerspSpan::Exact,
+            max_fps: FrameCap::NONE,
+            persp_span: PerspSpan::Spans8,
             scaled_2d: true,
             sbar_layout: SbarLayout::Overlay,
             native: true,
             fov_adapt: true,
             lerpmove: LerpMove::Smooth,
             lerpmodels: LerpModels::Smooth,
+            nailbarrels: NailBarrels::Barrels,
             sky: SkyScroll::Fluid,
-            sound: SoundMode::Modern,
+            sound: SoundMode::Slop,
             max_edicts: 8192,
-            touch: true,
             lightstyles: LerpLightStyles::Smooth,
             torches: TorchFlicker::MODERN,
             ..Cvars::classic()
@@ -297,7 +330,7 @@ impl Cvars {
     /// (`freelook` off), Space does not swim (`jumpswim` off), no
     /// Alt+Enter, and id's joystick ([`JoyCvars::classic`]: `joystick` off,
     /// no advanced axis layout, id's thresholds, no dead zone, curve, menu
-    /// keys or rumble). Every *engine* field — whatever profile `self` came
+    /// keys or rumble). Every *engine* field — whatever preset `self` came
     /// from — is untouched. The explicit, one console command (`idcontrols`)
     /// back to id's controls, and what the oracle harness pins against
     /// (`quaketool play`/`sound`: [`crate::settings::Settings::id`]) so it
@@ -374,8 +407,8 @@ pub struct Cvar {
     pub name: &'static str,
     /// `config.cfg` keeps it (id's `archive`).
     pub archive: bool,
-    /// A departure from id's game: a profile sets it ([`Cvars::classic`]
-    /// has it off).
+    /// A slop option, a departure from id's game: a preset sets it
+    /// ([`Cvars::classic`] has it off, or at the value both presets share).
     pub departure: bool,
     /// One line for the console's list.
     pub help: &'static str,
@@ -384,6 +417,13 @@ pub struct Cvar {
 }
 
 impl Cvar {
+    /// A number the machine picks (`settings::Machine`): the pixel size and the
+    /// renderer's threads. On the console or in a file, 0 is this machine's
+    /// number (`Settings::set_cvar`), as the value is never "auto".
+    pub fn machine_picked(&self) -> bool {
+        matches!(self.name, "vid_pixelsize" | "r_threads")
+    }
+
     /// The value as the console prints it (`var->string`).
     pub fn get(&self, c: &Cvars) -> String {
         (self.get)(c)
@@ -442,39 +482,39 @@ pub const CVARS: &[Cvar] = &[
         get: |c| number_string(c.joy.wwhack2), set: |c, v| c.joy.wwhack2 = atof(v) },
     Cvar { name: "joywwhack1", archive: false, departure: false, help: "WingMan Warrior U axis fix",
         get: |c| number_string(c.joy.wwhack1), set: |c, v| c.joy.wwhack1 = atof(v) },
-    Cvar { name: "joyyawsensitivity", archive: true, departure: false, help: "joystick turn scale (sign: way)",
+    Cvar { name: "joyyawsensitivity", archive: true, departure: true, help: "joystick turn scale (sign: way)",
         get: |c| number_string(c.joy.yaw_sensitivity), set: |c, v| c.joy.yaw_sensitivity = atof(v) },
-    Cvar { name: "joypitchsensitivity", archive: true, departure: false, help: "joystick look scale",
+    Cvar { name: "joypitchsensitivity", archive: true, departure: true, help: "joystick look scale",
         get: |c| number_string(c.joy.pitch_sensitivity), set: |c, v| c.joy.pitch_sensitivity = atof(v) },
-    Cvar { name: "joysidesensitivity", archive: true, departure: false, help: "joystick strafe scale",
+    Cvar { name: "joysidesensitivity", archive: true, departure: true, help: "joystick strafe scale",
         get: |c| number_string(c.joy.side_sensitivity), set: |c, v| c.joy.side_sensitivity = atof(v) },
-    Cvar { name: "joyforwardsensitivity", archive: true, departure: false, help: "joystick walk scale",
+    Cvar { name: "joyforwardsensitivity", archive: true, departure: true, help: "joystick walk scale",
         get: |c| number_string(c.joy.forward_sensitivity), set: |c, v| c.joy.forward_sensitivity = atof(v) },
-    Cvar { name: "joyyawthreshold", archive: true, departure: false, help: "joystick turn dead zone",
+    Cvar { name: "joyyawthreshold", archive: true, departure: true, help: "joystick turn dead zone",
         get: |c| number_string(c.joy.yaw_threshold), set: |c, v| c.joy.yaw_threshold = atof(v) },
-    Cvar { name: "joypitchthreshold", archive: true, departure: false, help: "joystick look dead zone",
+    Cvar { name: "joypitchthreshold", archive: true, departure: true, help: "joystick look dead zone",
         get: |c| number_string(c.joy.pitch_threshold), set: |c, v| c.joy.pitch_threshold = atof(v) },
-    Cvar { name: "joysidethreshold", archive: true, departure: false, help: "joystick strafe dead zone",
+    Cvar { name: "joysidethreshold", archive: true, departure: true, help: "joystick strafe dead zone",
         get: |c| number_string(c.joy.side_threshold), set: |c, v| c.joy.side_threshold = atof(v) },
-    Cvar { name: "joyforwardthreshold", archive: true, departure: false, help: "joystick walk dead zone",
+    Cvar { name: "joyforwardthreshold", archive: true, departure: true, help: "joystick walk dead zone",
         get: |c| number_string(c.joy.forward_threshold), set: |c, v| c.joy.forward_threshold = atof(v) },
-    Cvar { name: "joyadvaxisv", archive: true, departure: false, help: "axis V: 1 fwd 2 look 3 side 4 turn",
+    Cvar { name: "joyadvaxisv", archive: true, departure: true, help: "axis V: 1 fwd 2 look 3 side 4 turn",
         get: |c| number_string(c.joy.advaxis[5]), set: |c, v| c.joy.advaxis[5] = atof(v) },
-    Cvar { name: "joyadvaxisu", archive: true, departure: false, help: "axis U: 1 fwd 2 look 3 side 4 turn",
+    Cvar { name: "joyadvaxisu", archive: true, departure: true, help: "axis U: 1 fwd 2 look 3 side 4 turn",
         get: |c| number_string(c.joy.advaxis[4]), set: |c, v| c.joy.advaxis[4] = atof(v) },
-    Cvar { name: "joyadvaxisr", archive: true, departure: false, help: "axis R: 1 fwd 2 look 3 side 4 turn",
+    Cvar { name: "joyadvaxisr", archive: true, departure: true, help: "axis R: 1 fwd 2 look 3 side 4 turn",
         get: |c| number_string(c.joy.advaxis[3]), set: |c, v| c.joy.advaxis[3] = atof(v) },
-    Cvar { name: "joyadvaxisz", archive: true, departure: false, help: "axis Z: 1 fwd 2 look 3 side 4 turn",
+    Cvar { name: "joyadvaxisz", archive: true, departure: true, help: "axis Z: 1 fwd 2 look 3 side 4 turn",
         get: |c| number_string(c.joy.advaxis[2]), set: |c, v| c.joy.advaxis[2] = atof(v) },
-    Cvar { name: "joyadvaxisy", archive: true, departure: false, help: "axis Y: 1 fwd 2 look 3 side 4 turn",
+    Cvar { name: "joyadvaxisy", archive: true, departure: true, help: "axis Y: 1 fwd 2 look 3 side 4 turn",
         get: |c| number_string(c.joy.advaxis[1]), set: |c, v| c.joy.advaxis[1] = atof(v) },
-    Cvar { name: "joyadvaxisx", archive: true, departure: false, help: "axis X: 1 fwd 2 look 3 side 4 turn",
+    Cvar { name: "joyadvaxisx", archive: true, departure: true, help: "axis X: 1 fwd 2 look 3 side 4 turn",
         get: |c| number_string(c.joy.advaxis[0]), set: |c, v| c.joy.advaxis[0] = atof(v) },
-    Cvar { name: "joyadvanced", archive: true, departure: false, help: "axis maps from joyadvaxis*",
+    Cvar { name: "joyadvanced", archive: true, departure: true, help: "axis maps from joyadvaxis*",
         get: |c| flag(c.joy.advanced), set: |c, v| c.joy.advanced = on(v) },
     Cvar { name: "joyname", archive: false, departure: false, help: "the controller's name",
         get: |c| c.joy.name.clone(), set: |c, v| c.joy.name = v.to_string() },
-    Cvar { name: "joystick", archive: true, departure: false, help: "use the joystick / gamepad",
+    Cvar { name: "joystick", archive: true, departure: true, help: "use the joystick / gamepad",
         get: |c| flag(c.joy.enabled), set: |c, v| c.joy.enabled = on(v) },
     Cvar { name: "_cl_color", archive: true, departure: false, help: "shirt*16 + pants colour",
         get: |c| c.cl_color.to_string(), set: |c, v| c.cl_color = atof(v) as i32 },
@@ -511,8 +551,8 @@ pub const CVARS: &[Cvar] = &[
     Cvar { name: "_vid_resolution", archive: true, departure: false, help: "video mode WxH (4:3 box)",
         get: |c| format!("{}x{}", c.vid_resolution.0, c.vid_resolution.1),
         set: |c, v| if let Some(m) = parse_mode(v) { c.vid_resolution = m } },
-    Cvar { name: "wasm_uncapped", archive: true, departure: true, help: "no 72 fps cap",
-        get: |c| flag(c.uncapped), set: |c, v| c.uncapped = on(v) },
+    Cvar { name: "host_maxfps", archive: true, departure: true, help: "frames drawn a second, 0 none",
+        get: |c| c.max_fps.cvar().to_string(), set: |c, v| c.max_fps = FrameCap::from_cvar(atof(v)) },
     Cvar { name: "wasm_showfps", archive: true, departure: true, help: "frame rate readout",
         get: |c| flag(c.show_fps), set: |c, v| c.show_fps = on(v) },
     Cvar { name: "r_perspspan", archive: true, departure: true, help: "exact every 64,32,16 (id),8,4,1 px",
@@ -524,16 +564,16 @@ pub const CVARS: &[Cvar] = &[
         set: |c, v| c.sbar_layout = if on(v) { SbarLayout::Overlay } else { SbarLayout::Classic } },
     Cvar { name: "vid_native", archive: true, departure: true, help: "fill the window, native pixels",
         get: |c| flag(c.native), set: |c, v| c.native = on(v) },
-    Cvar { name: "vid_pixelsize", archive: true, departure: true, help: "0 auto, 1..4 pixels a pixel",
+    Cvar { name: "vid_pixelsize", archive: true, departure: true, help: "1..4 screen pixels a pixel",
         get: |c| c.pixel_size.to_string(),
-        set: |c, v| c.pixel_size = atof(v).clamp(0.0, f32::from(PIXEL_SIZE_MAX)) as u8 },
+        set: |c, v| c.pixel_size = atof(v).clamp(1.0, f32::from(PIXEL_SIZE_MAX)) as u8 },
     Cvar { name: "fov_adapt", archive: true, departure: true, help: "wider screens see more (Hor+)",
         get: |c| flag(c.fov_adapt), set: |c, v| c.fov_adapt = on(v) },
-    Cvar { name: "freelook", archive: true, departure: false, help: "mouse look without +mlook",
+    Cvar { name: "freelook", archive: true, departure: true, help: "mouse look without +mlook",
         get: |c| flag(c.freelook), set: |c, v| c.freelook = on(v) },
-    Cvar { name: "cl_jumpswim", archive: true, departure: false, help: "+jump also swims up",
+    Cvar { name: "cl_jumpswim", archive: true, departure: true, help: "+jump also swims up",
         get: |c| flag(c.jumpswim), set: |c, v| c.jumpswim = on(v) },
-    Cvar { name: "vid_altenter", archive: true, departure: false, help: "Alt+Enter toggles fullscreen",
+    Cvar { name: "vid_altenter", archive: true, departure: true, help: "Alt+Enter toggles fullscreen",
         get: |c| flag(c.alt_enter), set: |c, v| c.alt_enter = on(v) },
     Cvar { name: "r_lerpmove", archive: true, departure: true, help: "monsters glide between steps",
         get: |c| flag(c.lerpmove == LerpMove::Smooth),
@@ -541,14 +581,17 @@ pub const CVARS: &[Cvar] = &[
     Cvar { name: "r_lerpmodels", archive: true, departure: true, help: "animation frames blend together",
         get: |c| flag(c.lerpmodels == LerpModels::Smooth),
         set: |c, v| c.lerpmodels = if on(v) { LerpModels::Smooth } else { LerpModels::Classic } },
+    Cvar { name: "r_nailbarrels", archive: true, departure: true, help: "nailgun shots leave its barrels",
+        get: |c| flag(c.nailbarrels == NailBarrels::Barrels),
+        set: |c, v| c.nailbarrels = if on(v) { NailBarrels::Barrels } else { NailBarrels::Classic } },
     Cvar { name: "r_fluidsky", archive: true, departure: true, help: "sky clouds glide, not texel steps",
         get: |c| flag(c.sky == SkyScroll::Fluid),
         set: |c, v| c.sky = if on(v) { SkyScroll::Fluid } else { SkyScroll::Classic } },
-    Cvar { name: "snd_modern", archive: true, departure: true, help: "2026 mixer: device rate, fixes",
-        get: |c| flag(c.sound == SoundMode::Modern),
-        set: |c, v| c.sound = if on(v) { SoundMode::Modern } else { SoundMode::Classic } },
-    Cvar { name: "r_threads", archive: true, departure: false, help: "3-D view threads, 0 auto",
-        get: |c| c.threads.cvar().to_string(), set: |c, v| c.threads = Threads::from_cvar(atof(v)) },
+    Cvar { name: "snd_modern", archive: true, departure: true, help: "slop mixer: device rate, fixes",
+        get: |c| flag(c.sound == SoundMode::Slop),
+        set: |c, v| c.sound = if on(v) { SoundMode::Slop } else { SoundMode::Classic } },
+    Cvar { name: "r_threads", archive: true, departure: false, help: "threads that draw the 3-D view",
+        get: |c| c.threads.to_string(), set: |c, v| c.threads = atof(v).max(1.0) as usize },
     Cvar { name: "sv_max_edicts", archive: true, departure: true, help: "edict pool past id's 600, for big maps",
         get: |c| c.max_edicts.to_string(),
         set: |c, v| c.max_edicts = atof(v).clamp(MAX_EDICTS as f32, MAX_EDICTS_LIMIT as f32) as u32 },
@@ -556,13 +599,13 @@ pub const CVARS: &[Cvar] = &[
         get: |c| flag(c.touch), set: |c, v| c.touch = on(v) },
     Cvar { name: "in_touchaccel", archive: true, departure: false, help: "touch look acceleration, 0 none",
         get: |c| number_string(c.touch_accel), set: |c, v| c.touch_accel = atof(v).clamp(0.0, 4.0) },
-    Cvar { name: "joy_deadzone", archive: true, departure: false, help: "round stick dead zone, 0 off",
+    Cvar { name: "joy_deadzone", archive: true, departure: true, help: "round stick dead zone, 0 off",
         get: |c| number_string(c.joy.deadzone), set: |c, v| c.joy.deadzone = atof(v) },
-    Cvar { name: "joy_exponent", archive: true, departure: false, help: "look stick curve, 1 straight",
+    Cvar { name: "joy_exponent", archive: true, departure: true, help: "look stick curve, 1 straight",
         get: |c| number_string(c.joy.exponent), set: |c, v| c.joy.exponent = atof(v) },
-    Cvar { name: "joy_menukeys", archive: true, departure: false, help: "pad A/B/D-pad work the menus",
+    Cvar { name: "joy_menukeys", archive: true, departure: true, help: "pad A/B/D-pad work the menus",
         get: |c| flag(c.joy.menu_keys), set: |c, v| c.joy.menu_keys = on(v) },
-    Cvar { name: "joy_rumble", archive: true, departure: false, help: "pad rumble strength, 0 off",
+    Cvar { name: "joy_rumble", archive: true, departure: true, help: "pad rumble strength, 0 off",
         get: |c| number_string(c.joy.rumble), set: |c, v| c.joy.rumble = atof(v) },
     Cvar { name: "r_lerplightstyles", archive: true, departure: true, help: "flickering lights glide, not snap",
         get: |c| flag(c.lightstyles == LerpLightStyles::Smooth),
@@ -585,7 +628,7 @@ const OLD_NAMES: &[(&str, &str)] = &[
 /// A cvar replaced by one that does more, kept as a view onto it: a
 /// `config.cfg` saved before the change still sets the setting, and the
 /// console still reads and sets it by the old name; but [`write_changes`],
-/// completion, the lists and the profiles know only [`CVARS`], so the next
+/// completion, the lists and the presets know only [`CVARS`], so the next
 /// save writes the new cvar alone. (A cvar merely renamed, its values as
 /// they were, is [`OLD_NAMES`]'.)
 const RETIRED: &[Cvar] = &[
@@ -593,10 +636,17 @@ const RETIRED: &[Cvar] = &[
     // ends: on is `r_perspspan 1`, off id's 16, and it reads 1 only while
     // the span is 1. A saved `wasm_exactpersp "1"` (written by a Classic
     // player who switched it on) draws exact perspective, as it did; a saved
-    // "0" (a 2026 player who switched it off) draws id's 16-pixel spans.
+    // "0" (a slop player who switched it off) draws id's 16-pixel spans.
     Cvar { name: "wasm_exactpersp", archive: false, departure: true, help: "old: 1 is r_perspspan 1, 0 is 16",
         get: |c| flag(c.persp_span == PerspSpan::Exact),
         set: |c, v| c.persp_span = if on(v) { PerspSpan::Exact } else { PerspSpan::Spans16 } },
+    // The on/off of id's 72 fps cap until 2026-10-03, now `host_maxfps`: on
+    // is none (0), off id's 72, and it reads 1 only while there is no cap.
+    // A saved `wasm_uncapped "0"` (a slop player who switched it off) runs
+    // id's gate, as it did; a saved "1" (a Classic player) runs uncapped.
+    Cvar { name: "wasm_uncapped", archive: false, departure: true, help: "old: 1 is host_maxfps 0, 0 is 72",
+        get: |c| flag(c.max_fps == FrameCap::NONE),
+        set: |c, v| c.max_fps = if on(v) { FrameCap::NONE } else { FrameCap::ID } },
 ];
 
 /// `Cvar_FindVar`: the cvar called `name` (any case, as the port's console
@@ -633,53 +683,61 @@ mod tests {
 
     #[test]
     fn every_field_round_trips_through_its_console_name() {
-        let modern = Cvars::modern();
+        let slop = Cvars::slop();
         let mut c = Cvars::classic();
         for v in CVARS {
-            v.set(&mut c, &v.get(&modern));
+            v.set(&mut c, &v.get(&slop));
         }
-        assert_eq!(c, modern, "setting each cvar to the 2026 value's string gives the 2026 cvars");
+        assert_eq!(c, slop, "setting each cvar to the slop value's string gives the slop cvars");
         let names: std::collections::HashSet<_> = CVARS.iter().map(|c| c.name).collect();
         assert_eq!(names.len(), CVARS.len(), "no name twice");
     }
 
     #[test]
-    fn the_profiles_differ_only_in_departures() {
-        let (id, modern) = (Cvars::classic(), Cvars::modern());
+    fn the_presets_differ_only_in_slop_options_and_the_screen_size() {
+        let (id, slop) = (Cvars::classic(), Cvars::slop());
         for c in CVARS {
-            if c.get(&id) != c.get(&modern) {
-                assert!(c.departure, "{} differs between the profiles, so it is a departure", c.name);
+            if c.get(&id) != c.get(&slop) {
+                // Screen size is id's own cvar, started one step larger in
+                // slop: not a departure (a preset keeps the
+                // player's own value, `Settings::apply_preset`).
+                assert!(c.departure || c.name == "viewsize", "{} differs between the presets, so it is a departure", c.name);
             }
         }
+        assert_eq!((id.viewsize, slop.viewsize), (VIEWSIZE_DEFAULT, VIEWSIZE_DEFAULT + VIEWSIZE_STEP));
+        assert_eq!(slop.viewsize, VIEWSIZE_MODERN);
+        assert!(!find("viewsize").unwrap().departure, "id's own cvar");
         for c in CVARS.iter().filter(|c| c.departure) {
             assert!(c.archive, "{}: a departure is kept in config.cfg", c.name);
         }
-        assert!(id.always_run() && modern.always_run(), "Always Run is a shared control, on by default in both");
+        assert!(id.always_run() && slop.always_run(), "Always Run is a shared control, on by default in both");
     }
 
     /// The controls (module docs): departures from id, but not from each
-    /// other — [`Cvars::classic`] and [`Cvars::modern`] already agree on
-    /// them, so [`crate::settings::Settings::set_profile`] (which resets
-    /// only [`Cvar::departure`] fields to the new profile's) leaves them as
-    /// the player set them. [`Cvars::with_id_controls`] is the one way back
-    /// to id's own.
+    /// other — [`Cvars::classic`] and [`Cvars::slop`] agree on them. The
+    /// ones on the Controls page and the pad's layout are slop options
+    /// (a preset puts back a player's change); Always Run is id's own
+    /// Options row and no slop option. [`Cvars::with_id_controls`] is the
+    /// one way back to id's own.
     #[test]
-    fn the_controls_are_the_same_in_both_profiles() {
-        let (id, modern) = (Cvars::classic(), Cvars::modern());
+    fn the_controls_are_the_same_in_both_presets() {
+        let (id, slop) = (Cvars::classic(), Cvars::slop());
         for name in [
             "cl_forwardspeed", "cl_backspeed", "freelook", "cl_jumpswim", "vid_altenter", "joystick", "joy_rumble",
+            "joyadvanced", "joy_deadzone", "in_touch",
         ] {
             let c = find(name).unwrap();
-            assert_eq!(c.get(&id), c.get(&modern), "{name}: the same in both profiles");
+            assert_eq!(c.get(&id), c.get(&slop), "{name}: the same in both presets");
+            assert_eq!(c.departure, !name.starts_with("cl_") || name == "cl_jumpswim", "{name}: a slop option, but Always Run");
         }
-        assert_eq!(id.joy, modern.joy, "the whole gamepad layout, not just `joystick`");
-        assert_eq!(id.joy, JoyCvars::modern(), "Cvars::classic already has the 2026 pad");
+        assert_eq!(id.joy, slop.joy, "the whole gamepad layout, not just `joystick`");
+        assert_eq!(id.joy, JoyCvars::twin_stick(), "Cvars::classic already has the slop pad");
 
         // with_id_controls touches only the controls: everything else stays
-        // whatever profile it came from.
-        let old = modern.clone().with_id_controls();
+        // whatever preset it came from.
+        let old = slop.clone().with_id_controls();
         assert!(!old.freelook && !old.jumpswim && !old.alt_enter && !old.always_run() && old.joy == JoyCvars::classic());
-        assert_eq!((old.uncapped, old.native, old.crosshair), (modern.uncapped, modern.native, modern.crosshair), "the engine is untouched");
+        assert_eq!((old.max_fps, old.native, old.crosshair), (slop.max_fps, slop.native, slop.crosshair), "the engine is untouched");
     }
 
     #[test]
@@ -714,20 +772,22 @@ mod tests {
         assert_eq!(out, "cl_forwardspeed \"200\"\ncl_backspeed \"200\"\nm_pitch \"-0.022\"\n");
     }
 
-    /// The perspective span is 2026's exact (1), Classic's id's 16: the
-    /// departure a player changes in 2026 is the one `config.cfg` then
-    /// writes. Its values are the four spans; any other number is the
-    /// longest span not longer than it, and below 1 (0, a word) id's 16.
-    /// (Show FPS, the other old "extra", is the one 2026 leaves off.)
+    /// The perspective span is slop's 8 (id's portable C), Classic's id's 16:
+    /// the departure a player changes in slop is the one `config.cfg` then
+    /// writes — exact (1) included, which is a choice now. Its values are the
+    /// six spans; any other number is the longest span not longer than it,
+    /// and below 1 (0, a word) id's 16. (Show FPS, the other old "extra", is
+    /// the one slop leaves off.)
     #[test]
-    fn the_perspective_span_is_exact_in_2026_and_ids_16_in_classic() {
-        let (id, modern) = (Cvars::classic(), Cvars::modern());
+    fn the_perspective_span_is_8_in_slop_and_ids_16_in_classic() {
+        let (id, slop) = (Cvars::classic(), Cvars::slop());
         let c = find("r_perspspan").expect("the cvar");
         assert!(c.departure && c.archive);
-        assert_eq!((c.get(&id), c.get(&modern)), ("16".into(), "1".into()));
+        assert_eq!((c.get(&id), c.get(&slop)), ("16".into(), "8".into()));
+        assert_eq!(slop.persp_span, PerspSpan::Spans8, "id's own D_DrawSpans8");
         let fps = find("wasm_showfps").expect("the cvar");
-        assert_eq!((fps.get(&id), fps.get(&modern)), ("0".into(), "0".into()));
-        let mut spans = Cvars::modern();
+        assert_eq!((fps.get(&id), fps.get(&slop)), ("0".into(), "0".into()));
+        let mut spans = Cvars::slop();
         for (set, now) in [("8", "8"), ("4", "4"), ("16", "16"), ("1", "1"), ("32", "32"), ("64", "64"), ("12", "8"),
                            ("40", "32"), ("100", "64"), ("5", "4"), ("2", "1"), ("0", "16"), ("junk", "16"), ("-4", "16")] {
             c.set(&mut spans, set);
@@ -735,9 +795,40 @@ mod tests {
         }
         c.set(&mut spans, "4");
         let mut out = String::new();
-        write_changes(&spans, &Cvars::modern(), &mut out);
+        write_changes(&spans, &Cvars::slop(), &mut out);
         assert_eq!(out, "r_perspspan \"4\"\n");
+        c.set(&mut spans, "1");
+        out.clear();
+        write_changes(&spans, &Cvars::slop(), &mut out);
+        assert_eq!(out, "r_perspspan \"1\"\n", "exact is a choice in slop now: written");
+        c.set(&mut spans, "8");
+        out.clear();
+        write_changes(&spans, &Cvars::slop(), &mut out);
+        assert_eq!(out, "", "slop's own 8 is not written: a player who never touched it gets the preset's");
         assert_eq!(complete("r_persp"), Some("r_perspspan"));
+    }
+
+    /// `host_maxfps` is 2026-10-03's frame-rate cap; `wasm_uncapped`, the
+    /// on/off before it, still sets it from a saved config (1 none, 0 id's
+    /// 72), reads 1 only with no cap, and nothing writes or lists it.
+    #[test]
+    fn wasm_uncapped_is_the_caps_two_ends() {
+        let (id, slop) = (Cvars::classic(), Cvars::slop());
+        let cap = find("host_maxfps").expect("the cvar");
+        assert!(cap.departure && cap.archive);
+        assert_eq!((cap.get(&id), cap.get(&slop)), ("72".into(), "0".into()));
+        let old = find("WASM_UNCAPPED").expect("an old config still finds it");
+        let mut c = Cvars::slop();
+        old.set(&mut c, "0");
+        assert_eq!((c.max_fps, old.get(&c).as_str()), (FrameCap::ID, "0"), "a slop player's saved 0: id's 72");
+        let mut out = String::new();
+        write_changes(&c, &Cvars::slop(), &mut out);
+        assert_eq!(out, "host_maxfps \"72\"\n", "the next save writes the cap");
+        old.set(&mut c, "1");
+        assert_eq!((c.max_fps, old.get(&c).as_str()), (FrameCap::NONE, "1"));
+        cap.set(&mut c, "60");
+        assert_eq!(old.get(&c), "0", "60 is a cap");
+        assert!(CVARS.iter().all(|v| v.name != "wasm_uncapped") && complete("wasm_u").is_none());
     }
 
     /// `wasm_exactpersp`, the on/off before the span: a saved config's line
@@ -753,26 +844,29 @@ mod tests {
         let mut out = String::new();
         write_changes(&c, &Cvars::classic(), &mut out);
         assert_eq!(out, "r_perspspan \"1\"\n", "the next save writes the span");
-        let mut c = Cvars::modern();
+        let mut c = Cvars::slop();
+        assert_eq!(old.get(&c), "0", "slop's own 8 is not exact");
         old.set(&mut c, "0");
-        assert_eq!((c.persp_span, old.get(&c).as_str()), (PerspSpan::Spans16, "0"), "a 2026 player's saved 0: id's spans, as before");
+        assert_eq!((c.persp_span, old.get(&c).as_str()), (PerspSpan::Spans16, "0"), "a slop player's saved 0: id's spans, as before");
+        old.set(&mut c, "1");
+        assert_eq!((c.persp_span, old.get(&c).as_str()), (PerspSpan::Exact, "1"), "a saved 1: exact");
         for (span, reads) in [(PerspSpan::Spans64, "0"), (PerspSpan::Spans32, "0"), (PerspSpan::Spans8, "0"), (PerspSpan::Spans4, "0"), (PerspSpan::Exact, "1")] {
             c.persp_span = span;
             assert_eq!(old.get(&c), reads, "{span:?}");
         }
         assert_eq!(complete("wasm_ex"), None, "completion offers only the names in use");
-        assert!(CVARS.iter().all(|v| v.name != "wasm_exactpersp"), "not listed, not written, not a profile's");
+        assert!(CVARS.iter().all(|v| v.name != "wasm_exactpersp"), "not listed, not written, not a preset's");
     }
 
     #[test]
     fn an_old_name_sets_the_renamed_cvar_and_only_the_new_one_is_written() {
         let v = find("VID_FKEY").expect("a config.cfg from before the rename still finds it");
         assert_eq!(v.name, "vid_altenter");
-        let mut c = Cvars::modern();
+        let mut c = Cvars::slop();
         v.set(&mut c, "0");
         assert!(!c.alt_enter);
         let mut out = String::new();
-        write_changes(&c, &Cvars::modern(), &mut out);
+        write_changes(&c, &Cvars::slop(), &mut out);
         assert_eq!(out, "vid_altenter \"0\"\n", "the next save writes the new name");
         assert_eq!(complete("vid_f"), None, "completion offers only the names in use");
         for (old, new) in OLD_NAMES {

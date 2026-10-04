@@ -32,11 +32,11 @@ requestAnimationFrame
   poll the gamepad; if it changed,
   GAMEPAD ─────────────────────────▶ ring ─▶ fd_read(0) ─▶ kept for the frame
   AUDIO_CLOCK, TICK(seq, dt) ──────▶ ring ─▶ fd_read(0) returns the tick
-  spin on ACK ≥ seq (≤ 30 ms)                host::step(dt): Host_FilterTime,
-                                             IN_Commands (the pad's keys), the
-                                             client frame (IN_JoyMove), menu,
-                                             console: an 8-bit frame and its
-                                             palette (V_UpdatePalette); id's mixer
+  a quick frame: spin on ACK ≥ seq           host::step(dt): Host_FilterTime,
+  (≤ 30 ms); a slow one is not waited        IN_Commands (the pad's keys), the
+  for: it is drawn at the refresh after      client frame (IN_JoyMove), menu,
+  it is done, and the next TICK goes out     console: an 8-bit frame and its
+  when it comes (Atomics.waitAsync)          palette (V_UpdatePalette); id's mixer
                                              paints to the clock + mix-ahead
                                              fd_write(1): PCM ─▶ samples copied into the
                                                                  sound ring
@@ -65,13 +65,133 @@ AudioWorklet (audio thread): plays the sound ring, moves its clock
   runs a host frame. The worker's own event loop never runs again after
   `_start`, so nothing reaches the program by `postMessage`: every event goes
   through the ring.
-- **The page presents in the same refresh.** The refresh that posts a tick
-  spins (the main thread may not `Atomics.wait`) until the program answers,
-  then presents. That keeps the old page's timing, which computed the frame
-  inside the refresh; only the hand-off below is added. One tick is in flight at a time; a refresh that
+- **The page presents in the same refresh, when a frame is quick.** The
+  refresh that posts a tick spins (the main thread may not `Atomics.wait`)
+  until the program answers, then presents. That keeps the old page's
+  timing, which computed the frame inside the refresh; only the hand-off
+  below is added. One tick is in flight at a time; a refresh that
   finds the last one unanswered posts none (its time goes into the next
-  tick's `dt`) and presents whatever has come. The spin is bounded by 30 ms,
-  so a level load or a long automation call does not freeze the page.
+  tick's `dt`) and presents whatever has come. The spin is bounded by 30 ms
+  (`WAIT_MS`), so a level load or a long automation call does not freeze
+  the page.
+- **A slow frame is not waited for.** The refresh then only draws what has
+  come and asks for the next frame, and a frame that comes back after a
+  refresh has gone by without it is followed by the next tick at that
+  moment (`Atomics.waitAsync` on the Syncs), so the program draws back to
+  back while it is behind (`index.html`'s `pacing`). What "slow" is depends
+  on the device, because the wait's two costs do:
+  - *To the screen.* From the tick to the display compositor's swap
+    (`web/swap_trace.py`, below: a trace of headless Chromium on a desktop's
+    GPU at 60 Hz, the frames held with `stall_ms`; median ms):
+
+    | the frame, in refreshes | waited for | not waited for |
+    |---|---|---|
+    | 0.6 | 10.7–17.2 | the same (it is waited for everywhere) |
+    | 0.85 | 17.0 | 17.9 |
+    | 1.1 | 18.8 | 28.6 |
+    | 1.4 | 23.9 | 33.2 |
+    | 2.0 (33 ms: past the wait's 30) | 64.7 | 41.3 |
+
+    Under a refresh it is the same swap either way (which swap a frame of
+    0.6 makes is the display's own phase, run by run; at 0.85 the wait's
+    frame made the earlier one in one run of six). Past a refresh the
+    wait's frame is committed the moment it is done and swapped at once,
+    and the other is drawn at the next refresh's callback: 10 ms later at
+    60 Hz, a refresh later on the glass more often than not. Past the
+    wait's limit it is the wait that loses, and badly: the refresh gives up
+    at 30 ms, and the frame that arrives after is drawn only at the end of
+    the *next* wait (which is also where the page's old latency probe
+    credited a key to the frame before its own: a key to the draw call at
+    2.0 refreshes is 81 ms waited for and 57–59 not, where that probe said
+    47).
+  - *To the game.* The wait is a spin: a core busy for the whole frame. On
+    a desktop that is one core of many. On a phone it was the fastest core,
+    with the game's threads on the others ("On an Android phone", below: at
+    2640x1080, warm, 50 frames a second shown with the wait and 57 without
+    at 60 Hz; 58 and 67 with a finger down).
+
+  So there are two pairs of lines (`pacingLines`), each a moving average
+  of the program's time to answer a tick with a frame, with a second line
+  below the first to come back by:
+  - *a touch screen* (the page's touch-screen test, `pacing.scarceCores`:
+    the one place this is decided) stops waiting above 0.8 of a refresh and
+    waits again below 0.6: a frame of most of a refresh misses its own
+    refresh's swap anyway, and a longer one costs a refresh on the glass
+    (8 ms at the 120 Hz a finger brings) for frames that are a fifth
+    shorter and far fewer late ones;
+  - *anywhere else* only a frame the wait would give up on is not waited
+    for: above 0.9 of the limit (27 ms), back below 0.75 (22.5 ms). Up to
+    there the page is the page it was.
+
+  The display's period is the refreshes' shortest spacing lately. A
+  browser without `Atomics.waitAsync` waits always; `?wait` in the address
+  keeps the wait too, to compare by feel. `verify_pacing.py` checks both
+  kinds of device, both ways and the switches, with frames made slow on
+  purpose (`stall_ms`, a bench build).
+
+  *The frame-rate cap* (`host_maxfps`, Picture and sound > Frame rate cap:
+  60, id's 72, 120, 144, 240, none) holds the frames drawn, not the game,
+  and is the program's, on top of all this: the page posts a tick every
+  refresh whatever the cap, the program runs a host frame on every one —
+  the game at the display's rate, the 60 to 480 Hz `quaketool framerate
+  --check` proves — and draws its picture only on the first refresh at
+  least 1/cap after the last picture (5% less, for a refresh's time a hair
+  early; `client::host::FrameCap::picture_due`). A frame not drawn
+  (`cl_main::walk_frame_undrawn`) does everything but the pixels — the
+  server, the clocks, effects, particles, lights, fades, the view's kick
+  and smoothing, the sound — and answers the tick with no frame, which the
+  pacing does not count as a frame's time; it costs what `framerate
+  --budget`'s "sim" column says (0.04 ms against 1–2 for a whole frame on
+  one thread here), so the cap keeps its heat saving. So 60 on a 120 Hz
+  panel draws every second refresh, evenly; on 110 Hz (a phone's page with
+  a finger down) every second too, 55 a second; on 144 Hz every third, 48;
+  a cap above the display's rate draws every refresh; and the game steps at
+  the display's rate in every case. A tick the relaxed pacing posts between
+  refreshes draws no sooner. 72 is id's own gate (`Host_FilterTime`,
+  Classic's: the game's frames held with the pictures), none draws every
+  frame. Slop starts at none on every machine (a touch screen too, since
+  2026-10-04: the user's call). `quaketool
+  framerate --cap 60 --check` runs every scenario's capped twin at 60, 72,
+  90, 105, 110, 120, 144 and 240 Hz: each value is the uncapped one at its
+  rate exactly. `verify_pacing.py` counts the drawn gaps and the game's
+  host frames (`host_frames`) through the page's own tick at 120, 144 and
+  110 Hz, and in the page's loop at those rates (its refreshes from a clock
+  at that rate: a headless browser's are 60) on a touch screen, at 120
+  waited for and relaxed.
+
+  *Measure to the swap, not to the draw call.* The page's latency probe
+  (`quake.latency`, `latency.py`) stops at its own draw call, and a draw
+  call can be early without the picture being: `web/swap_trace.py DEPLOY
+  [--touch] [--stalls ...]` (a bench build; `QUAKE_GPU=1` for WebGL2)
+  marks each tick and each draw from outside the page (`performance.mark`
+  around its `sendTick` and `present`), takes a Chromium trace of the same
+  seconds, and follows every draw to the main frame that commits it
+  (`ProxyMain::BeginMainFrame`), the renderer compositor's draw after it,
+  and the display compositor's `Display::DrawAndSwap` after that; it
+  prints tick → draw call and tick → swap side by side. Headless, so the
+  browser's own scheduler at 60 Hz with no display behind it: a real one
+  shows a swap at its next refresh.
+
+  *Not built: drawing the frame the moment it comes.* The continuation
+  that posts the next tick could also draw (the review's prototype). To
+  the draw call it looks like the wait (a key to the draw, frames of 1.1
+  refreshes: 29.9 ms against the wait's 28.6 and 37.9 at the next
+  refresh), but a canvas drawn outside a refresh's callback is committed
+  with the next refresh's main frame all the same: its swap came no sooner
+  (28.0 ms against 25.8 at 1.1 refreshes, 32.5 against 32.9 at 1.4), so
+  the screen would not show it, and the probe that measures to the draw
+  call would say it did.
+
+  *Open: a presenter that may sleep.* What a touch screen pays for not
+  waiting — the 10 ms at the swap past a refresh, above — is the price of
+  a main thread that can only wait by spinning. A worker may sleep
+  (`Atomics.wait`): a presenter worker on an `OffscreenCanvas` could wait
+  for every frame, draw it the moment it is done and hand it to the
+  compositor itself, with no core kept busy: the wait's column of the
+  table with the phone's gain from not spinning (2640x1080 in touch play,
+  58 → 67 frames shown a second). It is the parked `fleet/present120`
+  branch's shape with its spin made a sleep; that branch is some 1000
+  lines against a page that has since changed under it. Not built.
 - **The 72 fps gate stays in the program.** A tick is the display's refresh
   and `dt` is the raw time since the last one, exactly the old `step(dt)`
   export's argument; `Host_FilterTime` decides whether a host frame runs.
@@ -106,7 +226,7 @@ round-trip tests; `wasi.js` and `index.html` carry the same constants.
 | 6 | AUDIO_READY | `ready u8`, `0 ×3`, `rate u32` (the AudioContext's sample rate; 0 none yet) |
 | 7 | CALL | `id u32`, then the UTF-8 line |
 | 8 | END | — (written by the host, not the page: "nothing more queued") |
-| 9 | WINDOW | `w u32`, `h u32`: the page's box for the picture in device pixels (its CSS size x `devicePixelRatio`; the whole screen in fullscreen), sent at start and on every resize; `dpr f32`: that `devicePixelRatio` (an older page sends none: read as 1) |
+| 9 | WINDOW | `w u32`, `h u32`: the page's box for the picture in device pixels (its CSS size x `devicePixelRatio`; the whole screen in fullscreen), sent at start and on every resize (a page may send its `devicePixelRatio` after them, `f32`, which the program does not read: a touch screen is the command line's `-touch`, "Settings") |
 | 10 | AUDIO_CLOCK | `pos u32`: the sound ring's play position, in sample pairs (wrapping); sent before every TICK |
 | 11 | AUDIO_WAKE | `pos u32`: the same, written by the host between ticks while the worklet plays: "mix now" |
 | 12 | PRESENT | `format u8`: how the page shows frames from now on (0 RGBA8, 1 INDEXED8; RGBA8 until it says). The page sends it before the first tick |
@@ -210,7 +330,23 @@ shown through each frame (the cshifts, then gamma: the renderer's
   `texelFetch(palette, texelFetch(frame, p).r)` — exact integers, no
   filtering, blending, dithering or colour conversion, so the canvas holds
   exactly the RGBA the program's own pack would. No RGBA pack runs in the
-  program, and a palette shift costs 1 KB.
+  program, and a palette shift costs 1 KB. The frame goes up before its
+  palette, and the order matters: Chromium sends a context's uploads
+  through one transfer buffer, which it resizes by what is in use when an
+  upload asks. A 1 KB palette asked for first, with the last frame's bytes
+  already consumed, made it shrink the megabytes it had grown to, and the
+  frame behind it made it grow again: fresh shared memory, faulted in page
+  by page, twice a frame (a trace on the phone: `TransferBuffer::Free` 340
+  times in 3 s). Asked for right after the frame, the palette finds the
+  buffer in use and nothing is resized: on the phone the uploads
+  and the draw call went from 2.27 to 0.29 ms at 2640x1080 and from 1.16
+  to 0.13 at 1320x540, every frame under 1 ms (one page, 15 s each way;
+  64 `Free`s in 3 s). The old order was sometimes quick too — the state is
+  sticky either way — which is how the same frame measured 2.6 ms in one
+  minute and 0.3 in the next. On a desktop (headless Chromium on the GPU,
+  the page's own loop at 60 Hz, main's page and this one twice each): 0.55
+  → 0.15 ms at 2.6 megapixels and 1.12 → 0.57 at 3806×2076, 120 `Free`s a second
+  → none.
 - **2-D canvas** (no WebGL2 — a headless Firefox with no display to ask —, a WebGL2 drawn by the CPU,
   or `?canvas2d`): the page asks for `RGBA8`; the program packs its frame
   through the palette on the renderer's threads (`render::pack_rgba`, one
@@ -317,8 +453,9 @@ path; there is no `fd_readdir`); anything else a newer `std` imports answers
 - **Saves and settings go through `std::fs`.** `save s0` writes
   `id1/s0.sav` (`Host_Savegame_f`), the Load and Save menus list the slots
   from the files (`M_ScanSaves`, when they open), and `config.cfg` holds the
-  settings the id way (`config.rs`, `Host_WriteConfiguration`): the profile,
-  then the `bind` lines and archived cvars that differ from it, written when
+  settings the id way (`config.rs`, `Host_WriteConfiguration`): the preset,
+  then the `bind` lines and archived cvars that differ from its values on this
+  machine, written when
   one of them changes and exec'd at startup as quake.rc does. When a written file is closed, `wasi.js` sends it
   to the page, which keeps it in IndexedDB (`quake-rs`, store `files`, keyed
   by path) and hands every kept file back at the next start. Without
@@ -327,7 +464,10 @@ path; there is no `fd_readdir`); anything else a newer `std` imports answers
   settings as `quake-rs.resolution`/`.viewsize`/`.extras` in localStorage. At
   start the page moves them once into the game directory — the saves to
   `id1/<name>`, the settings as the `config.cfg` lines the program would have
-  written — and removes the keys.
+  written — and removes the keys. A migrated `viewsize 100` was the old page's
+  default, not a choice, so it is dropped like the other restated defaults
+  (`LEGACY_DEFAULTS`): that player gets the preset's own Screen size, 110 in
+  slop. Any other size is kept.
 - A storage failure after the fact (quota) is printed on the console with
   `echo`, since the program's write already succeeded.
 
@@ -608,8 +748,8 @@ that split.
   a seven-minute track is not decoded whole into memory), through a gain
   node (the level) into the page's AudioContext, beside the worklet that
   plays the program's mix: it starts with the first click, as the game's
-  sound does, and a hidden tab pauses it with the game (WinQuake paused the
-  CD when it lost the screen). A looping track loops in the element; a
+  sound does, and a hidden tab (or a phone held upright) pauses it with the
+  game (WinQuake paused the CD when it lost the screen). A looping track loops in the element; a
   track played once reports its end (the `cd_ended` call: MCI's notify).
 - **Without music** there is no drive: no `-cdtracks`, no `CD` records,
   nothing in the program changes (id's `cd_null.c`, which the C oracle is
@@ -622,30 +762,41 @@ asked for; the element's time, loop and level; the output's RMS) and the
 ## Settings, and how the page shows the picture
 
 Every setting is the program's (`quake_rs::settings`: id's cvars and key
-bindings, and the port's departures, which the profiles **Classic** and
-**2026** switch — the engine; the controls are the player's, the same in both,
-and `idcontrols` is the console's one step to id's own). The page needs three of them, and hears
-them in the `STATE` record:
+bindings, and the port's slop options, which the presets **Classic** and
+**slop** set; the controls are the same in both, and `idcontrols` is the
+console's one step to id's own). A few are numbers the machine picks once, at
+start, from the command line (`settings::Machine`): `-touch`, a coarse pointer
+(a phone or a tablet: 2x, at most four threads), and `-hwthreads N`, the
+threads offered (all of them elsewhere, at 1x). No machine caps the frame
+rate: slop's cap is none everywhere, Classic's id's 72.
+The page passes `-touch` from `touchScreen` (`commandLine`), the one test the
+touch controls and the pacing's lines (`pacing.scarceCores`) use too, so the
+three never disagree about a device. The page needs three settings, and
+hears them in the `STATE` record:
 
-- **Native resolution** (`vid_native`, 2026). The page sends its box for the
-  picture in device pixels and its `devicePixelRatio` (`WINDOW`); the
-  program renders the box divided by a whole pixel size (`vid_pixelsize`:
-  1..4, or Auto, the smallest that keeps the frame within a 1080p frame's
-  pixels per whole square root of the renderer's threads, from 2 on a
-  phone: a ratio of 2 or more in a box whose shorter side is at most 540 CSS
-  pixels, since a phone's cores are several times slower than a desktop's
-  and slow further as it warms) and says the size in `pixel_size`; the page makes the canvas exactly `W x pixel_size` device
+- **Native resolution** (`vid_native`, slop). The page sends its box for the
+  picture in device pixels (`WINDOW`); the program renders the box divided
+  by a whole pixel size (`vid_pixelsize` 1..4, the machine's to start with;
+  past what the threads build's memory holds, 12 million pixels a frame,
+  the next size up: "What 512 MiB holds"; and in a box so small that the
+  size would make a frame under id's 320x200, the next size down, so the
+  picture never outgrows its box) and says the size in
+  `pixel_size`; the page makes the canvas exactly `W x pixel_size` device
   pixels wide and `H x pixel_size` tall (`fitCanvas`), `image-rendering:
   pixelated`, so every picture pixel is a whole square of screen pixels at
   the box's own aspect (the view is Hor+: `fov_adapt`). Off (Classic), the
   picture is the video mode (`_vid_resolution`, Options > Video Options)
   in the largest 4:3 box the window fits, as before.
-- **Alt+Enter toggles fullscreen** (`vid_altenter`, on in both profiles; with
+- **Alt+Enter toggles fullscreen** (`vid_altenter`, on in both presets; with
   `idcontrols` the chord is id's ALT `+strafe` and ENTER `+jump`): "Fullscreen", below.
-- **The profile from the address.** `?classic` and `?2026` add `+profile
-  classic` / `+profile 2026` to the program's command line (`wasi.js` hands
-  it `args`), which quake.rc's `stuffcmds` runs after `config.cfg`: the same
-  switch as the menu's, so it sticks.
+- **The preset from the address.** `?classic` and `?slop` (or the older
+  `?2026`) add `-preset classic` / `-preset slop` to the program's command
+  line (`wasi.js` hands it `args`). After `config.cfg` the program applies
+  it only when it is not the preset the stored settings were last set to
+  (`sys.rs`, `address_preset`): a first visit to a bookmarked `?classic`
+  gets Classic, and the player's own changes on top of it — the controls
+  too — survive every reload. The console's `preset` (and a `+preset` on
+  the command line) applies every time.
 - **A mission pack from the address.** `?game=hipnotic` / `?game=rogue` add
   `-hipnotic` / `-rogue` to the command line — `COM_InitFilesystem`'s own
   flags (`quake-rs`'s `common.rs`): the program layers that pack's own game
@@ -660,9 +811,10 @@ them in the `STATE` record:
   id's own engine would.
 
 `verify_settings.py` checks all of it in the browser (the window filled
-with whole pixels at devicePixelRatio 1 and 2, `?classic`, the switch, the
-reload); the checks that pin id's behaviour open the page as `?classic`,
-and `bench.py` does too, so its frames hash as `quaketool play`'s.
+with whole pixels at devicePixelRatio 1 and 2, `?classic`, Reset to Classic
+and `preset slop`, the reload), `verify_touch.py` a touch screen's numbers;
+the checks that pin id's behaviour open the page as `?classic`, and
+`bench.py` does too, so its frames hash as `quaketool play`'s.
 
 ## Input
 
@@ -685,7 +837,7 @@ it means, as id's `Key_Event`, `IN_MouseMove` and the joystick code do.
   on every activation change and mode set (vid_win.c: "fix the leftover Alt from any
   Alt-Tab"), the page sends one `CLEAR_KEYS` record whenever a release may
   have been lost: the window blurs, the tab hides, the pointer lock ends,
-  fullscreen ends. The program (`input.rs`, `clear_all_states`) runs
+  fullscreen ends, a phone is turned upright ("Touch"). The program (`input.rs`, `clear_all_states`) runs
   `Key_Event (key, false)` for every key, so each `+` binding lets go as
   its release would, then `Key_ClearStates` and `IN_ClearStates`; the page
   ends its unlocked mouse drag. A key still held presses again with its
@@ -1077,8 +1229,10 @@ poll).
 
 Nothing cheap is left in the page: keys and mouse go to the program when
 they happen and it applies them at once, the pad is read as late as the
-tick, and the frame is presented in the refresh that ticked. What would cut
-more is the browser's (`?lowlatency`, below) or the frame's own time.
+tick, and a frame the wait can wait for is presented in the refresh that
+ticked (a slower one, or on a touch screen one that takes most of a refresh,
+at the refresh after it is done: "A frame"). What would cut more is the
+browser's (`?lowlatency`, below) or the frame's own time.
 
 ## Fullscreen
 
@@ -1241,12 +1395,14 @@ The page only plays what it paints.
   `S_LocalSound`s through the mixer.
 - **A hidden tab** stops the game (no refreshes, no ticks). The page
   suspends the AudioContext with it and resumes it when the tab comes back,
-  so the sound stops and goes on where the game does.
+  so the sound stops and goes on where the game does. A touch screen held
+  upright does the same (the game waits behind the rotate prompt, "Touch"):
+  `awayNow()` is the hidden tab or that.
 
-**Classic and 2026.** The setting is `snd_modern` (`Cvars::sound`, a
-`quake_rs::snd::SoundMode`; Options > Classic / 2026 > Picture and sound >
+**Classic and slop.** The setting is `snd_modern` (`Cvars::sound`, a
+`quake_rs::snd::SoundMode`; Options > Slop Options > Picture and sound >
 "Full-rate sound"),
-a departure: off in the Classic profile, on in 2026. Classic
+a slop option: off in the Classic preset, on in slop. Classic
 is id's mixer as written (`Fixes::NONE`) at id's `desired_speed`, 11025 Hz,
 mixing id's 0.1 s ahead. The 2026 mixer (`Fixes::ALL`: the loop seam, exact
 resampling steps, the ambient ramp at any frame rate, `S_StopSound`'s range;
@@ -1378,7 +1534,17 @@ the same pixels for any count). `wasi.js`:
   mode;
 - before the program starts, makes a pool of thread workers (as many as
   `navigator.hardwareConcurrency`, 2–16), each another instance of
-  `wasi.js` — a worker made after its parent has blocked may never start;
+  `wasi.js` — a worker made after its parent has blocked may never start.
+  If the browser will not make them (`Worker` throws, or one fails to
+  load) the page stops and says so, on the boot panel and the status line, as
+  for the memory ("the game did not start: this browser would not start the
+  worker threads the game needs to run (…)"), and the pool made so far is
+  ended: the threads build never runs on one thread instead — a game that
+  quietly runs slower, in a mode nobody chose, is one more thing to keep
+  track of (until 2026-10-03 it did, and `-hwthreads 1` was the sign;
+  `verify_crash.py` makes `Worker` throw and checks the message). The
+  player's own `r_threads 1` is not that and stays: a setting, in either
+  build;
 - answers `thread-spawn` by claiming a free worker. Its first thread goes
   by message (the module, the memory, the thread id and start argument);
   the worker instantiates the module once, calls `wasi_thread_start`, marks
@@ -1389,8 +1555,20 @@ the same pixels for any count). `wasi.js`:
   wasm atomics on the shared memory, so `join`, `Mutex` and channels need
   nothing more from the host. With every worker busy it answers EAGAIN;
 - passes the program `-hwthreads N`, the threads it may count on
-  (`hardwareConcurrency`, at most the pool plus its own). If the pool cannot
-  be made, the program runs alone (`-hwthreads 1`).
+  (`hardwareConcurrency`, at most the pool plus its own).
+
+**What the browser must give.** When it will not, the page says so once,
+plainly, and the game does not start — never a degraded mode: the memory and
+the thread workers (above), and WebAssembly SIMD, which `wasi.js` probes
+(`SIMD_PROBE`, the usual `i8x16.popcnt` module) before it compiles the
+program: "the game did not start: this browser has no WebAssembly SIMD, which
+the game needs to run (Chrome 91, Firefox 89 and Safari 16.4 have it)". A
+build that uses SIMD (`-C target-feature=+simd128`) cannot be compiled
+without it, and asking first keeps the line from depending on how a browser
+words its compile error; for a build without SIMD the probe is harmless,
+since every current browser passes it. `verify_crash.py` checks all three
+lines (stubbing `Worker`, `WebAssembly.Memory`, and `WebAssembly.validate`
+with `compile`).
 
 A thread has the clocks, randomness, sleep and stderr (to its worker's
 console: the parent never reads messages again). The files, stdin and
@@ -1398,8 +1576,8 @@ stdout stay the main program's, and a thread cannot spawn threads yet.
 
 **A thread's stack** (1 MiB, malloc'd, no guard page) is what `std` asks
 wasi-libc's `pthread_create` for:
-1 MiB (`std::thread`'s wasip1 `DEFAULT_MIN_STACK_SIZE`; the bands' and the
-bakes' scoped threads ask nothing more), allocated from the program's own
+1 MiB (`std::thread`'s wasip1 `DEFAULT_MIN_STACK_SIZE`; the frame's scoped
+threads, which bake and draw the bands, ask nothing more), allocated from the program's own
 heap, with no guard below it — linear memory has no unmapped pages. A
 thread that recurses past it does not fault: it writes over whatever the
 heap holds below its stack (the review of the bakes measured 1500 KiB of
@@ -1471,10 +1649,27 @@ through every map of a game, each looked all the way round, in Chromium:
 id1 (pak0 and pak1) 64 MB at 1886×996 and 153 MB at 3806×2076 (4K, pixel
 size 1); Scourge of Armagon 68 and 153; Dissolution of Eternity 68 and 154
 (this round's research measured 46 MiB at 1280×720 and 152 MiB at a 4K
-window). So 512 MiB is three times what the largest frame the page's Auto
-pixel size makes needs (4K's worth of pixels at 16 threads); only a
-pixel size of 1 forced on a display past about 6K would not fit (8K, about
-500 MB, is the renderer's limit). It is half the threads build's old
+window). With 1x the default on a desktop since 2026-10-03, the program
+holds a frame to what the memory holds (`quake-wasm/src/vid.rs`,
+`MAX_FRAME_PIXELS`, 12 million pixels; past it the next pixel size, the
+player's own pick too). Measured the same way (shareware maps e1m1, e1m3,
+e1m4 and e1m7, 1x on 8 threads): a page started at a size holds about 26 MB
+and 19 bytes a pixel (1920x920 56 MB, 3840x2000 145, 5120x2720 286,
+6400x3440 437, 7680x4160 623: 8K at 1x does not fit). 4K and a 5120x2160
+ultrawide draw at 1x; 5K, 6K and 8K at 2x. A frame's buffers that grew with
+the window did not hand the old frame's memory to the next, larger one (a
+grown buffer moves, and the hole it leaves is too small for the next one):
+4800x2880 then 5120x3200 took 618 MB where a page started at 5120x3200 takes
+333, and on e1m3 a window walked up to 4224x2656 through 4, 6 and 17 sizes
+held 307, 284 and 282 MB where a page opened there held 188 — by an amount
+no setting bounded. So the threads build allocates every frame-sized buffer
+(the frame pool's, the z-buffer, a presented frame's RGBA) once, for the
+largest frame there is (`render::reserve_frames`, from `main`): every one is
+one size, a hole fits the next, and the same walks hold 202 MB from the first
+frame at any size to the end. The reserve is address space in a memory
+already made whole; only the pixels a frame writes are touched.
+`verify_present.py` walks a window up through sixteen sizes to the largest
+frame on the fixed build, the game never stopped. It is half the threads build's old
 maximum: a fixed memory is committed whole when it is made — free on Linux
 and Android until a page is touched (here the page's resident memory with it
 fixed is the growable build's: Chromium, all processes, 984 MB against 972 at
@@ -1485,16 +1680,19 @@ cleanly on the main thread — `memory allocation of N bytes failed`, then
 `std`'s abort — and the page shows "The game stopped: out of memory ...: a
 larger pixel size, in Video Options, needs less" (a 96 MiB build at 4K).
 
-**The renderer's threads** are the cvar `r_threads` (quake-wasm `App::
-render_threads`, the typed `quake_rs::render::Threads`): 0, the default,
-takes every thread the host offers (`-hwthreads`; a `wasm32-wasip1` build,
-without threads, gets 1), n takes n. `host::step` hands the resolved count
-to the renderer of whichever game draws the frame, every frame, so each
+**The renderer's threads** are the cvar `r_threads`, a number (at least 1;
+0 on the console or in a file is this machine's number, as for
+`vid_pixelsize`): the presets start it at the machine's — every thread the host
+offers (`-hwthreads`; a `wasm32-wasip1` build, without threads, gets 1), at
+most four on a touch screen (`settings::Machine::render_threads`; "On an
+Android phone", below, has the measurements and the why) — and `vid::render_threads`
+is where the frame reads it. `host::step` hands the count to the renderer of
+whichever game draws the frame, every frame, so each
 `Walk` and `DemoPlay` the host builds (a boot, a load, the attract loop's
 next demo) draws with it from its first frame. A spawn the host refuses
 (more threads asked than workers) leaves its bands to the threads that did
 start, so any count draws the frame. The `render_threads` call reports the
-resolved count. The RGBA pack runs on the same threads.
+count. The RGBA pack runs on the same threads.
 
 **Measured.** `threadcheck`'s rounds of seven scoped threads (a round:
 spawn, run, join) take 25 µs with the workers kept, against 214 µs when
@@ -1624,9 +1822,9 @@ by three quarters. Not clearly worse, so everything was ported.
 
 Kept, same meaning: it asks for a `desynchronized` canvas (WebGL2's or the
 2-D one), which can skip a compositor frame where the browser supports it
-(Chrome on Windows and ChromeOS), at the risk of tearing. The frame still
-arrives inside the refresh that ticked, so the hint matters exactly as much
-as before. Off by default, and not verifiable headless: there it holds the
+(Chrome on Windows and ChromeOS), at the risk of tearing. A quick frame
+still arrives inside the refresh that ticked, so the hint matters exactly as
+much as before. Off by default, and not verifiable headless: there it holds the
 refresh near 60 Hz, so input to present measured 12–16 ms at the median
 with it (old page and new, WebGL2 and 2-D alike) against 2–3 ms without. It
 stays off in 2026 too: it would save up to a refresh (2 ms at 480 Hz, 17 ms
@@ -1662,8 +1860,9 @@ bottom-anchored, the status bar covers *this frame* — the same arithmetic
 `calc_refdef` uses to keep the 3-D view off the bar (in 2026 too: the
 "Status bar overlay", `scr_sbaroverlay`, only draws the world on under the
 view beside the bar), so it is exactly right for every `viewsize` (0, 24
-or 48 virtual rows), the "scaled 2-D" extra's whole-number blow-up, and an
-intermission (always full screen, so 0). The page turns that into a CSS
+or 48 virtual rows; 2026 starts at 110, the 24-row status bar alone, and
+Classic at id's 100, with the inventory strip over it), the "scaled 2-D"
+extra's whole-number blow-up, and an intermission (always full screen, so 0). The page turns that into a CSS
 custom property, `--bar` (`touch.js`'s
 `refreshBar`/`applyBar`): the frame rows at the canvas box's own CSS-pixel-
 per-frame-pixel ratio, re-read whenever that ratio or the bar might have
@@ -1724,8 +1923,8 @@ for a release. Hidden where a pad key would be wrong: while the menu asks
 y or n (STATE 256) and while Customize controls waits for a key to bind
 (STATE 8, `BIND_GRAB`) — every other mode, and Classic too (a phone still
 has no keys). Help pages already take ◀▶ (id's `M_Help_Key`); the pad's
-presses reach them the same way, and the settings hub and its pages
-(Options > Classic / 2026) take OK, ▲▼ and ◀▶ as Options does — ◀▶ step
+presses reach them the same way, and Slop Options and its pages
+(Options' row 12) take OK, ▲▼ and ◀▶ as Options does — ◀▶ step
 Torch flicker's slider — and BACK backs out a screen at a time; so does a
 gamepad's A, B and D-pad (`joy_menukeys`). Taps and drags on the menu are unchanged;
 the pad is in addition.
@@ -1737,14 +1936,72 @@ character; Enter; a deleted zero-width sentinel is Backspace; Android's
 composed words when they end), and its key events never reach the page's
 own keyboard handler. Multiplayer > Setup's name rows get the same button.
 
-**Around the controls.** Held upright, a prompt asks for landscape (a tap
-dismisses it). The first tap ("tap to start") also asks for fullscreen and
-`screen.orientation.lock('landscape')` where the browser has them
-(Android; a fullscreen button stays while not fullscreen). During a game a
+**Quake plays only sideways.** The user saw the game sometimes play
+for a while upright on a phone and asked for landscape only, with the
+usual rotate-your-phone prompt shown whenever the phone is turned upright.
+(Until 2026-10-03 the prompt could be tapped away — "or tap to play
+upright" — after which the game ran upright for good; and it ran on behind
+the prompt while it showed.) Now, on a touch screen (`html.touch`: a coarse
+pointer, or `?touch`), whenever the page's box is taller than wide (CSS
+`(orientation: portrait)`: height at least width — the room the page has,
+not the device's turn, so a split screen is judged by its own box), `#tRotate`
+covers everything — the start prompt, the layer, a menu — opaque, so the
+game's last picture does not show through. It is plain CSS, up in the
+refresh the box turns, and there is nothing to dismiss it and no upright
+mode left. The game waits behind it:
+
+- **No ticks, no frames.** index.html's frame loop reads the same media
+  query (`portraitNow()`, once a refresh) and on the change does what a hidden tab already
+  does to it: sends no tick, presents nothing. The game's time stands still
+  (a tick carries the time since the last; none comes), so the attract loop,
+  a menu, the console and a game in progress stop alike with no state of the
+  game's own changed. Turned back, `lastTick` starts over and everything
+  goes on from the same instant — same game, same menu row, same demo frame.
+  Not id's `pause`, which a hidden tab's touch handling uses (below): a demo
+  ignores it (`host_pause`: "not really connected"), `pausable 0` refuses
+  it, it toggles, and it draws a plaque nobody looks at; and the hidden tab
+  wants a menu to come back to, where turning the phone back is the
+  resuming.
+- **Every key and finger is let go**: `clearAllStates()` (the CLEAR_KEYS
+  record, as a blur sends it), touch.js's `releaseAll()` (stick, fire,
+  jump), the menu pad's repeat timers, the phone's keyboard — the prompt
+  takes the touches from here, so no release would come, and a finger still
+  down when the phone turns back walks nobody on (it must lift and land
+  again). A keyboard beside a tablet is not heard while it waits
+  (`keyEvent`, `mouseMove`), so no stale presses wait for the turn back.
+- **Sound and CD stop** as on a hidden tab (`awayNow()`: hidden, or this;
+  `syncAudioAway`, `cdSync`) and go on where they were; the Screen Wake Lock
+  is let go.
+- **The window's box is not reported** (`sendWindow` returns): the program
+  keeps its landscape frame instead of resizing to a tall one nobody sees
+  and back; `releaseGame` sends the box if it changed. A page that loads
+  upright reports none until its first turn. The report goes out from the
+  frame loop, a refresh after the resize event (`windowDirty`), not from
+  the event: Firefox evaluates a media query at layout, after the event, so
+  a handler there still read the old orientation and sent the tall box.
+- **A tap on the prompt asks for fullscreen and the landscape lock** (the
+  gesture the covered "tap to start" would have given). A phone whose
+  rotation is locked never reports landscape by itself; Android Chrome's lock,
+  in fullscreen, overrides that and turns the page. Where a page has no
+  fullscreen (an iPhone) the hint says to unlock rotation instead.
+
+By reasoning, not run: a **tablet** is a touch device and follows the same
+rule (an iPad held upright waits, as a phone does). A **foldable** is judged
+by the box the page is given: a foldable phone unfolded is a tall box
+upright (the prompt) and a wide one sideways (the game). Its cover screen is
+close to square, so the page's box there is a coin
+toss between the two and not checked; nor is what box Chrome gives a page
+half folded. A desktop browser in a tall window has no `touch` class and
+is unaffected (with `?touch` it follows the rule). The phone's keyboard
+only shortens the box, so a sideways page stays sideways under it.
+
+**Around the controls.** The first tap ("tap to start") also asks for
+fullscreen and `screen.orientation.lock('landscape')` where the browser has
+them (Android; a fullscreen button stays while not fullscreen). During a game a
 Screen Wake Lock keeps the display on. Every touch resumes audio if the
 browser suspended it (iOS "interrupts" it in the background). When the
-page is hidden the audio is suspended, and with the touch controls on (not
-in Classic, where the game only stops getting ticks, as on a desktop) a
+page is hidden the audio is suspended, and with the touch controls on (in
+both presets; off by hand, the game only stops getting ticks, as on a desktop) a
 live game pauses (`pause`, id's plaque; STATE 512) under its menu; back in
 the game — the menu closed, by the player — the pause ends. Haptics:
 `QuakeTouch.rumble(weak, strong, ms)` takes the Gamepad API's dual-rumble
@@ -1752,10 +2009,14 @@ magnitudes and buzzes `navigator.vibrate` (Android; iOS Safari has none)
 for longer the stronger it is; nothing calls it yet — it is the hook for
 the `input` agent's gamepad rumble events (damage, heavy weapons).
 
-**Phones.** On an iPhone in landscape (844×390 CSS px, devicePixelRatio 3,
-so a 2532×1170 box) Auto picks a pixel size of 2 with the single-threaded
-build: a 1266×585 frame, 2×2 device pixels a picture pixel (0.67 CSS px,
-finer than the eye resolves at arm's length), and the scaled 2-D layer at
+**Phones.** *(As of 2026-09-26; since 2026-10-04 a touch screen's pixel size,
+threads and frame cap are the machine's numbers — 2x, at most four threads,
+60 — from the page's `-touch`: "Settings, and how the page shows the
+picture".)* On
+an iPhone in landscape (844×390 CSS px, devicePixelRatio 3, so a 2532×1170
+box) Auto picked a pixel size of 2 with the single-threaded build: a
+1266×585 frame, 2×2 device pixels a picture pixel (0.67 CSS px, finer than
+the eye resolves at arm's length), and the scaled 2-D layer at
 2×. What that costs, measured on a desktop, not on a phone
 (`bench.py --video modern`, one thread, headless Chromium on an 8-core desktop CPU
 under load 6, median page ms per frame, demo1 / walk_e1m1): 1266×585
@@ -1771,8 +2032,9 @@ Auto's budget grows with them (4 and up: twice the pixels), so a 6-core
 phone would get the 1×1 picture, 3.4× the pixels, drawn in equal row
 bands on unequal cores (a phone's efficiency cores take ~3× as long, and
 every band waits for the slowest): hotter and not smoother. For a phone,
-deploy the single-threaded build, or set `vid_pixelsize 2`. (Open: a
-phone-aware thread offer in wasi.js — the `present`/`platform` side.)
+deploy the single-threaded build, or set `vid_pixelsize 2`. (Since then a
+touch screen starts at 2×2 on four threads whatever it offers, the machine's
+numbers, and a phone has been measured: "On an Android phone", below.)
 iOS Safari: `SharedArrayBuffer` needs iOS 15.2 and https (the page says so
 when it is missing); rAF runs at 60 Hz (Safari's default even on 120 Hz
 screens), 30 Hz in Low Power Mode; Web Audio follows the silent switch;
@@ -1782,6 +2044,158 @@ stays outside it, "Files"); the threads build declares a shared memory of
 up to 1 GiB (16384 pages), which a browser reserves up front for a
 shared memory — the kind of reservation iOS has refused in other wasm
 games, one more reason to give a phone the single-threaded build.
+
+**On an Android phone (2026-10-03).** The phone (an SoC with
+three small cores, four middle, one fast;
+Chrome 154), measured over USB with `web/phone.py` (below). Played
+fullscreen, the page has a phone-sized landscape viewport: a 2640×1080
+frame at a pixel size of 1, 1320×540 at Auto's 2. `hardwareConcurrency` is
+8. The threads build, the 2026 profile, demo1.
+
+- **A finger on the glass doubles the frame rate.** The panel is adaptive:
+  60 Hz idle, 120 Hz while a finger moves. Chrome follows it: the page's
+  own `requestAnimationFrame` runs at 60 Hz with no finger down (also on a
+  panel held at 120 Hz: frames then show for two refreshes each, cleanly)
+  and at 105–110 Hz with one moving. So in touch play the game is asked for
+  twice the frames in half the time (8.3 ms), the fast core is busy 80–99%
+  instead of 4%, and the phone warms twice as fast. Every number below says
+  which case it is; tables made with no finger are the easy case.
+- **Heat decides.** A minute of 2640×1080 play and the phone caps its
+  middle cores at 1171 MHz and the fast one at 1478 (42–44% of their top
+  clocks) at a skin temperature of only 40 °C; half an hour of touch play
+  and they are at 940 and 1248 (41–42 °C). A frame then costs 2.2–2.7×
+  what it does cool. Even the 1320×540 frame gets there in touch play. The
+  numbers that matter are the warm ones.
+- **A frame in play costs more than back to back**: 8.4 ms against 3 at
+  1320×540, cool, at 60 Hz. Between frames the cores idle and the
+  scheduler clocks them down and keeps the game's threads on the slower
+  ones.
+- **Fewer frames, in touch play** (measured for a decision, nothing built).
+  At 1320×540 the 72 fps gate (`wasm_uncapped 0`: at a 120 Hz page, a
+  frame every second refresh) shows 61–62 a second instead of 108–115, the
+  fast core 8–26% busy instead of 65–80%, and the phone cools while it
+  plays: the caps came back from 940/1248 to 1286/1593 MHz in two minutes.
+  At 2640×1080 there is nothing to hold: a frame is longer than the gate
+  (58 shown either way), and a page that asks only every second refresh
+  shows 33, since with the gaps the cores clock down and the same frame
+  takes 24.6 ms instead of 14–17. And id's gate is not an even 60 on the
+  phone's 120 Hz: its 1/72 s lands between refreshes, and the panel's
+  refreshes and the relaxed pacing's back-to-back asks come unevenly, so
+  in touch play it showed about 270 gaps of more than 20 ms in 45 s, the fast
+  core 3–5% busy (2026-10-04). The frame-rate cap's 60 (`host_maxfps`, a
+  slop option: "A frame") draws a picture on the first refresh at least
+  1/60 s after the last — every second refresh of a 120 Hz panel, evenly —
+  while the game still runs every refresh. A touch screen started at it for
+  a day; since the user tried it (2026-10-04) slop starts with no cap on
+  every machine, and 60 is a player's pick. What it does on the phone is for
+  a phone run to say: `with.sh phone NAME -- uv run --with playwright
+  web/phone.py DEPLOY --fullscreen --touch --px 2,1 --threads 4 --cvar
+  host_maxfps=60,0 --secs 45 --cool 120`.
+
+Back to back (`timedemo demo1`), cool, 8 / 6 / 4 threads: 323 / 375 / 367
+fps at 1320×540; 148 / 162 / 155 at 2640×1080 with exact perspective; 182 /
+– / 194 with `r_perspspan 16`. Warm (1171/1478 MHz) on 8 threads: 69 exact,
+85 with span 16.
+
+In play, warm, before this round (main `4d28bd2`) → after (the page's two
+changes and Auto's four threads, below), median frame ms ; frames shown a
+second ; frames more than 20 ms apart in 45 s:
+
+| | 1320×540 (Auto) | 2640×1080, exact perspective |
+|---|---|---|
+| no finger, 60 Hz | 11 ; 59 ; 3 → the same | 18.3 ; 50 ; 365 → 14.6 ; 57 ; 133 |
+| a finger moving, 120 Hz | 7.0–8.6 ; 91–105 ; 70–79 → 6.7–7.1 ; 114–115 ; 10–13 | 16.0–18.3 ; 50–58 ; 449–798 → 13.2–14.2 ; 70–74 ; 41–76 |
+
+(Main's page and program and this branch's in turn, a kit's tab each, real
+fullscreen; the no-finger row is the page's changes alone on 8 threads.)
+With `r_perspspan 16` the 2640×1080 frame in touch play is 11.7–12.1 ms and
+82–84 are shown a second, against 14.4 and 69 exact in the same minutes.
+
+A day later (2026-10-04), after main's own renderer round (one round of
+threads a frame; the default span now 8), the same comparison in touch play —
+main `a3452f5` → this branch with main merged in, a kit tab each, in turn
+twice — frames shown a second ; frames more than 20 ms apart in 45 s ;
+median frame ms:
+
+| | 1320×540 | 2640×1080 |
+|---|---|---|
+| exact perspective | 102–114 ; 31–134 ; 4.4–6.1 → 117 ; 11–12 ; 6.0–6.2 | 64 ; 251–277 ; 15.1 → 85–86 ; 17–19 ; 11.2–11.5 |
+| `r_perspspan 8` (the default) | 113–114 ; 26–27 ; 5.5 → 116 ; 10–11 ; 5.1–5.5 | 77–84 ; 51–70 ; 10.3–12.0 → 96–100 ; 13–16 ; 9.2–9.8 |
+
+Main's round shows on the phone (2640×1080 exact was 50–58 a second on
+`4d28bd2`), and this round's changes pay on top of it as before: the
+frame's 99th percentile at 1320×540 goes from 16–24 ms to 8.5–8.9.
+
+- **What changed it.** On a touch screen the page no longer spins for a
+  frame of most of a refresh or more ("A frame"): the spin sat on the fast
+  core, 97–99% busy, while the game drew on the others. The upload's order ("Presentation"): 2.3 → 0.3 ms of the
+  main thread at 2640×1080. And **a phone draws on four threads, not
+  eight** (`settings::Machine::TOUCH_THREADS`): in touch play, 8 → 4 threads
+  took 2640×1080 from 67 to 70–74 frames shown a second and the late ones
+  from 116 to 41–76, and at 1320×540 the frame's 99th percentile from 20.7
+  ms to 9.5 — the 20 ms hitches twice a second were a band's thread put
+  off a core. Three threads are worse (53 a second at 2640×1080 against
+  59–64), five and six no better than four (58–59), at both sizes.
+- **Why four, and where.** The browser offers every core it sees, but a
+  frame needs some of them for the page's own thread, the compositor, the
+  GPU process and the sound; a phone's cores are of two or three kinds, of
+  which four or five are fast on any current one; and every busy core is
+  heat, which is paid back in clock. So on a touch screen (`-touch`, the
+  page's coarse-pointer test: a phone, and a tablet too) the machine starts
+  `r_threads` at four of the threads offered at most; with fewer offered,
+  those. Any other machine — a desktop, a laptop, a tablet whose primary
+  pointer is fine — starts on every thread offered, and `r_threads N` is N
+  anywhere. (Until 2026-10-04 the test was the screen's: `devicePixelRatio`
+  2 or more in a box whose shorter side is at most 540 CSS px, which left a
+  tablet on every thread; one test of the device now decides the touch
+  controls, the pacing's lines and these numbers alike.) A rule with no device in it would be
+  "half the threads offered": the same four here, and eight on this
+  16-thread desktop, where eight and sixteen measure the same; but it would
+  halve the threads of machines whose cores are all fast and unshared (an
+  Apple silicon Pro, an x86 without SMT), which nothing here could
+  measure, so it is not the rule.
+- **Presenting from a worker** (the parked `fleet/present120`) was built
+  on Chrome keeping a page's main-thread refresh at 60 on a 120 Hz panel.
+  That holds only with no finger down; in touch play the main thread
+  already gets the panel's rate, so for the rate a worker would add 120 Hz
+  only to a demo nobody touches or a gamepad, at the cost of the heat
+  above. What a worker would give touch play is the other thing: a wait
+  that sleeps (`Atomics.wait`) instead of spinning, so a slow frame could
+  be drawn the moment it is done without a core kept busy for it — the
+  refresh on the glass that not waiting costs ("A frame"). Not built.
+- **Not measured:** the delay from a touch to the glass. By the
+  compositor's swap in a headless trace ("A frame"), a frame longer than a
+  refresh is a refresh later on the glass when it is not waited for: 8 ms
+  at the 120 Hz of touch play, against frames 3–4 ms shorter and 12–24
+  more of them a second; `?wait` in the address plays the old way, to
+  compare by feel. Also not measured: real play (the finger is `adb shell
+  input swipe`, the game is demo1); other phones; a long session's
+  battery.
+
+**`web/phone.py`** is the kit: one command, a table — for each pixel size
+and thread count (and one more cvar's values: `--cvar r_perspspan=16,1`),
+`timedemo demo1`, then a stretch of `playdemo demo1` at the page's own
+pace, with each kind of core's clock, cap and load and the skin temperature
+read through adb beside the page's numbers (the frame's time, the frames
+shown, the gaps, the upload; the program's phases on a bench build). It
+measures the tab already open in the phone's Chrome and puts its cvars
+back, or serves a deploy dir to the phone over `adb reverse`
+(`http://localhost` is a secure context, so the threads build runs) in a
+tab it closes after, or runs against the local Chromium (`--local`).
+`--cool` rests the phone before each timedemo until no core is capped;
+`--touch` keeps a finger moving on the screen through every row (`adb shell
+input swipe`, in the middle of the picture, where a demo ignores it), and
+every row says the panel's refresh as SurfaceFlinger reports it. Three
+things it learned the hard way: a row with no finger measures a 60 Hz game
+the player never has; a page given part of the screen measures a
+smaller frame, so the device's state is read with every row and anything but
+the whole screen is refused; and Chrome hides its bars for a page's fullscreen
+only while no DevTools client is attached, so `--fullscreen` disconnects,
+sends the page's own Alt+Enter as a key event from Android, and connects
+again. A baseline of both pixel sizes at three thread counts with a minute
+of play each takes about 15 minutes of the phone, and it must be awake and
+unlocked with Chrome in front (a moving finger keeps it awake; with none it
+sleeps at its own timeout).
 
 ## Offline and install
 
@@ -1850,12 +2264,13 @@ run here.
 ## Browser support
 
 The design needs cross-origin isolation (below) for `SharedArrayBuffer`, and
-`Atomics.wait` in a worker. Checked here (2026-10-03): headless Chromium 146
-and headless Firefox 155, each all 18 `verify_*.py` (Firefox:
+`Atomics.wait` in a worker. Checked here (2026-10-03): headless Chromium 153
+(Playwright's) and headless Firefox 155, each all 20 `verify_*.py` (Firefox:
 `QUAKE_BROWSER=firefox`; "Build, serve, deploy" lists what differs and why),
-`verify_threads.py` in both, the benchmark in Chromium; Firefox's 16
-deploy-dir checks on the threads build with a display for its WebGL2 and
-without, and on `wasm32-wasip1` with one. Headed, on the desktop's Wayland compositor's virtual output with real input
+`verify_threads.py` in both, the benchmark in Chromium; Firefox's 17
+deploy-dir checks on the threads build, and 16 of them (all but
+`verify_crash.py`, which is about the threads build's own refusals) with a
+display for its WebGL2 too, and on `wasm32-wasip1` with one. Headed, on the Wayland compositor's virtual output with real input
 through XTEST: Chromium 146 (2026-10-02) and Firefox 155 ("Fullscreen",
 "Input"); in Firefox also the wheel, a save across a reload, and the sound's
 start: under
@@ -1973,11 +2388,11 @@ assembles one under `quake-wasm/target/bench-web`.
 
 **Firefox.** `QUAKE_BROWSER=firefox` runs any `verify_*.py` in Playwright's
 Firefox (`isolated.launch`, which also gives it the autoplay preferences
-Chromium takes as a flag; `webkit` does not start here). All 18 pass
+Chromium takes as a flag; `webkit` does not start here). All 19 pass
 (Firefox 155, 2026-10-03). What differs, each said by the script that
 differs:
 
-- `verify_extras` skips the Keyboard Lock checks, 17 of Chromium's 56: Firefox
+- `verify_extras` skips the Keyboard Lock checks, 17 of Chromium's 70: Firefox
   has no such API (its own no-API half runs).
 - `verify_present` tests WebGL2 only where Firefox has one, and a headless
   Firefox has one only with a display to ask: set `DISPLAY` (here
@@ -1988,7 +2403,7 @@ differs:
 - `verify_settings` skips its devicePixelRatio 2 section (3 checks): Playwright's
   Firefox loses a context's `device_scale_factor` on a cross-origin isolated
   page (a plain page keeps it), which is every page served here.
-- `verify_touch` runs on taps only: 95 checks pass and 7 are skipped, each saying
+- `verify_touch` runs on taps only: 137 checks pass and 8 are skipped, each saying
   why (the stick, the look drag, two thumbs, FIRE, JUMP, a held menu-pad
   arrow: Playwright's Firefox touchscreen taps and does nothing else, and has
   no `isMobile`), at devicePixelRatio 1 (so its "@3" and "@2.6" checks are

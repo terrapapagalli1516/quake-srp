@@ -14,8 +14,9 @@ worker thread that touches memory another thread has just grown can trap
 The threads build's memory is fixed (quake-wasm/build.rs), so the program runs
 RUNS times (default 8) and none may trap or fail. In a Chromium before 157
 the check also builds it the old way (QUAKE_WASM_GROWABLE=1, its own target
-dir) and runs that GROWABLE_RUNS times (default 80), and fails unless one
-traps: the trap it guards against is still there to catch. Firefox reads the
+dir) and runs that until one run traps, GROWABLE_RUNS times at the most
+(default 80), and fails if none does: the trap it guards against is still
+there to catch. Firefox reads the
 live size and does not trap; a Chromium from 157 has the fix; there the
 growable runs are skipped (`--growable` runs and reports them anyway).
 
@@ -115,11 +116,16 @@ with sync_playwright() as p:
     stale = name == "chromium" and major < 157
     if stale or GROWABLE:
         old = build(True)
-        bad = 0
+        bad = ran = 0
+        # One trap is the whole answer (the bug is still there to catch), and a run
+        # that traps costs its two-minute wait: stop at the first.
         for run in range(GROWABLE_RUNS):
             logs, done, errs, _ = run_program(br, old)
+            ran += 1
             bad += any("out of bounds" in e for e in errs + logs)
-        print(f"the growable build (the old link), {name} {version}: {GROWABLE_RUNS} runs, {bad} trapped")
+            if bad:
+                break
+        print(f"the growable build (the old link), {name} {version}: {ran} runs, {bad} trapped")
         if stale and bad == 0:
             fails.append(f"the growable build never trapped in {GROWABLE_RUNS} runs of {name} {version}: the check cannot see the bug")
     else:

@@ -1,5 +1,8 @@
 //! `quaketool framerate <pak> [--rates LIST] [--only NAMES] [--markdown]
 //! [--check]` — does the game play the same at every display rate?
+//! `quaketool framerate <pak> --cap N [--rates LIST] [--check]` — and with
+//! the frame-rate cap's picture held to N a second (`host_maxfps N`), the
+//! game still a host frame every refresh: the capped twin.
 //! `quaketool framerate <pak> --budget [--res WxH,...]` — what a frame of it
 //! costs at 480 Hz.
 //! `quaketool framerate <pak> --lerpmove [--rates LIST] [--strip DIR]` — how
@@ -13,6 +16,12 @@
 //! [the same options]` — what the frame's lit-surface bakes cost on 1 to 16
 //! threads: the 3-D view's time and its serial part where many blocks
 //! rebake; `--paced` keeps the display's real time between frames.
+//! `quaketool framerate <pak>[,<pak>...] --serial [--threads LIST] [--paced]
+//! [the same options]` — the page's slop frame (exact perspective, the
+//! status bar overlay with the world in its corners, the scaled 2-D layer)
+//! at the same views: the whole frame's time, and what it does on the
+//! calling thread alone, piece by piece (`--overlay 0` after it: id's
+//! status bar, one view a frame).
 //! `quaketool framerate <pak>[,<pak>...] --torchflicker S [the same options]
 //! [--dump DIR [--strengths LIST]]` — the same for the steady torches'
 //! flicker (`r_torchflicker` at strength S), standing by torches; with
@@ -22,7 +31,7 @@
 //! [--view NAME=MAP:X,Y,Z:YAW[:PITCH]]...` — what each perspective span
 //! (`r_perspspan`) costs: the 3-D view's time per frame with the walls and
 //! liquids exact every 16 pixels (id's), 8, 4 or at every pixel, the rest the
-//! 2026 profile's (`--exactpersp`: the same with `--spans 16,1`); with
+//! slop preset's (`--exactpersp`: the same with `--spans 16,1`); with
 //! `--dump DIR [--turn DEG_S] [--strafe UNITS_S] [--crop X,Y,W,H]`, every
 //! frame of each view at each span at the first rate as raw RGB instead, the
 //! camera turning or strafing (a clip of the four side by side).
@@ -43,12 +52,21 @@
 //! differ only by their frame times. With `--check` the command fails when
 //! an uncapped value is further from the 72 Hz reference than the scenario's
 //! stated tolerance.
+//!
+//! The capped twin (`--cap N`; rates `60,72,90,105,110,120,144,240` unless
+//! given) runs each uncapped scenario again with only the frames whose
+//! picture is due drawn ([`FrameCap::picture_due`]) and the rest stepped
+//! undrawn ([`cl_main::walk_frame_undrawn`], [`cl_demo::demo_frame_undrawn`])
+//! — as the browser host runs a cap other than id's 72 — and reports
+//! `uncapped → capped`. With `--check` it fails when a capped value is not
+//! exactly the uncapped one at its rate (drawing touched the game) or is
+//! further from the 72 Hz reference than the tolerance.
 
 use std::cell::RefCell;
 use std::fmt::Write as _;
 use std::time::Instant;
 
-use quake_rs::client::host::{host_filter_time_display, host_filter_time_uncapped};
+use quake_rs::client::host::{host_filter_time_display, host_filter_time_uncapped, FrameCap};
 use quake_rs::client::lerpmove::LerpMove;
 use quake_rs::client::{cl_demo, cl_main, host_cmd, DemoPlay, Phase, SoundCall, Vid, Walk};
 use quake_rs::pak::Pak;
@@ -120,11 +138,24 @@ struct FrameClock {
     oldrealtime: f64,
     frames: u64,
     seed: u32,
+    /// The picture's cap ([`PICTURE_CAP`]) and its last picture's time.
+    cap: FrameCap,
+    last_picture: f64,
 }
+
+/// The capped twin's cap (`--cap N`): every clock made while it is set draws
+/// only the frames whose picture is due. 0: every frame drawn.
+static PICTURE_CAP: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 impl FrameClock {
     fn new(rate: Rate, stepping: Stepping) -> FrameClock {
-        FrameClock { rate, stepping, realtime: 0.0, oldrealtime: 0.0, frames: 0, seed: 0x5eed }
+        let cap = FrameCap::new(PICTURE_CAP.load(std::sync::atomic::Ordering::Relaxed));
+        FrameClock { rate, stepping, realtime: 0.0, oldrealtime: 0.0, frames: 0, seed: 0x5eed, cap, last_picture: f64::MIN }
+    }
+
+    /// Whether the frame [`FrameClock::next`] just gave draws its picture.
+    fn draws(&mut self) -> bool {
+        self.cap.picture_due(self.realtime, &mut self.last_picture)
     }
 
     /// The next refresh interval.
@@ -200,7 +231,11 @@ impl Sim {
     /// One host frame; returns its `host_frametime`.
     fn frame(&mut self) -> f64 {
         let dt = self.clock.next();
-        let frame = cl_main::walk_frame(&mut self.w, dt, false, &VID);
+        let frame = if self.clock.draws() {
+            cl_main::walk_frame(&mut self.w, dt, false, &VID)
+        } else {
+            cl_main::walk_frame_undrawn(&mut self.w, dt, false, &VID)
+        };
         self.t += dt;
         self.dt = dt;
         for call in &frame.sound {
@@ -1013,7 +1048,7 @@ fn rocket(c: &Ctx) -> Vec<Measure> {
     let (mut light, mut count, mut spread) = (Series::default(), Series::default(), Series::default());
     s.run(0.6, |s| {
         let now = s.w.clock;
-        let radius = s.w.dlights.active().iter().filter(|d| d.die >= now).map(|d| d.radius).fold(0.0f32, f32::max);
+        let radius = s.w.dlights.active(f64::from(now)).iter().map(|d| d.radius).fold(0.0f32, f32::max);
         light.push(s.t - tb, f64::from(radius));
         let (n, r) = explosion_cloud(&s.w, boom.1);
         count.push(s.t - born, n);
@@ -1246,9 +1281,13 @@ fn demo(c: &Ctx) -> Vec<Measure> {
     while t < 20.0 {
         let dt = clock.next();
         t += dt;
-        let frame = cl_demo::demo_frame(&mut d, dt as f32, false, &VID);
+        let frame = if clock.draws() {
+            cl_demo::demo_frame(&mut d, dt as f32, false, &VID)
+        } else {
+            cl_demo::demo_frame_undrawn(&mut d, dt as f32, false, &VID)
+        };
         render::recycle_image(frame.image);
-        // The POV the frame drew.
+        // The POV the frame drew (or would have).
         let pov = (d.view.view_origin, d.view.view_angles);
         if pov != last {
             moves += 1;
@@ -1611,6 +1650,14 @@ struct StyleRun {
     baked: Vec<f64>,
     texels: Vec<f64>,
     view_s: Vec<f64>,
+    /// The whole client frame, in seconds, with the counters off, and its
+    /// parts beside the 3-D view: the game before it, and the 2-D layer
+    /// after it.
+    frame_s: Vec<f64>,
+    game_s: Vec<f64>,
+    layer2d_s: Vec<f64>,
+    /// The renderer's counters, frame by frame, with them on.
+    stats: Vec<render::RenderStats>,
 }
 
 /// `secs` of the live game at `rate` standing at `view`, drawn at `vid`,
@@ -1620,6 +1667,11 @@ struct StyleRun {
 /// the render threads idle between frames, and a frame's first round of
 /// threads starts cold. Without it the frames run back to back.
 static PACED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// `--serial`: the runs draw the page's slop frame — the status bar overlay
+/// with the world in the corners beside it ([`render::SbarLayout::Overlay`]),
+/// over the video settings the caller hands in.
+static OVERLAY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn style_run(pak: &Pak, view: &StyleView, rate: Rate, vid: Vid, threads: usize, secs: f64, counters: bool) -> StyleRun {
     let stepping = if rate == Rate::Hz(72) { Stepping::Classic } else { Stepping::Uncapped };
@@ -1635,6 +1687,9 @@ fn style_run(pak: &Pak, view: &StyleView, rate: Rate, vid: Vid, threads: usize, 
     if view.fire {
         s.arm(IT_ROCKET_LAUNCHER);
         s.w.in_attack = true;
+    }
+    if OVERLAY.load(std::sync::atomic::Ordering::Relaxed) {
+        s.w.sbar_layout = render::SbarLayout::Overlay;
     }
     let mut run = StyleRun::default();
     let (warm, end) = (s.t + 1.0, s.t + 1.0 + secs);
@@ -1664,8 +1719,13 @@ fn style_run(pak: &Pak, view: &StyleView, rate: Rate, vid: Vid, threads: usize, 
             run.serial_s.push((lap_times()[1] - st.bands_ns as f64 * 1e-9).max(0.0));
             run.baked.push(st.surf_baked as f64);
             run.texels.push(st.surf_texels_baked as f64);
+            run.stats.push(st);
         } else {
-            run.view_s.push(lap_times()[1]);
+            let [game, view, post, hud] = lap_times();
+            run.view_s.push(view);
+            run.frame_s.push(game + view + post + hud);
+            run.game_s.push(game);
+            run.layer2d_s.push(post + hud);
         }
     }
     run
@@ -1677,7 +1737,7 @@ fn style_run(pak: &Pak, view: &StyleView, rate: Rate, vid: Vid, threads: usize, 
 /// drawn, the blocks rebaked and their texels per frame (the renderer's
 /// counters, one run each), and the 3-D view's time per frame (median, mean,
 /// p95 over `reps` runs of each, interleaved, the counters off). The video
-/// cvars are the 2026 profile's but for the light styles.
+/// cvars are the slop preset's but for the light styles.
 fn lightstyles_report(pak: &Pak, rates: &[Rate], views: &[StyleView], res: (usize, usize), threads: usize, reps: usize, secs: f64) -> String {
     use quake_rs::server::LerpLightStyles;
     let modes = [LerpLightStyles::Classic, LerpLightStyles::Smooth]
@@ -1689,7 +1749,7 @@ fn lightstyles_report(pak: &Pak, rates: &[Rate], views: &[StyleView], res: (usiz
 /// `--torchflicker S [--rates LIST] [--res WxH] [--threads N] [--reps N]
 /// [--secs S] [--view NAME=MAP:X,Y,Z:YAW[:PITCH]]...`: as `--lightstyles`,
 /// the steady torches as id's → flickering at strength S (`r_torchflicker`),
-/// the rest of the 2026 profile's video cvars on in both.
+/// the rest of the slop preset's video cvars on in both.
 #[allow(clippy::too_many_arguments)]
 fn torches_report(pak: &Pak, rates: &[Rate], views: &[StyleView], res: (usize, usize), threads: usize, reps: usize, secs: f64, strength: render::TorchFlicker) -> String {
     let modes = [render::TorchFlicker::OFF, strength].map(|torches| render::VideoCvars { torches, ..render::VideoCvars::MODERN });
@@ -1698,7 +1758,7 @@ fn torches_report(pak: &Pak, rates: &[Rate], views: &[StyleView], res: (usize, u
 }
 
 /// `--bake [--rates LIST] [--res WxH] [--threads LIST] [--reps N] [--secs S]
-/// [--view NAME=MAP:X,Y,Z:YAW[:PITCH[:fire]]]...`: the 2026 profile's frame
+/// [--view NAME=MAP:X,Y,Z:YAW[:PITCH[:fire]]]...`: the slop preset's frame
 /// (the torches flickering, the light styles gliding) at each view, rate and
 /// thread count: the blocks rebaked and their texels per frame, the 3-D
 /// view's median and p95 ms (over `reps` runs of each thread count,
@@ -1711,7 +1771,7 @@ fn bake_report(pak: &Pak, rates: &[Rate], views: &[StyleView], res: (usize, usiz
     let mut o = String::new();
     let vid = Vid { width: res.0, height: res.1, display_aspect: res.0 as f64 / res.1 as f64, video: render::VideoCvars::MODERN, ..VID };
     let mean = |xs: &[f64]| xs.iter().sum::<f64>() / xs.len().max(1) as f64;
-    let _ = writeln!(o, "lit-surface bakes at {}x{}, the 2026 frame, {secs} s a run, threads {threads:?}", res.0, res.1);
+    let _ = writeln!(o, "lit-surface bakes at {}x{}, the slop frame, {secs} s a run, threads {threads:?}", res.0, res.1);
     quake_rs::client::set_lap_hook(Some(lap));
     for view in views {
         if pak.read_file(&format!("maps/{}.bsp", view.map)).ok().flatten().is_none() {
@@ -1733,6 +1793,74 @@ fn bake_report(pak: &Pak, rates: &[Rate], views: &[StyleView], res: (usize, usiz
                 let (serial, _) = median_p95(&mut counts[k].serial_s.clone());
                 let _ = writeln!(o, "    {t:>2} threads: 3-D view ms/frame median {med:.3}, p95 {p95:.3}; serial {serial:.3} ms ({:.0}%)  ({} frames)",
                     100.0 * serial / med.max(1e-9), times[k].len());
+            }
+        }
+    }
+    quake_rs::client::set_lap_hook(None);
+    o
+}
+
+/// `--serial [--rates LIST] [--res WxH] [--threads LIST] [--paced] [--reps N]
+/// [--secs S] [--view ...]`: the page's slop frame — the slop video
+/// settings with exact perspective, the status bar overlay (the world drawn
+/// on in the corners beside the bar: two more views a frame) and the scaled
+/// 2-D layer — at each view, rate and thread count: the whole client frame's
+/// and the 3-D view's median ms (over `reps` runs of each thread count,
+/// interleaved, the counters off), and from a run with the counters on the
+/// mean ms a frame of each piece the calling thread does alone, beside the
+/// bands' wall time. Where a native-resolution frame's serial time goes.
+fn serial_report(pak: &Pak, rates: &[Rate], views: &[StyleView], res: (usize, usize), threads: &[usize], reps: usize, secs: f64) -> String {
+    let mut o = String::new();
+    let vid = Vid {
+        width: res.0,
+        height: res.1,
+        display_aspect: res.0 as f64 / res.1 as f64,
+        persp_span: render::PerspSpan::Exact,
+        video: render::VideoCvars::MODERN,
+        ..VID
+    };
+    quake_rs::draw::set_scaled_2d(true);
+    let bar = if OVERLAY.load(std::sync::atomic::Ordering::Relaxed) { "the status bar overlay" } else { "id's status bar (--overlay 0)" };
+    let _ = writeln!(o, "the page's slop frame at {}x{}, {bar}, {secs} s a run, threads {threads:?}", res.0, res.1);
+    quake_rs::client::set_lap_hook(Some(lap));
+    for view in views {
+        if pak.read_file(&format!("maps/{}.bsp", view.map)).ok().flatten().is_none() {
+            let _ = writeln!(o, "{}: maps/{}.bsp is not in the pak (skipped)", view.name, view.map);
+            continue;
+        }
+        let _ = writeln!(o, "{} — maps/{}.bsp at {:?} looking {}{}", view.name, view.map, view.origin, view.yaw, if view.fire { ", firing rockets" } else { "" });
+        for &rate in rates {
+            let counts: Vec<StyleRun> = threads.iter().map(|&t| style_run(pak, view, rate, vid, t, secs, true)).collect();
+            let mut times: Vec<[Vec<f64>; 4]> = vec![Default::default(); threads.len()];
+            for _ in 0..reps {
+                for (k, &t) in threads.iter().enumerate() {
+                    let run = style_run(pak, view, rate, vid, t, secs, false);
+                    for (all, new) in times[k].iter_mut().zip([run.frame_s, run.view_s, run.game_s, run.layer2d_s]) {
+                        all.extend(new);
+                    }
+                }
+            }
+            let _ = writeln!(o, "  {:>6} Hz", rate.label());
+            for (k, &t) in threads.iter().enumerate() {
+                let [(frame, frame95), (view3d, _), (game, _), (layer2d, _)] = [0, 1, 2, 3].map(|i| median_p95(&mut times[k][i]));
+                let st = &counts[k].stats;
+                let ms = |f: &dyn Fn(&render::RenderStats) -> u64| st.iter().map(|s| f(s) as f64).sum::<f64>() / 1e6 / st.len().max(1) as f64;
+                let _ = writeln!(
+                    o,
+                    "    {t:>2} threads: frame {frame:.3} ms (p95 {frame95:.3}) = game {game:.3} + 3-D {view3d:.3} + 2-D {layer2d:.3}; counted: {:.1} views in {:.1} rounds of threads, {:.3} ms, alone {:.3} = setup {:.3} + walk {:.3} + brush {:.3} + scan {:.3} + lookups {:.3} + entities {:.3}; bands {:.3} (their bakes {:.3}, every thread's)",
+                    ms(&|s| s.views) * 1e6,
+                    ms(&|s| s.thread_rounds) * 1e6,
+                    ms(&|s| s.view_ns),
+                    ms(&|s| s.view_ns.saturating_sub(s.bands_ns)),
+                    ms(&|s| s.view_setup_ns),
+                    ms(&|s| s.world_sort_ns),
+                    ms(&|s| s.submodel_ns),
+                    ms(&|s| s.world_setup_ns),
+                    ms(&|s| s.surf_lookup_ns),
+                    ms(&|s| s.entity_setup_ns),
+                    ms(&|s| s.bands_ns),
+                    ms(&|s| s.surf_bake_ns),
+                );
             }
         }
     }
@@ -1886,7 +2014,7 @@ fn persp_run(pak: &Pak, view: &StyleView, rate: Rate, vid: Vid, threads: usize, 
 /// `--perspspan`: per view and rate, the 3-D view's time per frame (median,
 /// mean, p95 over `reps` runs of each, interleaved) at each of `spans`, the
 /// first the reference the others are put against (id's 16 by default),
-/// every other video setting the 2026 profile's (the torches flicker, so the
+/// every other video setting the slop preset's (the torches flicker, so the
 /// numbers are today's).
 #[allow(clippy::too_many_arguments)]
 fn persp_report(pak: &Pak, rates: &[Rate], views: &[StyleView], res: (usize, usize), spans: &[render::PerspSpan], threads: usize, reps: usize, secs: f64) -> String {
@@ -2040,12 +2168,14 @@ fn fmt(v: f64) -> String {
 pub fn cmd_framerate(pak_path: &str, rest: &[String]) -> Result<String, String> {
     let mut rates = vec![Rate::Hz(60), Rate::Hz(144), Rate::Hz(240), Rate::Hz(480), Rate::Jitter];
     let (mut only, mut markdown, mut check) = (None::<Vec<String>>, false, false);
+    // `--cap`'s: the capped twin, its cap, and the rates as given (72 kept).
+    let (mut cap, mut given_rates) = (None::<FrameCap>, None::<Vec<Rate>>);
     let (mut budget, mut res) = (false, "1280x800,1280x1024".to_string());
     let (mut lerpmove, mut strip) = (false, None::<String>);
     // `--lightstyles`' own: 72 Hz is a rate like any other there.
     let (mut lightstyles, mut views, mut style_rates) = (false, Vec::new(), vec![Rate::Hz(72), Rate::Hz(480)]);
     // `--bake`'s: the thread counts.
-    let (mut bake, mut thread_list) = (false, vec![1usize, 2, 4, 8, 16]);
+    let (mut bake, mut serial, mut thread_list) = (false, false, vec![1usize, 2, 4, 8, 16]);
     // `--torchflicker`'s: the strength, and `--dump`'s directory and strengths.
     let (mut torchflicker, mut dump, mut strengths) = (None::<f32>, None::<String>, vec![0.0, 0.5, 1.0]);
     // `--perspspan`'s: the spans compared, and `--dump`'s camera motion and
@@ -2060,6 +2190,7 @@ pub fn cmd_framerate(pak_path: &str, rest: &[String]) -> Result<String, String> 
                 let v = rest.get(i + 1).ok_or("--rates needs a list")?;
                 rates = v.split(',').map(Rate::parse).collect::<Result<_, _>>()?;
                 style_rates = rates.clone();
+                given_rates = Some(rates.clone());
                 rates.retain(|&r| r != Rate::Hz(72));
                 i += 1;
             }
@@ -2069,6 +2200,15 @@ pub fn cmd_framerate(pak_path: &str, rest: &[String]) -> Result<String, String> 
             }
             "--markdown" => markdown = true,
             "--check" => check = true,
+            "--cap" => {
+                let v = rest.get(i + 1).ok_or("--cap needs a number")?;
+                let n: u32 = v.parse().map_err(|_| format!("--cap: bad number {v:?}"))?;
+                if FrameCap::new(n) == FrameCap::NONE || FrameCap::new(n) == FrameCap::ID || FrameCap::new(n).cvar() != n {
+                    return Err(format!("--cap: {n} is not a cap the picture is held to (60..=240 but id's 72)"));
+                }
+                cap = Some(FrameCap::new(n));
+                i += 1;
+            }
             "--budget" => budget = true,
             "--lerpmove" => lerpmove = true,
             "--strip" => {
@@ -2101,6 +2241,15 @@ pub fn cmd_framerate(pak_path: &str, rest: &[String]) -> Result<String, String> 
                 i += 1;
             }
             "--bake" => bake = true,
+            "--serial" => {
+                serial = true;
+                OVERLAY.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            "--overlay" => {
+                let on = rest.get(i + 1).ok_or("--overlay needs 0 or 1")? != "0";
+                OVERLAY.store(on, std::sync::atomic::Ordering::Relaxed);
+                i += 1;
+            }
             "--paced" => PACED.store(true, std::sync::atomic::Ordering::Relaxed),
             "--torchflicker" => {
                 let v = rest.get(i + 1).ok_or("--torchflicker needs a strength")?;
@@ -2165,6 +2314,14 @@ pub fn cmd_framerate(pak_path: &str, rest: &[String]) -> Result<String, String> 
         }
         return Ok(persp_report(&pak, &style_rates, &views, size, &spans, threads, reps, secs));
     }
+    if serial {
+        style_rates.retain(|r| matches!(r, Rate::Hz(_)));
+        if views.is_empty() {
+            views = BAKE_VIEWS.iter().map(|v| StyleView::parse(v)).collect::<Result<_, _>>()?;
+        }
+        let size = super::parse_res(res.split(',').next().unwrap_or("1920x1080"), render::VideoCvars::MODERN)?;
+        return Ok(serial_report(&pak, &style_rates, &views, size, &thread_list, reps, secs));
+    }
     if bake {
         style_rates.retain(|r| matches!(r, Rate::Hz(_)));
         if views.is_empty() {
@@ -2204,6 +2361,11 @@ pub fn cmd_framerate(pak_path: &str, rest: &[String]) -> Result<String, String> 
         return lerpmove_report(&pak, &rates, strip.as_deref());
     }
 
+    if let Some(cap) = cap {
+        let rates = given_rates.unwrap_or_else(|| [60, 72, 90, 105, 110, 120, 144, 240].map(Rate::Hz).to_vec());
+        return capped_twin(&pak, cap, &rates, only.as_deref(), markdown, check);
+    }
+
     let mut o = String::new();
     let mut failures = Vec::new();
     for sc in SCENARIOS {
@@ -2236,7 +2398,7 @@ pub fn cmd_framerate(pak_path: &str, rest: &[String]) -> Result<String, String> 
                 }
             }
         }
-        report(&mut o, sc, &rates, &rows, markdown);
+        report(&mut o, sc, &rates, &rows, markdown, "id's → uncapped");
     }
     if check {
         if failures.is_empty() {
@@ -2248,9 +2410,68 @@ pub fn cmd_framerate(pak_path: &str, rest: &[String]) -> Result<String, String> 
     Ok(o)
 }
 
-fn report(o: &mut String, sc: &Scenario, rates: &[Rate], rows: &[Row], markdown: bool) {
+/// The capped twin (`--cap`): each scenario at 72 Hz with id's code (the
+/// reference), then at each rate uncapped and again with its picture held to
+/// `cap`, every frame still run. A capped value must be the uncapped one
+/// exactly — what a frame draws never moves the game — and, with `check`,
+/// within the scenario's tolerance of the reference.
+fn capped_twin(pak: &Pak, cap: FrameCap, rates: &[Rate], only: Option<&[String]>, markdown: bool, check: bool) -> Result<String, String> {
+    let mut o = format!("the capped twin: host_maxfps {}, the picture held to it, the game a frame every refresh\n", cap.cvar());
+    let mut failures = Vec::new();
+    for sc in SCENARIOS {
+        if only.is_some_and(|names| !names.iter().any(|n| n == sc.name)) {
+            continue;
+        }
+        let run = |rate, stepping, picture: FrameCap| {
+            PICTURE_CAP.store(picture.cvar(), std::sync::atomic::Ordering::Relaxed);
+            let values = (sc.run)(&Ctx { pak, rate, stepping });
+            PICTURE_CAP.store(0, std::sync::atomic::Ordering::Relaxed);
+            values
+        };
+        let reference = run(Rate::Hz(72), Stepping::Classic, FrameCap::NONE);
+        let mut rows: Vec<Row> = reference
+            .iter()
+            .map(|r| Row { name: r.name, unit: r.unit, tolerance: r.tolerance, reference: r.value, cells: Vec::new() })
+            .collect();
+        for &rate in rates {
+            let uncapped = run(rate, Stepping::Uncapped, FrameCap::NONE);
+            let capped = run(rate, Stepping::Uncapped, cap);
+            for (row, (a, b)) in rows.iter_mut().zip(uncapped.iter().zip(&capped)) {
+                row.cells.push((a.value, b.value));
+                let same = a.value == b.value || (a.value.is_nan() && b.value.is_nan());
+                if !same {
+                    failures.push(format!("{} / {} at {}: capped {} vs uncapped {}", sc.name, row.name, rate.label(), fmt(b.value), fmt(a.value)));
+                }
+                let within = (b.value - row.reference).abs() <= row.tolerance + 1e-9;
+                if check && !row.tolerance.is_nan() && !within {
+                    failures.push(format!(
+                        "{} / {} at {} capped: {} vs {} at 72 (tolerance ±{})",
+                        sc.name,
+                        row.name,
+                        rate.label(),
+                        fmt(b.value),
+                        fmt(row.reference),
+                        fmt(row.tolerance)
+                    ));
+                }
+            }
+        }
+        report(&mut o, sc, rates, &rows, markdown, "uncapped → capped");
+    }
+    if !failures.is_empty() {
+        return Err(format!("{o}check failed:\n  {}", failures.join("\n  ")));
+    }
+    if check {
+        let _ = writeln!(o, "check: every capped value is the uncapped one at its rate, within its tolerance of 72 Hz");
+    }
+    Ok(o)
+}
+
+/// One scenario's table: each rate's pair of values (`pair` names them) against
+/// the 72 Hz reference.
+fn report(o: &mut String, sc: &Scenario, rates: &[Rate], rows: &[Row], markdown: bool, pair: &str) {
     if markdown {
-        let _ = writeln!(o, "**{}** — {}\n", sc.name, sc.what);
+        let _ = writeln!(o, "**{}** — {} ({pair})\n", sc.name, sc.what);
         let head: Vec<String> = rates.iter().map(|r| r.label()).collect();
         let _ = writeln!(o, "| quantity | 72 (id) | {} | tolerance |", head.join(" | "));
         let _ = writeln!(o, "|---|---|{}---|", "---|".repeat(rates.len()));
@@ -2269,7 +2490,7 @@ fn report(o: &mut String, sc: &Scenario, rates: &[Rate], rows: &[Row], markdown:
     } else {
         let _ = writeln!(o, "{} — {}", sc.name, sc.what);
         let head: String = rates.iter().map(|r| format!(" {:>17}", r.label())).collect();
-        let _ = writeln!(o, "  {:<34} {:>9}{head}", "quantity (id's → uncapped)", "72 (id)");
+        let _ = writeln!(o, "  {:<34} {:>9}{head}", format!("quantity ({pair})"), "72 (id)");
         for r in rows {
             let name = if r.unit.is_empty() { r.name.to_string() } else { format!("{} ({})", r.name, r.unit) };
             let cells: String = r.cells.iter().map(|&(a, b)| format!(" {:>17}", format!("{} → {}", fmt(a), fmt(b)))).collect();

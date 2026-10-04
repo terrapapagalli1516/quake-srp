@@ -5,20 +5,26 @@
 **Play it:** `DEMO-URL` (id's shareware episode, in the browser)
 
 **Browsers:** tested in Chromium and Firefox (headless and headed) and on an Android phone; not
-yet in Safari. Firefox has no Keyboard Lock, so there one Esc in fullscreen also leaves it.
+yet in Safari. Firefox has no Keyboard Lock, so there one Esc in fullscreen also leaves it. The
+threads build needs the browser to give it its memory and its worker threads: if it will not,
+the page says so and the game does not start (the single-threaded build is a deploy you choose,
+not a fallback).
 
-| Classic | 2026 (the default) |
+| Classic | slop (the default) |
 |:---:|:---:|
-| ![E1M1 in the Classic profile](screenshots/classic-e1m1.png) | ![E1M1 in the 2026 profile](screenshots/2026-e1m1.png) |
+| ![E1M1 in the Classic preset](screenshots/classic-e1m1.png) | ![E1M1 in the slop preset](screenshots/2026-e1m1.png) |
 | 320x200 in a 4:3 frame, id's status bar, id's 72 fps cap | the window's shape and size in whole pixels (here 960x540 shown at 2x), no frame-rate cap |
 
-Both are stills from `quaketool shot`, so the 2026 crosshair isn't drawn.
+Both are stills from `quaketool shot`, so the slop crosshair isn't drawn. The slop one is
+`quaketool shot quake-data/ID1/PAK0.PAK maps/e1m1.bsp out.ppm --res 960x540 --zoom 2 --video modern --scaled2d 1 --sbaroverlay 1`,
+which draws the preset's values: Screen size 110 (no inventory bar) and perspective every 8 pixels.
 
 id Software's *Quake* (1996), ported to Rust from the WinQuake C source, with only the
 standard library and no `unsafe` code. With every extra switched off it is id's game,
-checked against id's own C: 100.00% of the pixels in id's standard 3-D views, the sound
-mixer sample for sample, and demo playback frame for frame over 17,500 frames. Every check
-is one command. By default it is the same software renderer given a 2026 machine. It plays
+checked against id's own C: every pixel but two in id's standard 3-D views, the sound
+mixer sample for sample, and in demo playback the camera, every entity and every dynamic
+light, frame by frame over 17,500 frames. What is known to differ still is a list
+([AUDIT.md](AUDIT.md), "Open"). Every check is one command. By default it is the same software renderer given a 2026 machine. It plays
 in a browser; natively, `quaketool` runs the same engine without a window.
 
 **How it was built.** Claude, Anthropic's model, wrote the code and the docs in Claude
@@ -46,11 +52,12 @@ dependencies, no `unsafe`, and Classic is id's game, proven for anything touched
   - the status bar, menus and console, apart from a few explained differences (the version
     string, the video-mode list, the port's own Options rows);
   - the mixer's output, sample for sample, on 28 scripted cases;
-  - demo playback, frame by frame.
+  - demo playback, frame by frame: the camera, the entities and the dynamic lights (the
+    game's state; a demo frame's pixels are compared on a sample of frames).
 
   One command re-runs all of it; see [Proof](#proof).
-- **A 2026 profile.** It shows what software-rendered Quake looks like when the hardware is
-  no longer the limit:
+- **The slop options, and their preset.** They show what software-rendered Quake looks like
+  when the hardware is no longer the limit:
   - native resolution in whole pixels, at any window shape, with a wider field of view;
   - no frame-rate cap: a new frame on every display refresh;
   - still 8-bit, with id's palette, colormaps and lighting, and textures are never
@@ -111,7 +118,7 @@ with the page, the program and the shareware pak (with id's licence beside it), 
 `_headers` file that Cloudflare Pages and Netlify read for the two headers and the
 caching. Upload `DIR` as it is.
 
-You play with WASD and the mouse (click the game to capture the mouse), in either profile:
+You play with WASD and the mouse (click the game to capture the mouse), in either preset:
 
 | key or input | does |
 |---|---|
@@ -124,7 +131,8 @@ You play with WASD and the mouse (click the game to capture the mouse), in eithe
 | Alt+Enter | fullscreen (and the bar's button, or the browser's F11); in fullscreen Esc is the menu, hold Esc to leave |
 | F6 / F9 | quicksave / quickload (id's F-keys: F1 help, F2/F3 save/load, F4 options, F10 quit) |
 
-A gamepad or a touch screen also works. The mouse wheel switches weapons in 2026 only (id's
+A gamepad or a touch screen also works (a phone plays sideways only: held upright, a "turn your
+phone sideways" screen covers the page and the game waits behind it). The mouse wheel switches weapons in slop only (id's
 `default.cfg` leaves it unbound). The page's **keys** button lists them all. For id's own
 1996 controls (the arrows, no mouse look, no gamepad, Always Run off) type `idcontrols` in
 the console.
@@ -137,35 +145,47 @@ console goes past the slider's end), or set the mouse to poll at 125 Hz, which a
 the fine aim. The numbers are in [web/PLATFORM.md](web/PLATFORM.md#input), "The mouse
 against the trackpad".
 
-## Classic and 2026
+## The slop options and the Classic preset
 
-Every difference from id's game is a named setting. Classic turns the engine ones off; 2026,
-the default, turns most of them on. The controls are not part of the choice: both profiles
-play with the same ones, and a switch leaves them as they are.
+Every difference from id's game is a named setting, one of the port's "slop options" (its
+name: quake-srp, the slop rust port). Two fixed presets set them: **slop**, the default,
+turns most of them on; **Classic** turns them off. The controls are the same in both.
 
-| | Classic | 2026 |
+| | Classic | slop |
 |---|---|---|
-| frame rate | id's 72 fps cap | a frame every display refresh; jumps, lifts, flashes and trails are stepped to match 72 Hz ([FRAMERATE.md](FRAMERATE.md)) |
-| picture | a fixed mode (960x600 by default) in a 4:3 frame, id's 90° field of view | the window's own size and shape in whole pixels (pixel size Auto or 1–4), a wider view on wide screens |
-| status bar, menus, console | 1:1, as id drew them | scaled up by a whole number |
+| frame rate | id's 72 fps cap | a frame every display refresh (Frame rate cap: none, or 60 to 240 frames drawn a second, the game still every refresh); jumps, lifts, flashes and trails are stepped to match 72 Hz, within the tolerances [FRAMERATE.md](FRAMERATE.md) states |
+| picture | a fixed mode (960x600 by default) in a 4:3 frame, id's 90° field of view | the window's own size and shape in whole pixels (1x, 2x on a touch screen; Video Options lists 1x to 4x with the size each gives), a wider view on wide screens |
+| status bar, menus, console | 1:1, as id drew them; Screen size 100: the status bar with the inventory bar above it | scaled up by a whole number; Screen size starts one step larger, 110: the status bar without the inventory bar, so the HUD takes less of the screen |
 | monsters | move in id's 0.1 s steps, and change pose ten times a second | glide between the steps, and blend between poses (the gun too) |
 | lights | the flickering ones snap ten times a second; most torches and flames steady, as the map baked them | the flickering ones glide; the steady torches and flames flicker gently about their light (`r_torchflicker`, a strength) |
-| controls | WASD, mouse look, Always Run, a twin-stick gamepad with rumble (the same in both; `idcontrols` is id's `default.cfg`) | the same, plus the mouse wheel for weapons, a crosshair and touch controls |
+| controls | WASD, mouse look, Always Run, a twin-stick gamepad with rumble, touch controls (the same in both; `idcontrols` is id's `default.cfg`) | the same, plus the mouse wheel for weapons and a crosshair |
 | sound | id's mixer at 11025 Hz | id's mixer at the device's rate, with four of id's bugs fixed |
-| perspective | id's spans: exact every 16 pixels, affine in between | exact at every pixel of walls and liquids (or every 64, 32, 8 or 4: Perspective span, `r_perspspan`; 32 on a phone and 64 at 1080p are about what 1996 looked like) |
+| perspective | id's spans: exact every 16 pixels, affine in between | exact every 8 pixels along walls and liquids, id's own portable-C loop (Perspective span, `r_perspspan`: 64, 32, 16, 8, 4 or exact at every pixel; 32 on a phone and 64 at 1080p are about what 1996 looked like) |
 
-In both profiles the renderer splits each frame across all CPU cores, and the picture is the
-same on any number of them.
+The numbers the machine decides are picked once, at start, and shown as numbers, never
+"auto": on a touch screen the game starts at 2x on four threads; elsewhere at 1x on every
+thread. Neither caps the frame rate. A frame never gets bigger than the
+browser build's memory holds: past it, the next pixel size (5K and 8K screens draw at 2x).
+In both presets the renderer splits each frame across the CPU cores (`r_threads`), and the
+picture is the same on any number of them.
 
-To switch, use **Options > Classic / 2026** (left and right), the address (`?classic` or
-`?2026`), or the console (`profile classic`). Enter on that row opens the settings, one
-page each for **Picture and sound**, **Motion and light** (the torches' flicker is there)
-and **Controls**, where every setting can be changed alone. The choice is saved in
-`config.cfg`, in the browser's storage, and that file keeps only what you changed.
-[AUDIT.md](AUDIT.md) ("The profiles and the departures") lists every setting and why it
-exists.
+**Options** (id's screen; the port's three rows last, after Video Options, where id's
+"Reset to defaults" row is gone): **Slop Options** opens the settings, one page each for
+**Picture and sound**, **Motion and light** (the torches' flicker is there) and **Controls**,
+where every setting can be changed alone; the picture's size is chosen in Video Options.
+**Reset to Classic** and **Reset to slop** set everything to that preset — keys, Options
+(Screen size, Brightness, the volumes, the mouse), the video mode, every setting — after
+asking; your saved games stay. The menus do not say where your settings stand or mark what
+differs from a preset; the console's `preset` does, by name. The console's `preset slop` or
+`preset classic` is the gentler switch: it sets the port's settings to the preset's and
+keeps your keys and Options; the address's `?classic` or `?slop` does the same at a load,
+when your settings were last set to the other one, so a bookmarked `?classic` keeps what you
+change on top of it. `config.cfg`, in the browser's storage, keeps the preset and only what
+you changed from it.
+[AUDIT.md](AUDIT.md) ("The slop options and the presets") lists every setting and why it
+exists. The oracle compares Classic with id's 1996 keys too (`idcontrols`).
 
-In either profile the page can be installed as an app, and it works offline. It also
+In either preset the page can be installed as an app, and it works offline. It also
 plays the registered game and the mission packs from your own copies
 ([PLATFORM.md](web/PLATFORM.md), "Your files").
 
@@ -211,7 +231,7 @@ input, touch and offline play in detail.
 uv run oracle/classic_check.py      # about a minute once built; prints ALL PASS
 ```
 
-This runs the Classic profile through nine checks. Four compare the port with values
+This runs the Classic preset through nine checks. Four compare the port with values
 recorded from a tree known to be right. Five run id's C next to the port:
 
 | check | compares | against |
@@ -237,10 +257,11 @@ Beyond Classic:
   both browser builds, on every push (`.github/workflows/check.yml`; `ci/local.sh` runs
   the same commands on a checkout).
 - `quake-rs/target/release/quaketool framerate quake-data/ID1/PAK0.PAK --check` runs 22
-  gameplay scenarios at high frame rates and compares them with id's 72 Hz.
-- 18 headless-browser checks (`web/verify_*.py`) cover everything from walking and the
-  menus to the gamepad, touch, quitting, sound through late frames, and reading back the
-  canvas. All 18 pass in Chromium and in Firefox (`QUAKE_BROWSER=firefox`; Firefox's touch
+  gameplay scenarios at high frame rates and compares them with id's 72 Hz, each within a
+  stated tolerance ([FRAMERATE.md](FRAMERATE.md)).
+- 20 headless-browser checks (`web/verify_*.py`) cover everything from walking and the
+  menus to the gamepad, touch, quitting, sound through late frames, how a refresh waits
+  for its frame, and reading back the canvas. All 20 pass in Chromium and in Firefox (`QUAKE_BROWSER=firefox`; Firefox's touch
   check runs on taps, and the Keyboard Lock checks are skipped there: `web/PLATFORM.md`,
   "Build, serve, deploy").
 
@@ -251,8 +272,9 @@ not the last digit.
 
 - **Classic, against id's own C:** on one core, `timedemo demo1` runs 1.35–1.44x as fast as
   id's portable C built from the same source, from 320x200 to 960x600
-  ([PERF_PLAN.md](PERF_PLAN.md)).
-- **2026 video, natively** (`timedemo demo1`, frames per second):
+  ([PERF_PLAN.md](PERF_PLAN.md)). That is id's C without id's x86 assembly, which the 1996
+  game used for its inner loops and which is not compared here.
+- **slop video, natively** (`timedemo demo1`, frames per second):
 
   | threads | 1920x1080 | 2560x1440 | 3840x2160 |
   |---:|---:|---:|---:|

@@ -4,6 +4,7 @@
 //! keys the automation calls press, each through keys.c's `Key_Event`
 //! ([`crate::input::key_event`]).
 
+use quake_rs::client::host::FrameCap;
 use quake_rs::keys::{
     K_BACKSPACE, K_DOWNARROW, K_ENTER, K_ESCAPE, K_LEFTARROW, K_RIGHTARROW, K_UPARROW,
 };
@@ -41,7 +42,7 @@ pub(crate) fn apply_menu_action(a: &mut App, action: MenuAction) -> Option<MenuD
             // Enter on a Video Options row: a fixed mode (VID_MenuKey
             // K_ENTER -> VID_SetMode) set `_vid_resolution` and native
             // resolution off — the framebuffer takes the new (clamped) size
-            // at once. One of the port's own native-resolution rows (2026)
+            // at once. One of the port's own native-resolution rows (slop)
             // turned native back on instead, with no stored mode to
             // reallocate to: recompute the picture from the window and pixel
             // size, same as any other frame (`apply_settings`). Either way
@@ -61,11 +62,13 @@ pub(crate) fn apply_menu_action(a: &mut App, action: MenuAction) -> Option<MenuD
                 a.toggle_console();
             }
         }
-        MenuAction::ResetDefaults => {
-            // Options "Reset to defaults": select() ran the profile's
-            // default.cfg on the settings (read live each frame); the video
-            // mode is not a default.cfg cvar and stays.
-            crate::vid::sync_menu_resolution(a);
+        MenuAction::Reset => {
+            // Options' "Reset to slop" or "Reset to Classic", answered yes:
+            // the menu reset the settings (read live each frame); the
+            // picture follows them now, and Video Options with it. Nothing
+            // is deleted: the saves and the player's own files stay, and the
+            // next frame writes config.cfg for the settings as they are.
+            crate::vid::apply_settings(a);
         }
         MenuAction::Resume => {
             // M_Main_Key K_ESCAPE: the demo loop back (`cls.demonum =
@@ -263,8 +266,8 @@ pub(crate) fn menu_point(x: f32, y: f32) -> i32 {
 /// record carries it, and the browser checks read it (the screen transitions:
 /// Multiplayer opens, Save gates, Video applies). 0 Main, 1 SinglePlayer,
 /// 2 Load, 3 Save, 4 Multiplayer, 5 Options, 6 Keys, 7 Video, 8 Help, 9 Quit,
-/// 10 the port's settings hub (Options > Classic / 2026), 11 Multiplayer >
-/// Setup, then the hub's pages: 12 Picture and sound, 13 Motion and light,
+/// 10 the port's Slop Options (Options' 14th row), 11 Multiplayer > Setup,
+/// then Slop Options' pages: 12 Picture and sound, 13 Motion and light,
 /// 14 Controls.
 pub(crate) fn menu_screen_id() -> i32 {
     APP.with(|c| {
@@ -281,11 +284,11 @@ pub(crate) fn menu_screen_id() -> i32 {
                 render::MenuScreen::Video => 7,
                 render::MenuScreen::Help => 8,
                 render::MenuScreen::Quit => 9,
-                render::MenuScreen::Extras => 10,
+                render::MenuScreen::SlopOptions => 10,
                 render::MenuScreen::Setup => 11,
-                render::MenuScreen::ExtrasPage(render::ExtrasPage::Picture) => 12,
-                render::MenuScreen::ExtrasPage(render::ExtrasPage::Motion) => 13,
-                render::MenuScreen::ExtrasPage(render::ExtrasPage::Controls) => 14,
+                render::MenuScreen::SlopPage(render::SlopPage::Picture) => 12,
+                render::MenuScreen::SlopPage(render::SlopPage::Motion) => 13,
+                render::MenuScreen::SlopPage(render::SlopPage::Controls) => 14,
             })
             .unwrap_or(0)
     })
@@ -293,7 +296,7 @@ pub(crate) fn menu_screen_id() -> i32 {
 
 /// The highlighted row on the showing screen ([`quake_rs::menu::Menu::cursor`]):
 /// the browser checks' way to see what Video Options (or any list) actually
-/// marks current without having to read conchars pixels — e.g. in 2026, the
+/// marks current without having to read conchars pixels — e.g. in slop, the
 /// native-resolution rows follow `RESOLUTION_PRESETS`, so a native row's
 /// index is `RESOLUTION_PRESETS.len() + pixel_size.min(4)`.
 pub(crate) fn menu_cursor() -> i32 {
@@ -303,24 +306,26 @@ pub(crate) fn menu_cursor() -> i32 {
 // --- the four first departures as bits (the checks' shorthand) --------------
 
 /// The four settings that were the port's first "Web extras", as the bits
-/// the browser checks and the benchmark read and set them by: 1
-/// `wasm_uncapped`, 2 `wasm_showfps`, 4 `wasm_exactpersp` (set while
-/// `r_perspspan` is 1, exact; [`set_extras`] says what setting it does), 8
-/// `wasm_scaled2d`.
+/// the browser checks and the benchmark read and set them by: 1 no frame
+/// cap (`host_maxfps 0`, the retired `wasm_uncapped`), 2 `wasm_showfps`, 4
+/// `wasm_exactpersp` (set while `r_perspspan` is 1, exact), 8
+/// `wasm_scaled2d`. [`set_extras`] says what each sets.
 pub(crate) fn extras() -> i32 {
     APP.with(|c| {
         c.borrow().as_ref().map_or(0, |a| {
             let s = &a.settings.cvars;
             let exact = s.persp_span == quake_rs::render::PerspSpan::Exact;
-            i32::from(s.uncapped) | i32::from(s.show_fps) << 1 | i32::from(exact) << 2 | i32::from(s.scaled_2d) << 3
+            let uncapped = s.max_fps == FrameCap::NONE;
+            i32::from(uncapped) | i32::from(s.show_fps) << 1 | i32::from(exact) << 2 | i32::from(s.scaled_2d) << 3
         })
     })
 }
 
 /// Set the four settings from [`extras`]' bits; other bits are ignored. Bit
-/// 4 set is `r_perspspan 1`; clear, it leaves a span of 64, 32, 16, 8 or 4
-/// as it is and turns exact into id's 16 — so `set_extras(extras())` changes
-/// nothing, whatever the span.
+/// 1 set is `host_maxfps 0`; clear, it leaves a cap of 60 to 240 as it is
+/// and turns none into id's 72. Bit 4 set is `r_perspspan 1`; clear, it
+/// leaves a span of 64, 32, 16, 8 or 4 as it is and turns exact into id's
+/// 16. So `set_extras(extras())` changes nothing, whatever the cap and span.
 pub(crate) fn set_extras(bits: i32) {
     ensure_app(|a| {
         let s = &mut a.settings.cvars;
@@ -332,7 +337,14 @@ pub(crate) fn set_extras(bits: i32) {
         } else {
             s.persp_span
         };
-        (s.uncapped, s.show_fps, s.persp_span, s.scaled_2d) = (bits & 1 != 0, bits & 2 != 0, span, bits & 8 != 0);
+        let cap = if bits & 1 != 0 {
+            FrameCap::NONE
+        } else if s.max_fps == FrameCap::NONE {
+            FrameCap::ID
+        } else {
+            s.max_fps
+        };
+        (s.max_fps, s.show_fps, s.persp_span, s.scaled_2d) = (cap, bits & 2 != 0, span, bits & 8 != 0);
     });
 }
 
@@ -367,7 +379,7 @@ mod tests {
         let (confirm, map) = APP.with(|c| {
             let b = c.borrow();
             let a = b.as_ref().unwrap();
-            (a.menu.new_game_confirm(), a.walk.as_ref().unwrap().map_name.clone())
+            (a.menu.asking().is_some(), a.walk.as_ref().unwrap().map_name.clone())
         });
         assert!(confirm, "the modal is up");
         assert_eq!(map, "maps/e1m1.bsp", "no new game yet");
@@ -394,12 +406,12 @@ mod tests {
         assert_eq!(menu_tap(160.0 + 100.0, 32.0 + 2.5 * 20.0), 1, "Main's item 2");
         assert_eq!(menu_screen(), render::MenuScreen::Options);
         let run = || APP.with(|c| c.borrow().as_ref().unwrap().settings.cvars.always_run());
-        let (before, always_run_row) = (run(), 32.0 + 8.5 * 8.0);
+        let (before, always_run_row) = (run(), 32.0 + 7.5 * 8.0); // row 7
         assert_eq!(menu_tap(260.0, always_run_row), 1);
         assert_eq!(run(), before, "the first tap points");
         assert_eq!(menu_tap(260.0, always_run_row), 1);
         assert_ne!(run(), before, "the second flips it");
-        assert_eq!(menu_point(260.0, 32.0 + 3.5 * 8.0), 1, "a finger on Screen size");
+        assert_eq!(menu_point(260.0, 32.0 + 2.5 * 8.0), 1, "a finger on Screen size, row 2");
         assert_eq!(menu_tap(100.0, 190.0), 0, "under the list");
         menu_cancel();
         menu_cancel();
@@ -413,11 +425,11 @@ mod tests {
         assert_eq!(boot(), 1);
         set_resolution(320, 200); // preset 0
         // boot() opened the menu on Main. Navigate: Options (cursor 2) ->
-        // Video Options (row 12) -> down one mode -> Enter applies it.
+        // Video Options (row 11) -> down one mode -> Enter applies it.
         menu_down();
         menu_down();
         menu_select(); // -> Options
-        for _ in 0..12 {
+        for _ in 0..11 {
             menu_down(); // ROW_VIDEO
         }
         menu_select(); // -> Video mode list (cursor on the current preset, 0)
@@ -474,39 +486,47 @@ mod tests {
         assert!(player_field("health") > 0.0);
     }
 
+    /// Options' Reset to Classic, the row above the last (asks; y:
+    /// everything Classic's, the keys and id's Options too), then Slop
+    /// Options and a row of each page.
     #[test]
-    fn classic_2026_switches_the_profile_and_its_page_each_setting() {
-        use quake_rs::settings::{Profile, Settings};
+    fn reset_to_classic_resets_everything_and_slop_options_sets_each_row() {
+        use quake_rs::keys::BIND_JUMP;
+        use quake_rs::settings::{Machine, Preset, Settings};
         let settings = || APP.with(|c| c.borrow().as_ref().unwrap().settings.clone());
         assert_eq!(boot(), 1);
-        assert_eq!(settings(), Settings::new(Profile::Classic), "the tests start in Classic");
+        assert_eq!(settings(), Settings::new(Preset::Classic, Machine::default()), "the tests start in Classic");
+        use_slop();
+        crate::host_cmd::execute_console_command("bind j +jump; sensitivity 7; wasm_showfps 1");
         menu_down();
         menu_down();
         menu_select(); // -> Options
-        for _ in 0..13 {
-            menu_down(); // the port's row 13, Classic / 2026
-        }
-        menu_right();
-        assert_eq!(settings(), Settings::new(Profile::Modern), "right: every setting to 2026's");
-        menu_left();
-        assert_eq!(settings().profile, Profile::Classic, "left: back");
+        menu_up(); // row 0 wraps to the last, Reset to slop,
+        menu_up(); // and the one above it: Reset to Classic
         menu_select();
-        assert_eq!(menu_screen_id(), 10, "Enter opens the settings hub");
-        menu_down();
+        let asking = || APP.with(|c| c.borrow().as_ref().unwrap().menu.asking());
+        assert_eq!(asking(), Some(quake_rs::menu::Question::ResetClassic), "it asks");
+        menu_quit_no();
+        assert_eq!((asking(), settings().preset), (None, Preset::Slop), "n: nothing changed");
         menu_select();
-        assert_eq!(menu_screen_id(), 12, "...and its row Picture and sound, that page");
-        menu_right(); // Uncapped framerate
-        assert_eq!(extras(), 1);
-        menu_down();
-        menu_down();
-        menu_right(); // Pixel size: auto -> 1
-        assert_eq!(settings().cvars.pixel_size, 1);
+        menu_quit_yes(); // the y key, as the page's YES button presses it
+        assert_eq!(settings(), Settings::new(Preset::Classic, Machine::default()), "everything Classic's");
+        assert!(settings().binds.command(b'j') != Some(BIND_JUMP) && settings().cvars.sensitivity != 7.0, "his key and Mouse Speed too");
+        assert_eq!((menu_screen_id(), menu_cursor()), (5, 13), "Options, on its row");
+
+        menu_up(); // row 12, Slop Options
+        menu_select();
+        assert_eq!(menu_screen_id(), 10, "Enter opens Slop Options");
+        menu_select();
+        assert_eq!(menu_screen_id(), 12, "...and its first row Picture and sound, that page");
+        menu_right(); // Frame rate cap: id's 72 -> 120
+        assert_eq!(settings().cvars.max_fps, FrameCap::new(120));
         menu_cancel();
-        assert_eq!(menu_screen_id(), 10, "Esc returns to the hub");
+        assert_eq!(menu_screen_id(), 10, "Esc returns to Slop Options");
         menu_down();
         menu_select();
         assert_eq!(menu_screen_id(), 13, "Motion and light");
-        for _ in 0..4 {
+        for _ in 0..5 {
             menu_down(); // Torch flicker, a slider
         }
         menu_right();
@@ -520,6 +540,7 @@ mod tests {
         assert_eq!(menu_screen_id(), 5, "Esc Esc returns to Options");
         menu_select(); // ...on its row
         assert_eq!(menu_screen_id(), 10);
+        assert_eq!(settings().standing().changed, ["host_maxfps", "r_torchflicker"], "the console's preset says so");
         // The checks' shorthand for the first four; other bits are dropped.
         set_extras(-1);
         assert_eq!(extras(), 15);
@@ -541,11 +562,34 @@ mod tests {
         assert_eq!(extras(), 2);
     }
 
+    /// Options' Reset to slop: everything, keys and id's Options too, the
+    /// slop preset whole — and the saves stay: a reset deletes nothing.
+    #[test]
+    fn reset_to_slop_is_everything_and_keeps_a_save() {
+        use quake_rs::settings::{Machine, Preset, Settings};
+        let settings = || APP.with(|c| c.borrow().as_ref().unwrap().settings.clone());
+        assert_eq!(boot(), 1);
+        step(0.05); // the game runs: Save may open
+        do_save_command(Some("s3"));
+        let save = crate::common::read_file("s3.sav").expect("saved");
+        crate::host_cmd::execute_console_command("bind j +jump; sensitivity 7; viewsize 80; crosshair 2");
+        menu_down();
+        menu_down();
+        menu_select(); // -> Options
+        menu_up(); // row 0 wraps to the last, Reset to slop
+        menu_select();
+        assert_eq!(APP.with(|c| c.borrow().as_ref().unwrap().menu.asking()), Some(quake_rs::menu::Question::ResetSlop));
+        menu_quit_yes();
+        assert_eq!(settings(), Settings::new(Preset::Slop, Machine::default()), "everything the slop preset's");
+        assert_eq!(crate::common::read_file("s3.sav").ok(), Some(save), "the save is there, as it was");
+        assert_eq!(crate::config::current_text().unwrap(), "// generated by quake, do not modify\npreset \"slop\"\n");
+    }
+
     #[test]
     fn keys_screen_rebinds_forward_through_the_exports() {
         reset_queue();
         assert_eq!(boot(), 1);
-        use_2026(); // WASD, Always Run
+        use_slop(); // WASD, Always Run
         // Navigate: Options -> Customize controls (row 0).
         menu_down();
         menu_down();

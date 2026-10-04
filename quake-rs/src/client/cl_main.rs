@@ -23,17 +23,18 @@ use crate::tent::BeamModel;
 use super::cl_input::{
     clamp_pitch, KeyMove, CL_ANGLESPEEDKEY, CL_PITCHSPEED, CL_YAWSPEED, SPEED, V_CENTERSPEED,
 };
-use super::cl_tent::{rocket_trail_type, spawn_temp_entity};
+use super::cl_tent::{rocket_trail_type, spawn_temp_entity, TRAIL_ROCKET};
 use super::host::host_error;
 use super::host_cmd::{try_changelevel, try_restart, IT_INVISIBILITY};
 use super::lerpmodels::{self, LerpModels};
 use super::lerpmove::LerpMove;
+use super::nailbarrels::{self, GunPose, NailBarrels};
 use super::view::{
     cshift_add, fade_cshifts, parse_damage, stamp_item_gettime, stufftext_bonus_flash, BONUS_COLOR,
     BONUS_PERCENT, FACE_ANIM_TIME, V_KICKTIME,
 };
 use super::{
-    backtile_for, color_for_name, draw_world_below, lap, render_options, s_update, view_hook, warp_below, ClientFrame,
+    backtile_for, color_for_name, draw_view, lap, render_options, s_update, view_hook, warp_below, ClientFrame,
     Listener, Phase, SoundCall, Vid, Walk,
 };
 
@@ -94,16 +95,6 @@ fn parse_client_damage(w: &mut Walk, ent_origin: [f32; 3]) {
     w.v_dmg_pitch = pd.pitch;
     w.v_dmg_time = V_KICKTIME;
     w.faceanimtime = w.server.time() + FACE_ANIM_TIME;
-}
-
-/// The dynamic lights R_PushDlights marks this frame: every slot with a
-/// radius whose `die` has not passed (`die < cl.time || !radius` is skipped),
-/// at its current — not yet decayed — radius.
-pub fn pushed_dlights(
-    dlights: &crate::dlight::DynamicLights,
-    now: f32,
-) -> Vec<crate::dlight::DynamicLight> {
-    dlights.active().into_iter().filter(|dl| dl.die >= now).collect()
 }
 
 /// `cl.punchangle` as SV_WriteClientdataToMessage sends it: each component
@@ -252,6 +243,22 @@ fn disconnected_frame(vid: &Vid, sound: Vec<SoundCall>) -> ClientFrame {
 /// `Host_Error`: [`host_error`] ends the game, and this frame and every later
 /// one is the disconnected screen, until the host drops the walk.
 pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -> ClientFrame {
+    client_frame(w, host_frametime, menu_up, vid, true)
+}
+
+/// [`walk_frame`] without its picture: a host frame a frame-rate cap does not
+/// draw (`client::host::FrameCap`). Everything the frame does to the game and
+/// to what the view shows next runs as in a drawn one — the server's frame,
+/// the client's clocks, the effects, particles and lights, the palette's
+/// fades, the view's kick and stair smoothing, the frame blends, the sound —
+/// and only the pixels are skipped: the 3-D view, the status bar and the
+/// messages. Its image is empty.
+pub fn walk_frame_undrawn(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -> ClientFrame {
+    client_frame(w, host_frametime, menu_up, vid, false)
+}
+
+/// [`walk_frame`], its picture drawn or not (`draw`).
+fn client_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid, draw: bool) -> ClientFrame {
     if w.host_error.is_some() {
         return disconnected_frame(vid, Vec::new());
     }
@@ -570,17 +577,9 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
             }
             continue; // beams spawn no particles / sounds / dlights here
         }
-        // Explosions spawn a decaying dynamic light (CL_ParseTEnt): radius 350,
-        // die now+0.5, decay 300, minlight 0, key 0 -> a fresh slot each one.
-        {
-            use crate::server::te_consts::*;
-            // Only TE_EXPLOSION and TE_EXPLOSION2 flash a dynamic light in id's
-            // CL_ParseTEnt; TE_TAREXPLOSION (blob) does NOT.
-            if matches!(ev.te_type, TE_EXPLOSION | TE_EXPLOSION2) {
-                w.dlights.alloc(0, ev.pos, 350.0, now + 0.5, 300.0, 0.0, now);
-            }
-        }
-        if let Some(name) = spawn_temp_entity(&mut w.particles, ev, now, &mut w.prng) {
+        // The explosions' light (CL_ParseTEnt's CL_AllocDlight) is made with
+        // their particles, by the call a demo's playback makes as well.
+        if let Some(name) = spawn_temp_entity(&mut w.particles, &mut w.dlights, ev, f64::from(now), &mut w.prng) {
             // CL_ParseTEnt read the position with MSG_ReadCoord, so the sound
             // starts to the 1/8 unit (the particles above still start at the
             // unrounded position: an open item, in the particles' code).
@@ -617,30 +616,22 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
     let is_relinked =
         |e: i32| usize::try_from(e).ok().and_then(|e| relinked.get(e)).copied() == Some(true);
 
-    // 2d. Entity light effects (EF_MUZZLEFLASH / BRIGHTLIGHT / DIMLIGHT) from the
-    //     relinked edicts. The rand()&31 radius jitter is added here (entity_dlights
-    //     stays a pure query). Then decay + retire the whole pool for this frame.
+    // 2d. Entity light effects (EF_MUZZLEFLASH / BRIGHTLIGHT / DIMLIGHT) of the
+    //     relinked edicts, by the call a demo's entities make
+    //     (`DynamicLights::relink_effects`). The pool is decayed after the
+    //     frame is drawn.
     let smooth_frames = w.lerpmodels == LerpModels::Smooth;
-    for ed in w.server.entity_dlights() {
-        if !is_relinked(ed.key) {
+    for e in w.server.lit_entities() {
+        if !is_relinked(e.key) {
             continue;
         }
+        let flashed = w.dlights.relink_effects(e.key, e.origin, e.angles, e.effects, f64::from(now), &mut w.prng);
         // r_lerpmodels: the same relink keeps a flashing entity's animation
         // from blending across the flare (`FrameLerps::muzzle_flash`) — the
         // player's flash is the view weapon's.
-        if smooth_frames && ed.muzzleflash {
-            w.frame_lerps.muzzle_flash(if ed.key == w.player { lerpmodels::VIEWMODEL } else { ed.key });
+        if smooth_frames && flashed {
+            w.frame_lerps.muzzle_flash(if e.key == w.player { lerpmodels::VIEWMODEL } else { e.key });
         }
-        let jitter = w.prng.next_range(32) as f32;
-        w.dlights.alloc(
-            ed.key,
-            ed.origin,
-            ed.radius_base + jitter,
-            now + ed.life,
-            0.0,
-            ed.minlight,
-            now,
-        );
     }
     // 3. Make sure every live entity's model is cached (runtime-spawned
     //    entities — gibs, projectiles — can appear after boot), and every
@@ -709,6 +700,11 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
             .retain(|&e, _| !vm.is_free_edict(e));
     }
     let smooth = w.lerpmove == LerpMove::Smooth;
+    // r_nailbarrels (a slop option): the player's own nails, as (index in
+    // `descs`, edict), drawn leaving the nailgun's barrels once the camera
+    // and the gun are placed (below).
+    let barrel_nails = w.nailbarrels == NailBarrels::Barrels;
+    let mut player_nails: Vec<(usize, i32)> = Vec::new();
     for e in 0..n {
         let ent = e as i32;
         if ent == w.player || w.server.vm.is_free_edict(ent) {
@@ -777,7 +773,7 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
         // The model header flags (rocket/grenade/gib/tracer trails + EF_ROTATE).
         let cached_mdl = w.model_cache.get(&m).and_then(|o| o.as_ref());
         let mflags = cached_mdl.map(|md| md.header.flags).unwrap_or(0);
-        // r_lerpmodels (the 2026 extra): a group frame (a torch's flicker) is
+        // r_lerpmodels (the slop extra): a group frame (a torch's flicker) is
         // not a motion between two poses — [`lerpmodels::FrameLerps::blend`]
         // snaps instead of blending across one.
         let frame_is_group = cached_mdl.is_some_and(|md| md.frame_is_group(frame as i32));
@@ -805,7 +801,7 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
             trail_spawns.push((ent, origin, ttype));
         }
         let model_index = w.server.vm.ent_float(ent, w.server.vm.fo().modelindex) as usize;
-        // r_lerpmove (the 2026 extra): a monster glides between its steps
+        // r_lerpmove (the slop extra): a monster glides between its steps
         // where it is drawn; its trail and everything else keep the server's
         // origin.
         let (origin, angles) = if smooth && w.server.vm.movetype(ent) == MoveType::Step {
@@ -814,13 +810,16 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
         } else {
             (origin, angles)
         };
-        // r_lerpmodels (the 2026 extra): blend this entity's animation
+        // r_lerpmodels (the slop extra): blend this entity's animation
         // toward `frame` from whatever frame it was at a moment ago.
         let blend = if smooth_frames {
             w.frame_lerps.blend(ent, model_index, frame, frame_is_group, origin, f64::from(w.clock))
         } else {
             None
         };
+        if barrel_nails && m == nailbarrels::NAIL && w.server.vm.ent_int(ent, w.server.vm.fo().owner) == w.player {
+            player_nails.push((descs.len(), ent));
+        }
         descs.push((m, origin, angles, frame, color, skin, blend));
     }
     if smooth {
@@ -842,8 +841,8 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
         if let Some(head) = w.trail_org.get_mut(&ent) {
             w.particles.spawn_trail(head, neworg, ttype, step, &mut w.tracercount, &mut w.prng);
         }
-        if ttype == 0 {
-            w.dlights.alloc(ent, neworg, 200.0, now + 0.01, 0.0, 0.0, now);
+        if ttype == TRAIL_ROCKET {
+            w.dlights.relink_rocket(ent, neworg, f64::from(now));
         }
     }
 
@@ -961,6 +960,34 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
             fov_deg: 90.0,
         }
     };
+    // R_DrawViewModel (r_main.c ~622) returns early — drawing NO gun — when the
+    // player is dead (STAT_HEALTH <= 0) or carrying the Ring of Shadows
+    // (IT_INVISIBILITY). Without this the gun hovers, frozen, on the rolled
+    // death-cam, and stays visible while invisible. The intermission camera also
+    // hides it (V_CalcIntermissionRefdef: `view->model = NULL`).
+    let hide_gun = intermission
+        || w.server.vm.ent_float(w.player, w.server.vm.fo().health) <= 0.0
+        || (w.server.vm.ent_float(w.player, w.server.vm.fo().items) as i32) & IT_INVISIBILITY != 0;
+    // r_nailbarrels (a slop option): each of the player's nails drawn
+    // leaving the barrel it fires from, while the nailgun is drawn where
+    // V_CalcRefdef puts it this frame (`client::nailbarrels`); the world
+    // stops the offset short of its surfaces.
+    if barrel_nails {
+        let gun = (!hide_gun && weapon_name == nailbarrels::NAILGUN).then(|| {
+            let angles = render::viewmodel_angles(&cam, client_punchangle(w), ang[2]);
+            let ofs = render::viewmodel_origin_ofs(angles, bob, w.viewsize);
+            GunPose::new(crate::math::add(cam.pos, ofs), angles)
+        });
+        let clip = |from, to| crate::world::trace_world(&w.bsp, from, to, [0.0; 3], [0.0; 3]).endpos;
+        for &(i, ent) in &player_nails {
+            let vm = &w.server.vm;
+            let (id, velocity) = (vm.ent_float(ent, vm.fo().nextthink), vm.ent_vec(ent, vm.fo().velocity));
+            descs[i].1 = w.nail_launches.draw(ent, id, descs[i].1, velocity, gun.as_ref(), clip);
+        }
+        w.nail_launches.end_frame();
+    } else {
+        w.nail_launches.clear();
+    }
     // R_MarkLeaves / R_StoreEfrags: the statics whose leaves the view's PVS
     // (from the leaf holding r_refdef.vieworg, not fattened) reaches join the
     // frame after the relinked entities, as they join cl_visedicts in the C.
@@ -1055,15 +1082,8 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
             _ => None,
         })
         .collect();
-    // Anchor the weapon viewmodel to the camera (drawn last, on top of the world).
-    // R_DrawViewModel (r_main.c ~622) returns early — drawing NO gun — when the
-    // player is dead (STAT_HEALTH <= 0) or carrying the Ring of Shadows
-    // (IT_INVISIBILITY). Without this the gun hovers, frozen, on the rolled
-    // death-cam, and stays visible while invisible. The intermission camera also
-    // hides it (V_CalcIntermissionRefdef: `view->model = NULL`).
-    let hide_gun = intermission
-        || w.server.vm.ent_float(w.player, w.server.vm.fo().health) <= 0.0
-        || (w.server.vm.ent_float(w.player, w.server.vm.fo().items) as i32) & IT_INVISIBILITY != 0;
+    // Anchor the weapon viewmodel to the camera (drawn last, on top of the
+    // world), unless `hide_gun` (above).
     let viewmodel = if hide_gun {
         None
     } else {
@@ -1118,7 +1138,7 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
     // walls: R_PushDlights skips `die < cl.time || !radius`. A light is drawn
     // at the radius it was allocated with; CL_DecayLights shrinks it after the
     // frame (below).
-    let active_dlights = pushed_dlights(&w.dlights, now);
+    let active_dlights = w.dlights.active(f64::from(now));
     // The animated light-style scales (torch flicker, pulsing lights) at the
     // current server clock, stepped as id's or gliding (`r_lerplightstyles`,
     // the video cvars'); the worldspawn populated the styles at spawn time.
@@ -1127,7 +1147,7 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
     // SCR_CalcRefdef / R_SetVrect: the viewsize picks the 3-D view rectangle
     // (the view sits ABOVE the status bar, projected about its own centre)
     // and how much status bar shows; an intermission is always full screen.
-    // With 2026's status bar overlay, also the rows under the view the world
+    // With slop's status bar overlay, also the rows under the view the world
     // goes on into, beside the bar (`refdef.below`).
     lap(Phase::Sim);
     let refdef = render::calc_refdef(render_w, render_h, w.viewsize, intermission, w.sbar_layout);
@@ -1158,25 +1178,32 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
     };
     // The screen: backtile around the view rectangle (SCR_UpdateScreen's
     // Draw_TileClear) and the view drawn straight into it, or, underwater,
-    // into the warp buffer for D_WarpScreen below. With 2026's status bar
+    // into the warp buffer for D_WarpScreen below. With slop's status bar
     // overlay the world goes on under the view, beside the bar (underwater,
     // in the view's buffer, to be wobbled with it). The status bar is drawn
     // over it later.
-    let backtile = backtile_for(&vrect, render_w, render_h, w.gfx_wad.as_ref());
-    let mut img = render::screen_with_backtile(vrect, render_w, render_h, backtile.as_ref());
+    // An undrawn frame (`walk_frame_undrawn`) stops here for the pixels: an
+    // empty image, and no 3-D view, warp, crosshair or 2-D layer below.
+    let mut img = if draw {
+        let backtile = backtile_for(&vrect, render_w, render_h, w.gfx_wad.as_ref());
+        render::screen_with_backtile(vrect, render_w, render_h, backtile.as_ref())
+    } else {
+        render::Image::new(0, 0, 0)
+    };
     let below = warp_below(&refdef, vid);
-    let warp_view = if dowarp {
+    let warp_view = if !draw {
+        None
+    } else if dowarp {
         Some(w.renderer.render_extended(&scene, below))
     } else {
-        w.renderer.render_into(&scene, &mut img);
-        draw_world_below(&mut w.renderer, &scene, &refdef, &mut img);
+        draw_view(&mut w.renderer, &scene, &refdef, &mut img);
         None
     };
     lap(Phase::Render3d);
     // Host_Frame runs CL_DecayLights after SCR_UpdateScreen: `radius -=
     // (cl.time - cl.oldtime)*decay` — 0 while paused, nothing fades or dies.
     if dt.is_finite() && dt > 0.0 && !paused {
-        w.dlights.advance(dt, now);
+        w.dlights.advance(dt, f64::from(now));
     }
 
     // 5b. Colour shifts (V_UpdatePalette, the software build's palette shift):
@@ -1195,13 +1222,15 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
     }
     // The 2-D oracle harness paints the view one flat colour (the C oracle's
     // `oracle_blank`), so a shot measures the 2-D layer alone (`set_view_hook`).
-    view_hook(&mut img, vrect);
+    if draw {
+        view_hook(&mut img, vrect);
+    }
     // V_RenderView: the crosshair over the view, before the 2-D layer — but
     // not over an intermission or finale, which id's GLQuake leaves it off
     // (gl_screen.c's SCR_UpdateScreen draws it only outside them): WinQuake
     // draws it there too, over the level's stats, with nothing to aim at.
-    // (`crosshair` is a 2026 setting; Classic draws none.)
-    if w.intermission == 0 {
+    // (`crosshair` is a slop setting; Classic draws none.)
+    if draw && w.intermission == 0 {
         render::draw_crosshair(&mut img, w.crosshair, w.conchars.as_ref(), &vrect);
     }
     // cl.cshifts order: CONTENTS (bottom) -> DAMAGE -> BONUS -> POWERUP (top).
@@ -1237,7 +1266,9 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
     //    for == 2, the center string alone for == 3 — and only while the game
     //    owns the screen (`key_dest == key_game`; with the menu/console up
     //    neither the bar nor the overlay paints, the view is full-screen).
-    if w.intermission != 0 {
+    if !draw {
+        // Undrawn: no status bar, overlay, plaque or messages.
+    } else if w.intermission != 0 {
         if !menu_up {
             match w.intermission {
                 1 => {
@@ -1323,7 +1354,7 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
 
     // SCR_DrawPause: the plaque while cl.paused, outside an intermission and
     // whatever key_dest is (the menu draws over it).
-    if cl_paused && w.intermission == 0 {
+    if draw && cl_paused && w.intermission == 0 {
         if let Some(pic) = w.pic_pause.as_ref() {
             render::draw_pause(&mut img, pic);
         }
@@ -1337,7 +1368,7 @@ pub fn walk_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid) -
     // Also suppressed during intermission: SCR_UpdateScreen's intermission
     // branches draw neither SCR_CheckDrawCenterString (the finale text above is
     // its own path) nor the console notify lines.
-    if !menu_up && w.intermission == 0 {
+    if draw && !menu_up && w.intermission == 0 {
         if let Some(cc) = w.conchars.as_ref() {
             if let Some((text, _)) = &w.centerprint {
                 render::draw_centerprint(&mut img, cc, text);

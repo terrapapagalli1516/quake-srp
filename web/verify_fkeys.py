@@ -136,7 +136,7 @@ with sync_playwright() as p:
         "unverified here whether a real windowed browser keeps it, as PLATFORM.md says it should)",
     )
 
-    pg.keyboard.press("Alt+Enter")  # 2026's fullscreen key (vid_altenter)
+    pg.keyboard.press("Alt+Enter")  # the fullscreen key (vid_altenter, on in both presets)
     try:
         pg.wait_for_function("!!document.fullscreenElement", timeout=12000)
         got_fullscreen = True

@@ -74,6 +74,14 @@ pub(super) fn c_ftoi(x: f64) -> i32 {
     }
 }
 
+/// The box `verts` lie in on the screen: their least and greatest columns,
+/// then rows (`None` of no vertex).
+pub(super) fn screen_box<'v>(verts: impl IntoIterator<Item = &'v FinalVert>) -> Option<[i64; 4]> {
+    let mut verts = verts.into_iter().map(|p| (i64::from(p.v[0]), i64::from(p.v[1])));
+    let (u, row) = verts.next()?;
+    Some(verts.fold([u, u, row, row], |[umin, umax, vmin, vmax], (u, row)| [umin.min(u), umax.max(u), vmin.min(row), vmax.max(row)]))
+}
+
 /// The framebuffer side of `D_PolysetDraw` (d_polyse.c): a band of the view
 /// and its z-buffer, and the rasteriser state the C keeps in globals.
 ///
@@ -394,11 +402,14 @@ impl<'b, 'a> PolyFramebuffer<'b, 'a> {
     /// points are midpoints of them). A triangle wholly outside is another
     /// band's.
     pub(super) fn touches(&self, v: &[FinalVert; 3]) -> bool {
-        let (mut umin, mut umax, mut vmin, mut vmax) = (i64::MAX, i64::MIN, i64::MAX, i64::MIN);
-        for p in v {
-            let (u, row) = (i64::from(p.v[0]), i64::from(p.v[1]));
-            (umin, umax, vmin, vmax) = (umin.min(u), umax.max(u), vmin.min(row), vmax.max(row));
-        }
+        screen_box(v).is_some_and(|corners| self.touches_box(&corners))
+    }
+
+    /// [`PolyFramebuffer::touches`] for anything whose vertices lie in the
+    /// box `corners` ([`screen_box`]): a whole model's — where this is
+    /// false, it is false for each of its triangles, and its points are
+    /// another band's.
+    pub(super) fn touches_box(&self, &[umin, umax, vmin, vmax]: &[i64; 4]) -> bool {
         let w = self.width as i64;
         let own = self.band.indices();
         vmin * w + umin < own.end as i64 && vmax * w + umax >= own.start as i64

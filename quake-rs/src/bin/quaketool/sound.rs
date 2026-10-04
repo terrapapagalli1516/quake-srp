@@ -8,7 +8,7 @@
 //!   frame every 1/F s (72 by default; Classic through `Host_FilterTime`'s
 //!   gate) and after each one mixes ahead of a device clock that plays
 //!   `rate` pairs a second, as `S_Update_` mixed ahead of the DMA position.
-//!   Classic is id's mixer at id's 11025 Hz; the default is the 2026 mixer
+//!   Classic is id's mixer at id's 11025 Hz; the default is the slop mixer
 //!   (every [`Fixes`]) at 48000 Hz.
 //! - `quaketool sndscript <pak> <script> <out.raw> --rate HZ [--fixes] [--trace FILE]`
 //!   runs one of the sound oracle's scripts (`oracle/sound.py`,
@@ -34,7 +34,7 @@ use quake_rs::pak::Pak;
 use quake_rs::qrand::QRand;
 use quake_rs::render;
 use quake_rs::server::{SoundEvent, StaticSound};
-use quake_rs::settings::{Profile, Settings};
+use quake_rs::settings::{Preset, Settings};
 use quake_rs::snd::{Fixes, Mixer, SoundMode};
 
 /// The device ring's size in sample pairs (the oracle's fake DMA buffer):
@@ -70,14 +70,14 @@ pub fn cmd_sound(pak_path: &str, demo: &str, out_path: &str, rest: &[String]) ->
         }
         i += 1;
     }
-    let mode = if classic { SoundMode::Classic } else { SoundMode::Modern };
+    let mode = if classic { SoundMode::Classic } else { SoundMode::Slop };
 
     let pak = open_pak(pak_path)?;
     let name = cl_demo::default_extension(demo, ".dem");
     let mut calls = Vec::new();
     let mut d = cl_demo::build_demo(pak.clone(), &name, &mut calls).ok_or_else(|| format!("{name}: couldn't open"))?;
     // `--rate` is the device's: Classic mixes at id's 11025 whatever it is
-    // unless asked for another, the 2026 mixer at the device's.
+    // unless asked for another, the slop mixer at the device's.
     let mut mixer = match rate {
         Some(r) if classic => {
             let mut m = Mixer::new(&pak, r.clamp(1000, 192_000), Fixes::NONE);
@@ -131,7 +131,7 @@ pub fn cmd_sound(pak_path: &str, demo: &str, out_path: &str, rest: &[String]) ->
     let _ = writeln!(
         o,
         "{name}: {frames} frames, {starts} S_StartSound; {} at {rate} Hz ({}), {:.2} s: peak {peak}, rms {rms:.0}, {clipped} samples clipped -> {out_path}",
-        if classic { "Classic" } else { "2026 mixer" },
+        if classic { "Classic" } else { "slop mixer" },
         if classic { "id's mixer" } else { "every fix" },
         pcm.len() as f64 / 2.0 / f64::from(rate),
     );
@@ -353,7 +353,7 @@ pub fn cmd_sndwalk(pak_path: &str, map: &str, script_path: &str, log_path: &str,
     let pak = open_pak(pak_path)?;
     let text = std::fs::read_to_string(script_path).map_err(|e| format!("cannot read {script_path}: {e}"))?;
     let segs = parse_walk(&text).map_err(|e| format!("{script_path}: {e}"))?;
-    let settings = Settings::id(Profile::Classic); // id's controls by name: the oracle pins against them explicitly
+    let settings = Settings::id(Preset::Classic); // id's controls by name: the oracle pins against them explicitly
     let rand = Rc::new(QRand::new());
     let map_file = format!("maps/{map}.bsp");
     let mut calls = Vec::new();

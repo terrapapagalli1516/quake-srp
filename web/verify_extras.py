@@ -1,33 +1,33 @@
 #!/usr/bin/env -S uv run --with playwright --script
-"""Verify Options > Classic / 2026, its settings hub and pages, the settings
-the page keeps across reloads, and Esc in fullscreen, end-to-end in headless
-Chromium. The page opens as `?classic` (every engine departure off):
+"""Verify Options > Slop Options, its pages, the settings the page keeps
+across reloads, and Esc in fullscreen, end-to-end in headless Chromium. The
+page opens as `?classic` (every slop option off):
 
-  1. Options' 14th row, "Classic / 2026" (the port's): left/right switch the
-     whole profile (the 2026 one turns wasm_uncapped and wasm_scaled2d on,
-     and r_perspspan to 1, exact),
-     Enter opens the settings hub (menu_screen_id 10), whose rows open the
-     pages (12 Picture and sound, 13 Motion and light, 14 Controls); their
-     rows switch each setting (Picture: Uncapped framerate row 0, the
-     Perspective span row 6 stepping 64, 32, id's 16, 8, 4, exact, Show FPS row 8;
-     Motion: Fluid sky row 2, Gliding
-     lights row 3, the Torch flicker slider row 4, five steps to 1;
+  1. Options' row 12, "Slop Options" (the port's; Reset to Classic and
+     Reset to slop under it): left and right change nothing, Enter opens it
+     (menu_screen_id 10), whose rows open the pages (12 Picture and sound,
+     13 Motion and light, 14 Controls); their rows switch each setting
+     (Picture: the Frame rate cap row 0 stepping id's 72, 120, 144, 240,
+     none, 60, the Perspective span row 4 stepping 64, 32, id's 16, 8, 4,
+     exact, Show FPS row 6; Motion: Nails from barrels row 2, Fluid sky row 3, Gliding
+     lights row 4, the Torch flicker slider row 5, five steps to 1;
      Controls: Wheel weapons row 1 binds and unbinds the wheel:
-     left/right/Enter), Esc returns from a page to the hub on its row and
-     from the hub to Options; the wasm_* console variables set the same
-     settings, with the console's history and Tab completion (and the retired
-     wasm_exactpersp still sets the span's two ends). Screenshots:
-     verify_extras_options.png, verify_extras.png (the hub),
+     left/right/Enter), Esc returns from a page
+     to Slop Options on its row and from there to Options; the console
+     variables set the same settings, with the console's history and Tab
+     completion (and the retired wasm_uncapped and wasm_exactpersp still set
+     the cap's and the span's two ends). Screenshots:
+     verify_extras_options.png, verify_extras.png (Slop Options),
      verify_extras_motion.png (the torch slider at 1), verify_extras_fps.png
      (the readout).
-  2. wasm_uncapped through the real program: a second of 1/144 s steps runs
-     72 host frames with the cap (id's), 144 without.
+  2. The cap through the real program: a second of 1/144 s steps runs 72
+     host frames with id's 72, 144 with none.
   3. On frozen frames: wasm_showfps changes only the box in the top-left
      corner, exact perspective redraws the walls, and switching either off
-     restores id's frame byte for byte (Classic). In 2026, where exact
-     perspective starts on, id's 16 redraws the walls and exact is the frame
-     again; 8 and 4 redraw them too, each nearer exact than the one before.
-  4. Persistence: config.cfg keeps the profile and what differs from it
+     restores id's frame byte for byte (Classic). In slop, where the span
+     starts at 8, exact, id's 16, 64, 32 and 4 redraw the walls, each nearer
+     exact the shorter its span, and `r_perspspan 8` is the default's frame.
+  4. Persistence: config.cfg keeps the preset and what differs from it
      (`wasm_showfps "1"`, `viewsize "80"`, ...), and a plain reload (no
      `?classic`) comes back Classic with them.
   5. The fullscreen key and Esc in fullscreen (PLATFORM.md, "Fullscreen").
@@ -62,8 +62,8 @@ WEB = isolated.webdir()
 PORT = isolated.port(8175)
 httpd = isolated.serve(WEB, PORT)
 
-OPTIONS, EXTRAS = 5, 10
-PICTURE, MOTION, CONTROLS = 12, 13, 14   # the hub's pages (menu_screen_id)
+OPTIONS, SLOP_OPTIONS, VIDEO = 5, 10, 7
+PICTURE, MOTION, CONTROLS = 12, 13, 14   # Slop Options' pages (menu_screen_id)
 
 passed, failed = 0, 0
 def check(name, ok, detail=""):
@@ -138,44 +138,50 @@ with sync_playwright() as p:
     ext = lambda: pg.evaluate("exp.extras()")
     key = lambda k, n=1: [pg.keyboard.press(k) or time.sleep(0.06) for _ in range(n)]
 
-    # 1. Options' 14th row switches the profile; Enter opens the page.
-    prof = lambda: pg.evaluate("quake.text('profile')")
-    check("?classic: the Classic profile, every setting off", prof() == "classic" and ext() == 0)
+    # 1. Options' 14th row opens Slop Options, and its pages each setting.
+    prof = lambda: pg.evaluate("quake.text('preset')")
+    check("?classic: the Classic preset, every setting off", prof() == "classic" and ext() == 0)
+    # The page starts slop and the address applies Classic: Screen size,
+    # never moved, goes with it to id's 100 (and the inventory bar with it).
+    check("?classic: Screen size is id's 100", pg.evaluate("exp.viewsize()") == 100)
     frames(pg)
-    check("config.cfg keeps the profile the address chose",
-          cfg_has(pg, 'profile "classic"'), str(pg.evaluate(CFG)))
-    key("Escape")                      # the menu over the attract demo
-    key("ArrowDown", 2); key("Enter")
-    check("Options opens", scr() == OPTIONS)
-    key("ArrowUp")                     # up from row 0 wraps to the last row...
-    time.sleep(0.3)
-    pg.locator("#c").screenshot(path=os.path.join(WEB, "verify_extras_options.png"))
-    key("ArrowRight")
-    # uncapped 1 + exact perspective 4 + scaled 2-D 8
-    check("...Classic / 2026: right switches to 2026", prof() == "2026" and ext() == 13, str(ext()))
-    key("ArrowLeft")
-    check("left: back to Classic", prof() == "classic" and ext() == 0)
+    check("config.cfg keeps the preset the address chose",
+          cfg_has(pg, 'preset "classic"'), str(pg.evaluate(CFG)))
     cur = lambda: pg.evaluate("exp.menu_cursor()")
     cvar = lambda name: pg.evaluate(f"quake.text('cvar', '{name}')")
     def bind_of(k):
         """The console's answer to `bind K`: '"K" = "..."', or "is not bound"."""
         pg.evaluate(f"quake.callLine('exec bind {k}')")
         return pg.evaluate("quake.text('console_text')").splitlines()[-1]
+    key("Escape")                      # the menu over the attract demo
+    key("ArrowDown", 2); key("Enter")
+    check("Options opens", scr() == OPTIONS)
+    key("ArrowUp", 3)                  # up from row 0 wraps to Reset to slop, then Reset to Classic, then Slop Options
+    check("...its row 12, Slop Options", cur() == 12)
+    time.sleep(0.3)
+    pg.locator("#c").screenshot(path=os.path.join(WEB, "verify_extras_options.png"))
+    key("ArrowRight"); key("ArrowLeft")
+    check("...left and right change nothing", prof() == "classic" and ext() == 0 and scr() == OPTIONS)
     key("Enter")
-    check("Enter opens the settings hub", scr() == EXTRAS and cur() == 0)
+    check("Enter opens Slop Options", scr() == SLOP_OPTIONS and cur() == 0)
     time.sleep(0.3)
     pg.locator("#c").screenshot(path=os.path.join(WEB, "verify_extras.png"))
-    key("ArrowDown"); key("Enter")
-    check("the hub's row 1 opens Picture and sound", scr() == PICTURE and cur() == 0, f"{scr()} {cur()}")
-    key("ArrowRight")                      # row 0: Uncapped framerate
-    check("Right toggles Uncapped framerate", ext() == 1)
-    key("ArrowDown", 8); key("Enter")      # row 8: Show FPS
-    check("Enter toggles Show FPS", ext() == 3)
+    key("Enter")
+    check("its row 0 opens Picture and sound", scr() == PICTURE and cur() == 0, f"{scr()} {cur()}")
+    caps = []
+    for _ in range(6):
+        key("ArrowRight"); caps.append(cvar("host_maxfps"))
+    check("Right steps the Frame rate cap: 120, 144, 240, none, 60, then id's 72 again",
+          caps == ["120", "144", "240", "0", "60", "72"], str(caps))
+    key("ArrowRight", 4)
+    check("...none is the extras' old bit 1", cvar("host_maxfps") == "0" and ext() == 1)
+    key("ArrowLeft", 4)
+    check("...and Left back to id's 72", cvar("host_maxfps") == "72" and ext() == 0)
+    key("ArrowDown", 6); key("Enter")      # row 6: Show FPS (no Resolution row: Video Options alone)
+    check("Enter toggles Show FPS", ext() == 2)
     key("ArrowLeft")
-    check("Left toggles it back", ext() == 1)
-    key("ArrowUp", 8); key("ArrowLeft")
-    check("all off again", ext() == 0)
-    key("ArrowDown", 6)                    # row 6: Perspective span, id's 16
+    check("Left toggles it back: all off again", ext() == 0)
+    key("ArrowUp", 2)                      # row 4: Perspective span, id's 16
     spans = []
     for _ in range(6):
         key("ArrowRight"); spans.append(cvar("r_perspspan"))
@@ -186,24 +192,26 @@ with sync_playwright() as p:
     key("ArrowLeft", 3)
     check("...and Left back through 4 and 8 to id's 16", cvar("r_perspspan") == "16" and ext() == 0)
     key("Escape")
-    check("Esc returns to the hub, on Picture and sound's row", scr() == EXTRAS and cur() == 1)
+    check("Esc returns to Slop Options, on Picture and sound's row", scr() == SLOP_OPTIONS and cur() == 0)
     key("ArrowDown"); key("Enter")
-    check("row 2 opens Motion and light", scr() == MOTION and cur() == 0)
-    key("ArrowDown", 2); key("Enter")      # row 2: Fluid sky
-    key("ArrowDown"); key("ArrowRight")    # row 3: Gliding lights
+    check("row 1 opens Motion and light", scr() == MOTION and cur() == 0)
+    key("ArrowDown", 2); key("Enter")      # row 2: Nails from barrels
+    check("Nails from barrels switches r_nailbarrels", cvar("r_nailbarrels") == "1", cvar("r_nailbarrels"))
+    key("ArrowDown"); key("Enter")         # row 3: Fluid sky
+    key("ArrowDown"); key("ArrowRight")    # row 4: Gliding lights
     check("Fluid sky and Gliding lights switch r_fluidsky and r_lerplightstyles",
           (cvar("r_fluidsky"), cvar("r_lerplightstyles")) == ("1", "1"))
-    key("ArrowDown"); key("ArrowRight", 5)  # row 4: Torch flicker, 0.2 a step
-    check("the Torch flicker slider: five steps right from Classic's 0 is 2026's 1",
+    key("ArrowDown"); key("ArrowRight", 5)  # row 5: Torch flicker, 0.2 a step
+    check("the Torch flicker slider: five steps right from Classic's 0 is slop's 1",
           cvar("r_torchflicker") == "1", cvar("r_torchflicker"))
     time.sleep(0.3)
     pg.locator("#c").screenshot(path=os.path.join(WEB, "verify_extras_motion.png"))
     key("ArrowLeft", 6)
-    key("ArrowUp"); key("ArrowLeft"); key("ArrowUp"); key("Enter")
-    check("...and all three back to Classic's",
-          (cvar("r_fluidsky"), cvar("r_lerplightstyles"), cvar("r_torchflicker")) == ("0", "0", "0"))
+    key("ArrowUp"); key("ArrowLeft"); key("ArrowUp"); key("Enter"); key("ArrowUp"); key("Enter")
+    check("...and all four back to Classic's",
+          (cvar("r_nailbarrels"), cvar("r_fluidsky"), cvar("r_lerplightstyles"), cvar("r_torchflicker")) == ("0", "0", "0", "0"))
     key("Escape"); key("ArrowDown"); key("Enter")
-    check("row 3 opens Controls", scr() == CONTROLS and cur() == 0)
+    check("row 2 opens Controls", scr() == CONTROLS and cur() == 0)
     key("ArrowDown"); key("Enter")         # row 1: Wheel weapons
     check("Wheel weapons binds the wheel's cycle (Classic leaves it unbound)",
           bind_of("MWHEELUP") == '"MWHEELUP" = "impulse 10"' and bind_of("MWHEELDOWN") == '"MWHEELDOWN" = "impulse 12"')
@@ -212,13 +220,14 @@ with sync_playwright() as p:
     key("Escape"); key("Escape")
     check("Esc Esc returns to Options", scr() == OPTIONS)
     key("Enter")
-    check("...on the Classic / 2026 row", scr() == EXTRAS)
+    check("...on the Slop Options row", scr() == SLOP_OPTIONS)
     key("Escape"); key("Escape"); key("Escape")
     check("Esc Esc Esc closes the menu", vis() == 0)
     key("Backquote")
     for line in ["wasm_uncapped 1", "wasm_showfps 1"]:
         pg.keyboard.type(line); key("Enter")
-    check("the wasm_* console variables set the same settings", ext() == 3)
+    check("the console variables set the same settings (the retired wasm_uncapped too)",
+          ext() == 3 and cvar("host_maxfps") == "0")
     # Key_Console's history and Tab, through the page's keys: Up Up brings
     # back "wasm_uncapped 1" (Backspace + 0 turns it off); Tab completes a
     # cvar name ("r_persp" -> "r_perspspan "). The retired wasm_exactpersp
@@ -232,10 +241,11 @@ with sync_playwright() as p:
     check("wasm_exactpersp 0: id's 16", ext() == 2 and cvar("r_perspspan") == "16")
     frames(pg)
     check("config.cfg keeps the change, and only what differs from Classic",
-          cfg_has(pg, 'profile "classic"', 'wasm_showfps "1"')
-          and "wasm_uncapped" not in (pg.evaluate(CFG) or ""), str(pg.evaluate(CFG)))
+          cfg_has(pg, 'preset "classic"', 'wasm_showfps "1"')
+          and "wasm_uncapped" not in (pg.evaluate(CFG) or "") and "host_maxfps" not in (pg.evaluate(CFG) or ""),
+          str(pg.evaluate(CFG)))
 
-    # 2. wasm_uncapped through the real program, with the page's own ticks
+    # 2. The cap through the real program, with the page's own ticks
     #    paused so they cannot interleave (the calls run back to back).
     capped, uncapped = pg.evaluate("""async () => {
         quake.pause();
@@ -249,7 +259,7 @@ with sync_playwright() as p:
         return [a, b];
     }""")
     check("144 Hz with id's cap: 72 frames a second", 71 <= capped <= 73, str(capped))
-    check("144 Hz with wasm_uncapped: 144", uncapped == 144, str(uncapped))
+    check("144 Hz with no cap: 144", uncapped == 144, str(uncapped))
 
     # 3. wasm_showfps in the walk: freeze the frames, then only the readout
     #    may change the canvas.
@@ -293,10 +303,11 @@ with sync_playwright() as p:
     pg.evaluate("exp.set_extras(2)")
     pg.evaluate("quake.resume()")
 
-    # 3b. The 2026 default has exact perspective on (a fresh context, its own
-    #     storage: the address chooses the profile and the section below
-    #     still finds Classic in this one's). Off is id's 16-pixel spans, which
-    #     redraw the walls; on again is the same frame.
+    # 3b. The slop default draws the perspective every 8 pixels (id's portable
+    #     C loop; a fresh context, its own storage: the address chooses the
+    #     preset and the section below still finds Classic in this one's).
+    #     Exact, id's 16 and the others redraw the walls, nearer exact the
+    #     shorter the span; back to 8 is the same frame as the default.
     ctx3 = br.new_context(viewport={"width": 820, "height": 560})
     pg3 = ctx3.new_page()
     pg3.on("console", lambda m: errs.append(m.text) if m.type == "error" else None)
@@ -308,37 +319,38 @@ with sync_playwright() as p:
     isolated.wait_until(pg3, "exp.menu_visible().then(v => !v)", 5)
     time.sleep(1.0)
     ext3 = pg3.evaluate("exp.extras()")
-    check("?2026: exact perspective starts on (uncapped, exact perspective, scaled 2-D)",
-          ext3 == 13 and pg3.evaluate("quake.text('cvar', 'r_perspspan')") == "1"
-          and pg3.evaluate("quake.text('cvar', 'wasm_exactpersp')") == "1", str(ext3))
+    check("?2026: Screen size starts at 110 (the status bar alone)", pg3.evaluate("exp.viewsize()") == 110)
+    check("?2026 (slop's old word): the perspective span starts at 8 (no cap, scaled 2-D; exact is off)",
+          ext3 == 9 and pg3.evaluate("quake.text('cvar', 'r_perspspan')") == "8"
+          and pg3.evaluate("quake.text('cvar', 'wasm_exactpersp')") == "0", str(ext3))
     pg3.evaluate("quake.pause()")
     pg3.evaluate(FROZEN)
-    pg3.evaluate(GRAB, "_x_on")
-    pg3.evaluate(f"exp.set_extras({ext3 & ~4})")
-    pg3.evaluate(FROZEN)
-    pg3.evaluate(GRAB, "_x_off")
-    d = pg3.evaluate(DIFF, ["_x_on", "_x_off"])
-    check("2026: id's 16-pixel spans redraw the walls", d is not None and d["n"] > 1000, str(d))
-    # 64 and 32 longer, 8 and 4 between: each redraws the walls, nearer exact
-    # the shorter its span.
-    near = {}
-    for span in (64, 32, 8, 4):
+    pg3.evaluate(GRAB, "_x_default")
+    # Exact, then id's 16, 64, 32 and 4: each redraws the walls, nearer exact
+    # the shorter its span; 8, the default, is between 16 and 4.
+    for span in (1, 64, 32, 16, 4):
         pg3.evaluate(f"quake.callLine('exec r_perspspan {span}')")
         pg3.evaluate(FROZEN)
         pg3.evaluate(GRAB, f"_x_{span}")
-        near[span] = pg3.evaluate(DIFF, ["_x_on", f"_x_{span}"])
-    n16 = d["n"] if d else 0
-    n64, n32, n8, n4 = ((near[k] or {}).get("n", 0) for k in (64, 32, 8, 4))
-    check("2026: r_perspspan 64, 32, 8 and 4 redraw the walls, nearer exact the shorter the span",
-          n64 > n32 > n16 > n8 > n4 > 0, f"pixels off exact: 64 {n64}, 32 {n32}, 16 {n16}, 8 {n8}, 4 {n4}")
-    pg3.evaluate(f"exp.set_extras({ext3})")
+    off = {k: pg3.evaluate(DIFF, ["_x_1", f"_x_{k}"]) for k in (64, 32, 16, 4)}
+    off["default"] = pg3.evaluate(DIFF, ["_x_1", "_x_default"])
+    n64, n32, n16, n8, n4 = ((off[k] or {}).get("n", 0) for k in (64, 32, 16, "default", 4))
+    check("slop: r_perspspan 64, 32, 16 and 4 redraw the walls, nearer exact the shorter the span, the default 8 between 16 and 4",
+          n64 > n32 > n16 > n8 > n4 > 0, f"pixels off exact: 64 {n64}, 32 {n32}, 16 {n16}, 8 (default) {n8}, 4 {n4}")
+    pg3.evaluate("quake.callLine('exec r_perspspan 8')")
     pg3.evaluate(FROZEN)
-    pg3.evaluate(GRAB, "_x_on2")
-    check("...and on again is the same frame, byte for byte",
-          pg3.evaluate(DIFF, ["_x_on", "_x_on2"]) is None)
+    pg3.evaluate(GRAB, "_x_8")
+    check("...and r_perspspan 8 is the default's frame, byte for byte",
+          pg3.evaluate(DIFF, ["_x_default", "_x_8"]) is None)
+    # wasm_exactpersp 1 is exact (the span's one end), a choice in slop now.
+    pg3.evaluate("quake.callLine('exec wasm_exactpersp 1')")
+    pg3.evaluate(FROZEN)
+    pg3.evaluate(GRAB, "_x_old1")
+    check("...and the retired wasm_exactpersp 1 is exact",
+          pg3.evaluate(DIFF, ["_x_1", "_x_old1"]) is None and pg3.evaluate("exp.extras()") == ext3 | 4)
     ctx3.close()
 
-    # 4. Persistence across a plain reload (no ?classic): the profile,
+    # 4. Persistence across a plain reload (no ?classic): the preset,
     #    viewsize, the settings, the resolution.
     key("Minus", 2)                    # default.cfg: '-' is sizedown -> 80
     frames(pg)
@@ -346,7 +358,7 @@ with sync_playwright() as p:
           cfg_has(pg, 'viewsize "80"', 'wasm_showfps "1"'), str(pg.evaluate(CFG)))
     pg.evaluate("exp.set_extras(3)")
     frames(pg)
-    cfg_has(pg, 'wasm_uncapped "1"', 'wasm_showfps "1"')
+    cfg_has(pg, 'host_maxfps "0"', 'wasm_showfps "1"')
     res0 = pg.evaluate("Promise.all([exp.width(), exp.height()])")
     boot_page(pg, "")
     check("a plain reload comes back Classic", prof() == "classic", prof())
@@ -490,7 +502,7 @@ with sync_playwright() as p:
     pg2.on("console", lambda m: errs.append(m.text) if m.type == "error"
            else warns.append(m.text) if m.type == "warning" else None)
     pg2.on("pageerror", lambda e: errs.append("PAGEERROR: " + str(e)))
-    boot_page(pg2, "")   # the default, 2026: Alt+Enter is the fullscreen key
+    boot_page(pg2, "")   # the default, slop: Alt+Enter is the fullscreen key
     pg2.evaluate("document.getElementById('walkBtn').click()")
     time.sleep(1.0)
     pg2.keyboard.press("Escape")

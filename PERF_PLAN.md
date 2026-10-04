@@ -1288,9 +1288,10 @@ removed; see "Method" below):
 - Independently of the warp: `render/raster.rs`'s `turb16_span` (*since 2026-10-03
   `turb_span::<N>`, `Turbulent8` at any perspective span, 16 id's*; `Turbulent8`,
   `D_DrawTurbulent8Span`'s span sampler — the DEFAULT liquid renderer in both profiles,
-  `exact_perspective` is off by default; *since 2026-10-03 the 2026 profile draws exact
-  perspective (`r_perspspan 1`, `RenderOptions::persp_span`), so there the liquids take
-  `span_turb`'s exact branch, which has the mask too*) did two `i32::rem_euclid` divisions per liquid
+  `exact_perspective` is off by default; *since 2026-10-03 the 2026 profile draws
+  `r_perspspan 8` (`RenderOptions::persp_span`; it drew exact for part of that day), so
+  there the liquids take `turb_span::<8>`, and `r_perspspan 1` takes `span_turb`'s exact
+  branch, which has the mask too*) did two `i32::rem_euclid` divisions per liquid
   pixel to wrap into the 64x64 texture. Quake's liquid miptextures are always a power of
   two (64x64), and for a power-of-two modulus `n`, two's-complement `v & (n-1)` equals
   `v.rem_euclid(n)` for every `i32`, negative included — so the wrap is a mask, not a
@@ -1412,7 +1413,8 @@ dynamic light every block it touches. At 1080p on 8 threads the torch-lit views 
   (`web/wasi.js`), as the bands' are. Baking inside the bands, at a band's first touch of
   a face, would save the second round of thread starts but needs a lock or a once-cell
   per block in the span setup and bakes a face shared by two bands on whichever comes
-  first; not built.
+  first; not built here. (§14 built it: a once-cell per block, and every thread takes
+  the bake jobs before its first band.)
 - **When it pays.** A texel of baking costs about 0.7 ns, and a round of threads
   (spawn, run, join) about 32, 61 and 77 µs natively for 1, 3 and 7 helpers when
   threads ran a moment before, 145–415 µs after an idle gap (14 ms: a 72 Hz
@@ -1503,3 +1505,109 @@ In the page (the threads build on this round's deploy, headless, a 1886×996 202
 pixel size 1, `r_threads N` then `timedemo demo1`, median of three rounds): Chromium 164
 → 164 fps on one thread, 296 → 339 on 4, 337 → 390 on 8, 323 → 383 on 16; Firefox 139 →
 141, 242 → 279, 280 → 318, 271 → 314.
+
+## 14. One round of threads a frame, and less on one thread (2026-10-03, branch `fleet/opt-serial`)
+
+An Android phone draws a native 2640×1080 frame in 6–7 ms back to
+back and 17–18 ms in play at 60 Hz: its cores sleep between frames, every round of
+threads wakes them, the governor caps the fast cores, and what a frame does on one
+thread runs on a core at about 1.2 GHz. So this round counted what a frame of the
+page's 2026 profile does that is not pixels (`quaketool framerate --serial`: exact
+perspective, the status bar overlay, the scaled 2-D layer, natively) and went after it.
+
+**What it found** (e1m3's flames at 2631×1071, 8 threads, main): of a 3.7 ms frame the
+bands were 1.7; the rest ran on the calling thread — the edge scan 0.58, the bakes'
+own round 0.36, the game 0.24, the 2-D layer 0.27, the world walk 0.17, the surface
+lookups 0.14, the entities' setup 0.11, a z-buffer fill 0.10 — and the frame started
+three to six rounds of threads: with the overlay a frame is three views (four where
+the view does not stand on the bar: 1315×535), each with a round for its bands and,
+in a torch-lit room, one for its bakes.
+
+**What changed** (all the same pixels: "Proof"):
+
+- **One round a frame.** The bakes have no round of their own: each thread of the
+  bands' round takes bakes first, the largest first, until none is left, then bands
+  (`surf::Bakes`; a span reads a block the frame bakes through it). And a frame's views
+  share the round (`Renderer::render_into_with`, `band::Target`): each is prepared in
+  turn on the calling thread, then the frame's rows are cut into strips wherever a view
+  begins or ends, each strip holding a band of every view lying in it, all taken from
+  one queue. Three to eight rounds a frame became one. (`client::draw_view` is the one
+  call; demo playback draws through it as live play does.)
+- **The spans in row order.** The scan's spans stay as it makes them, row after row,
+  each naming its surface; a band draws one run of them. Before, each of the 32 bands
+  walked every surface's whole span list to find its rows.
+- **The scan in one walk.** id walks the active edges three times a scanline
+  (`R_GenerateSpans`, `R_RemoveEdges`, `R_StepActiveU`); each edge is now removed or
+  stepped as soon as its spans are generated. id's walks stay in the tests as the
+  reference (726,000 spans, the same in the same order).
+- **The z-buffer keeps its size** (the overlay's small windows made every frame refill
+  megabytes of it); **a blown-up pic's repeated rows are copies** (the status bar at
+  the scaled 2-D layer's 5 drew every row texel by texel); **a band skips an alias
+  model it does not reach** (every band asked each of its triangles); **the surface
+  bake is a routine per mip level**, as id's four (no division a row, no bounds test
+  a texel: a third less time a texel); the world walk tests a node's visframe before
+  it reads its box.
+
+**Proof.** Main's `quaketool` against the branch's, 355 frame hashes (a script of
+`quaketool` runs kept with the round's scratch): the goldens on 1 and 8 threads; `play`'s hashes of
+demo1–3 and three walks in Classic and 2026 video on 1 and 8 threads; 168 `shot`s of
+the live client — seven views (one under water, one firing) at 2631×1071, 1920×1080,
+1315×535 and 640×400, with the overlay's corners and the scaled 2-D layer, at exact
+perspective and at 16, without the bar, and Classic — and 162 `view`s (nine eyes,
+three sizes, three video settings), each on 1 and 8 threads: identical after every
+commit. Every frame of demo1–3 and four walks at 640×400 and 960×600 (`play
+--hash-every 1`, 2026 video, 3 threads) hashes as main's. `classic_check` ALL PASS.
+New tests: the views of a frame in one round against the view and then each window
+(screen, z, surface cache, 1–8 threads); the strips' cut; `Bakes` on several threads;
+the scan against id's three walks; the bake against the loop as first written; the
+blit over opaque rows. 858 tests in `quake-rs`, 211 in `quake-wasm`; clippy clean, the
+wasm targets too.
+
+**Native** (`quaketool framerate <pak> --serial --res 2631x1071 --threads 1,4,8
+--rates 60`: the live game standing at each view, the page's 2026 frame, the whole
+client frame's median ms, main → branch, three interleaved rounds under the fleet's
+measurement lock, frames back to back):
+
+| view | 1 thread | 4 threads | 8 threads |
+|---|---|---|---|
+| e1m2's start | 7.62 → 8.16 (see below) | 3.97 → 3.32 | 3.23 → 2.35 |
+| e1m3's flames | 9.26 → 8.19 | 4.58 → 3.63 | 3.67 → 2.37 |
+| e1m1, firing rockets | 7.61 → 7.43 | 3.65 → 2.92 | 2.93 → 1.96 |
+
+On eight threads a frame takes 27–35% less, on four 16–21%. What the calling thread
+does alone (e1m3's flames, 8 threads, the counters' means): 1.37 ms with the bakes'
+round → 0.83: the scan 0.57 → 0.45, the z-buffer fill 0.09 → 0, the lookups 0.12 →
+0.09, the walk 0.155 → 0.145; the 2-D layer 0.26 → 0.13; the bands with the bakes
+1.67 + 0.31 → 1.20. (e1m2's start on one thread is the CPU's two speeds, not the
+code: the game's own time, the same code in both builds, read 0.11 or 0.145 ms from
+run to run, and the frames of the fast runs are 7.55 and 7.62 against 7.52.)
+
+`timedemo demo1` (one view, no overlay, the RGBA pack in the frame, back to back; three
+interleaved rounds): natively at 2631×1071, 2026 video, 99.7 → 102.4 fps on one thread,
+254 → 260 on four, 327 → 353 on eight. In the page (headless Chromium, the threads
+build, `?2026` with the overlay, a 2538×828 frame at pixel size 1): 316 → 369 fps on
+8 threads (3.17 → 2.71 ms a frame), 268 → 299 on 4, and 386 and 301 once demo playback
+drew through `client::draw_view` too (it had kept a round a view).
+
+**What one thread pays.** The 2026 frame above is level on one thread only because
+its 2-D layer got 0.12 ms cheaper: the world itself draws slower there. The review
+measured it against the branch's base, interleaved, under the lock (medians; the 3-D
+view alone, warm): Classic at 2631×1071 2.10 → 2.26 ms on e1m3 and 1.89 → 2.10 on e1m1
+(+8%, +11%), the 2026 view at that size 7.29 → 7.54 (+3%), Classic at 640×400
+0.615 → 0.623 (+1%); `timedemo demo1` on one thread, Classic, 348 → 330 fps at
+2631×1071 and 1283 → 1243 at 640×400 (−5%, −3%), 2026 native 111.8 → 111.0. Commit by
+commit it is the spans in row order (a band's run in place of each surface's list: one
+thread loses the surface-by-surface order, +11–12% on the Classic native views) and
+the bake lookup in the span's setup (+4–7%); the one-walk scan and the shared round
+give a little back. Every browser deploy and every multi-core run is faster; a run on
+one thread is the price, and `WorldDraw::draw_band` is where to win it back.
+
+**Not measured:** an Android phone. These are a desktop's cores awake; what a round of
+threads costs there when the workers slept 10 ms, and what the calling thread's part
+costs at 1.2 GHz, are the phone's to say (`web/phone.py`).
+
+**What is left on one thread** (e1m3's flames at 2631×1071): the scan 0.45 ms, the
+game before the renderer 0.20, the walk 0.15 (three views' walks), the 2-D layer 0.13,
+the entities' setup 0.11, the lookups 0.09 (a lightmap is still built, or its luxels
+copied, for a surface whose block the cache then has: `D_CacheSurface` asks the cache
+first).

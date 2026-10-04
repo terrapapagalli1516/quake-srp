@@ -41,7 +41,9 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 PROJECT = HERE.parent
-ORACLE = PROJECT / "oracle" / "build" / "quake-oracle"
+sys.path.insert(0, str(PROJECT / "oracle"))
+from oraclebin import ORACLE_BIN as ORACLE, ensure_oracle  # noqa: E402
+
 CRATE = PROJECT / "quake-rs"
 QUAKETOOL = CRATE / "target" / "release" / "quaketool"
 GAMES = ("hipnotic", "rogue")
@@ -127,8 +129,7 @@ def main() -> None:
     ap.add_argument("--out", type=Path, default=PROJECT / "oracle" / "build" / "packs")
     a = ap.parse_args()
     times = sorted(float(t) for t in a.times.split(","))
-    if not ORACLE.exists():
-        subprocess.run([str(PROJECT / "oracle" / "build.sh")], check=True)
+    ensure_oracle()
     subprocess.run(["cargo", "build", "--release", "--quiet", "--bin", "quaketool"], cwd=CRATE, check=True)
     out = a.out.resolve()
     summary = []

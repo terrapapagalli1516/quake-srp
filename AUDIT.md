@@ -4,79 +4,120 @@ The ledger of every difference found between the port and id's WinQuake C, and w
 done about it, with the evidence. Newest work is at the bottom. This top part is the way
 in:
 
-1. the two profiles, and every departure the 2026 profile makes, as one table;
+1. the two presets, and every slop option, as one table;
 2. an index of the 2026-09-26 and 2026-09-25 sections;
 3. everything still open, in one list.
 
-## The profiles and the departures
+## The slop options and the presets
 
-Since 2026-09-26 every departure from id's game is a setting. `quake_rs::cvar::CVARS`
-marks each one `departure`, and two profiles switch them all at once
-(`quake_rs::settings`):
+Since 2026-09-26 every departure from id's game is a setting, since 2026-10-03 called a
+"slop option" (the port's name: quake-srp, the slop rust port). `quake_rs::cvar::CVARS`
+marks each one `departure`, and two fixed presets set them all at once
+(`quake_rs::settings::Preset`):
 
-- **Classic** has every departure off. It is WinQuake: frames, game state and timing,
-  proven by `uv run oracle/classic_check.py` (`oracle/README.md`, "Classic").
-- **2026** is the default: an idealized software-rendered Quake on a 2026 machine.
+- **Classic** has every slop option off (or at the value both presets share, the
+  controls). It is WinQuake: frames, game state and timing, proven by `uv run
+  oracle/classic_check.py` (`oracle/README.md`, "Classic").
+- **slop** is the default: an idealized software-rendered Quake on a 2026 machine.
 
-**The profile is the engine; the controls are the player's.** Since 2026-10-03 WASD, mouse
-look, the gamepad, Space swimming up, Alt+Enter and Always Run are the same in both
-profiles by default (the rows below marked *both*). They are not `departure` cvars, so
-switching profile leaves them alone, as it leaves id's own settings. The oracle never
-sees them (id's C has no WASD or gamepad to compare); the harnesses that run Classic
-against it name id's controls explicitly (`Settings::id`: `quaketool play` and `sound`;
-`idcontrols` in `oracle_screen`, whose Keys screen the C draws with `default.cfg`'s keys).
-The one step to id's 1996 controls — arrows, `a` `+lookup`, no mouse look, no gamepad,
-Always Run off — is the console's `idcontrols`; it is never a profile switch. The mouse
-wheel's weapon cycle is the exception, still a 2026 departure: switching to Classic
-unbinds it.
+**The machine picks the numbers.** The threads and the pixel size are built from what the
+host knows at start (`settings::Machine`: a touch screen, the threads offered), never
+re-read in a session and never "auto": a touch screen starts at 2x and four threads at
+most; anything else at 1x on every thread offered. The frame-rate cap is the preset's on
+every machine: none in slop (a touch screen too, since 2026-10-04), id's 72 in Classic. `config.cfg` writes a number only when it
+differs from this machine's. (The page passes `-touch` from its one touch-screen test,
+`touchScreen`, which also puts up the touch controls and draws the pacing's lines.)
 
-To switch, use Options > "Classic / 2026" (←/→), the console's `profile classic|2026`,
-or the page's `?classic` / `?2026`. Enter on that row opens the settings hub, id's Video
-Options idiom: the Profile row and a row for each of three pages, the departures by kind —
-**Picture and sound**, **Motion and light**, **Controls** (`quake_rs::menu::ExtrasPage`;
-Escape goes back a screen, onto the row it came from). Each row can also be set alone, on
-its page or as its console variable. Switching profile resets the departures (and binds or
-unbinds the wheel), and keeps the controls and id's own settings (Screen size, Brightness,
-the volumes, the mouse).
+**The controls are shared.** WASD, mouse look, the gamepad, Space swimming up, Alt+Enter,
+the touch controls and Always Run are the same in both presets (the rows below marked
+*both*). The oracle never sees them (id's C has no WASD or gamepad to compare); the
+harnesses that run Classic against it name id's controls explicitly (`Settings::id`:
+`quaketool play` and `sound`; `idcontrols` in `oracle_screen`, whose Keys screen the C
+draws with `default.cfg`'s keys). The one step to id's 1996 controls — arrows, `a`
+`+lookup`, no mouse look, no gamepad, Always Run off — is the console's `idcontrols`;
+it is never a preset. The mouse wheel's weapon cycle is slop's alone: Classic unbinds it.
 
-| departure | setting (its page and row) | 2026 | why |
+**The two actions** (Options' last two rows, after a question each, in like words:
+`quake_rs::menu::Question`): **Reset to Classic** and **Reset to slop** set everything to
+that preset on this machine (`Settings::reset`) — every slop option, the key bindings, id's
+Options (Screen size, Brightness, the volumes, the mouse, Always Run, the look toggles),
+the video mode, the name and colours — and `config.cfg` becomes the preset's one line; the
+saved games and the player's own files stay. The console's `preset slop|classic` (its old
+name `profile` still runs it, and `2026`/`modern`, `id` still name a preset) is the gentler
+switch (`Settings::apply_preset`): every slop option to the preset's, the player's keys
+(but the wheel) and id's Options kept. The page's `?classic` / `?slop` (or `?2026`) do the
+same at load, only when the stored settings were last set to the other one, so a
+bookmarked `?classic` keeps the player's own changes on top of it.
+
+**Options and Slop Options** (the user's order, 2026-10-04): id's rows from Customize
+controls to Video Options, without id's "Reset to defaults" (so from Screen size on they
+sit one row higher than in id's game), then the port's: **Slop Options**, **Reset to
+Classic**, **Reset to slop** — the resets last, where no stray press from the top lands.
+Slop Options opens a screen in id's Video Options idiom — a row for each of three pages,
+the slop options by kind — **Picture and sound**, **Motion and light**, **Controls**
+(`quake_rs::menu::SlopPage`; Escape goes back a screen, onto the row it came from). The
+picture's size is chosen in Video Options alone (no row on the pages). Each row can also
+be set alone, as its console variable. The menus do not say where the settings stand, nor
+mark a value that differs from a preset (every label and value bronze, as id's Options;
+Video Options' white current mode is id's): the console's `preset` says it, naming the
+slop options that differ (`Settings::standing`), and `version` adds ", custom".
+
+**Screen size starts one step larger in slop.** Since 2026-10-03 the slop preset starts
+`viewsize` at 110 (`screen::VIEWSIZE_MODERN`, in `Cvars::slop`): the inventory strip
+goes and the status bar alone is drawn, so the HUD takes less of a slop screen. Classic
+stays at id's 100, `default.cfg`'s. It is id's own cvar, not a slop option, so it has no
+row on the Slop Options pages and the standing does not count it: `config.cfg` writes it
+only when it differs from the preset's start (a returning player who never moved it gets
+110; one who chose a size keeps it, a slop player's chosen 100 included). The resets set
+their preset's (110, 100). Applying a preset (the console's `preset`, the address) takes
+the new preset's start only if the size still equals the old preset's — so `preset
+classic` turns slop's unmoved 110 into id's 100, `default.cfg`'s, even though it keeps
+id's other Options, and a chosen size is kept. The one case it cannot
+tell from "never moved" is a player who chose the other preset's start (100 in slop):
+the next preset treats that as unmoved. A flag in `config.cfg` to tell them apart would
+cost more than the gap does. The tools keep id's 100 unless asked for the slop layout
+(`quaketool shot --sbaroverlay 1` starts at 110); `play` and `timedemo` draw Classic's
+screen.
+
+| slop option | setting (its page and row) | slop | why |
 |---|---|---|---|
-| No 72 fps cap: a host frame on every display refresh, with the game stepped as id's 72 Hz frames step it (`Stepping::Uncapped`) | `wasm_uncapped` (Picture and sound > Uncapped framerate) | on | The game must play the same from 60 to 480 Hz. id's gate caps the game at 72 fps, so a 120 Hz display runs at 60. The stepping keeps jumps, flashes, trails and clocks on id's 72 Hz values (`FRAMERATE.md`). |
-| The picture fills the window at the window's aspect, at its device pixels divided by a whole pixel size, with square pixels; the renderer's `hires` (views past 1280x1024, particles and the underwater warp in proportion). Video Options (2026 only) lists Native — Auto, then 1x..4x pixel size — above `RESOLUTION_PRESETS`, honestly marking whichever is actually live (printing its real size) and letting Enter switch back to it after a fixed mode; off (Classic, or the host never says `modern`), the screen is `VID_MenuDraw`'s alone | `vid_native` (Picture and sound > Native resolution), `vid_pixelsize` (Pixel size) | on, Auto | id's modes stop at 1280x1024 and are shown in a 4:3 box. Whole pixels keep the chunky software look. Auto picks the smallest size that keeps a frame within 1920x1080 pixels times the whole square root of the render threads. ("High resolutions and Hor+") |
+| No 72 fps cap: a host frame on every display refresh, with the game stepped as id's 72 Hz frames step it (`Stepping::Uncapped`); or a cap of 60 to 240 on that timing | `host_maxfps` (QuakeSpasm's name; Picture and sound > Frame rate cap: 60, id's 72, 120, 144, 240, none); the retired `wasm_uncapped` sets its ends (1 none, 0 72) | none (on every machine; Classic id's 72, `Host_FilterTime`'s own gate exactly) | The game must play the same from 60 to 480 Hz. id's gate caps the game at 72 fps, so a 120 Hz display runs at 60. The stepping keeps jumps, flashes, trails and clocks on id's 72 Hz values (`FRAMERATE.md`). A cap other than 72 holds the frames drawn, not the game: a host frame runs on every refresh, and the picture is drawn on the first refresh at least 1/cap after the last one (`FrameCap::picture_due`; the others run undrawn, `cl_main::walk_frame_undrawn`): 60 on a 120 Hz display draws every second refresh, evenly; a cap above the display's rate draws every refresh; one that does not divide it draws below itself (60 on 144 Hz: 48 pictures a second) while the game runs at 144 (`quaketool framerate --cap 60 --check`). |
+| The picture fills the window at the window's aspect, at its device pixels divided by a whole pixel size, with square pixels; the renderer's `hires` (views past 1280x1024, particles and the underwater warp in proportion). Video Options lists Native 1x..4x below `RESOLUTION_PRESETS`, each with the size it gives, the live one white, and Enter switches back to it after a fixed mode, with a line that a mode above draws in a 4:3 box; the rows show in slop or whenever the picture is native (Classic with `vid_native 1`), else the screen is `VID_MenuDraw`'s alone. No frame bigger than the threads build's 512 MiB holds (`vid::MAX_FRAME_PIXELS`, 12 million pixels, measured): past it the next pixel size, the player's pick included | `vid_native`, `vid_pixelsize` 1..4 (Options > Video Options, the one place it is chosen) | on, 1x (2x on a touch screen) | id's modes stop at 1280x1024 and are shown in a 4:3 box. Whole pixels keep the chunky software look. A phone at 1x drew 13-19 ms frames against 60 Hz's 16.7, at 2x 8-9 ms. ("High resolutions and Hor+"; "Slop Options, two presets" for the memory) |
 | Hor+: `fov` spans a 4:3 screen, and a wider screen sees more at the sides | `fov_adapt` (Picture and sound > Widescreen FOV) | on | id spreads `fov` over any width, so a wide screen loses the top and bottom. |
 | The 2-D layer (status bar, menus, console) at the largest whole multiple of 320x200 that fits; on its screen, wider than 320 on most frames (384 at 16:9), the level-complete screen centred as the status bar is (`Sbar_DrawPic`'s `(vid.width - 320)>>1`, `Screen2d::centred_320_x`) | `wasm_scaled2d` (Picture and sound > Scaled 2-D layer) | on | id draws it 1:1, so at 1440p the status bar is a 24-pixel strip. `Sbar_IntermissionOverlay` draws at fixed coordinates laid out for 320 columns, so on a wider screen it sits left of the centred bar, menus and finale ("The 2-D layer on a wide screen", below). |
 | The world beside the status bar: id's view, its projection and every pixel of it unchanged (the gun, the crosshair, the horizon where they were), and the world drawn on under it, down to the screen's bottom, wherever the bar leaves it uncovered — the corner either side of the bar, and the row or two id leaves between an even-height view and the bar. Each part is a window onto the view (`render::ViewWindow`: the view's centre and scales, the frustum cut to the part's sides; id's `R_ViewChanged` can centre a view off its rectangle, `xOrigin`/`yOrigin`); underwater (with hires) the view is drawn with the rows under it and the wobble runs on into them. From viewsize 100 (below it the view is inside a border); none with id's warp buffer (hires off: the corners keep the backtile while underwater) | `scr_sbaroverlay` (Picture and sound > Status bar overlay) | on | On any frame whose 2-D screen is wider than the bar's 320 columns (384 at 16:9) id's layout leaves a brown strip either side of it. The corners are extra renders: at 1080p two windows of 160x240 (measured +7% on a frame's time; underwater +23%, the rows under the view drawn across its width for the warp to read), on a wide 1315x535 frame three, its corners 337 columns wide (+25%); a part's spans start their 16-pixel steps at its own edge, so a texel by the corners' inner edges can sit a shade off where a taller view would put it, and each part picks its surfaces' mip levels for itself (id picks one per surface for the view), so a surface crossing from the view into a corner can change level at the seam. |
 | Monsters glide between their 0.1 s steps (QuakeSpasm's `r_lerpmove`) | `r_lerpmove` (Motion and light > Smooth monsters) | on | At high refresh rates a stepping monster visibly jumps ten times a second. ("Demo playback between messages") |
 | An alias model's animation blends between its frames (QuakeSpasm's `r_lerpmodels`) | `r_lerpmodels` (Motion and light > Smooth animations) | on | id steps `frame` ten times a second; at high refresh rates a monster's walk cycle (and the view weapon's) visibly holds a pose for several frames, then jumps. A model that fires (`EF_MUZZLEFLASH`) does not blend its fire frames — the flare is geometry in them, and blended it slid from barrel to barrel or grew over a tenth of a second — as QuakeSpasm's `CL_RelinkEntities` has it: that change and the next one snap, the view weapon for the player's flash. (`client::lerpmodels`, FRAMERATE.md "Animation frames blended") |
+| The player's nailgun nails drawn leaving its barrels: while a nail's tail is inside the barrel it fires from (30 units, `v_nail.mdl`), on that barrel's axis, where the gun hides it; past the muzzle it eases onto its own line over 100 units, or by where that line meets the world. Drawing only (the nail, its collisions, touch, sound and impact are the server's); live play only (a demo's nails are first seen 50–125 units out); the super nailgun's centre-line nails as id's | `r_nailbarrels` (Motion and light > Nails from barrels) | on | QuakeC launches the nail at `origin + '0 0 16' + v_right*±4` (`W_FireSpikes`), 6.7 units above the barrel it alternates with (12.7 below the eye at Screen size 110). At 2026's sizes the nail is a large pyramid, and uncapped frames add frames nearer than id's 72 Hz ever showed (4 units out at 240 Hz), beside and partly behind the gun: the shots read as two lines from wide of the gun. Measured on every rate from 60 to 480 Hz, Screen size 100/110/120, Hor+, the overlay, standing, walking, strafing and turning: no pixel of a nail while it is inside the barrel, and its first drawn frame touches the gun (at 72 Hz, turning, one in five first showed 3–4 pixels off it, a 72 Hz frame taking it 14 units). (`client::nailbarrels`) |
 | A crosshair at the view's centre (`V_RenderView`'s): `crosshair 1` the port's cross — thin arms of palette 253 round an open centre, outlined in black, in proportion to the frame's height (`screen::CrossSize`) — and `2` id's conchars `+` at the 2-D layer's scale, its crossing on the centre (id's puts the glyph's corner there, its crossing 4 pixels right of and 4.5 below the aim); left off the intermission and finale screens as id's GLQuake leaves it (`gl_screen.c`'s `SCR_UpdateScreen`; WinQuake draws it over the stats too) | `crosshair` (Picture and sound > Crosshair: off, cross, id's +) | 1, the cross (id: 0) | Mouse aiming. id's `+` at the 2026 2-D scale is a blocky grey glyph 35 pixels across at 1080p, crossing 20 pixels right of the aim and 22.5 below. A level's stats have nothing to aim at. |
-| Mouse look without holding `+mlook` | `freelook` (Controls > Mouse look) | both | How mouse play works today; `+mlook` still works in both profiles. |
+| Mouse look without holding `+mlook` | `freelook` (Controls > Mouse look) | both | How mouse play works today; `+mlook` still works in both presets. |
 | Always Run | `cl_forwardspeed`, `cl_backspeed` 400 (Options > Always Run) | both (id: 200) | |
-| WASD: `w`/`s` forward and back, `a`/`d` strafe, over `default.cfg`'s `a` `+lookup` and `d` `+moveup` | the profile's bindings (`Bindings::with_wasd`) | both | |
-| The wheel switches weapons: a notch up `impulse 10` (next), down `impulse 12` (previous) | the profile's bindings (`Bindings::with_wheel`; Controls > Wheel weapons: on binds the two keys to the cycle, off unbinds them, and a wheel the player bound by hand reads `custom`, where a key puts the cycle back over it) | on | `default.cfg` predates the wheel (`in_win.c`'s `WM_MOUSEWHEEL` already turns it into `MWHEELUP`/`MWHEELDOWN` key presses), so id's players bound it themselves. The one control that stays a departure: the user wanted it 2026's alone, so a switch to Classic unbinds it (`Bindings::without_wheel`). |
+| WASD: `w`/`s` forward and back, `a`/`d` strafe, over `default.cfg`'s `a` `+lookup` and `d` `+moveup` | the presets' bindings (`Bindings::with_wasd`) | both | |
+| The wheel switches weapons: a notch up `impulse 10` (next), down `impulse 12` (previous) | the presets' bindings (`Bindings::with_wheel`; Controls > Wheel weapons: on binds the two keys to the cycle, off unbinds them, and a wheel the player bound by hand reads `custom`, where a key puts the cycle back over it) | on | `default.cfg` predates the wheel (`in_win.c`'s `WM_MOUSEWHEEL` already turns it into `MWHEELUP`/`MWHEELDOWN` key presses), so id's players bound it themselves. The one control slop has alone: the user wanted it so, and the Classic preset unbinds it (`Bindings::without_wheel`). |
 | Jump also swims up (`upmove`), on top of QuakeC's own swim | `cl_jumpswim` (Controls > Space swims up) | both | With WASD, `d` no longer swims up. |
 | Alt+Enter toggles fullscreen, whatever has the keyboard (the page takes the chord before the game) | `vid_altenter` (Controls > Fullscreen key; `vid_fkey`, its name when the key was F, still sets it) | both | `default.cfg` binds ALT `+strafe` and ENTER `+jump`, so in WinQuake the chord is a strafe-jump. A letter could not work in the menu and the console (`web/PLATFORM.md`, "Fullscreen"). |
 | id's mixer at the device's rate with four of its faults fixed: the click at a loop's restart, 48 kHz pitch 1.4% flat, ambient fades stalling above 100 fps, `S_StopSound`'s channel range | `snd_modern` (Picture and sound > Full-rate sound) | on | Classic is id's mixer as written, at 11025 Hz. ("The engine's own mixer") |
-| Touch controls on a touch screen (stick, look by dragging, fire, jump, weapon), and the live game pauses when the page is hidden | `in_touch` (Controls > Touch controls) | on | Phones. Classic on a touch screen keeps a MENU button and the tappable menu. ("Touch, install and offline") |
-| A gamepad as a twin-stick pad: in_win.c's advanced joystick layout (`joystick 1`, `joyadvanced 1`, the axis maps and sensitivities), a round dead zone, a look curve, the pad in the menus, and the 2026 pad bindings | `joystick` (Controls > Gamepad), `joyadv*`, `joy*sensitivity`, `joy*threshold`, `joy_deadzone`, `joy_exponent`, `joy_menukeys` | both | id's `joystick 0` reads no pad. ("Input") |
+| Touch controls on a touch screen (stick, look by dragging, fire, jump, weapon), and the live game pauses when the page is hidden | `in_touch` (Controls > Touch controls) | both | Phones. On in the Classic preset too (input, not the engine): Reset to Classic must not leave a phone unplayable. Off by hand, a touch screen keeps a MENU button and the tappable menu. ("Touch, install and offline") |
+| A gamepad as a twin-stick pad: in_win.c's advanced joystick layout (`joystick 1`, `joyadvanced 1`, the axis maps and sensitivities), a round dead zone, a look curve, the pad in the menus, and the slop pad bindings | `joystick` (Controls > Gamepad), `joyadv*`, `joy*sensitivity`, `joy*threshold`, `joy_deadzone`, `joy_exponent`, `joy_menukeys` | both | id's `joystick 0` reads no pad. ("Input") |
 | Rumble on damage and on the big guns (the pad, or a phone's vibration) | `joy_rumble` (Controls > Rumble) | both | |
 | QuakeWorld's frame-rate readout, in the top-left corner (QuakeWorld's sat bottom right, just above the status bar); the notify lines start a text row lower while it shows | `wasm_showfps` (Picture and sound > Show FPS) | off | Clutter. |
-| The perspective span (`RenderOptions::persp_span`, `render::PerspSpan`): how often the walls and liquids find their texel exactly, where id's x86 `D_DrawSpans16` and `Turbulent8` do it every 16 pixels and step affinely between — every 64 or 32 (`D_DrawSpans8`'s arithmetic, longer), every 8 (id's portable C `D_DrawSpans8`, ported as written: 100.00% against id's C on the oracle's eight rows), every 4 (the same arithmetic), or at every pixel. On liquids `Turbulent8`'s arithmetic at the same length: at 64, 32, 8 and 4 not id's (`Turbulent8` is 16 in both id builds) | `r_perspspan 64\|32\|16\|8\|4\|1` (Picture and sound > Perspective span: `64`, `32`, `id's 16`, `8`, `4`, `exact`); the retired `wasm_exactpersp` sets its ends (1 exact, 0 id's 16) and reads 1 only at 1 | 1 (exact) | The user's call: at 1080p and above id's affine steps show as a wobble on walls seen at a grazing angle, which at 320x200 they did not; the user chose exact, asked for 8 and 4 and then 64 and 32 to try, and decides the default after trying them. The error grows as the square of the span's angle: id's 16 at 320x200 spanned what about 36 pixels do on a wide 1315x535 frame (Hor+) and 72 at 1080p, so 32 at 1315x535 and 64 at 1080p are about 1996's look (pixels off exact over ten views: 1996 8.9%, 1315x535 at 32 9.7%, 1080p at 64 10.9%), and 16 at 1080p a fifth of 1996's angle (2.1%). At 1080p 22 / 10 / 3.7 / 1.3 / 0.4% of e1m6's corridor's pixels differ from exact at 64 / 32 / 16 / 8 / 4; floors hardly at all (a level view crosses a floor at one depth a row). The cost, 3-D view at 1080p on one thread against 16: 64 −12-17%, 32 −7-10%, 8 +7-11%, 4 +26-29%, exact +71-96%; on eight threads −4-6%, −4-+4%, +6-15%, +14-30%, +42-69%; demo1 in the browser at 1080p on eight threads 358 / 344 / 324 / 310 / 314 / 278 fps. `screenshots/perspspan-*.png`; `FRAMERATE.md`, "The perspective span". `quaketool --video modern`, `bench.py --video modern` and `set_video("modern")` carry exact. |
+| The perspective span (`RenderOptions::persp_span`, `render::PerspSpan`): how often the walls and liquids find their texel exactly, where id's x86 `D_DrawSpans16` and `Turbulent8` do it every 16 pixels and step affinely between — every 64 or 32 (`D_DrawSpans8`'s arithmetic, longer), every 8 (id's portable C `D_DrawSpans8`, ported as written: 100.00% against id's C on the oracle's eight rows), every 4 (the same arithmetic), or at every pixel. On liquids `Turbulent8`'s arithmetic at the same length: at 64, 32, 8 and 4 not id's (`Turbulent8` is 16 in both id builds) | `r_perspspan 64\|32\|16\|8\|4\|1` (Picture and sound > Perspective span: `64`, `32`, `id's 16`, `8`, `4`, `exact`); the retired `wasm_exactpersp` sets its ends (1 exact, 0 id's 16) and reads 1 only at 1 | 8 (id's portable C loop; Classic 16) | The user's call: at 1080p and above id's affine steps show as a wobble on walls seen at a grazing angle, which at 320x200 they did not. The user first chose exact (2026-10-03), asked for 8 and 4 and then 64 and 32 to try, and then chose 8 for every device, phones included (having asked for span 8 by default on desktop). Exact is one setting away, and a choice now: `config.cfg` writes `r_perspspan "1"`, and writes nothing for 8, so a returning player who never touched the span moves from exact to 8 and one who chose a value keeps it. The error grows as the square of the span's angle: id's 16 at 320x200 spanned what about 36 pixels do on a wide 1315x535 frame (Hor+) and 72 at 1080p, so 32 at 1315x535 and 64 at 1080p are about 1996's look (pixels off exact over ten views: 1996 8.9%, 1315x535 at 32 9.7%, 1080p at 64 10.9%), and 16 at 1080p a fifth of 1996's angle (2.1%). At 1080p 22 / 10 / 3.7 / 1.3 / 0.4% of e1m6's corridor's pixels differ from exact at 64 / 32 / 16 / 8 / 4; floors hardly at all (a level view crosses a floor at one depth a row). The cost, 3-D view at 1080p on one thread against 16: 64 −12-17%, 32 −7-10%, 8 +7-11%, 4 +26-29%, exact +71-96%; on eight threads −4-6%, −4-+4%, +6-15%, +14-30%, +42-69%; demo1 in the browser at 1080p on eight threads 358 / 344 / 324 / 310 / 314 / 278 fps. `screenshots/perspspan-*.png`; `FRAMERATE.md`, "The perspective span". `quaketool --video modern`, `bench.py --video modern` and `set_video("modern")` carry the preset's span (8; they carried exact from 2026-10-03 to the day 8 became the default). |
 | The sky's clouds glide: the cloud layer is offset by the exact `skytime*skyspeed`, not `R_MakeSky`'s whole texels (`SkyScroll::Fluid`); still the nearest texel, palette-true, and id's frame at every whole texel | `r_fluidsky` (Motion and light > Fluid sky) | on | id's back layer already glides (`D_Sky_uv_To_st` adds the float scroll), but the clouds' extra 8 texels a second come as `(int)(skytime*skyspeed)`: eight one-texel jumps a second, a pixel at 320x200, 6 at 1080p looking up, 11 at 4K. At 240 Hz, looking up at e1m3's sky, id's frames change 3% of the view each and 39% at every jump; the fluid ones a steady 5%. No cost: the port already reads both layers per pixel, so only where the offset is added moves (the sky-heavy view at 1080p, 1 and 8 threads: +0.3%, within noise). (`render::sky`) |
 | The `ED_Alloc` edict ceiling past id's 600 (`Vm::max_edicts`) | `sv_max_edicts` (console only, no settings row — nothing to choose until a map needs it) | on, 8192 | id's own number, kept for Classic. No map of id1 or the mission packs needs more: Rogue's `r2m6`, which seemed to, overflowed only while the port kept its statics' edicts ("`makestatic` frees its edict"). Room for bigger maps. |
 | Animated lights glide: a light style moves from each letter of its pattern to the next across its tenth of a second (`R_AnimateLight`'s letter `k` to `k+1` by `frac(cl.time*10)`), in steps of two of id's light units (`server::GLIDE_STEP`); id's value at every whole tenth; a one-letter style (steady, or a switched light) and a pattern QuakeC replaces still change at once (`LerpLightStyles::Smooth`), in live play and demos alike (of the attract loop only demo3's views hold an animated light) | `r_lerplightstyles` (Motion and light > Gliding lights) | on | id's lights snap ten times a second: at 240 Hz a flickering torch holds each brightness for 24 frames, then one frame changes 11% of the view (e2m2's torch-lit start, `cl.time` 5.0–5.1, 640x400) or half of it (e1m1's fluorescent flicker going 'm' to 'a', 5.1–5.2). The glide changes at most 0.65% a frame there (15% on e1m1's, a fade; `FRAMERATE.md`'s table). The strobes become ramps, as DarkPlaces' `r_lerplightstyles` makes them. A lit block rebakes whenever its value changes, so the cost is the bakes, on the render threads (PERF_PLAN.md §13): at 1920x1080, 8 threads, the most torch-lit view found (e2m5, 46 styled surfaces) +0.12 ms a frame at 72 Hz, +0.08 ms at 480 (0.22 and 0.11 with the bakes on one thread); 0.02–0.08 ms elsewhere (`FRAMERATE.md`, "Light styles between their letters"). |
-| Steady torches flicker: every torch and flame LIGHT.EXE baked steady (style 0) moves its share of the light it gave each luxel — found again from the entity lump with LIGHT.EXE's own code ported: its `(light - dist)` with its angle and range scales at its `-extra` sample points, nothing where its `TestLine` finds a wall between torch and sample (so no light through walls), never more than the luxel holds; re-derived so, the shareware maps' style-0 lightmaps come out byte for byte on 85–100% of their luxels — by world.qc's two flicker strings (styles 1 and 6) through the light-style glide at once, at the kind's rates (the wall torch quick and shallow, the big flame slow and deep), each torch at its own phases from its origin; zero-mean, so every luxel's light averages to id's (the picture's mean brightness within about 2%: the colormap's uneven rows, its ceiling clamp); a model takes the change of the luxel under it (`R_LightPoint`); torches with a style of their own are left to it; live and demos alike (demo1's and demo2's torches come alive) (`render::torch`) | `r_torchflicker` (Motion and light > Torch flicker: a slider as id's, 0 to 2 by 0.2, 2026's 1 in the middle; a strength, 0 off, 1 the flicker style's swing, up to 2 — which reads as noise, about three times id's own flickering torches — for tuning by eye) | on, 1 (the user's choice) | The user asked for torches that flicker a bit, for a nice warm feeling. id's mappers made only `start`'s and a few of episode 2's torches flicker; e1m2–e1m7's 143 and e2m6's 109 are steady. Nothing is added to the picture but light that moves: palette-true, id's colormap, no new light. At 240 Hz on e1m2's arch it changes 0.9% of the view a frame (at most 2.4%). The cost is the bakes: a torch's light reaches 300 units, so in a torch-lit room most of the surfaces drawn rebake every frame at 72 Hz, about half at 480: at 1920x1080 on 1 thread +0.3–1.3 ms a frame, on 8 threads +0.2–0.6 ms (the bakes run on the render threads, PERF_PLAN.md §13; before, +0.3–1.8); at 1315x535, 8 threads, +0.1–0.3 ms. Finding the torches' light at a map's load: 9–39 ms on 8 threads, 58–260 on one (`FRAMERATE.md`, "Steady torches that flicker"). |
+| Steady torches flicker: every torch and flame LIGHT.EXE baked steady (style 0) moves its share of the light it gave each luxel — found again from the entity lump with LIGHT.EXE's own code ported: its `(light - dist)` with its angle and range scales at its `-extra` sample points, nothing where its `TestLine` finds a wall between torch and sample (so no light through walls), never more than the luxel holds; re-derived so, the shareware maps' style-0 lightmaps come out byte for byte on 85–100% of their luxels — by world.qc's two flicker strings (styles 1 and 6) through the light-style glide at once, at the kind's rates (the wall torch quick and shallow, the big flame slow and deep), each torch at its own phases from its origin; zero-mean, so every luxel's light averages to id's (the picture's mean brightness within about 2%: the colormap's uneven rows, its ceiling clamp); a model takes the change of the luxel under it (`R_LightPoint`); torches with a style of their own are left to it; live and demos alike (demo1's and demo2's torches come alive) (`render::torch`) | `r_torchflicker` (Motion and light > Torch flicker: a slider as id's, 0 to 2 by 0.2, slop's 1 in the middle; a strength, 0 off, 1 the flicker style's swing, up to 2 — which reads as noise, about three times id's own flickering torches — for tuning by eye) | on, 1 (the user's choice) | The user asked for torches that flicker a bit, for a nice warm feeling. id's mappers made only `start`'s and a few of episode 2's torches flicker; e1m2–e1m7's 143 and e2m6's 109 are steady. Nothing is added to the picture but light that moves: palette-true, id's colormap, no new light. At 240 Hz on e1m2's arch it changes 0.9% of the view a frame (at most 2.4%). The cost is the bakes: a torch's light reaches 300 units, so in a torch-lit room most of the surfaces drawn rebake every frame at 72 Hz, about half at 480: at 1920x1080 on 1 thread +0.3–1.3 ms a frame, on 8 threads +0.2–0.6 ms (the bakes run on the render threads, PERF_PLAN.md §13; before, +0.3–1.8); at 1315x535, 8 threads, +0.1–0.3 ms. Finding the torches' light at a map's load: 9–39 ms on 8 threads, 58–260 on one (`FRAMERATE.md`, "Steady torches that flicker"). |
 
 **The 2-D layer on a wide screen.** Every 2-D draw that WinQuake places by screen
 coordinates, and where it sits on a 2-D screen wider than 320 (any mode past 320x200 in
-Classic; the scaled layer's own screen in 2026):
-- Centred by id, so in both profiles: the status bar, inventory and solo scoreboard
+Classic; the scaled layer's own screen in slop):
+- Centred by id, so in both presets: the status bar, inventory and solo scoreboard
   (`Sbar_DrawPic`/`Sbar_DrawString`'s `(vid.width - 320)>>1`), the menus (`M_DrawPic`,
   `M_DrawCharacter`), the finale plaque (`Sbar_FinaleOverlay`, `(vid.width -
   pic->width)/2`), centre prints and the finale text (`SCR_DrawCenterString`) and the New
   Game prompt (`SCR_DrawNotifyString`), line by line `(vid.width - l*8)/2`, and the pause
   plaque (`SCR_DrawPause`).
 - Laid out for a 320-wide screen at fixed coordinates: `Sbar_IntermissionOverlay` alone.
-  Classic keeps it in the top-left corner, as id; 2026 centres it (the scaled 2-D row).
+  Classic keeps it in the top-left corner, as id; slop centres it (the scaled 2-D row).
 - Anchored by design, left where id puts them: the notify lines (`Con_DrawNotify`, at the
   console's own left margin, wrapped to its width), the console, the crosshair (the view's
   centre), and Show FPS (the top-left corner at the notify lines' margin, the notify lines
@@ -88,21 +129,25 @@ Classic; the scaled layer's own screen in 2026):
   `Sbar_MiniDeathmatchOverlay` (at a fixed x = 324: to look at again if deathmatch is
   ever ported).
 
-**The same in both profiles** (id's behaviour, or the platform's, not a departure):
+**The same in both presets** (id's behaviour, or the platform's, not a slop option):
 - Raw mouse (`unadjustedMovement`): id's `IN_StartupMouse` switched pointer acceleration
   off.
 - Keys by their physical place: id's scancodes.
-- `r_threads`: the pixels are the same for any thread count.
+- `r_threads`: the pixels are the same for any thread count (the machine's number in
+  both presets: every thread offered, four at most on a touch screen).
 - On a touch screen the menus answer taps (a tap becomes a key id's menu takes).
 - QuakeC errors end the game: id's `Host_Error`.
 - The CD plays the player's own tracks (`cd_win.c`; with none there is no drive, as
   `cd_null.c`).
 - A player's own `pak1.pak` goes through id's search path.
-- id's joystick (`idcontrols`; the 2026 pad is the default in both profiles) has a few small
+- id's joystick (`idcontrols`; the slop pad is the default in both presets) has a few small
   departures of its own ("Input").
 
-The names still carry the old era: `wasm_*` for four of the cvars, `MenuScreen::Extras`
-and `EXTRAS_*` in the menu code. Renaming them needs `config.cfg` aliases (Open, "Code").
+The names still carry the old era in two cvars, `wasm_showfps` and `wasm_scaled2d`
+(`wasm_uncapped` became `host_maxfps` and `wasm_exactpersp` `r_perspspan`, the old names
+kept as views onto them; the settings screens' `MenuScreen::Extras` and `EXTRAS_*` are
+`SlopOptions` and `SLOP_*` since 2026-10-03). Renaming the two needs `config.cfg`
+aliases (Open, "Code").
 
 ## The 2026-09-26 sections
 
@@ -121,7 +166,7 @@ The 2026 push, in merge order. Each section names its branch; the merge message 
 - **QuakeC errors end the game** (`q26/server`): `PR_RunError`'s report, `Host_Error`,
   `error`/`objerror` (CENSUS L16).
 - **Settings and profiles** (`q26/settings`): Classic's controls were id's (shared with 2026 since
-  2026-10-03: "The profiles", above); `+mlook`; the crosshair; `config.cfg` as id's; one command table; the profiles.
+  2026-10-03: "The slop options", above); `+mlook`; the crosshair; `config.cfg` as id's; one command table; the profiles.
 - **Input** (`q26/input`): id's joystick; the 2026 pad; keys by place; raw mouse;
   latency.
 - **Touch, install and offline** (`q26/mobile`): `in_touch`; tappable menus; pause when
@@ -215,7 +260,7 @@ marked *(2026-06)* were not re-checked since. Struck items were closed on 2026-0
 - ~~Four control departures on by default (mouse look held while the pointer is locked,
   WASD, `f` for fullscreen, Space adding swim-up speed)~~: each a named setting (settings).
   Classic had `default.cfg`'s bindings and none of them until 2026-10-03, when the controls
-  became the player's, the same in both profiles ("The profiles", above).
+  became the player's, the same in both presets ("The slop options", above).
 - ~~The main menu does not stop the attract loop~~: it does, as `M_Menu_Main_f`
   (polish4b; the 2026-09-25 list missed it).
 - ~~`setmodel` gives alias and sprite models a zero box~~: id's box (polish4a, CENSUS L10).
@@ -294,8 +339,11 @@ marked *(2026-06)* were not re-checked since. Struck items were closed on 2026-0
   `joysidesensitivity` serves both axes; input, not fixed).
 
 **Demo playback**
-- No dynamic lights in demo playback: explosions and rockets light nothing (Round 4;
-  fix-client F13).
+- ~~No dynamic lights in demo playback: explosions and rockets light nothing (Round 4;
+  fix-client F13)~~ — ✅ demolights: a recorded demo makes the lights id's client makes,
+  slot for slot over the whole attract loop ("Demo playback draws id's dynamic lights",
+  below). What stays the port's own: the `rand()&31` in a flash's radius (id's draw is
+  stirred every host frame and differs from run to run).
 - Demo statics are drawn without the efrag test (same pixels, more work) (sim).
 - The loop wrap keeps the ambient ramp warm where id restarts it from 0 (2026-06,
   deliberate; not re-checked since the loop moved to `CL_NextDemo` on `quake/timedemo`
@@ -418,9 +466,10 @@ tracer parity; sky-name case; `push_entity`'s trigger order against `SV_Impact`;
 group syncbase (Round 2, Round 5).
 
 **Code** (the closing review's ranked list; `CODE_PLAN.md` has the plan)
-- Old-era names: the `wasm_*` cvars (`wasm_uncapped`, `wasm_showfps`,
-  `wasm_exactpersp`, `wasm_scaled2d`, `wasm_help`), `MenuScreen::Extras`, `EXTRAS_*`
-  and the `extras` automation calls. Renaming needs `config.cfg` aliases.
+- Old-era names: the `wasm_*` cvars (`wasm_showfps`, `wasm_scaled2d`; `wasm_help`) and
+  the `extras` automation calls. Renaming needs `config.cfg` aliases. (~~`wasm_uncapped`,
+  `wasm_exactpersp`, `MenuScreen::Extras`, `EXTRAS_*`~~: `host_maxfps`, `r_perspspan`,
+  `SlopOptions`, `SLOP_*`, 2026-10-03; the old cvar names stay as views.)
 - rustfmt and edition: 117 files are not rustfmt-clean, and quake-rs is still on edition
   2021 (CODE_PLAN W0a).
 - 12 rustdoc warnings in `server/` and the VM, and dead public functions (`Vm::global_ofs`,
@@ -633,7 +682,7 @@ Deferred (confirmed, with concrete plans, lower frequency / higher effort):
 - ✅ **R_MarkLights dlight BSP gating** (MED) — fixed in the ship push: per-face
   dlightbits via the faithful node recursion (+ a port-specific luxel-extent
   cache-path gate; see the session entry).
-- ⬜ **Demo explosion dlight** (LOW) — the demo path emits no dynamic lights.
+- ✅ **Demo explosion dlight** (LOW) — the demo path emitted no dynamic lights; closed on `fleet/demolights` ("Demo playback draws id's dynamic lights", below).
 
 ### Render-perf pass + Rounds 5-6
 
@@ -776,7 +825,7 @@ All HIGHs and the actionable MEDs are closed as of the 2026-06-10 ship push
 
 - **Lightless maps** (no lighting lump): Lambert instead of id's fullbright row 0
   (narrow; test maps only). Sample-less faces in lit maps: ✅ Session 7.
-- Demo explosion dlight. (~~Sound channel override only dedups within a
+- ~~Demo explosion dlight~~ (closed, `fleet/demolights`). (~~Sound channel override only dedups within a
   frame~~ — ✅ closed in Session 6: cross-frame (entity,channel) override +
   S_StopSound in the page registry, live + demo.)
 - ~~Minor sbar polish (pain-frame face anim)~~ — ✅ census F16 below; the
@@ -1575,9 +1624,10 @@ world, e1m1/e1m2/e1m3/e1m7 unless stated).
     `PerspSpan::Exact`, `--perspspan 1`): byte-identical to before (the oracle's exact
     rows are unchanged). The uncached per-pixel wall path (faces over the
     surface-cache size cap, or no colormap — never in id's maps) stays exact.
-- ✅ **`wasm_exactpersp 0|1`** (an extra, not id; default 0 — and on in the 2026 profile since
-  2026-10-03, the user's call; see the departures table. Since 2026-10-03 the setting
-  is `r_perspspan 64|32|16|8|4|1`, Classic 16 and 2026 exact (1); `wasm_exactpersp` is
+- ✅ **`wasm_exactpersp 0|1`** (an extra, not id; default 0. In the 2026 profile it was on
+  from 2026-10-03 until the user chose a span of 8 instead the same day: see the
+  departures table. Since then the setting
+  is `r_perspspan 64|32|16|8|4|1`, Classic 16 and 2026 8; `wasm_exactpersp` is
   a retired name for its two ends, read by an old `config.cfg`). The browser
   reaches the exact-perspective renderer option through a console variable.
   All of the port's opt-in extras live in one place, `quake-wasm/src/
@@ -1636,7 +1686,7 @@ earlier verify scripts).
 |---|---|---|---|
 | Uncapped framerate | `wasm_uncapped 0\|1` | `Host_FilterTime` without its 72 fps gate (same [0.001, 0.1] clamps): a host frame per display refresh (120/144 Hz run 120/144 fps). The gate itself is unchanged. | departure, opt-in via Web extras, default off |
 | Show FPS | `wasm_showfps 0\|1` | QuakeWorld's `SCR_DrawFPS`: `"%3d FPS"` in white conchars at `vid.width - len*8 - 8`, `vid.height - sb_lines - 8`, not on intermission screens. The rate is presented frames over a window of at least 1 s of `realtime` (QW shows the raw count; count/window reads a steady 60 instead of 60/61). | departure, opt-in via Web extras, default off |
-| Exact perspective | `wasm_exactpersp 0\|1` (since 2026-10-03 `r_perspspan 64\|32\|16\|8\|4\|1`, the old name its two ends) | exact perspective at every pixel of the textured walls and liquids instead of id's 16-pixel spans (`RenderOptions::exact_perspective`, `quake/w2b`'s; now `RenderOptions::persp_span`, which also has 64, 32, 8 and 4). | departure, opt-in via Web extras, default off (since 2026-10-03 Classic 16 and 2026 exact: "The profiles and the departures") |
+| Exact perspective | `wasm_exactpersp 0\|1` (since 2026-10-03 `r_perspspan 64\|32\|16\|8\|4\|1`, the old name its two ends) | exact perspective at every pixel of the textured walls and liquids instead of id's 16-pixel spans (`RenderOptions::exact_perspective`, `quake/w2b`'s; now `RenderOptions::persp_span`, which also has 64, 32, 8 and 4). | departure, opt-in via Web extras, default off (since 2026-10-03 Classic 16 and 2026 8, exact one setting away: "The slop options and the presets") |
 | Scaled 2-D layer | `wasm_scaled2d 0\|1` | the status bar, menus, console and text blown up from a 320x200 screen, the port's old layout, instead of WinQuake's 1:1 2-D layer (`draw::set_scaled_2d`, `quake/fid2d`'s). Added by the chair after this branch (`dafa2c7`, extras bit 8). | departure, opt-in via Web extras, default off |
 
 Faithful, same branch:
@@ -2576,7 +2626,7 @@ Both off is **Classic**, id's: views clamped to `MAXWIDTH`x`MAXHEIGHT`, `fov` ac
   0xFFFFF` wraps from 2048 wide. The port's `Edge::u`/`u_step` are 44.20 in an `i64`
   with id's values wherever the `int` holds them (an edge that is stepped spans two or more
   rows, so `|u_step| < w`). Every other table the C sizes by `MAXWIDTH`/`MAXHEIGHT` was
-  already a run-time `Vec` (`newedges`, `removeedges`, `DPS_MAXSPANS`, the warp's `rowptr`
+  already a run-time `Vec` (`newedges`, `DPS_MAXSPANS`, the warp's `rowptr`
   and `column`, `intsintable`); `r_maxedges`/`r_maxsurfs`/`MAXSPANS` are growable, and demo1
   at 3840x2160 peaks at 1112 edges and 392 surfaces (id's pools: 2400, 800), about what it
   needs at 640x400 (950, 378). Texture, lightmap, sky and z fixed point are in texel or
@@ -2597,7 +2647,7 @@ Both off is **Classic**, id's: views clamped to `MAXWIDTH`x`MAXHEIGHT`, `fov` ac
   faint shimmer; with hires it is 320x200's wobble at full resolution (id's to the pixel at
   320x200).
 - **Kept as they are (the look, or already fine at 4K).** The 16-pixel perspective spans
-  *(since 2026-10-03 the 2026 profile draws exact perspective instead; Classic keeps the
+  *(since 2026-10-03 the 2026 profile draws them every 8 pixels instead; Classic keeps the
   spans — the departures table)*:
   they differ from exact perspective on 8.84 / 1.20 / 0.20% of the pixels of an e1m1 view at
   320x200 / 1280x800 / 3840x2400, so affine swim fades as the resolution grows.
@@ -2741,7 +2791,7 @@ settings live in one typed value the host owns (`quake_rs::settings`), and
 `config.cfg` keeps them the id way. What that changed against id's WinQuake:
 
 - ✅ **Classic's controls were id's** (since 2026-10-03 they are the same in both profiles
-  and `idcontrols` is the way to id's: "The profiles", at the top; this entry is as of
+  and `idcontrols` is the way to id's: "The slop options", at the top; this entry is as of
   2026-09-26; closes "Decisions, not work": the four control departures, and Always Run). `default.cfg`'s bindings: `a`
   `+lookup`, `d` `+moveup`, `c` `+movedown`, `w`/`s` unbound; `cl_forwardspeed`
   / `cl_backspeed` 200; `f` unbound (the page's fullscreen key is
@@ -3016,6 +3066,9 @@ Two "look" problems the closing review found playing the 2026 default in a brows
   `menu_options.video` shot is unchanged (native rows never draw there;
   `oracle/classic_expected.txt`'s 95.49/98.80 — the port's own mode list vs
   id's grid, a pre-existing, documented difference — holds exactly).
+  *(Since 2026-10-03, `fleet/slopoptions`: no Auto row — the native rows are 1x..4x,
+  each printing the size it gives, the live one white; they show in slop or whenever
+  the picture is native; and Slop Options' Resolution row opens this screen.)*
 - **The fade dither at a big "scaled 2-D" scale: already fixed, not a
   regression.** Checked directly (not just read): `fade_screen` (`draw.rs`)
   already dithers on `screen_2d`'s own scale, not the framebuffer's raw
@@ -3611,3 +3664,232 @@ past 600. No map of id1 or either pack needs it. Its docs and console help say s
 - `CL_ParseStatic`'s `MAX_STATIC_ENTITIES` (128, "Too many static entities") is not
   modelled. No map checked reaches it: `r1m1`'s 106 statics are the packs' most, and
   the shareware maps have at most 44 (`e1m3`).
+
+## Demo playback draws id's dynamic lights (2026-10-03, branch `fleet/demolights`)
+
+AUDIT's open item "no dynamic lights in demo playback" (Round 4, fix-client F13).
+In id's client a recorded demo is lit as live play is: `CL_RelinkEntities` makes a
+light for every relinked entity with `EF_MUZZLEFLASH`, `EF_BRIGHTLIGHT` or
+`EF_DIMLIGHT` (the view entity's flash included) and for a model flagged `EF_ROCKET`,
+`CL_ParseTEnt` one for `TE_EXPLOSION` and `TE_EXPLOSION2`, and `CL_DecayLights` runs
+after every frame. The port's demo path made none, in both profiles: the attract
+loop, the first thing a visitor sees, was darker than id's wherever a shotgun, a
+rocket or a grenade went off (`cl_demo.rs`: "EF_ROCKET's dlight is not drawn").
+
+**What is shared.** Not a second feed of the walk's lights, but the same calls. The C
+spells each light once, where it is made; so does the port, in `dlight.rs`:
+`DynamicLights::relink_effects` (the three effect bits, in the C's order and with its
+`rand()&31`), `relink_rocket` and `explosion`, and `spawn_temp_entity` (the shared
+`CL_ParseTEnt` half) takes the pool, so a temp entity's particles, light and sound are
+one call. `walk_frame` and `render_demo_frame` both call them; the walk's edicts reach
+`relink_effects` through `Server::lit_entities` (which replaces `entity_dlights` and
+its `EntityDlight` structs: the derivation of a light from `effects` lives in one
+place), the demo's entities through their snapshots. `playtest`'s own simplified TE
+code (a dev report) now agrees that the tarbaby's blob has no light.
+
+**What the demo does with them.**
+- Each relinked entity's lights are made at the origin and angles it is relinked at
+  (`CL_LerpPoint`'s fraction: a light follows its entity between messages), in entity
+  order with the view entity in its place; a static is never relinked, so lights
+  nothing. The view entity's angles (the way the recorded player faces, which aim its
+  flash) are now recorded (`DemoFrame::view_entity_angles`).
+- Temp entities spawn their light as the message is read, at the clock it is read at.
+- `die` and the death test use `cl.time` as the C has it: a `double` clock against a
+  `float` `die` (`DynamicLights` takes `f64`). In a demo `cl.time` is the host's
+  running sum; the first run of the oracle comparison differed in 36 of 17,500 frames,
+  all explosions' last frames, 0.5 s on, where the float clock rounds the other way.
+  The live walk passes its float clock, widened: id's `cl.time` there is the server's
+  float.
+- The pool is id's `cl_dlights`: 32 slots cleared at the start, never freed (a dead
+  light keeps its slot and its key until something takes the slot), so `CL_AllocDlight`
+  picks the slot id's does (before: freed slots lost their keys). Decay is
+  `cl.time - cl.oldtime` after the frame is drawn; the playback starting over clears it
+  (`CL_ClearState`). `timedemo` draws them too (each message is its frame).
+- 2026's extras keep working: the torch flicker and the threaded bakes are the
+  renderer's (`a_recorded_explosion_changes_the_frame_the_same_on_any_thread_count`),
+  `r_lerpmodels`' flash snap reads the recorded effects as before, and with
+  `r_lerpmove` a monster's light follows where it is drawn (the glide), where the live
+  walk's follows the server's origin (it keeps "everything else" there).
+
+**Proof** (`oracle/README.md`, "Demo playback", "Demo lights in pixels").
+- `demo_lerp.py` compares the lights slot for slot over the 17,500 frames of the loop
+  against id's `cl_dlights` (`oracle_trace`'s new `D` lines): every frame MATCH, in all
+  four runs. Per frame the same slots, keys, origins, decays, minlights and `die`; the
+  radius exactly for the 2,145 explosion and 8,184 rocket light-frames, and a flash's
+  `200 + (rand()&31)` inside its window (the 3,410 flash light-frames; id's draw is
+  stirred every host frame and differs from run to run, the port's own draw is the
+  one thing it cannot share).
+- `demo_lights.py`, 51 demo frames in pixels (the 3-D view, 320x200, the page's
+  aspect): where the radii are exact (26 frames: explosions, rockets) the port's
+  playback frame is id's to 99.96-100.00% (min / median 99.96 / 100.00; before, with no
+  lights, 3.72 / 95.55: `demo1:358`, a grenade's first frame, 14.42 -> 100.00); with a
+  flash (25 frames) 44.53 / 90.54 against id's 99.83 / 99.99 once id's own radius is
+  handed over (before 18.17 / 65.76; `demo1:323`, the shotgun's flash, 75.65 -> 91.34 ->
+  100.00). The shortfall is the radius draw alone: the match follows the distance
+  between the port's draw and id's.
+- Unit tests: each effect's light (radius, die, decay, origin, minlight, key, the
+  jitter's window and one draw per light), the 32-slot allocation slot by slot (a dead
+  light's key still wins, the first dead slot, the fallback to slot 0, the 33rd light),
+  decay, `CL_ParseTEnt`'s lights (only the two explosions), `Server::lit_entities`, and
+  playback: the recorded flash equals the live call's light for the same entity state,
+  a light follows its entity's interpolated origin, the view entity's flash is aimed by
+  its own angles and takes its place among the entity numbers, a flash is remade every
+  frame its message holds it and outlives it by 0.1 s, a rocket's light, an explosion's
+  decay and death, timedemo and the loop wrap.
+- `classic_check` ALL PASS with `play.demo1..3`'s frame hashes re-recorded (nine
+  values: at 320x200 demo1 9 of the 22 sampled frames moved, demo2 4, demo3 13 — the
+  ones with a flash, a rocket or an explosion in view); the demos' sound tallies and
+  every walk, fire and quad hash unchanged (the live walk's lights are made by the same
+  calls and the pool's slot order does not reach a pixel), and goldens, timedemo, census,
+  edicts, oracle, screen2d, demolerp and sound as before.
+
+**Not done.** A frame's flash radius is the port's own `rand()&31`: the match with id's
+frame cannot be exact where one is in view, as it cannot be between two runs of id's own
+game. Mission-pack demos were not run (the id1 attract loop is the only recorded
+stream in the tree).
+
+**Cost and the browser checks** (under the fleet's `measure` lock; timings are noisy).
+`timedemo` at 640x400, the same machine interleaved before / after, median of five:
+demo1 1247 -> 1207 fps (-3.2%), demo2 1335 -> 1326 (-0.7%), demo3 1305 -> 1231 (-5.7%);
+the frame counts are id's (969, 985, 1090). The lit surfaces rebuild their lightmaps
+every frame a light touches them, as in live play (`PERF_PLAN.md` A2). `quaketool
+framerate --check` passes; the browser's `verify_demo` (11 checks), `verify_timedemo`
+(31, its 969 frames at 640x400 included) and `verify_walk` pass.
+
+## Slop Options, two presets, machine-picked numbers, a frame-rate cap (2026-10-03, branch `fleet/slopoptions`)
+
+The user's settled design (`fleet/slop-options-design.md` in the chair's round): no
+"profile" one is in, but two fixed presets one resets to; no "auto" values, but numbers
+the machine picks at start; the resolution chosen in one place; a frame-rate cap in place
+of an on/off; the port's pages called "Slop Options". "The slop options and the presets",
+at the top, is the result; here what changed, and what moved against id.
+
+- **id's Options screen, two explained differences more** (`menu.rs`, `OPTIONS_LABELS`):
+  rows 0–12 stay where id put them (the `screen2d` oracle reaches Video Options in twelve
+  presses on both sides). Row 2, id's "Reset to defaults" (`exec default.cfg`), reads
+  **"Reset to slop"** — the user's wording: the port's defaults are the slop preset, and
+  the row sets everything, keys and id's Options too, after a question (id's row asked
+  nothing). Row 13, the port's row since 2026-09-25 (in the slot of `_WIN32`'s "Use
+  Mouse"), reads **"Slop Options"**, its value where the settings stand (`classic`
+  there); a **15th row, "Reset to Classic"**, sits under it at y=144, the last row the
+  plaque spans. `oracle/classic_expected.txt`'s Options shots were re-recorded for it,
+  those four values alone: `menu_options.options` 99.05 → 97.38% at 320x200, 99.74 →
+  99.28% at 640x400 (1473 px off id's, was about 531); `menu_disconnected.options` 98.56 →
+  97.10% and 99.18 → 98.82% (1854 / 3015 px, was 919 / 2108). Every other value of
+  `classic_check` is unchanged (goldens `4807aaa1 9ae2b478 c65b7046`, the 42 play hashes,
+  the timedemo counts, census, edicts, the eight 3-D oracle rows, demolerp, the mixer).
+- **The questions.** New Game's `SCR_ModalMessage` is one asking state now
+  (`menu::Question`): New Game's, "Reset everything to the slop / preset: keys, Options,
+  video? / Saved games stay." and "Reset every slop option to / the Classic preset? Your
+  keys / and Options stay." — "preset" goes in the box because the label column holds 18
+  characters. y answers yes, n or Escape no, by key number as id's; on a phone the page's
+  YES and NO buttons press those keys (`verify_touch.py`).
+- **No frame bigger than the memory holds** (`quake-wasm/src/vid.rs`,
+  `MAX_FRAME_PIXELS` = 12 million pixels). Measured with a growable threads build in
+  headless Chromium (its memory's size is the heap's high-water mark), 1x on 8 threads,
+  e1m1, e1m3, e1m4 and e1m7 each turned all the way round: a page started at a size holds
+  1920x920 56 MB, 3840x2000 145, 5120x2720 286, 6400x3440 437, 7680x4160 623 — about 26 MB
+  and 19 bytes a pixel, so 8K at 1x does not fit the threads build's fixed 512 MiB (537
+  MB). A resize keeps the old frame's memory beside the new one: 4800x2880 then
+  5120x3200 reached 618 MB where a page started at 5120x3200 takes 333, so the limit is
+  what two frames hold, a window's and its fullscreen's: 26 + 2 x 19 x 12 = 482 MB. Past
+  it the next pixel size (the player's own pick too): 4K and a 5120x2160 ultrawide draw at
+  1x, 5K, 6K and 8K at 2x. Not measured: the registered maps and the mission packs here
+  (PLATFORM.md's numbers had them within 10 MB of id1's at 4K), and a window dragged larger
+  through many sizes (each new largest size may add its own frame's memory, as above).
+- **The frame-rate cap** (`host_maxfps`, `client::host::FrameCap`): 72 is
+  `Host_FilterTime`'s gate exactly as `wasm_uncapped 0` ran it, so Classic's timing is
+  unchanged (`quaketool framerate --check` passes; the timedemo counts are unchanged);
+  none (0) is the old uncapped path; 60..240 keep the uncapped timing and, for now, draw
+  as none does: holding them to their rate is the page's frame loop's part, the branch's
+  second stage.
+- **Threads and the pixel size are numbers** (`r_threads` at least 1, `vid_pixelsize`
+  1..4): `render::Threads::{Auto, Count}`, quake-wasm's `auto_pixel_budget` and
+  `phone_sized` (the devicePixelRatio guess) went. A desktop with a dense screen draws at
+  1x on every thread now where Auto chose 2x on 1-3 threads; a phone at 2x on four
+  threads once the page says `-touch`.
+
+### The second stage (2026-10-04): the page's machine, the caps, the memory
+
+- **One touch-screen test.** The page passes `-touch` from `touchScreen` (a coarse
+  primary pointer, or `?touch`), the test its touch controls and its pacing's lines
+  (`pacing.scarceCores`) already used: a touch screen starts at 2x, at most four threads
+  (`settings::Machine::TOUCH_THREADS`, which takes over `fleet/opt-phone`'s
+  `PHONE_AUTO_THREADS` and its measurements; a coarse-pointer tablet now gets four too)
+  and the 60 fps cap. `vid::render_threads` stays the one place the frame reads the count.
+- **The caps other than 72 and none** (`client::host::host_filter_time_capped`): a frame
+  on the first refresh at least 1/cap after the last one, less 5% for a refresh's time a
+  hair early. 60 on a 120 Hz display is every second refresh, evenly (id's 72 gate there
+  gave an Android phone an uneven 60, about 270 gaps over 20 ms in 45 s); a cap above the
+  display's rate draws every refresh; 60 on 144 Hz draws every third (48). 72 is still
+  `Host_FilterTime`'s gate, so Classic is untouched (`framerate --check`, the goldens, the
+  oracle).
+- **The address's preset applies only when it differs** (`sys.rs`, `address_preset`):
+  `?classic` / `?slop` are `-preset NAME`, applied after `config.cfg` only when the stored
+  settings were last set to the other preset; the console's `preset` always applies.
+- **A window's frames are bounded.** The threads build allocates every frame-sized buffer
+  once, for the largest frame (`render::reserve_frames(MAX_FRAME_PIXELS)`): a grown
+  buffer used to move and leave a hole the next larger frame could not use, so a window
+  walked up to 4224x2656 through 4 to 17 sizes held 282-307 MB where a page opened there
+  held 188; reserved, 202 MB from the first frame at any size to the end of every walk.
+  The reserve is address space in a memory made whole at start. `verify_present.py` walks
+  sixteen sizes on the fixed build. (`check_fixed_memory`'s `cfg(target_feature =
+  "atomics")` is unstable, and false on stable Rust even for the threads target: the check
+  never ran; `build.rs` now names the threads build.)
+- **A frame is not held to 320x200 when a smaller pixel size fills the box**: a touch
+  screen's 2x in a box under 640x400 (Firefox's emulated phone, whose devicePixelRatio is
+  lost on an isolated page) draws at 1x, instead of a frame held to 200 rows and drawn
+  taller than its box.
+
+### The review's fix round (2026-10-04, branch `fleet/slopfix`)
+
+- **The cap holds the picture, not the game.** The second stage's cap skipped whole host
+  frames, so a cap that did not divide the display's rate ran the game below the range
+  the port proves: 60 gave 48 game frames a second on 144 Hz, 45 on 90, 37.5 on 75, and
+  52-55 on an Android phone, where `framerate --rates 36,45,48,60` and
+  `50,52,55` fail (the stairs' fall speed, a fall's damage, the lift). Now a host frame runs
+  on every refresh (`host_filter_time_display`, `Stepping::Uncapped`) and only the picture
+  is held to the cap (`FrameCap::picture_due`); the frames between run undrawn
+  (`cl_main::walk_frame_undrawn`, `cl_demo::demo_frame_undrawn`: everything but the
+  pixels). `quaketool framerate --cap 60 --check` runs each scenario's capped twin at 60,
+  72, 90, 105, 110, 120, 144 and 240 Hz: every capped value is the uncapped one at its
+  rate, exactly. (One uncapped value is outside its tolerance at 90 Hz, a rate the plain
+  `--check` does not run: the grenade's explosion point, 638.9 against 648.5 ±8.5 —
+  the game's at 90 Hz, cap or none, and FRAMERATE.md's to look at.) An undrawn frame
+  costs `framerate --budget`'s "sim": 0.04 ms against 0.98-1.82 for a whole frame on one
+  thread, so the cap keeps its heat saving.
+- **0 for `vid_pixelsize` or `r_threads` is this machine's number** (`Settings::set_cvar`),
+  not 1x or one thread, and is not written to `config.cfg`.
+- **Video Options offers only the native sizes the window can be drawn at**
+  (`menu::NativeSizes`); the white row is the one drawn (`Menu::native_row_drawn`).
+- **The standing counts the console-only slop options apart** (`settings::CONSOLE_ONLY`:
+  `sv_max_edicts`): "Yours differ in 1 console setting", "Yours: 2 rows, 1 console
+  setting".
+- **Names.** `SoundMode::Slop` ("slop"; `2026` and `modern` still parse), `JoyCvars::twin_stick`
+  (both presets' pad); the cvar `snd_modern` and the checks' `set_video modern` keep their
+  first names, which files and scripts carry.
+
+### The user's simpler menus (2026-10-04, branch `fleet/slopmenu`)
+
+After trying them, the user asked for fewer indicators and resets that reset:
+- **No standing in the menus**: no value beside Slop Options, no "Yours differ…" line under
+  its list, nothing white for differing from a preset (labels and values bronze, as id's
+  Options). The console's `preset` is the one place that says where the settings stand,
+  by name ("Yours differ from Classic in:" and the slop options that do).
+- **Both resets reset everything** to their preset on this machine (`Settings::reset`):
+  keys, id's Options, the video mode, every slop option, the name and colours; the boxes
+  read alike ("Reset everything to the Classic / preset: keys, Options, video? / Saved
+  games stay."). The console's `preset` and the address keep the gentler switch.
+- **Options' order**: id's rows without "Reset to defaults", then Slop Options, Reset to
+  Classic, Reset to slop. id's rows from Screen size on sit one higher than in id's game, so
+  the 2-D oracle's shots of this screen differ more: `menu_options.options` 97.38 -> 88.71
+  (320x200) and 99.28 -> 96.87 (640x400), 6398 px at both, was 1473;
+  `menu_disconnected.options` 97.10 -> 89.53 and 98.82 -> 96.95, 6699 / 7820 px, was
+  1854 / 3015 — re-recorded, those four values alone. The `menu_options` scenario reaches
+  Video Options in eleven presses on the port's side and id's twelve on the C's
+  (`screen2d.py`'s `id_key`); its keys and video shots compare the same screens as before
+  (0 and 2422 px), and every other expected value is unchanged.
+- **No Resolution row** on Picture and sound (8 rows): the picture's size is chosen in Video
+  Options alone, from id's row, and Escape goes back to Options.
+- **The frame-rate cap starts at none on every machine** (a touch screen too); Classic's is
+  id's 72.

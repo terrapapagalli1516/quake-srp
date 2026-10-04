@@ -92,20 +92,21 @@ impl<W: Write> Sys<W> {
         }
     }
 
-    /// `Host_Init`'s `quake.rc`: `exec config.cfg`, `stuffcmds` (the command
-    /// line's `+` commands: the page's `?classic` is `+profile classic`), then
-    /// `startdemos demo1 demo2 demo3` (the attract loop; a key brings up the
-    /// menu). The Load/Save listings are read once here too. `CDAudio_Init`
-    /// comes first: the disc is the tracks the command line names
-    /// (`-cdtracks`, the page's music files).
+    /// `Host_Init`'s `quake.rc`: `exec config.cfg`, the address's preset
+    /// (`-preset`, [`address_preset`]), `stuffcmds` (the command line's `+`
+    /// commands), then `startdemos demo1 demo2 demo3` (the attract loop; a
+    /// key brings up the menu). The Load/Save listings are read once here
+    /// too. `CDAudio_Init` comes first: the disc is the tracks the command
+    /// line names (`-cdtracks`, the page's music files).
     fn host_init(&mut self, command_line: &[String]) {
         self.audio.set_disc(quake_rs::cd_audio::Disc::from_args(command_line));
         // `config.cfg` as it stands after the exec, so the first frame writes
         // the file only when something since has changed a setting — the
-        // command line's `profile` included, which then sticks, as a choice
+        // command line's preset included, which then sticks, as a choice
         // made in the menu does.
         crate::app::ensure_app(|_| {}); // the settings exist before quake.rc runs
         self.config = exec_config().or_else(crate::config::current_text);
+        address_preset(command_line);
         crate::host_cmd::execute_console_command(&quake_rs::cmd::stuff_cmds(command_line));
         boot_attract();
         scan_saves();
@@ -167,12 +168,12 @@ impl<W: Write> Sys<W> {
                 Event::AudioWake(pos) => {
                     // S_ExtraUpdate: top the device's ring up between frames.
                     // No host frame ran, so this is not a sample for the
-                    // 2026 mixer's adaptive lead ([`Audio::mix`]).
+                    // slop mixer's adaptive lead ([`Audio::mix`]).
                     self.audio.clock(pos);
                     self.write_sound(0.0, None)?;
                     self.out.flush()?;
                 }
-                Event::Window { w, h, dpr } => crate::vid::set_window(w, h, dpr),
+                Event::Window { w, h } => crate::vid::set_window(w, h),
                 Event::Present(format) => crate::app::ensure_app(|a| a.present.set_format(format)),
                 Event::Gamepad(pad) => gamepad(pad),
                 Event::Call { id, line } => {
@@ -211,7 +212,7 @@ impl<W: Write> Sys<W> {
         let ran = step(dt as f32) != 0;
         // How long this host frame actually took: while it ran, the worker
         // could not mix, nor answer the page's AudioWake between ticks
-        // either. The 2026 mixer's lead adapts to it ([`Audio::mix`]);
+        // either. The slop mixer's lead adapts to it ([`Audio::mix`]);
         // Classic's `_snd_mixahead` ignores it.
         let host_elapsed = t0.elapsed().as_secs_f64();
         // S_Update_ every tick, even one Host_FilterTime's 72 fps cap skipped
@@ -262,7 +263,7 @@ impl<W: Write> Sys<W> {
         let flags = if pcm.clear { PCM_CLEAR } else { 0 };
         Msg::Pcm { start, rate, flags, pairs: &self.pcm_bytes }.write_to(&mut self.out)?;
         let s = self.audio.stats;
-        let mode = u32::from(self.audio.mode() == quake_rs::snd::SoundMode::Modern);
+        let mode = u32::from(self.audio.mode() == quake_rs::snd::SoundMode::Slop);
         let counts = AudioCounts {
             rate,
             mode,
@@ -284,7 +285,7 @@ impl<W: Write> Sys<W> {
         Ok(())
     }
 
-    /// The frame's rumbles (the 2026 `joy_rumble`), for the pad or a phone.
+    /// The frame's rumbles (the slop `joy_rumble`), for the pad or a phone.
     fn write_rumbles(&mut self) -> io::Result<()> {
         let (mut rumbles, mut pad) = (Vec::new(), false);
         crate::app::ensure_app(|a| (rumbles, pad) = (a.pad.take_rumbles(), a.pad.pad_read));
@@ -326,8 +327,7 @@ fn ui_state() -> UiState {
     let (native, alt_enter, pixel_size) = APP.with(|c| {
         c.borrow().as_ref().map_or((false, false, 0), |a| {
             let native = crate::vid::native(a);
-            let threads = crate::vid::render_threads(a);
-            let pixel = a.window.filter(|_| native).map_or(0, |w| crate::vid::pixel_size(&a.settings.cvars, w, a.dpr, threads));
+            let pixel = a.window.filter(|_| native).map_or(0, |w| crate::vid::pixel_size(&a.settings.cvars, w));
             (native, a.settings.cvars.alt_enter, pixel)
         })
     });
@@ -355,14 +355,31 @@ fn ui_state() -> UiState {
     (flags, crate::menu::menu_screen_id(), pixel_size)
 }
 
+/// The address's preset (`-preset NAME`: the page's `?classic`, `?slop`
+/// and the older `?2026`), applied after `config.cfg` only when it differs
+/// from the preset the stored settings were last set to: a bookmarked
+/// `?classic` gives a first visit Classic, and the player's own changes on
+/// top of it — the controls too — survive every reload. (The console's
+/// `preset`, and a `+preset` on the command line, always apply.)
+fn address_preset(command_line: &[String]) {
+    let asked = command_line.iter().position(|a| a == "-preset").and_then(|i| command_line.get(i + 1));
+    let Some(preset) = asked.and_then(|name| quake_rs::settings::Preset::parse(name)) else { return };
+    let mut stored = preset;
+    crate::app::ensure_app(|a| stored = a.settings.preset);
+    if stored != preset {
+        crate::host_cmd::execute_console_command(&format!("preset {}", preset.name()));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::proto::{encode, Record, STATE_ASK, STATE_ALT_ENTER, STATE_NATIVE, STATE_PAUSED, STATE_TOUCH};
 
     /// quake.rc's `stuffcmds`: the command line's `+profile 2026` (the
-    /// page's `?2026`; the tests start in Classic) runs after `config.cfg`,
-    /// and sticks — the first frame writes it. Without it nothing is written.
+    /// preset's old words; the tests start in Classic) runs after
+    /// `config.cfg`, and sticks — the first frame writes it, in the new
+    /// words. Without it nothing is written.
     #[test]
     fn the_command_line_runs_after_config_cfg_and_sticks() {
         let cfg = || crate::common::read_file(crate::config::CONFIG_CFG).ok();
@@ -371,9 +388,41 @@ mod tests {
         APP.with(|c| *c.borrow_mut() = None);
         let args = ["+profile".to_string(), "2026".to_string()];
         run(encode::tick(1, 0.0).as_slice(), &mut Vec::new(), &args).unwrap();
-        APP.with(|c| assert_eq!(c.borrow().as_ref().unwrap().settings.profile, quake_rs::settings::Profile::Modern));
+        APP.with(|c| assert_eq!(c.borrow().as_ref().unwrap().settings.preset, quake_rs::settings::Preset::Slop));
         let text = String::from_utf8(cfg().expect("written")).unwrap();
-        assert_eq!(text, "// generated by quake, do not modify\nprofile \"2026\"\n");
+        assert_eq!(text, "// generated by quake, do not modify\npreset \"slop\"\n");
+    }
+
+    /// The address's preset (`-preset`) applies only when it differs from
+    /// the stored settings' preset: a first `?slop` visit (the tests start
+    /// in Classic) gets slop, and on the next load the player's own change
+    /// on top of it survives; `?classic` then gives Classic. The console's
+    /// `preset` (a `+preset`) applies every time.
+    #[test]
+    fn the_address_preset_applies_only_when_it_differs() {
+        use quake_rs::client::lerpmove::LerpMove;
+        use quake_rs::render::PerspSpan;
+        use quake_rs::settings::Preset;
+        // One page load: the program's whole run on one tick, then what its
+        // settings are (the first frame has written config.cfg).
+        let load = |args: &[&str]| {
+            APP.with(|c| *c.borrow_mut() = None);
+            let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+            run(encode::tick(1, 0.0).as_slice(), &mut Vec::new(), &args).unwrap();
+            APP.with(|c| {
+                let app = c.borrow();
+                let s = &app.as_ref().unwrap().settings;
+                (s.preset, s.cvars.persp_span, s.cvars.lerpmove)
+            })
+        };
+        let slop = (Preset::Slop, PerspSpan::Spans4, LerpMove::Smooth);
+        assert_eq!(load(&["-preset", "slop", "+r_perspspan", "4"]), slop, "applied, then the player's change");
+        assert_eq!(load(&["-preset", "slop"]), slop, "the same preset: the change survives the reload");
+        assert_eq!(load(&["-preset", "2026"]), slop, "and under the old word");
+        let classic = (Preset::Classic, PerspSpan::Spans16, LerpMove::Classic);
+        assert_eq!(load(&["-preset", "classic"]), classic, "another preset applies");
+        assert_eq!(load(&["+preset", "classic", "+r_perspspan", "8"]).1, PerspSpan::Spans8);
+        assert_eq!(load(&["+preset", "classic"]).1, PerspSpan::Spans16, "the console's preset always applies");
     }
 
     /// Run the program on `input` and split what it wrote.
@@ -405,7 +454,7 @@ mod tests {
         assert_eq!(w, 960);
         assert_eq!(frames[0].payload.len(), 8 + w * h * 4);
         // The attract demo sounds: every tick's samples — the tests' Classic
-        // profile: id's mixer at 11025 Hz whatever the device — from the
+        // preset: id's mixer at 11025 Hz whatever the device — from the
         // device's position on (0.1 s ahead of it, then the ticks' worth),
         // the first clearing the ring (S_Init).
         let pcm: Vec<&Record> = recs.iter().filter(|r| r.kind == Record::PCM).collect();
@@ -469,18 +518,18 @@ mod tests {
         assert_eq!(replies, [1.0, 1.0, 0.0]);
     }
 
-    /// The 2026 profile's native resolution through the protocol: the page's
-    /// `Window` in device pixels, the picture at a whole fraction of it (Auto:
-    /// the smallest pixel that keeps a 1080p frame's cost on one thread), and
-    /// the `State` that tells the page to fill its box with that pixel size.
+    /// The slop preset's native resolution through the protocol: the page's
+    /// `Window` in device pixels, the picture at a whole fraction of it (the
+    /// pixel size, or the next one up whose frame the memory holds), and the
+    /// `State` that tells the page to fill its box with that pixel size.
     /// Classic shows its video mode in the 4:3 box whatever the window —
     /// `STATE_ALT_ENTER` stays set even there, a shared control now, not the
     /// engine (`quake_rs::settings`'s module docs).
     #[test]
-    fn the_window_sets_a_native_picture_in_2026_and_nothing_in_classic() {
-        let frame_and_state = |profile: &str, win: (u32, u32)| {
+    fn the_window_sets_a_native_picture_in_slop_and_nothing_in_classic() {
+        let frame_and_state = |preset: &str, win: (u32, u32)| {
             let mut input = Vec::new();
-            input.extend(encode::call(1, &format!("exec profile {profile}; r_threads 1")));
+            input.extend(encode::call(1, &format!("exec preset {preset}; r_threads 1")));
             input.extend(encode::window(win.0, win.1));
             input.extend(encode::tick(1, 0.0));
             input.extend(encode::tick(2, 0.0));
@@ -490,15 +539,16 @@ mod tests {
             let state = recs.iter().rev().find(|r| r.kind == Record::STATE).unwrap();
             (w, h, state.u32_at(0) & (STATE_NATIVE | STATE_ALT_ENTER), state.u32_at(8))
         };
-        assert_eq!(frame_and_state("2026", (1920, 1080)), (1920, 1080, STATE_NATIVE | STATE_ALT_ENTER, 1));
-        assert_eq!(frame_and_state("2026", (3840, 2160)), (1920, 1080, STATE_NATIVE | STATE_ALT_ENTER, 2), "4K: 2x2 pixels");
-        assert_eq!(frame_and_state("2026", (5120, 2880)), (1706, 960, STATE_NATIVE | STATE_ALT_ENTER, 3), "5K: 3x3");
-        assert_eq!(frame_and_state("2026", (1300, 700)), (1300, 700, STATE_NATIVE | STATE_ALT_ENTER, 1), "any aspect");
+        assert_eq!(frame_and_state("slop", (1920, 1080)), (1920, 1080, STATE_NATIVE | STATE_ALT_ENTER, 1));
+        assert_eq!(frame_and_state("slop", (3840, 2160)), (3840, 2160, STATE_NATIVE | STATE_ALT_ENTER, 1), "4K: 1x");
+        assert_eq!(frame_and_state("slop", (5120, 2880)), (2560, 1440, STATE_NATIVE | STATE_ALT_ENTER, 2), "5K: 2x, what the memory holds");
+        assert_eq!(frame_and_state("slop", (1300, 700)), (1300, 700, STATE_NATIVE | STATE_ALT_ENTER, 1), "any aspect");
         assert_eq!(frame_and_state("classic", (1920, 1080)), (960, 600, STATE_ALT_ENTER, 0), "the mode, in the 4:3 box; Alt+Enter is a shared control, on here too");
     }
 
-    /// The flags the page's touch controls read: `in_touch` (on in 2026),
-    /// the menu waiting for y or n, the live game paused.
+    /// The flags the page's touch controls read: `in_touch` (on in both
+    /// presets, off only by hand), the menu waiting for y or n, the live
+    /// game paused.
     #[test]
     fn the_state_says_touch_a_question_and_pause() {
         let flags_after = |lines: &[&str]| {
@@ -511,8 +561,9 @@ mod tests {
             let state = recs.iter().rev().find(|r| r.kind == Record::STATE).unwrap();
             state.u32_at(0) & (STATE_TOUCH | STATE_ASK | STATE_PAUSED)
         };
-        assert_eq!(flags_after(&["exec profile 2026"]), STATE_TOUCH);
-        assert_eq!(flags_after(&["exec profile classic"]), 0);
+        assert_eq!(flags_after(&["exec preset slop"]), STATE_TOUCH);
+        assert_eq!(flags_after(&["exec preset classic"]), STATE_TOUCH, "Classic must not leave a phone unplayable");
+        assert_eq!(flags_after(&["exec in_touch 0"]), 0);
         assert_eq!(flags_after(&["boot", "menu_cancel", "exec pause"]), STATE_PAUSED);
         assert_eq!(flags_after(&["exec pause"]), 0, "unpaused");
         let quit = ["boot", "menu_up", "menu_select"];
@@ -540,7 +591,7 @@ mod tests {
     }
 
     /// The page's `Gamepad` records reach `IN_Commands` in the next host
-    /// frame: the 2026 pad's Start (`togglemenu`) opens the menu, and the
+    /// frame: the slop pad's Start (`togglemenu`) opens the menu, and the
     /// frame's `State` says so.
     #[test]
     fn a_gamepad_record_is_read_at_the_next_frame() {
@@ -549,7 +600,7 @@ mod tests {
         let mut input = Vec::new();
         input.extend(encode::call(1, "boot"));
         input.extend(encode::call(2, "menu_cancel"));
-        input.extend(encode::call(3, "exec profile 2026"));
+        input.extend(encode::call(3, "exec preset slop"));
         input.extend(encode::gamepad(Some(start)));
         input.extend(encode::tick(1, 1.0 / 60.0));
         input.extend(encode::gamepad(None));
@@ -560,24 +611,24 @@ mod tests {
         assert_eq!(states.last().map(|s| s & STATE_MENU), Some(STATE_MENU), "Start opened it: {states:?}");
     }
 
-    /// The live game in `profile` (320x200, one render thread), then a
+    /// The live game in `preset` (320x200, one render thread), then a
     /// second of `hz` display refreshes. Before refresh `i`'s tick (1-based;
     /// 0 is the boot frame's) go the `Mouse` records `records(i)` gives, a
     /// `dx` each, and after every tick a call reads the yaw the frame drew
     /// (`v_angle`: the camera turns by it, the listener faces it). A last
     /// host frame, past the 72 fps gate, draws the last records. Returns
     /// the drawn yaws, the boot frame's first.
-    fn drawn_yaws(profile: &str, hz: u32, records: impl FnMut(u32) -> Vec<f32>) -> Vec<f64> {
-        drawn_yaws_clocked(profile, hz, 1.0, records)
+    fn drawn_yaws(preset: &str, hz: u32, records: impl FnMut(u32) -> Vec<f32>) -> Vec<f64> {
+        drawn_yaws_clocked(preset, hz, 1.0, records)
     }
 
     /// [`drawn_yaws`] with the refreshes' clock off by `clock`: each tick
     /// says `clock / hz` seconds passed (a clock running at half or twice
     /// the real rate, as a wrong system clock would give the page).
-    fn drawn_yaws_clocked(profile: &str, hz: u32, clock: f64, mut records: impl FnMut(u32) -> Vec<f32>) -> Vec<f64> {
+    fn drawn_yaws_clocked(preset: &str, hz: u32, clock: f64, mut records: impl FnMut(u32) -> Vec<f32>) -> Vec<f64> {
         APP.with(|c| *c.borrow_mut() = None);
         let mut input = Vec::new();
-        input.extend(encode::call(1, &format!("exec profile {profile}; r_threads 1")));
+        input.extend(encode::call(1, &format!("exec preset {preset}; r_threads 1")));
         input.extend(encode::call(2, "boot"));
         input.extend(encode::call(3, "menu_cancel"));
         input.extend(encode::call(4, "set_resolution 320 200"));
@@ -634,16 +685,16 @@ mod tests {
     /// a 1000 Hz mouse moving 1000 counts in a second, as a browser delivers
     /// it — the counts since the last refresh summed into one `mousemove`
     /// (or split over three), a whole number each, then the refresh's tick —
-    /// at 60 to 480 Hz with the 2026 profile's uncapped frames, and in
+    /// at 60 to 480 Hz with the slop preset's uncapped frames, and in
     /// Classic behind id's 72 fps gate. The view the frames draw turns 160°
     /// each time: 0.16° a count at `sensitivity 3`. Nothing on the mouse
     /// path is per frame: `IN_MouseMove` adds each record as it comes.
     #[test]
     fn the_mouse_turns_the_view_the_same_at_any_refresh_rate() {
-        for (profile, hz, split) in
-            [("2026", 60, 1), ("2026", 144, 1), ("2026", 240, 1), ("2026", 480, 1), ("2026", 480, 3), ("classic", 60, 1), ("classic", 480, 1)]
+        for (preset, hz, split) in
+            [("slop", 60, 1), ("slop", 144, 1), ("slop", 240, 1), ("slop", 480, 1), ("slop", 480, 3), ("classic", 60, 1), ("classic", 480, 1)]
         {
-            let yaws = drawn_yaws(profile, hz, |i| {
+            let yaws = drawn_yaws(preset, hz, |i| {
                 let counts = if i == 0 { 0 } else { counts_by(i, hz) - counts_by(i - 1, hz) };
                 (0..split)
                     .map(|part| counts / split + u32::from(part == split - 1) * (counts % split))
@@ -652,7 +703,7 @@ mod tests {
                     .collect()
             });
             let t: f64 = turns(&yaws).iter().sum();
-            assert!((t + 160.0).abs() < 0.01, "{profile} at {hz} Hz, {split} event(s) a refresh: turned {t}°, not 160° right");
+            assert!((t + 160.0).abs() < 0.01, "{preset} at {hz} Hz, {split} event(s) a refresh: turned {t}°, not 160° right");
         }
     }
 
@@ -661,20 +712,20 @@ mod tests {
     /// pixels: a count is 0.8 of one at 125%; macOS reports points): 1000
     /// events of 0.3 counts from a 1000 Hz mouse turn the view 48° (0.16° a
     /// count) at 60 and at 480 Hz, a record per event or a refresh's events
-    /// summed, in both profiles, and 1000 of a hundredth of a count 1.6°.
+    /// summed, in both presets, and 1000 of a hundredth of a count 1.6°.
     /// Nothing on the path rounds: the record is an f32, `IN_MouseMove`
     /// multiplies it in f32 (no `(int)` mickeys, no `m_filter`), and the
     /// yaw only rounds to its own step ([`yaw_rounding`]).
     #[test]
     fn fractional_mouse_counts_turn_the_view_in_full_at_any_refresh_rate() {
         for (counts, want) in [(0.3, 48.0), (0.01, 1.6)] {
-            for profile in ["2026", "classic"] {
+            for preset in ["slop", "classic"] {
                 for hz in [60, 480] {
                     for coalesce in [false, true] {
-                        let t: f64 = turns(&drawn_yaws(profile, hz, mouse_1000hz(hz, counts, coalesce))).iter().sum();
+                        let t: f64 = turns(&drawn_yaws(preset, hz, mouse_1000hz(hz, counts, coalesce))).iter().sum();
                         assert!(
                             (t + want).abs() < yaw_rounding(1000),
-                            "{profile} at {hz} Hz, 1000 events of {counts} counts (coalesced: {coalesce}): turned {t}°, not {want}° right"
+                            "{preset} at {hz} Hz, 1000 events of {counts} counts (coalesced: {coalesce}): turned {t}°, not {want}° right"
                         );
                     }
                 }
@@ -685,7 +736,7 @@ mod tests {
     /// The frame clock is not in the turn: the same 1000 records (of 0.3
     /// counts, and of 2) from a 1000 Hz mouse turn the view 48° (320°)
     /// with the refreshes at 60, 240, 480 and 1000 Hz, and with each tick's
-    /// time reported at half and at twice the real one, in both profiles.
+    /// time reported at half and at twice the real one, in both presets.
     /// `IN_MouseMove` has no time in it (`viewangles[YAW] -= m_yaw *
     /// mouse_x`, a record at a time); the clock decides only which frame
     /// draws a record, and how many frames there are (at half the clock,
@@ -695,13 +746,13 @@ mod tests {
     #[test]
     fn the_turn_does_not_depend_on_the_frame_clock() {
         for (counts, want) in [(0.3, 48.0), (2.0, 320.0)] {
-            for profile in ["2026", "classic"] {
+            for preset in ["slop", "classic"] {
                 for hz in [60, 240, 480, 1000] {
                     for clock in [0.5, 1.0, 2.0] {
-                        let t: f64 = turns(&drawn_yaws_clocked(profile, hz, clock, mouse_1000hz(hz, counts, false))).iter().sum();
+                        let t: f64 = turns(&drawn_yaws_clocked(preset, hz, clock, mouse_1000hz(hz, counts, false))).iter().sum();
                         assert!(
                             (t + want).abs() < yaw_rounding(1000),
-                            "{profile} at {hz} Hz, the clock at {clock}x: 1000 events of {counts} counts turned {t}°, not {want}° right"
+                            "{preset} at {hz} Hz, the clock at {clock}x: 1000 events of {counts} counts turned {t}°, not {want}° right"
                         );
                     }
                 }
@@ -709,8 +760,8 @@ mod tests {
         }
     }
 
-    /// What the drawn frame shows of a steady mouse: at 480 Hz in the 2026
-    /// profile, one count (then two) before every refresh turns every
+    /// What the drawn frame shows of a steady mouse: at 480 Hz in the slop
+    /// preset, one count (then two) before every refresh turns every
     /// drawn frame by exactly 0.16° (0.32°): the camera's yaw is the
     /// frame's `cl.viewangles`, never a 72 Hz step or an interpolation of
     /// it. Classic, behind id's 72 fps gate, draws at most 72 of the 480
@@ -718,10 +769,10 @@ mod tests {
     #[test]
     fn every_frame_draws_the_mouse_turn_so_far() {
         for per_refresh in [1, 2] {
-            let yaws = drawn_yaws("2026", 480, |i| if (1..=480).contains(&i) { vec![1.0; per_refresh] } else { Vec::new() });
+            let yaws = drawn_yaws("slop", 480, |i| if (1..=480).contains(&i) { vec![1.0; per_refresh] } else { Vec::new() });
             let want = -0.16 * per_refresh as f64;
             for (i, t) in turns(&yaws)[..480].iter().enumerate() {
-                assert!((t - want).abs() < 1e-4, "2026, {per_refresh} count(s) a refresh: frame {} turned {t}°, not {want}°", i + 1);
+                assert!((t - want).abs() < 1e-4, "slop, {per_refresh} count(s) a refresh: frame {} turned {t}°, not {want}°", i + 1);
             }
         }
         let yaws = drawn_yaws("classic", 480, |i| if (1..=480).contains(&i) { vec![1.0] } else { Vec::new() });
@@ -739,19 +790,19 @@ mod tests {
     /// However far the player has turned, a small delta turns the view in
     /// full: after 100 turns to the right (36000°: 225 records of 1000
     /// counts), 1000 events of a tenth of a count still turn it 16°, and of
-    /// a hundredth 1.6°, in both profiles. Left at -36000°, an f32 yaw's
+    /// a hundredth 1.6°, in both presets. Left at -36000°, an f32 yaw's
     /// step is 2^-8°: the tenths turned it 15.6° (2% short) and the
     /// hundredths not at all.
     #[test]
     fn a_small_mouse_delta_turns_the_view_after_any_number_of_turns() {
         for (counts, want) in [(0.1, 16.0), (0.01, 1.6)] {
-            for profile in ["2026", "classic"] {
+            for preset in ["slop", "classic"] {
                 let fine = mouse_1000hz(480, counts, false);
-                let yaws = drawn_yaws(profile, 480, |i| if i == 0 { vec![1000.0; 225] } else { fine(i) });
+                let yaws = drawn_yaws(preset, 480, |i| if i == 0 { vec![1000.0; 225] } else { fine(i) });
                 let t: f64 = turns(&yaws).iter().sum();
                 assert!(
                     (t + want).abs() < yaw_rounding(1000),
-                    "{profile}, 100 turns in: 1000 events of {counts} counts turned {t}°, not {want}° right"
+                    "{preset}, 100 turns in: 1000 events of {counts} counts turned {t}°, not {want}° right"
                 );
             }
         }

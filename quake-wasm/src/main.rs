@@ -30,7 +30,7 @@
 //! | `sys`       | sys_win.c `main`                        | the loop: events in, a host frame per tick, frames and sound out |
 //! | `proto`     | —                                       | the records on stdin and stdout                  |
 //! | `automation`| —                                       | the protocol's calls: the page's buttons, the browser checks' hooks |
-//! | `common`    | common.c `COM_InitFilesystem`           | `-basedir`, the game directory, `pak0.pak`, the game's own files (and `main`'s `-hwthreads`, the threads the host offers) |
+//! | `common`    | common.c `COM_InitFilesystem`           | `-basedir`, the game directory, `pak0.pak`, the game's own files (and `main`'s machine: `-touch`, `-hwthreads`) |
 //! | `config`    | host.c `Host_WriteConfiguration`        | `config.cfg`: the settings' changes, written on change, exec'd at startup |
 //! | `app`       | host.c, client.h                        | the `App` (host state around the client's `Walk`/`DemoPlay`: the settings, menu, console, clocks), menu assets, the client's level loads with their sound calls carried out, the boots |
 //! | `host`      | host.c `Host_Frame`                     | `step`: the frame gate (id's 72 fps, or every refresh stepped as 72 Hz runs), the mode's client frame, the menu/console overlays, the fps readout, the frame's palette (`V_UpdatePalette`) |
@@ -43,7 +43,7 @@
 //! | `console`   | console.c, keys.c `Key_Console`         | console toggle and typing                        |
 //! | `host_cmd`  | cmd.c `Cmd_ExecuteString`               | the console's command table, `Cvar_Command`, `bind`, `map` (the loads and cheats: `client::host_cmd`) |
 //! | `savegame`  | host_cmd.c `Host_Savegame_f`/`_Loadgame_f`, menu.c `M_ScanSaves` | save/load as `.sav` files |
-//! | `snd_dma`   | snd_win.c                               | the sound device: the client's sound calls into id's mixer (`quake_rs::snd::Mixer`), mixed ahead of the page's audio clock into `Pcm` records for its ring and AudioWorklet; the mixer follows the `snd_modern` setting (Classic: id's at 11025 Hz; 2026: the device's rate) |
+//! | `snd_dma`   | snd_win.c                               | the sound device: the client's sound calls into id's mixer (`quake_rs::snd::Mixer`), mixed ahead of the page's audio clock into `Pcm` records for its ring and AudioWorklet; the mixer follows the `snd_modern` setting (Classic: id's at 11025 Hz; slop: the device's rate) |
 //! | `vid`       | vid_win.c                               | the picture's size (a mode in a 4:3 box, or native), framebuffer, the client frames' `Vid` |
 //! | `bench`     | —                                       | `--features bench` frame-phase timers and workloads |
 //!
@@ -55,12 +55,12 @@
 //! ## Settings
 //!
 //! Every setting is in the App's [`quake_rs::settings::Settings`]: id's cvars
-//! and key bindings, and the port's departures from id's game, which two
-//! profiles switch — **2026**, the default, and **Classic**, WinQuake
-//! exactly (Options > "Classic / 2026", `profile classic|2026` on the
-//! console, `?classic` / `?2026` in the page's address). `config.cfg` in the
-//! game directory keeps the profile and whatever the player changed from
-//! it, the id way (`bind` lines and archived cvars).
+//! and key bindings, and the port's departures from id's game, its slop
+//! options, which two presets set — **slop**, the default, and **Classic**,
+//! WinQuake exactly (`preset slop|classic` on the console, `?classic` /
+//! `?2026` in the page's address). `config.cfg` in the game directory keeps
+//! the preset and whatever the player changed from it, the id way (`bind`
+//! lines and archived cvars).
 
 #![forbid(unsafe_code)]
 
@@ -94,6 +94,8 @@ mod test_util;
 mod census_tests;
 #[cfg(test)]
 mod content_tests;
+#[cfg(test)]
+mod nail_tests;
 
 use std::io::{self, BufWriter};
 use std::path::PathBuf;
@@ -108,17 +110,22 @@ fn basedir() -> PathBuf {
         .map_or_else(|| PathBuf::from("."), PathBuf::from)
 }
 
-/// The threads the host offers: `-hwthreads <n>` (`wasi.js` passes its pool
-/// of thread workers plus one), else what `std` says this machine has (1
-/// where it cannot say, as on `wasm32-wasip1`).
-fn hw_threads() -> usize {
+/// The machine the presets' numbers are built for
+/// ([`quake_rs::settings::Machine`]), from the command line: `-touch` when
+/// the page's primary pointer is coarse (a phone, a tablet), and the threads
+/// the host offers, `-hwthreads <n>` (`wasi.js` passes its pool of thread
+/// workers plus one), else what `std` says this machine has (1 where it
+/// cannot say, as on `wasm32-wasip1`).
+fn machine() -> quake_rs::settings::Machine {
     let args: Vec<String> = std::env::args().collect();
-    args.iter()
+    let threads = args
+        .iter()
         .position(|a| a == "-hwthreads")
         .and_then(|i| args.get(i + 1))
         .and_then(|n| n.parse().ok())
         .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, std::num::NonZero::get))
-        .max(1)
+        .max(1);
+    quake_rs::settings::Machine { touch: args.iter().any(|a| a == "-touch"), threads }
 }
 
 /// `-sharedframes`: the host shares the program's memory with the page
@@ -151,9 +158,11 @@ fn mod_dirs() -> (Vec<String>, bool) {
 /// The threads build's startup check: its shared memory must be the fixed
 /// size `build.rs` links (initial = maximum), or a thread may trap when
 /// another grows it (web/PLATFORM.md, "Threads"). Says so on stderr if not.
+/// (`build.rs` names the threads build: `cfg(target_feature = "atomics")`
+/// is unstable, and false on stable Rust even there.)
 fn check_fixed_memory() {
-    #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
-    {
+    #[cfg(target_arch = "wasm32")]
+    if option_env!("QUAKE_WASM_THREADS").is_some() {
         let have = core::arch::wasm32::memory_size::<0>() as u64 * 65536;
         match option_env!("QUAKE_WASM_FIXED_MEMORY").and_then(|v| v.parse::<u64>().ok()) {
             Some(want) if have == want => {}
@@ -163,8 +172,21 @@ fn check_fixed_memory() {
     }
 }
 
+/// A fixed memory (the threads build's) allocates its frames' buffers once,
+/// each for the largest frame there is ([`vid::MAX_FRAME_PIXELS`]): a
+/// buffer that grew with the window would leave a hole the next larger
+/// frame's cannot use, and the memory cannot grow past it
+/// (`quake_rs::render::reserve_frames`). A growable memory grows as the
+/// frames need.
+fn reserve_frames() {
+    if option_env!("QUAKE_WASM_FIXED_MEMORY").is_some() {
+        quake_rs::render::reserve_frames(vid::MAX_FRAME_PIXELS);
+    }
+}
+
 fn main() -> ExitCode {
     check_fixed_memory();
+    reserve_frames();
     // IN_StartupJoystick's `-nojoy`: no pad is ever read.
     let nojoy = std::env::args().any(|a| a == "-nojoy");
     // COM_InitFilesystem: a Sys_Error here (a pack that is not one, a
@@ -180,7 +202,9 @@ fn main() -> ExitCode {
         }
     };
     app::ensure_app(|a| {
-        a.hw_threads = hw_threads();
+        // The presets' numbers for this machine, before `config.cfg` says
+        // what the player changed from them (`sys::run`'s quake.rc).
+        a.settings = quake_rs::settings::Settings::new(app::START_PRESET, machine());
         a.present = present::Present::new(shared_frames());
         for line in log {
             a.console.println(line);

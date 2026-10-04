@@ -31,7 +31,9 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 PROJECT = HERE.parent
-ORACLE = PROJECT / "oracle" / "build" / "quake-oracle"
+sys.path.insert(0, str(PROJECT / "oracle"))
+from oraclebin import ORACLE_BIN as ORACLE, ensure_oracle  # noqa: E402
+
 PAK = PROJECT / "quake-data" / "ID1" / "PAK0.PAK"
 
 
@@ -67,9 +69,7 @@ def main():
         else:
             lines.append(c)
     lines.append("oracle_quit")
-    if not ORACLE.exists():
-        print("building the C oracle (oracle/build.sh) ...", file=sys.stderr)
-        subprocess.run([str(PROJECT / "oracle" / "build.sh")], check=True)
+    ensure_oracle()
     with tempfile.TemporaryDirectory(prefix="oracle-base-") as tmp:
         base = Path(tmp)
         (base / "id1").mkdir()
