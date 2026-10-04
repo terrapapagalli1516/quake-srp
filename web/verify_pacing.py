@@ -1,38 +1,54 @@
 #!/usr/bin/env -S uv run --with playwright --script
 """Verify how a refresh gets its frame (index.html's `pacing`; PLATFORM.md,
-"A frame"), in headless Chromium:
+"A frame"), in a headless browser. A refresh waits for a quick frame and
+does not wait for a slow one; where the line lies depends on the device:
 
-  1. quick frames: the refresh that asks for a frame waits for it and shows
+  A desktop (the wait's spin is one core of many):
+  1. quick frames: the refresh that asks for a frame waits for it and draws
      it (the wait is the frame's whole time; a frame a refresh);
-  2. slow frames (`stall_ms`, a frame longer than a refresh): within two
-     seconds the refresh stops waiting (`quake.pacing.relaxed`; the main
-     thread's wait is nothing), and the program draws back to back: the
-     frames shown a second are what its frame time allows, not one every
-     other refresh;
-  3. quick again: the wait is back within two seconds;
-  4. input still reaches the canvas and is measured (the latency probe: a
-     key's time to the present of the frame that consumed it is at least the
-     frame's own time, with the wait and without);
-  5. a browser without `Atomics.waitAsync` waits always, as before;
-  6. `?wait` in the address: slow frames are waited for too;
-  7. no console errors.
+  2. frames longer than a refresh but shorter than the wait's limit (30 ms)
+     are still waited for: not waiting would only show them later;
+  3. frames the wait would give up on: the refresh stops waiting (the main
+     thread's wait is nothing), and the program draws back to back — the
+     frames shown a second are what its frame time allows;
+  4. quick again: the wait is back.
+
+  A touch screen (the spin takes a core the game needs; `pacing.scarceCores`,
+  set from the page's touch-screen test):
+  5. a frame over 0.8 of a refresh is not waited for, and still a frame a
+     refresh is shown; a frame longer than a refresh is drawn back to back;
+  6. quick again: the wait is back.
+
+  Everywhere:
+  7. input reaches the canvas and is measured (the latency probe: a key's
+     time to the draw of the frame that consumed it is never under a frame's
+     own time, with the wait and without);
+  8. a browser without `Atomics.waitAsync` waits always, as before;
+  9. `?wait` in the address: slow frames are waited for too;
+  10. the page takes a touch screen for one (`?touch`; an emulated phone in
+      Chromium), and a desktop for none;
+  11. no console errors.
 
 `stall_ms` makes a host frame slow on demand and exists only in a
 `--features bench` build (verify_audio_resilience.py says why and how to
 build one). On a plain build the frames cannot be made slow, so the page is
-told to stop waiting instead (`quake.pacing.force`): the same checks of the
-relaxed refresh with quick frames, without the switch on the frame's time
-(said in the output).
+told to stop waiting instead (`quake.pacing.force`): the checks of the
+relaxed refresh with quick frames, without the lines (said in the output).
+
+The waits for a mode to change are generous (the machine may be busy); the
+frame times compared are the ones of the same stretch of frames, so a busy
+machine moves both sides alike.
 
 Usage: verify_pacing.py [deploy-dir]   (a `--features bench` build checks it all)
 """
-import statistics, sys, time
+import os, statistics, sys, time
 from playwright.sync_api import sync_playwright
 import isolated
 
 WEB = isolated.webdir()
 PORT = isolated.port(8573)
 httpd = isolated.serve(WEB, PORT)
+CHROMIUM = os.environ.get("QUAKE_BROWSER", "chromium") == "chromium"
 
 passed, failed = 0, 0
 def check(name, ok, detail=""):
@@ -41,7 +57,12 @@ def check(name, ok, detail=""):
     if ok: passed += 1
     else: failed += 1
 
-STALL_MS = 25          # with the frame's own time, well past a 60 Hz refresh
+# Host frames held this long (ms; the frame's own time comes on top), against
+# a 60 Hz refresh (16.7 ms) and the wait's limit (WAIT_MS, 30 ms):
+OVER_A_REFRESH = 18    # 1.2 refreshes, well under the limit
+OVER_THE_LIMIT = 34    # the wait gives up on every frame (and two refreshes are not enough: a page that asked only at a refresh would show 20 a second, not 28)
+MOST_OF_A_REFRESH = 13 # about 0.9 of a refresh
+SETTLE = 6.0           # seconds a mode may take to change (about 1 s on a quiet machine)
 
 # `secs` of the page's own loop: refreshes, frames shown, the main thread's
 # wait in each refresh, the program's time for each frame shown, and how many
@@ -55,6 +76,20 @@ WINDOW = """(secs) => new Promise(done => {
            relaxed: L.filter(x => x.relaxed).length, refresh: quake.pacing.refresh });
   }, secs * 1000);
 })"""
+
+# Twelve key presses, and the frames drawn meanwhile: each key's time to the
+# draw of the frame that consumed it, and every frame's own time.
+KEYS = """async () => {
+  quake.latency = []; quake.dispatch = []; quake.live = [];
+  for (let i = 0; i < 12; i++) {
+    document.dispatchEvent(new KeyboardEvent('keydown', { code: 'ArrowLeft', key: 'ArrowLeft', bubbles: true }));
+    await new Promise(r => setTimeout(r, 90));
+    document.dispatchEvent(new KeyboardEvent('keyup', { code: 'ArrowLeft', key: 'ArrowLeft', bubbles: true }));
+    await new Promise(r => setTimeout(r, 90));
+  }
+  const lat = quake.latency, L = quake.live; quake.latency = null; quake.live = null;
+  return { lat, turns: L.filter(x => x.shown).map(x => x.turn) };
+}"""
 
 def boot(pg, query="?2026"):
     pg.goto(f"http://127.0.0.1:{PORT}/index.html{query}", wait_until="load")
@@ -73,22 +108,43 @@ def window(pg, secs=3.0):
     w["fps"] = w["shown"] / secs
     return w
 
-def slow(pg, bench, on):
-    """Frames slow (a bench build: `stall_ms`), or the page told not to wait."""
-    if bench:
-        pg.evaluate(f"quake.call('stall_ms', {STALL_MS if on else 0})")
-    else:
-        pg.evaluate(f"quake.pacing.force = {'true' if on else 'null'}")
+def stall(pg, ms):
+    pg.evaluate(f"quake.call('stall_ms', {ms})")
 
-def settle(pg, relaxed, secs=2.0):
+def settle(pg, relaxed, secs=SETTLE):
     """Wait for the page to take the mode; true when it did within `secs`."""
     return isolated.wait_until(pg, f"quake.pacing.relaxed === {'true' if relaxed else 'false'}", secs, raising=False)
+
+def waited(w):
+    """Every refresh of the stretch waited for its frame: none relaxed, and the wait was the frame's time."""
+    return w["relaxed"] == 0 and abs(w["wait"] - w["turn"]) < 1.0
+
+def not_waited(name, w, back_to_back):
+    """The checks of a stretch of refreshes that did not wait."""
+    check(f"{name}: every refresh ran relaxed", w["relaxed"] == w["refreshes"], f"{w['relaxed']} of {w['refreshes']}")
+    check(f"{name}: the main thread does not wait", w["wait"] < 1.0 and max(w["waits"]) < 5.0,
+          f"median {w['wait']:.3f} ms, max {max(w['waits']):.2f} ms")
+    possible = min(1000.0 / w["turn"], 1000.0 / w["refresh"]) if w["turn"] else 0.0
+    check(f"{name}: frames come as fast as the program draws them (a refresh each at most)",
+          w["fps"] >= 0.85 * possible, f"{w['fps']:.1f} shown a second, {possible:.1f} possible")
+    if back_to_back:
+        check(f"{name}: a frame takes longer than a refresh", w["turn"] > w["refresh"], f"{w['turn']:.1f} ms")
+
+def keys(pg, name):
+    """The latency probe: no key reaches the canvas sooner than a frame takes (the quickest frame of the
+    same stretch: a key is consumed by one of them, and waits for it whole)."""
+    k = pg.evaluate(KEYS)
+    lat, turns = k["lat"], [t for t in k["turns"] if t > 0]
+    floor = min(turns) if turns else 0.0
+    check(f"{name}: keys are measured to their frame's draw", len(lat) >= 12 and min(lat) >= 0.9 * floor,
+          f"{len(lat)} samples, min {min(lat) if lat else 0:.1f} ms, median {statistics.median(lat) if lat else 0:.1f} ms, "
+          f"the quickest frame {floor:.1f} ms")
 
 with sync_playwright() as p:
     br = isolated.launch(p, ["--no-sandbox", "--autoplay-policy=no-user-gesture-required"])
     errs = []
-    def page(init=None, query="?2026"):
-        ctx = br.new_context(viewport={"width": 820, "height": 560})
+    def page(init=None, query="?2026", **context):
+        ctx = br.new_context(**{"viewport": {"width": 820, "height": 560}, **context})
         if init:
             ctx.add_init_script(init)
         pg = ctx.new_page()
@@ -102,7 +158,8 @@ with sync_playwright() as p:
     # A bench build answers stall_ms with 0; a plain one knows no such call (NaN).
     bench = pg.evaluate("quake.call('stall_ms', 0)") == 0
     if not bench:
-        print("NOTE not a --features bench build: frames stay quick, the relaxed refresh is forced")
+        print("NOTE not a --features bench build: frames stay quick, the relaxed refresh is forced, the lines are not checked")
+    check("a desktop is not taken for a touch screen", pg.evaluate("quake.pacing.scarceCores") is False)
 
     # 1. Quick frames: waited for.
     check("quick frames: the refresh waits for its frame", settle(pg, False))
@@ -111,69 +168,81 @@ with sync_playwright() as p:
     check("quick: a frame a refresh", q["shown"] >= 0.9 * q["refreshes"], f"{q['shown']} of {q['refreshes']}")
     check("quick: the wait is the frame's time", abs(q["wait"] - q["turn"]) < 0.5 and q["turn"] < 0.6 * refresh,
           f"wait {q['wait']:.2f} ms, frame {q['turn']:.2f} ms, refresh {refresh:.2f} ms")
+    keys(pg, "quick")
 
-    # 2. Slow frames: not waited for, drawn back to back.
-    slow(pg, bench, True)
-    check("slow frames: the refresh stops waiting within 2 s", settle(pg, True))
-    s = window(pg)
-    check("slow: every refresh ran relaxed", s["relaxed"] == s["refreshes"], f"{s['relaxed']} of {s['refreshes']}")
-    check("slow: the main thread does not wait", s["wait"] < 1.0 and max(s["waits"]) < 5.0,
-          f"median {s['wait']:.3f} ms, max {max(s['waits']):.2f} ms")
     if bench:
-        check("slow: a frame takes longer than a refresh", s["turn"] > refresh, f"{s['turn']:.1f} ms")
-    back_to_back = min(1000.0 / s["turn"], 1000.0 / refresh)
-    check("slow: frames come as fast as the program draws them (a refresh each at most)",
-          s["fps"] >= 0.85 * back_to_back, f"{s['fps']:.1f} shown a second, {back_to_back:.1f} possible")
+        # 2. A desktop: longer than a refresh, shorter than the wait's limit: waited for.
+        stall(pg, OVER_A_REFRESH)
+        time.sleep(3.0)
+        w = window(pg)
+        check("a desktop, frames over a refresh: still waited for", waited(w) and w["turn"] > refresh,
+              f"{w['relaxed']} of {w['refreshes']} relaxed, wait {w['wait']:.1f} ms, frame {w['turn']:.1f} ms")
 
-    # 4a. The latency probe in relaxed mode: a key reaches the canvas no
-    # sooner than a frame takes.
-    LAT = """async () => {
-      quake.latency = []; quake.dispatch = [];
-      for (let i = 0; i < 12; i++) {
-        document.dispatchEvent(new KeyboardEvent('keydown', { code: 'ArrowLeft', key: 'ArrowLeft', bubbles: true }));
-        await new Promise(r => setTimeout(r, 90));
-        document.dispatchEvent(new KeyboardEvent('keyup', { code: 'ArrowLeft', key: 'ArrowLeft', bubbles: true }));
-        await new Promise(r => setTimeout(r, 90));
-      }
-      const l = quake.latency; quake.latency = null; return l;
-    }"""
-    lat = pg.evaluate(LAT)
-    check("slow: keys are measured to their frame's present", len(lat) >= 12 and min(lat) >= 0.9 * s["turn"],
-          f"{len(lat)} samples, min {min(lat) if lat else 0:.1f} ms, frame {s['turn']:.1f} ms")
+        # 3. A desktop: frames the wait gives up on: not waited for, back to back.
+        stall(pg, OVER_THE_LIMIT)
+        check("a desktop, frames over the wait's limit: the refresh stops waiting", settle(pg, True))
+        not_waited("over the limit", window(pg), True)
+        keys(pg, "over the limit")
 
-    # 3. Quick again.
-    slow(pg, bench, False)
-    check("quick again: the wait is back within 2 s", settle(pg, False))
-    q2 = window(pg)
-    check("quick again: a frame a refresh, waited for", q2["relaxed"] == 0 and q2["shown"] >= 0.9 * q2["refreshes"]
-          and abs(q2["wait"] - q2["turn"]) < 0.5, f"{q2['shown']} of {q2['refreshes']}, wait {q2['wait']:.2f} ms")
-    lat = pg.evaluate(LAT)
-    check("quick: keys are measured too", len(lat) >= 12 and min(lat) >= 0.9 * q2["turn"],
-          f"{len(lat)} samples, median {statistics.median(lat) if lat else 0:.1f} ms")
+        # 4. Quick again.
+        stall(pg, 0)
+        check("quick again: the wait is back", settle(pg, False))
+        w = window(pg)
+        check("quick again: a frame a refresh, waited for", waited(w) and w["shown"] >= 0.9 * w["refreshes"],
+              f"{w['shown']} of {w['refreshes']}, wait {w['wait']:.2f} ms")
+
+        # 5. A touch screen: over 0.8 of a refresh is not waited for.
+        pg.evaluate("quake.pacing.scarceCores = true")
+        stall(pg, MOST_OF_A_REFRESH)
+        check("a touch screen, frames of most of a refresh: the refresh stops waiting", settle(pg, True))
+        w = window(pg)
+        not_waited("most of a refresh", w, False)
+        stall(pg, OVER_A_REFRESH)
+        time.sleep(1.5)
+        not_waited("a touch screen, over a refresh", window(pg), True)
+        keys(pg, "a touch screen, over a refresh")
+
+        # 6. Quick again.
+        stall(pg, 0)
+        check("a touch screen, quick again: the wait is back", settle(pg, False))
+        w = window(pg)
+        check("a touch screen, quick again: a frame a refresh, waited for", waited(w) and w["shown"] >= 0.9 * w["refreshes"],
+              f"{w['shown']} of {w['refreshes']}, wait {w['wait']:.2f} ms")
+    else:
+        pg.evaluate("quake.pacing.force = true")
+        check("told not to wait: the refresh stops waiting", settle(pg, True))
+        not_waited("told not to wait", window(pg), False)
+        keys(pg, "told not to wait")
+        pg.evaluate("quake.pacing.force = null")
+        check("left to itself again: the wait is back", settle(pg, False))
     pg.context.close()
 
-    # 5. No Atomics.waitAsync: the old way, always.
-    pg = page("Atomics.waitAsync = undefined;")
-    slow(pg, bench, True)
-    time.sleep(2.0)
-    o = window(pg)
-    check("no Atomics.waitAsync: slow frames are still waited for", o["relaxed"] == 0 and abs(o["wait"] - o["turn"]) < 1.0,
-          f"wait {o['wait']:.1f} ms, frame {o['turn']:.1f} ms")
-    slow(pg, bench, False)
-    pg.context.close()
+    # 8. No Atomics.waitAsync: the old way, always (as a touch screen, with slow frames, on a bench build).
+    def always_waits(name, pg):
+        if bench:
+            pg.evaluate("quake.pacing.scarceCores = true")
+            stall(pg, OVER_A_REFRESH)
+        else:
+            pg.evaluate("quake.pacing.force = quake.pacing.force === false ? false : true")
+        time.sleep(3.0)
+        o = window(pg)
+        check(f"{name}: slow frames are still waited for", waited(o), f"wait {o['wait']:.1f} ms, frame {o['turn']:.1f} ms")
+        if bench:
+            stall(pg, 0)
+        pg.context.close()
+    always_waits("no Atomics.waitAsync", page("Atomics.waitAsync = undefined;"))
 
-    # 6. ?wait: the old way by choice (a bench build makes the frames slow;
-    # on a plain one the page's choice is what is checked).
-    pg = page(query="?2026&wait")
-    if bench:
-        pg.evaluate(f"quake.call('stall_ms', {STALL_MS})")
-    time.sleep(2.0)
-    o = window(pg)
-    check("?wait: every refresh waits for its frame", o["relaxed"] == 0 and abs(o["wait"] - o["turn"]) < 1.0,
-          f"wait {o['wait']:.1f} ms, frame {o['turn']:.1f} ms")
-    if bench:
-        pg.evaluate("quake.call('stall_ms', 0)")
+    # 9. ?wait: the old way by choice.
+    always_waits("?wait", page(query="?2026&wait"))
+
+    # 10. A touch screen is taken for one.
+    pg = page(query="?2026&touch")
+    check("?touch: taken for a touch screen", pg.evaluate("quake.pacing.scarceCores") is True)
     pg.context.close()
+    if CHROMIUM:
+        pg = page(viewport={"width": 844, "height": 390}, device_scale_factor=3, is_mobile=True, has_touch=True)
+        check("an emulated phone: taken for a touch screen", pg.evaluate("quake.pacing.scarceCores") is True)
+        pg.context.close()
 
     check("no console errors", not errs, "; ".join(errs[:3]))
     br.close()
