@@ -460,6 +460,7 @@ def main():
     ap.add_argument("--touch", action="store_true", help="keep a finger moving on the screen through every row (the phone)")
     ap.add_argument("--fullscreen", action="store_true", help="put the page in fullscreen first (the phone: a key chord from Android)")
     ap.add_argument("--query", default="?2026", help="the deploy page's query")
+    ap.add_argument("--eval", default="", help="JavaScript to run in the page before the rows (an experiment's knob)")
     ap.add_argument("--port", type=int, default=isolated.port(9100))
     ap.add_argument("--json", help="append each row here, a JSON line each")
     a = ap.parse_args()
@@ -510,6 +511,8 @@ def main():
             time.sleep(2.5)
         # (A run stopped while it rested the phone leaves the page's ticks paused.)
         pg.evaluate("() => { if (quake.paused) quake.resume(); }")
+        if a.eval:
+            pg.evaluate("js => { (0, eval)(js); }", a.eval)
         name, _, values = a.cvar.partition("=")
         extras = [(name, v) for v in values.split(",") if v] if name else [None]
         saved = {n: t.cvar(n) for n in ["vid_pixelsize", "r_threads"] + ([name] if name else [])}

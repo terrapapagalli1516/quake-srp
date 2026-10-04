@@ -131,15 +131,17 @@ pub(crate) fn picture_size(cvars: &Cvars, window: Option<(u32, u32)>, dpr: f32, 
 }
 
 /// The most threads Auto (`r_threads 0`) draws on for a [`phone_sized`]
-/// screen. A phone's cores are of several kinds, and the slower ones do not
-/// help a frame that waits for its last band: on an Android phone (one fast
-/// core, four middle, three small; its browser offers 8) four threads drew
-/// every measured frame as fast as eight, or faster — `timedemo demo1` 367
-/// fps against 323 at 1320x540 and 155 against 148 at 2640x1080, cool; in
-/// play at 2640x1080 once warm the same median frame with fewer late ones
-/// (p95 16.9 ms against 20.3, 58 frames a second shown against 56) — and six
-/// were no better than four (web/PLATFORM.md, "On an Android phone"). `r_threads
-/// N` still draws on N.
+/// screen. The browser offers every core it sees, but a phone's are of two
+/// or three kinds (four or five fast ones on any current phone), the page's
+/// own thread, the compositor, the GPU process and the sound need some of
+/// them each frame, and every busy core is heat, which a phone pays back in
+/// clock. Measured on an Android phone (one fast core, four middle, three
+/// small; 8 offered), warmed up: four threads against eight
+/// showed 70-74 frames a second against 67 at 2640x1080 with a third of the
+/// late ones, and at 1320x540 took the frame's 99th percentile from 20.7 ms
+/// to 9.5 (a band's thread put off its core); three were worse, five and six
+/// no better (web/PLATFORM.md, "On an Android phone"). Other screens draw on
+/// every thread offered, and `r_threads N` on N anywhere.
 pub(crate) const PHONE_AUTO_THREADS: usize = 4;
 
 /// The threads the renderer draws with: `r_threads` against what the host

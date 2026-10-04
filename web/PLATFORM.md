@@ -83,8 +83,8 @@ AudioWorklet (audio thread): plays the sound ring, moves its clock
   (`index.html`'s `pacing`). Waiting could not show such a frame in its own
   refresh anyway, and the wait is a spin: on a phone it sat on a fast core
   for the whole frame while the game's threads had the others ("On an
-  Android phone", below: 46 frames a second shown at 2640x1080 with the wait, 57-58
-  without). The display's period is the refreshes' shortest spacing lately.
+  Android phone", below: at 2640x1080, warm, 50 frames a second shown with the wait
+  and 57 without at 60 Hz; 58 and 67 with a finger down). The display's period is the refreshes' shortest spacing lately.
   A browser without `Atomics.waitAsync` waits always. `verify_pacing.py`
   checks both ways and the switch, with frames made slow on purpose
   (`stall_ms`, a bench build).
@@ -1541,7 +1541,9 @@ larger pixel size, in Video Options, needs less" (a 96 MiB build at 4K).
 **The renderer's threads** are the cvar `r_threads` (quake-wasm `App::
 render_threads`, the typed `quake_rs::render::Threads`): 0, the default,
 takes every thread the host offers (`-hwthreads`; a `wasm32-wasip1` build,
-without threads, gets 1), n takes n. `host::step` hands the resolved count
+without threads, gets 1) — four of them at most on a phone's screen
+(`vid::render_threads`; "On an Android phone", below, has the measurements and
+the why) —, n takes n. `host::step` hands the resolved count
 to the renderer of whichever game draws the frame, every frame, so each
 `Walk` and `DemoPlay` the host builds (a boot, a load, the attract loop's
 next demo) draws with it from its first frame. A spawn the host refuses
@@ -1896,45 +1898,96 @@ shared memory — the kind of reservation iOS has refused in other wasm
 games, one more reason to give a phone the single-threaded build.
 
 **On an Android phone (2026-10-03).** The phone (an SoC with
-three slow cores, four middle, one fast; Chrome 154),
-measured over USB with `web/phone.py` (below). Played fullscreen, the
-page has a phone-sized landscape viewport: a 2640×1080 frame at a pixel
-size of 1, 1320×540 at Auto's 2; its `requestAnimationFrame` runs at 60 Hz;
-`hardwareConcurrency` is 8, so Auto draws on 8 threads. The threads build,
-the 2026 profile, demo1:
+three small cores, four middle, one fast;
+Chrome 154), measured over USB with `web/phone.py` (below). Played
+fullscreen, the page has a phone-sized landscape viewport: a 2640×1080
+frame at a pixel size of 1, 1320×540 at Auto's 2. `hardwareConcurrency` is
+8. The threads build, the 2026 profile, demo1.
 
-| | 1320×540 (Auto) | 2640×1080, exact perspective | 2640×1080, `r_perspspan 16` |
-|---|---|---|---|
-| back to back (`timedemo`), cool, 8 / 6 / 4 threads | 323 / 375 / 367 fps | 148 / 162 / 155 | 182 / – / 194 |
-| back to back, warm (the caps below), 8 threads | – | 69 | 85 |
-| in play at 60 Hz, cool (the larger frame: caps already at 1920 MHz): the frame, ms | 8.4 | 12.8 | 10.1 |
-| in play, warm, before this round's page: frame ms; frames shown a second | 11 ; 59 | 18.3 ; 50 | 15.0 ; 57 |
-| in play, warm, this round's page | 11 ; 59 | 14.6 ; 57 | 13.5 ; 58 |
-
+- **A finger on the glass doubles the frame rate.** The panel is adaptive:
+  60 Hz idle, 120 Hz while a finger moves. Chrome follows it: the page's
+  own `requestAnimationFrame` runs at 60 Hz with no finger down (also on a
+  panel held at 120 Hz: frames then show for two refreshes each, cleanly)
+  and at 105–110 Hz with one moving. So in touch play the game is asked for
+  twice the frames in half the time (8.3 ms), the fast core is busy 80–99%
+  instead of 4%, and the phone warms twice as fast. Every number below says
+  which case it is; tables made with no finger are the easy case.
 - **Heat decides.** A minute of 2640×1080 play and the phone caps its
-  cores at 1171 MHz (the four) and 1478 MHz (the fast one), 42–44% of their
-  top clocks, at a skin temperature of only 40 °C, and holds them there; a
-  frame then costs 2.2× what it does cool. Even the 1320×540 frame pulls
-  the caps down slowly (2803 → 1785 MHz in three minutes). The numbers that
-  matter are the warm ones.
-- **A frame in play costs far more than back to back**: 8.4 ms against 3
-  at 1320×540, cool. Between frames the cores idle, the scheduler keeps the
-  game's threads (each busy a fraction of the time) on the slower cores at
-  low clocks, and the fast core is left to whoever is busiest — which was
-  the page's main thread, spinning for the frame ("A frame", above). So the
-  thread count hardly matters in play: 4, 6 and 8 threads are within noise
-  of one another at both sizes (one thread: 11.8 ms against 10.5 at
-  1320×540), with a slightly better tail on 4.
-- **What this round's page changed**, on the warm phone at 2640×1080: the
-  wait gone when frames are slow, 18.3 → 14.6 ms a frame and 50 → 57 frames
-  shown a second (main's page and this one in turn, twice each, 45 s a
-  row); and the upload's order, 2.3 → 0.3 ms of the main thread whenever
-  Chromium's buffer was in its bad state ("Presentation"). Native is then
-  close to a steady 60 with `r_perspspan 16`, and short of it (57, with a
-  late frame two or three times a second) with exact perspective.
-- **Not measured:** the display at 120 Hz (the phone's adaptive mode idles
-  at 60 and boosts only while a finger moves; its settings were not
-  touched), the delay from a touch to the glass, a long session's battery.
+  middle cores at 1171 MHz and the fast one at 1478 (42–44% of their top
+  clocks) at a skin temperature of only 40 °C; half an hour of touch play
+  and they are at 940 and 1248 (41–42 °C). A frame then costs 2.2–2.7×
+  what it does cool. Even the 1320×540 frame gets there in touch play. The
+  numbers that matter are the warm ones.
+- **A frame in play costs more than back to back**: 8.4 ms against 3 at
+  1320×540, cool, at 60 Hz. Between frames the cores idle and the
+  scheduler clocks them down and keeps the game's threads on the slower
+  ones.
+- **Fewer frames, in touch play** (measured for a decision, nothing built).
+  At 1320×540 the 72 fps gate (`wasm_uncapped 0`: at a 120 Hz page, a
+  frame every second refresh) shows 61–62 a second instead of 108–115, the
+  fast core 8–26% busy instead of 65–80%, and the phone cools while it
+  plays: the caps came back from 940/1248 to 1286/1593 MHz in two minutes.
+  At 2640×1080 there is nothing to hold: a frame is longer than the gate
+  (58 shown either way), and a page that asks only every second refresh
+  shows 33, since with the gaps the cores clock down and the same frame
+  takes 24.6 ms instead of 14–17.
+
+Back to back (`timedemo demo1`), cool, 8 / 6 / 4 threads: 323 / 375 / 367
+fps at 1320×540; 148 / 162 / 155 at 2640×1080 with exact perspective; 182 /
+– / 194 with `r_perspspan 16`. Warm (1171/1478 MHz) on 8 threads: 69 exact,
+85 with span 16.
+
+In play, warm, before this round (main `4d28bd2`) → after (the page's two
+changes and Auto's four threads, below), median frame ms ; frames shown a
+second ; frames more than 20 ms apart in 45 s:
+
+| | 1320×540 (Auto) | 2640×1080, exact perspective |
+|---|---|---|
+| no finger, 60 Hz | 11 ; 59 ; 3 → the same | 18.3 ; 50 ; 365 → 14.6 ; 57 ; 133 |
+| a finger moving, 120 Hz | 7.0–8.6 ; 91–105 ; 70–79 → 6.7–7.1 ; 114–115 ; 10–13 | 16.0–18.3 ; 50–58 ; 449–798 → 13.2–14.2 ; 70–74 ; 41–76 |
+
+(Main's page and program and this branch's in turn, a kit's tab each, real
+fullscreen; the no-finger row is the page's changes alone on 8 threads.)
+With `r_perspspan 16` the 2640×1080 frame in touch play is 11.7–12.1 ms and
+82–84 are shown a second, against 14.4 and 69 exact in the same minutes.
+
+- **What changed it.** The page no longer spins for a slow frame ("A
+  frame"): the spin sat on the fast core, 97–99% busy, while the game drew
+  on the others. The upload's order ("Presentation"): 2.3 → 0.3 ms of the
+  main thread at 2640×1080. And **Auto draws a phone on four threads, not
+  eight** (`vid.rs`, `PHONE_AUTO_THREADS`): in touch play, 8 → 4 threads
+  took 2640×1080 from 67 to 70–74 frames shown a second and the late ones
+  from 116 to 41–76, and at 1320×540 the frame's 99th percentile from 20.7
+  ms to 9.5 — the 20 ms hitches twice a second were a band's thread put
+  off a core. Three threads are worse (53 a second at 2640×1080 against
+  59–64), five and six no better than four (58–59), at both sizes.
+- **Why four, and where.** The browser offers every core it sees, but a
+  frame needs some of them for the page's own thread, the compositor, the
+  GPU process and the sound; a phone's cores are of two or three kinds, of
+  which four or five are fast on any current one; and every busy core is
+  heat, which is paid back in clock. So on a phone's screen (the test Auto's
+  pixel size already makes: `devicePixelRatio` 2 or more in a box whose
+  shorter side is at most 540 CSS px) Auto takes four of the threads
+  offered at most; with fewer offered, those. Any other screen — a
+  desktop, a laptop, a tablet — draws on every thread offered, as before,
+  and `r_threads N` is N anywhere. A rule with no device in it would be
+  "half the threads offered": the same four here, and eight on this
+  16-thread desktop, where eight and sixteen measure the same; but it would
+  halve the threads of machines whose cores are all fast and unshared (an
+  Apple silicon Pro, an x86 without SMT), which nothing here could
+  measure, so it is not the rule.
+- **Presenting from a worker** (the parked `fleet/present120`) was built
+  on Chrome keeping a page's main-thread refresh at 60 on a 120 Hz panel.
+  That holds only with no finger down; in touch play the main thread
+  already gets the panel's rate, so a worker would add 120 Hz only to a
+  demo nobody touches or a gamepad, at the cost of the heat above. Not
+  finished, for this reason.
+- **Not measured:** the delay from a touch to the glass (a frame not
+  waited for is shown at the refresh after it is done: at 120 Hz at most
+  8 ms later than the wait's best case, and the wait's frame would miss
+  that refresh's deadline anyway — argued, not measured); real play (the
+  finger is `adb shell input swipe`, the game is demo1); other phones; a
+  long session's battery.
 
 **`web/phone.py`** is the kit: one command, a table — for each pixel size
 and thread count (and one more cvar's values: `--cvar r_perspspan=16,1`),
@@ -1946,14 +1999,20 @@ measures the tab already open in the phone's Chrome and puts its cvars
 back, or serves a deploy dir to the phone over `adb reverse`
 (`http://localhost` is a secure context, so the threads build runs) in a
 tab it closes after, or runs against the local Chromium (`--local`).
-`--cool` rests the phone before each timedemo until no core is capped. Two
-things it learned the hard way: a page given part of the screen measures a
+`--cool` rests the phone before each timedemo until no core is capped;
+`--touch` keeps a finger moving on the screen through every row (`adb shell
+input swipe`, in the middle of the picture, where a demo ignores it), and
+every row says the panel's refresh as SurfaceFlinger reports it. Three
+things it learned the hard way: a row with no finger measures a 60 Hz game
+the player never has; a page given part of the screen measures a
 smaller frame, so the device's state is read with every row and anything but
 the whole screen is refused; and Chrome hides its bars for a page's fullscreen
 only while no DevTools client is attached, so `--fullscreen` disconnects,
 sends the page's own Alt+Enter as a key event from Android, and connects
 again. A baseline of both pixel sizes at three thread counts with a minute
-of play each takes about 15 minutes of the phone.
+of play each takes about 15 minutes of the phone, and it must be awake and
+unlocked with Chrome in front (a moving finger keeps it awake; with none it
+sleeps at its own timeout).
 
 ## Offline and install
 
