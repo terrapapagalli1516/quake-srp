@@ -36,6 +36,7 @@
 //! id's 1996 controls are one explicit step away, never a preset:
 //! [`Cvars::with_id_controls`], the console's `idcontrols`.
 
+use crate::client::host::FrameCap;
 use crate::client::in_win::JoyCvars;
 use crate::client::lerpmodels::LerpModels;
 use crate::client::lerpmove::LerpMove;
@@ -101,10 +102,13 @@ pub struct Cvars {
     /// `_vid_default_mode_win`), shown in a 4:3 box; the Video Options list.
     /// Not used while [`Cvars::native`] is on.
     pub vid_resolution: (u16, u16),
-    /// `wasm_uncapped`: no 72 fps cap (`Host_FilterTime`); a host frame on
-    /// every display refresh, the game stepped as id's 72 Hz frames
-    /// ([`crate::stepping::Stepping::Uncapped`]).
-    pub uncapped: bool,
+    /// `host_maxfps` (QuakeSpasm's name): the most frames a second
+    /// ([`FrameCap`]). id's 72 is `Host_FilterTime`'s gate (Classic); none, a
+    /// host frame on every display refresh, the game stepped as id's 72 Hz
+    /// frames ([`crate::stepping::Stepping::Uncapped`]); a touch screen's
+    /// slop preset starts at 60 ([`crate::settings::Machine::frame_cap`]).
+    /// The retired `wasm_uncapped` still sets and reads it ([`RETIRED`]).
+    pub max_fps: FrameCap,
     /// `wasm_showfps`: QuakeWorld's frame-rate readout.
     pub show_fps: bool,
     /// `r_perspspan`: how often the walls and liquids find their texel
@@ -242,7 +246,7 @@ impl Cvars {
             d_mipscale: 1.0,
             d_mipcap: 0.0,
             vid_resolution: (960, 600),
-            uncapped: false,
+            max_fps: FrameCap::ID,
             show_fps: false,
             persp_span: PerspSpan::Spans16,
             scaled_2d: false,
@@ -293,7 +297,7 @@ impl Cvars {
         Cvars {
             viewsize: VIEWSIZE_MODERN,
             crosshair: Crosshair::Cross,
-            uncapped: true,
+            max_fps: FrameCap::NONE,
             persp_span: PerspSpan::Spans8,
             scaled_2d: true,
             sbar_layout: SbarLayout::Overlay,
@@ -529,8 +533,8 @@ pub const CVARS: &[Cvar] = &[
     Cvar { name: "_vid_resolution", archive: true, departure: false, help: "video mode WxH (4:3 box)",
         get: |c| format!("{}x{}", c.vid_resolution.0, c.vid_resolution.1),
         set: |c, v| if let Some(m) = parse_mode(v) { c.vid_resolution = m } },
-    Cvar { name: "wasm_uncapped", archive: true, departure: true, help: "no 72 fps cap",
-        get: |c| flag(c.uncapped), set: |c, v| c.uncapped = on(v) },
+    Cvar { name: "host_maxfps", archive: true, departure: true, help: "frames a second at most, 0 none",
+        get: |c| c.max_fps.cvar().to_string(), set: |c, v| c.max_fps = FrameCap::from_cvar(atof(v)) },
     Cvar { name: "wasm_showfps", archive: true, departure: true, help: "frame rate readout",
         get: |c| flag(c.show_fps), set: |c, v| c.show_fps = on(v) },
     Cvar { name: "r_perspspan", archive: true, departure: true, help: "exact every 64,32,16 (id),8,4,1 px",
@@ -615,6 +619,13 @@ const RETIRED: &[Cvar] = &[
     Cvar { name: "wasm_exactpersp", archive: false, departure: true, help: "old: 1 is r_perspspan 1, 0 is 16",
         get: |c| flag(c.persp_span == PerspSpan::Exact),
         set: |c, v| c.persp_span = if on(v) { PerspSpan::Exact } else { PerspSpan::Spans16 } },
+    // The on/off of id's 72 fps cap until 2026-10-03, now `host_maxfps`: on
+    // is none (0), off id's 72, and it reads 1 only while there is no cap.
+    // A saved `wasm_uncapped "0"` (a slop player who switched it off) runs
+    // id's gate, as it did; a saved "1" (a Classic player) runs uncapped.
+    Cvar { name: "wasm_uncapped", archive: false, departure: true, help: "old: 1 is host_maxfps 0, 0 is 72",
+        get: |c| flag(c.max_fps == FrameCap::NONE),
+        set: |c, v| c.max_fps = if on(v) { FrameCap::NONE } else { FrameCap::ID } },
 ];
 
 /// `Cvar_FindVar`: the cvar called `name` (any case, as the port's console
@@ -705,7 +716,7 @@ mod tests {
         // whatever preset it came from.
         let old = slop.clone().with_id_controls();
         assert!(!old.freelook && !old.jumpswim && !old.alt_enter && !old.always_run() && old.joy == JoyCvars::classic());
-        assert_eq!((old.uncapped, old.native, old.crosshair), (slop.uncapped, slop.native, slop.crosshair), "the engine is untouched");
+        assert_eq!((old.max_fps, old.native, old.crosshair), (slop.max_fps, slop.native, slop.crosshair), "the engine is untouched");
     }
 
     #[test]
@@ -774,6 +785,29 @@ mod tests {
         write_changes(&spans, &Cvars::slop(), &mut out);
         assert_eq!(out, "", "slop's own 8 is not written: a player who never touched it gets the preset's");
         assert_eq!(complete("r_persp"), Some("r_perspspan"));
+    }
+
+    /// `host_maxfps` is 2026-10-03's frame-rate cap; `wasm_uncapped`, the
+    /// on/off before it, still sets it from a saved config (1 none, 0 id's
+    /// 72), reads 1 only with no cap, and nothing writes or lists it.
+    #[test]
+    fn wasm_uncapped_is_the_caps_two_ends() {
+        let (id, slop) = (Cvars::classic(), Cvars::slop());
+        let cap = find("host_maxfps").expect("the cvar");
+        assert!(cap.departure && cap.archive);
+        assert_eq!((cap.get(&id), cap.get(&slop)), ("72".into(), "0".into()));
+        let old = find("WASM_UNCAPPED").expect("an old config still finds it");
+        let mut c = Cvars::slop();
+        old.set(&mut c, "0");
+        assert_eq!((c.max_fps, old.get(&c).as_str()), (FrameCap::ID, "0"), "a slop player's saved 0: id's 72");
+        let mut out = String::new();
+        write_changes(&c, &Cvars::slop(), &mut out);
+        assert_eq!(out, "host_maxfps \"72\"\n", "the next save writes the cap");
+        old.set(&mut c, "1");
+        assert_eq!((c.max_fps, old.get(&c).as_str()), (FrameCap::NONE, "1"));
+        cap.set(&mut c, "60");
+        assert_eq!(old.get(&c), "0", "60 is a cap");
+        assert!(CVARS.iter().all(|v| v.name != "wasm_uncapped") && complete("wasm_u").is_none());
     }
 
     /// `wasm_exactpersp`, the on/off before the span: a saved config's line

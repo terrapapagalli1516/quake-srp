@@ -92,6 +92,7 @@ pub(crate) fn exec_config() -> Option<String> {
 mod tests {
     use super::*;
     use crate::app::{boot, ensure_app, APP};
+    use quake_rs::client::host::FrameCap;
     use quake_rs::settings::{Machine, Preset, Settings};
 
     fn settings() -> Settings {
@@ -157,7 +158,7 @@ mod tests {
         exec_config();
         let s = settings();
         assert!(s.cvars.show_fps, "the choice is kept");
-        assert!(s.cvars.uncapped && s.cvars.scaled_2d, "the slop values are not switched off");
+        assert!(s.cvars.max_fps == FrameCap::NONE && s.cvars.scaled_2d, "the slop values are not switched off");
         assert_eq!(s.preset, Preset::Slop);
         assert_eq!(s.cvars.viewsize, 110.0, "its `viewsize 100` only restated the old default: slop's start applies");
     }

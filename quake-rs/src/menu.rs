@@ -14,6 +14,7 @@ use crate::keys::{
     keynum_to_string, Wheel, K_BACKSPACE, K_DEL, K_DOWNARROW, K_ENTER, K_ESCAPE, K_LEFTARROW,
     K_RIGHTARROW, K_UPARROW,
 };
+use crate::client::host::FrameCap;
 use crate::render::{Image, PerspSpan};
 use crate::screen::{center_string_top, Crosshair, VIEWSIZE_MAX, VIEWSIZE_MIN, VIEWSIZE_STEP};
 use crate::settings::Settings;
@@ -149,6 +150,9 @@ impl SlopPage {
 pub enum RowKind {
     /// A cvar that is on or off (`M_DrawCheckbox`); any key flips it.
     Toggle,
+    /// `host_maxfps`: `60`, `id's 72`, `120`, `144`, `240`, `none`
+    /// ([`FrameCap::STEPS`]); left and right step it, right the more frames.
+    FrameCap,
     /// The picture's size (`vid_native`, `vid_pixelsize`): shows the size the
     /// game draws at; Enter opens Video Options, the one place it is
     /// chosen; left and right change nothing.
@@ -216,10 +220,10 @@ pub const SLOP_OPTIONS_ROWS: [SettingRow; 3] = [
 /// [`SlopPage::Picture`]'s rows: the frame, then the sound.
 pub const PICTURE_ROWS: [SettingRow; 9] = [
     SettingRow {
-        cvar: "wasm_uncapped",
-        label: "    Uncapped framerate",
-        help: ["One frame every display refresh,", "past Quake's 72 fps cap"],
-        kind: RowKind::Toggle,
+        cvar: "host_maxfps",
+        label: "        Frame rate cap",
+        help: ["At most this many frames a second;", "none: one every screen refresh"],
+        kind: RowKind::FrameCap,
     },
     SettingRow {
         cvar: "vid_native",
@@ -366,6 +370,11 @@ impl SettingRow {
     /// at ([`Menu::actual_size`]), what the Resolution row shows.
     pub fn value(&self, s: &Settings, (w, h): (i32, i32)) -> String {
         match self.kind {
+            RowKind::FrameCap => match s.cvars.max_fps {
+                FrameCap::NONE => "none".to_string(),
+                FrameCap::ID => "id's 72".to_string(),
+                cap => cap.cvar().to_string(),
+            },
             RowKind::Resolution => format!("{w}x{h}"),
             RowKind::Crosshair => match s.cvars.crosshair {
                 Crosshair::Off => checkbox_text(false),
@@ -402,11 +411,13 @@ impl SettingRow {
 
     /// Left (`step` -1) or right (+1) on it, as `M_AdjustSliders` does a
     /// checkbox or a slider: a toggle or the wheel flips whatever the
-    /// direction, the crosshair (off, cross, id's +) and the perspective span
-    /// (id's 16, 8, 4, exact) step, wrapping; a slider steps, clamped at its
-    /// ends as id's are; the Resolution row and a page row change nothing.
+    /// direction, the frame-rate cap (60, id's 72, 120, 144, 240, none), the
+    /// crosshair (off, cross, id's +) and the perspective span (id's 16, 8,
+    /// 4, exact) step, wrapping; a slider steps, clamped at its ends as id's
+    /// are; the Resolution row and a page row change nothing.
     pub fn adjust(&self, s: &mut Settings, step: i32) {
         match self.kind {
+            RowKind::FrameCap => s.cvars.max_fps = s.cvars.max_fps.stepped(step),
             RowKind::Crosshair => {
                 let n = i32::from(s.cvars.crosshair.cvar()) + step;
                 s.cvars.crosshair = Crosshair::from_cvar(n.rem_euclid(3) as f32);
@@ -439,6 +450,7 @@ impl SettingRow {
     /// Its console line, the third help line (none for a page row).
     pub fn console_hint(&self) -> String {
         match self.kind {
+            RowKind::FrameCap => format!("console: {} 0 or {}-{}", self.cvar, FrameCap::MIN, FrameCap::MAX),
             RowKind::Resolution => "console: vid_native, vid_pixelsize".to_string(),
             RowKind::Crosshair => format!("console: {} 0/1/2", self.cvar),
             RowKind::PerspSpan => format!("console: {} 64/32/16/8/4/1", self.cvar),
@@ -4602,6 +4614,29 @@ mod tests {
         assert_eq!(s.cvars.persp_span, PerspSpan::Spans16, "back to Classic's");
         assert_eq!(span.console_hint(), "console: r_perspspan 64/32/16/8/4/1");
 
+        // The frame-rate cap: 60, id's 72 (Classic's), 120, 144, 240, none
+        // (slop's on a desktop), right the more frames, wrapping; a number
+        // set on the console between the steps steps to its neighbours.
+        let cap = on_row(&mut m, "host_maxfps");
+        assert_eq!((row_of("host_maxfps"), cap.label.trim_start()), ((SlopPage::Picture, 0), "Frame rate cap"));
+        assert_eq!(cap.value(&s, PICTURE), "id's 72");
+        assert_eq!(cap.value(&Settings::default(), PICTURE), "none");
+        let steps: Vec<String> = (0..6).map(|_| { m.adjust(1, &mut s); cap.value(&s, PICTURE) }).collect();
+        assert_eq!(steps, ["120", "144", "240", "none", "60", "id's 72"]);
+        m.adjust(-1, &mut s);
+        assert_eq!((s.cvars.max_fps, cvar::find("host_maxfps").unwrap().get(&s.cvars).as_str()), (FrameCap::new(60), "60"));
+        m.adjust(-1, &mut s);
+        assert_eq!(cap.value(&s, PICTURE), "none", "left from 60 wraps to none");
+        cvar::find("host_maxfps").unwrap().set(&mut s.cvars, "100");
+        assert_eq!(cap.value(&s, PICTURE), "100");
+        m.adjust(1, &mut s);
+        assert_eq!(cap.value(&s, PICTURE), "120", "right of 100: 120");
+        cvar::find("host_maxfps").unwrap().set(&mut s.cvars, "100");
+        m.adjust(-1, &mut s);
+        assert_eq!(cap.value(&s, PICTURE), "id's 72", "left of 100: 72");
+        assert_eq!(cap.console_hint(), "console: host_maxfps 0 or 60-240");
+        assert_eq!(m.take_sounds(), vec![MenuSound::Menu3; 10]);
+
         // The torch flicker: a slider (M_DrawSlider's knob), 0 to 2 by a
         // tenth of its range, clamped at its ends as id's sliders are;
         // Classic's 0 at the left, slop's 1 in the middle.
@@ -4872,27 +4907,35 @@ mod tests {
         let mut img = Image::new(320, 200, 0);
         draw_menu(&mut img, &m, &s, &pics, Some(&cc), clock(0.0, 0.1));
         assert_eq!(px(&img, 200, 32), 0, "the cursor blinks");
-        // "on" replaces "off" once toggled.
+        // "on" replaces "off" once toggled (Widescreen FOV), and the frame
+        // rate cap's "id's 72" its next step's "120".
         m.screen = MenuScreen::SlopPage(SlopPage::Picture);
+        let fov = row_of("fov_adapt").1;
+        m.set_cursor(fov);
+        let mut img = Image::new(320, 200, 0);
+        draw_menu(&mut img, &m, &s, &pics, Some(&cc), clock(0.0, 0.3));
+        assert_eq!(px(&img, 220 + 16, 32 + fov * 8), 5, "\"off\" is three characters");
+        assert_eq!(px(&img, 220 + 48, 32), 5, "\"id's 72\" is seven");
+        m.adjust(1, &mut s);
         m.set_cursor(0);
         m.adjust(1, &mut s);
         let mut img = Image::new(320, 200, 0);
         draw_menu(&mut img, &m, &s, &pics, Some(&cc), clock(0.0, 0.3));
-        assert_eq!(px(&img, 220 + 16, 32), 0, "\"on\" is two characters");
-        assert_eq!(px(&img, 220 + 16, 40), 5, "\"off\" is three");
+        assert_eq!(px(&img, 220 + 16, 32 + fov * 8), 0, "\"on\" is two");
+        assert_eq!((px(&img, 220 + 16, 32), px(&img, 220 + 24, 32)), (6, 0), "\"120\" is three");
         // Without conchars only the pics draw; nothing panics.
         let mut img = Image::new(320, 200, 0);
         draw_menu(&mut img, &m, &s, &pics, None, clock(0.0, 0.3));
         assert_eq!(img.pixels[4 * 320 + 100], 8);
 
         // White marks what differs from the preset (here Classic, with the
-        // uncapped frame rate toggled on above, and the torches moved): the
-        // value, a slider's label, the page's row on Slop Options; and the
-        // standing counts the rows.
-        assert_eq!(s.standing().rows(), 2);
+        // frame rate cap and Widescreen FOV changed above, and the torches
+        // moved): the value, a slider's label, the page's row on Slop
+        // Options; and the standing counts the rows.
+        assert_eq!(s.standing().rows(), 3);
         let mut img = Image::new(320, 200, 0);
         draw_menu(&mut img, &m, &s, &pics, Some(&cc), clock(0.0, 0.3));
-        assert_eq!((px(&img, 220, 32), px(&img, 220, 40)), (6, 5), "\"on\" white, the Resolution row bronze");
+        assert_eq!((px(&img, 220, 32), px(&img, 220, 40)), (6, 5), "\"120\" white, the Resolution row bronze");
         let first = |row: &SettingRow| 16 + 8 * row.label.bytes().position(|b| b != b' ').unwrap();
         assert_eq!(px(&img, first(&PICTURE_ROWS[0]), 32), 5, "a value's label stays bronze");
         m.screen = MenuScreen::SlopPage(page);
@@ -4905,7 +4948,7 @@ mod tests {
         let pages: Vec<u8> = SLOP_OPTIONS_ROWS.iter().enumerate().map(|(i, r)| px(&img, first(r), 32 + i * 8)).collect();
         assert_eq!(pages, [6, 6, 5], "Picture and Motion hold a changed row, Controls none");
         let line = s.standing().line();
-        assert_eq!(line, "Yours differ from Classic in 2 rows");
+        assert_eq!(line, "Yours differ from Classic in 3 rows");
         let x = (320 - 8 * line.len()) / 2;
         assert_eq!(span(&img, 148), Some((x, x + 8 * line.len() - 1)), "{line}, centred");
     }

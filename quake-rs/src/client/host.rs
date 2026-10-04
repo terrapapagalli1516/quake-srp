@@ -54,6 +54,77 @@ pub const HOST_FRAME_INTERVAL: f64 = 1.0 / 72.0;
 /// `host_filter_time_caps_every_refresh_rate_at_a_steady_cadence`.
 pub const HOST_FRAME_TOLERANCE: f64 = 0.001;
 
+/// `host_maxfps` (QuakeSpasm's name for it): the most host frames a second.
+/// id's 72 is `Host_FilterTime`'s own gate, with id's timing
+/// ([`host_filter_time`]): the Classic preset's, which the oracle proves.
+/// [`FrameCap::NONE`] is a frame on every display refresh
+/// ([`host_filter_time_display`]), the game stepped as id's 72 Hz frames
+/// (`stepping`). The other caps keep that timing and only draw fewer frames.
+/// On the console a number: 0 (none) or 60..=240.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameCap(u32);
+
+impl FrameCap {
+    /// No cap: a frame every display refresh.
+    pub const NONE: FrameCap = FrameCap(0);
+    /// id's 72: `Host_FilterTime`'s gate.
+    pub const ID: FrameCap = FrameCap(72);
+    /// The lowest cap a number names: the bottom of the 60-480 Hz range the
+    /// uncapped game is proven over (`quaketool framerate --check`).
+    pub const MIN: u32 = 60;
+    /// The highest.
+    pub const MAX: u32 = 240;
+    /// The menu's steps, left to right: 60, id's 72, 120, 144, 240, none.
+    pub const STEPS: [FrameCap; 6] =
+        [FrameCap::new(60), FrameCap::ID, FrameCap::new(120), FrameCap::new(144), FrameCap::new(240), FrameCap::NONE];
+
+    /// `fps` frames a second at most, within [`FrameCap::MIN`]..=[`FrameCap::MAX`];
+    /// 0 is none.
+    pub const fn new(fps: u32) -> FrameCap {
+        if fps == 0 {
+            FrameCap::NONE
+        } else if fps < FrameCap::MIN {
+            FrameCap(FrameCap::MIN)
+        } else if fps > FrameCap::MAX {
+            FrameCap(FrameCap::MAX)
+        } else {
+            FrameCap(fps)
+        }
+    }
+
+    /// The cap a cvar value names: none for 0 (or less, or a word),
+    /// otherwise the whole number within [`FrameCap::MIN`]..=[`FrameCap::MAX`].
+    pub fn from_cvar(value: f32) -> FrameCap {
+        if value.is_nan() || value < 1.0 { FrameCap::NONE } else { FrameCap::new(value.round().min(1e6) as u32) }
+    }
+
+    /// The cvar's value: the frames a second, 0 for none.
+    pub fn cvar(self) -> u32 {
+        self.0
+    }
+
+    /// Its place among the caps, lowest first, none after every number.
+    fn order(self) -> u32 {
+        if self == FrameCap::NONE { u32::MAX } else { self.0 }
+    }
+
+    /// The menu's next step from here, `step` +1 (right: more frames, then
+    /// none) or -1, wrapping; from a number between the steps (set on the
+    /// console), the step on that side of it.
+    pub fn stepped(self, step: i32) -> FrameCap {
+        let steps = FrameCap::STEPS;
+        let n = steps.len() as i32;
+        let at = match steps.iter().position(|&c| c == self) {
+            Some(i) => i as i32 + step,
+            None => {
+                let above = steps.iter().position(|c| c.order() > self.order()).unwrap_or(steps.len()) as i32;
+                if step > 0 { above } else { above - 1 }
+            }
+        };
+        steps[at.rem_euclid(n) as usize]
+    }
+}
+
 /// `Host_FilterTime` (host.c): given `realtime` (already advanced by this
 /// call's raw time), decide whether a host frame runs. `None` = "framerate is
 /// too high": do nothing this call. `Some(host_frametime)` = run a frame that
@@ -101,6 +172,24 @@ pub fn host_filter_time_display(realtime: f64, oldrealtime: &mut f64) -> Option<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- host_maxfps --------------------------------------------------------
+
+    /// `host_maxfps`: 0 (or less, or a word) is none; a number is held to
+    /// 60..=240; the menu's steps go 60, 72, 120, 144, 240, none and round.
+    #[test]
+    fn a_frame_cap_is_none_or_60_to_240() {
+        let caps = |vs: &[f32]| vs.iter().map(|&v| FrameCap::from_cvar(v).cvar()).collect::<Vec<_>>();
+        assert_eq!(caps(&[0.0, -5.0, f32::NAN, 0.4, 1.0, 30.0, 60.0, 72.0, 99.6, 240.0, 1000.0, 1e30]), [0, 0, 0, 0, 60, 60, 60, 72, 100, 240, 240, 240]);
+        assert_eq!((FrameCap::new(0), FrameCap::new(72), FrameCap::new(500)), (FrameCap::NONE, FrameCap::ID, FrameCap::new(240)));
+        let mut cap = FrameCap::new(60);
+        let right: Vec<u32> = (0..6).map(|_| { cap = cap.stepped(1); cap.cvar() }).collect();
+        assert_eq!(right, [72, 120, 144, 240, 0, 60]);
+        let left: Vec<u32> = (0..6).map(|_| { cap = cap.stepped(-1); cap.cvar() }).collect();
+        assert_eq!(left, [0, 240, 144, 120, 72, 60]);
+        assert_eq!((FrameCap::new(130).stepped(1), FrameCap::new(130).stepped(-1)), (FrameCap::new(144), FrameCap::new(120)));
+        assert_eq!((FrameCap::new(200).stepped(1), FrameCap::new(61).stepped(-1)), (FrameCap::new(240), FrameCap::new(60)));
+    }
 
     // -- Host_Error ---------------------------------------------------------
 

@@ -4,6 +4,7 @@
 //! keys the automation calls press, each through keys.c's `Key_Event`
 //! ([`crate::input::key_event`]).
 
+use quake_rs::client::host::FrameCap;
 use quake_rs::keys::{
     K_BACKSPACE, K_DOWNARROW, K_ENTER, K_ESCAPE, K_LEFTARROW, K_RIGHTARROW, K_UPARROW,
 };
@@ -305,24 +306,26 @@ pub(crate) fn menu_cursor() -> i32 {
 // --- the four first departures as bits (the checks' shorthand) --------------
 
 /// The four settings that were the port's first "Web extras", as the bits
-/// the browser checks and the benchmark read and set them by: 1
-/// `wasm_uncapped`, 2 `wasm_showfps`, 4 `wasm_exactpersp` (set while
-/// `r_perspspan` is 1, exact; [`set_extras`] says what setting it does), 8
-/// `wasm_scaled2d`.
+/// the browser checks and the benchmark read and set them by: 1 no frame
+/// cap (`host_maxfps 0`, the retired `wasm_uncapped`), 2 `wasm_showfps`, 4
+/// `wasm_exactpersp` (set while `r_perspspan` is 1, exact), 8
+/// `wasm_scaled2d`. [`set_extras`] says what each sets.
 pub(crate) fn extras() -> i32 {
     APP.with(|c| {
         c.borrow().as_ref().map_or(0, |a| {
             let s = &a.settings.cvars;
             let exact = s.persp_span == quake_rs::render::PerspSpan::Exact;
-            i32::from(s.uncapped) | i32::from(s.show_fps) << 1 | i32::from(exact) << 2 | i32::from(s.scaled_2d) << 3
+            let uncapped = s.max_fps == FrameCap::NONE;
+            i32::from(uncapped) | i32::from(s.show_fps) << 1 | i32::from(exact) << 2 | i32::from(s.scaled_2d) << 3
         })
     })
 }
 
 /// Set the four settings from [`extras`]' bits; other bits are ignored. Bit
-/// 4 set is `r_perspspan 1`; clear, it leaves a span of 64, 32, 16, 8 or 4
-/// as it is and turns exact into id's 16 — so `set_extras(extras())` changes
-/// nothing, whatever the span.
+/// 1 set is `host_maxfps 0`; clear, it leaves a cap of 60 to 240 as it is
+/// and turns none into id's 72. Bit 4 set is `r_perspspan 1`; clear, it
+/// leaves a span of 64, 32, 16, 8 or 4 as it is and turns exact into id's
+/// 16. So `set_extras(extras())` changes nothing, whatever the cap and span.
 pub(crate) fn set_extras(bits: i32) {
     ensure_app(|a| {
         let s = &mut a.settings.cvars;
@@ -334,7 +337,14 @@ pub(crate) fn set_extras(bits: i32) {
         } else {
             s.persp_span
         };
-        (s.uncapped, s.show_fps, s.persp_span, s.scaled_2d) = (bits & 1 != 0, bits & 2 != 0, span, bits & 8 != 0);
+        let cap = if bits & 1 != 0 {
+            FrameCap::NONE
+        } else if s.max_fps == FrameCap::NONE {
+            FrameCap::ID
+        } else {
+            s.max_fps
+        };
+        (s.max_fps, s.show_fps, s.persp_span, s.scaled_2d) = (cap, bits & 2 != 0, span, bits & 8 != 0);
     });
 }
 
@@ -510,8 +520,8 @@ mod tests {
         assert_eq!(menu_screen_id(), 10, "Enter opens Slop Options");
         menu_select();
         assert_eq!(menu_screen_id(), 12, "...and its first row Picture and sound, that page");
-        menu_right(); // Uncapped framerate
-        assert_eq!(extras(), 1);
+        menu_right(); // Frame rate cap: id's 72 -> 120
+        assert_eq!(settings().cvars.max_fps, FrameCap::new(120));
         menu_down(); // Resolution
         menu_select();
         assert_eq!(menu_screen_id(), 7, "the Resolution row opens Video Options");
@@ -536,7 +546,7 @@ mod tests {
         assert_eq!(menu_screen_id(), 5, "Esc Esc returns to Options");
         menu_select(); // ...on its row
         assert_eq!(menu_screen_id(), 10);
-        assert_eq!(settings().standing().rows(), 2, "the uncapped frame rate and the torches");
+        assert_eq!(settings().standing().rows(), 2, "the frame-rate cap and the torches");
         // The checks' shorthand for the first four; other bits are dropped.
         set_extras(-1);
         assert_eq!(extras(), 15);

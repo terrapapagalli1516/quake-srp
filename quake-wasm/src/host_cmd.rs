@@ -553,7 +553,7 @@ fn cmd_wasm_help(args: &Args) {
         for line in wrap(COMMANDS.iter().map(|c| c.name), LIST_WIDTH) {
             a.console.println(line);
         }
-        a.console.println(format!("slop options, preset {} (slop|classic):", a.settings.preset.name()));
+        a.console.println(format!("slop options (preset {}):", a.settings.preset.name()));
         for v in CVARS.iter().filter(|v| v.departure) {
             a.console.println(format!("  {} {}", v.name, v.get(&a.settings.cvars)));
         }
@@ -889,10 +889,11 @@ mod tests {
         let help: Vec<String> = APP.with(|c| {
             c.borrow().as_ref().unwrap().console.lines().map(str::to_string).collect()
         });
-        assert!(help.iter().any(|l| l == "  wasm_uncapped 0"), "{help:?}");
+        assert!(help.iter().any(|l| l == "  host_maxfps 72"), "{help:?}");
         assert!(help.iter().any(|l| l == "  r_perspspan 1"), "{help:?}");
-        let listed = help.iter().skip_while(|l| !l.starts_with("slop options, preset"));
-        assert!(!listed.into_iter().any(|l| l.contains("wasm_exactpersp")), "the retired name is not listed: {help:?}");
+        let listed: Vec<&String> = help.iter().skip_while(|l| !l.starts_with("slop options (preset")).collect();
+        assert!(!listed.is_empty(), "{help:?}");
+        assert!(!listed.iter().any(|l| l.contains("wasm_exactpersp") || l.contains("wasm_uncapped")), "the retired names are not listed: {help:?}");
         assert!(help.iter().all(|l| l.len() <= LIST_WIDTH), "fits a 320-wide console: {help:?}");
     }
 
@@ -1171,16 +1172,17 @@ mod tests {
     /// name, and `2026`, the slop preset's, still work.
     #[test]
     fn idcontrols_is_ids_1996_controls_and_a_preset_keeps_the_keys() {
+        use quake_rs::client::host::FrameCap;
         use quake_rs::keys::{BIND_FORWARD, BIND_LOOKUP, K_MWHEELUP};
         let live = || APP.with(|c| c.borrow().as_ref().unwrap().settings.clone());
         assert_eq!(boot(), 1);
         execute_console_command("profile 2026");
         let s = live();
-        assert!(s.binds.get(K_MWHEELUP).is_some() && s.cvars.uncapped && s.cvars.freelook && s.preset == Preset::Slop);
+        assert!(s.binds.get(K_MWHEELUP).is_some() && s.cvars.max_fps == FrameCap::NONE && s.cvars.freelook && s.preset == Preset::Slop);
 
         execute_console_command("preset classic"); // the engine: the wheel off, the shared controls as they were
         let s = live();
-        assert!(!s.cvars.uncapped && s.binds.get(K_MWHEELUP).is_none(), "the wheel is slop's alone");
+        assert!(s.cvars.max_fps == FrameCap::ID && s.binds.get(K_MWHEELUP).is_none(), "the wheel is slop's alone");
         assert!(s.cvars.freelook && s.cvars.always_run() && s.cvars.joy.enabled, "the shared controls");
         assert_eq!(s.binds.command(b'w'), Some(BIND_FORWARD));
 
@@ -1191,11 +1193,11 @@ mod tests {
         assert_eq!(s.binds.command(b'a'), Some(BIND_LOOKUP));
         assert!(!s.cvars.freelook && !s.cvars.jumpswim && !s.cvars.alt_enter && !s.cvars.always_run());
         assert_eq!(s.cvars.joy, quake_rs::client::in_win::JoyCvars::classic(), "id's joystick: off");
-        assert!(s.cvars.uncapped && s.preset == Preset::Slop, "the engine untouched");
+        assert!(s.cvars.max_fps == FrameCap::NONE && s.preset == Preset::Slop, "the engine untouched");
 
         execute_console_command("preset classic"); // the slop options back, the keys and Always Run kept
         let s = live();
-        assert!(s.cvars.freelook && s.cvars.joy.enabled && !s.cvars.uncapped, "every slop option Classic's");
+        assert!(s.cvars.freelook && s.cvars.joy.enabled && s.cvars.max_fps == FrameCap::ID, "every slop option Classic's");
         assert!(s.binds.command(b'w').is_none() && !s.cvars.always_run(), "id's keys and Always Run kept");
     }
 

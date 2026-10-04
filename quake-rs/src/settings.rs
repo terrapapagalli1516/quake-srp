@@ -63,6 +63,7 @@
 //! they changed stays as they left it. (id's file lists every value: id's
 //! defaults never changed after release.)
 
+use crate::client::host::FrameCap;
 use crate::cvar::{self, Cvars};
 use crate::keys::Bindings;
 
@@ -99,6 +100,11 @@ impl Machine {
     /// under a CSS pixel there, finer than the eye resolves at arm's length.
     pub const TOUCH_PIXEL_SIZE: u8 = 2;
 
+    /// The frame-rate cap a touch screen's slop preset starts at: its own
+    /// 60 Hz refresh, which an Android phone's Chrome keeps the page's frames to
+    /// anyway (STATUS.md, 2026-09-30), and what its cores sustain warm.
+    pub const TOUCH_FRAME_CAP: FrameCap = FrameCap::new(60);
+
     /// The renderer's threads to start at (`r_threads`): every thread
     /// offered, or at most [`Machine::TOUCH_THREADS`] on a touch screen.
     pub fn render_threads(self) -> usize {
@@ -110,6 +116,13 @@ impl Machine {
     /// [`Machine::TOUCH_PIXEL_SIZE`] on a touch screen.
     pub fn pixel_size(self) -> u8 {
         if self.touch { Machine::TOUCH_PIXEL_SIZE } else { 1 }
+    }
+
+    /// The slop preset's frame-rate cap (`host_maxfps`): none, a frame every
+    /// display refresh, or [`Machine::TOUCH_FRAME_CAP`] on a touch screen
+    /// (the Classic preset's is id's 72 on any machine).
+    pub fn frame_cap(self) -> FrameCap {
+        if self.touch { Machine::TOUCH_FRAME_CAP } else { FrameCap::NONE }
     }
 }
 
@@ -156,13 +169,14 @@ impl Preset {
     /// The preset's cvars on `machine`: [`Cvars::classic`] or
     /// [`Cvars::slop`], with the numbers the machine picks — the renderer's
     /// threads and the pixel size, the same in both presets (Classic's
-    /// picture is a video mode, so its pixel size waits for `vid_native`).
+    /// picture is a video mode, so its pixel size waits for `vid_native`),
+    /// and slop's frame-rate cap (Classic's is id's 72 everywhere).
     pub fn cvars(self, machine: Machine) -> Cvars {
-        let values = match self {
-            Preset::Classic => Cvars::classic(),
-            Preset::Slop => Cvars::slop(),
+        let (values, max_fps) = match self {
+            Preset::Classic => (Cvars::classic(), FrameCap::ID),
+            Preset::Slop => (Cvars::slop(), machine.frame_cap()),
         };
-        Cvars { threads: machine.render_threads(), pixel_size: machine.pixel_size(), ..values }
+        Cvars { threads: machine.render_threads(), pixel_size: machine.pixel_size(), max_fps, ..values }
     }
 
     /// The preset's Screen size (`viewsize`): `default.cfg`'s 100 in
@@ -353,7 +367,7 @@ mod tests {
     fn the_slop_preset_is_the_default_and_both_share_the_controls() {
         let s = Settings::default();
         assert_eq!(s.preset, Preset::Slop);
-        assert!(s.cvars.uncapped && s.cvars.native && s.cvars.always_run());
+        assert!(s.cvars.max_fps == FrameCap::NONE && s.cvars.native && s.cvars.always_run());
         assert_eq!(s.cvars.crosshair, crate::render::Crosshair::Cross);
         assert_eq!(s.cvars.viewsize, 110.0, "slop starts Screen size one step past id's 100");
         assert_eq!(s.binds.command(b'w'), Some(BIND_FORWARD));
@@ -363,7 +377,7 @@ mod tests {
         let classic = Settings::new(Preset::Classic, Machine::default());
         assert_eq!(classic.cvars, Cvars::classic());
         assert_eq!(classic.cvars.viewsize, 100.0, "Classic: default.cfg's, with id's inventory bar");
-        assert!(!classic.cvars.uncapped && !classic.cvars.native, "the engine: id's");
+        assert!(classic.cvars.max_fps == FrameCap::ID && !classic.cvars.native, "the engine: id's");
         assert!(classic.cvars.freelook && classic.cvars.jumpswim && classic.cvars.alt_enter && classic.cvars.always_run());
         assert_eq!(classic.binds.command(b'w'), Some(BIND_FORWARD), "WASD by default in Classic too");
         assert_eq!(classic.binds.get(K_MWHEELUP), None, "except the wheel: still a slop option");
@@ -373,7 +387,7 @@ mod tests {
         assert_eq!(id.binds, Bindings::default_cfg(), "id's bindings, not the shared WASD/gamepad ones");
         assert_eq!(id.binds.command(b'a'), Some(BIND_LOOKUP));
         assert!(!id.cvars.freelook && !id.cvars.jumpswim && !id.cvars.alt_enter && !id.cvars.always_run());
-        assert_eq!(id.cvars.uncapped, classic.cvars.uncapped, "the engine is Classic's regardless");
+        assert_eq!(id.cvars.max_fps, classic.cvars.max_fps, "the engine is Classic's regardless");
     }
 
     /// Reset to Classic (applying a preset): every slop option to the
@@ -403,7 +417,7 @@ mod tests {
         assert_eq!(s.binds.get(K_MWHEELUP), None, "the wheel turns off with the preset");
 
         s.apply_preset(Preset::Slop);
-        assert!(s.cvars.uncapped && !s.cvars.show_fps && s.cvars.pixel_size == 1 && s.cvars.freelook, "slop's");
+        assert!(s.cvars.max_fps == FrameCap::NONE && !s.cvars.show_fps && s.cvars.pixel_size == 1 && s.cvars.freelook, "slop's");
         assert_eq!((s.cvars.viewsize, s.cvars.gamma, s.cvars.always_run()), (80.0, 0.8, false));
         assert_eq!(s.binds.command(b'j'), Some(BIND_ATTACK), "the rebind still survives");
         assert!(s.binds.get(K_MWHEELUP).is_some(), "the wheel is back");
@@ -555,6 +569,50 @@ mod tests {
             "// generated by quake, do not modify\npreset \"classic\"\nbind \"q\" \"+forward\"\nunbind \"z\"\n\
              viewsize \"110\"\nwasm_showfps \"1\"\n"
         );
+    }
+
+    /// The numbers a preset takes from the machine: a touch screen starts at
+    /// 2x on at most four threads and slop's 60 fps cap, anything else at
+    /// 1x on every thread and no cap; Classic's cap is id's 72 on either.
+    /// `config.cfg` writes a number only when it differs from this
+    /// machine's, so the same 2x is a choice on a desktop and nothing at all
+    /// on a phone.
+    #[test]
+    fn the_machine_picks_the_presets_numbers() {
+        let phone = Machine { touch: true, threads: 8 };
+        let desktop = Machine { touch: false, threads: 16 };
+        for preset in [Preset::Slop, Preset::Classic] {
+            let c = preset.cvars(phone);
+            assert_eq!((c.pixel_size, c.threads), (2, 4), "{preset:?} on a phone");
+            let c = preset.cvars(desktop);
+            assert_eq!((c.pixel_size, c.threads), (1, 16), "{preset:?} on a desktop");
+        }
+        assert_eq!((Preset::Slop.cvars(phone).max_fps, Preset::Slop.cvars(desktop).max_fps), (FrameCap::new(60), FrameCap::NONE));
+        assert_eq!((Preset::Classic.cvars(phone).max_fps, Preset::Classic.cvars(desktop).max_fps), (FrameCap::ID, FrameCap::ID));
+        assert_eq!(Machine { touch: true, threads: 2 }.render_threads(), 2, "four at most, not four at least");
+        assert_eq!(Machine { touch: false, threads: 0 }.render_threads(), 1, "always one");
+        assert_eq!(Preset::Slop.cvars(Machine::default()), Cvars::slop(), "a plain machine: one thread, 1x");
+        assert_eq!(Preset::Classic.cvars(Machine::default()), Cvars::classic());
+
+        let head = "// generated by quake, do not modify\npreset \"slop\"\n";
+        let on_phone = Settings::new(Preset::Slop, phone);
+        assert_eq!(on_phone.config_text(), head, "the phone's own numbers are not written");
+        let mut at_2x = Settings::new(Preset::Slop, desktop);
+        at_2x.cvars.pixel_size = 2;
+        assert_eq!(at_2x.config_text(), format!("{head}vid_pixelsize \"2\"\n"), "2x is a choice on a desktop");
+        let mut at_1x = on_phone.clone();
+        at_1x.cvars.pixel_size = 1;
+        at_1x.cvars.threads = 8;
+        at_1x.cvars.max_fps = FrameCap::NONE;
+        assert_eq!(at_1x.config_text(), format!("{head}host_maxfps \"0\"\nvid_pixelsize \"1\"\nr_threads \"8\"\n"),
+            "and 1x on eight with no cap choices on a phone");
+
+        // Applying a preset sets the machine's numbers where they are slop
+        // options, and never touches the threads (no slop option).
+        let mut s = Settings::new(Preset::Slop, phone);
+        s.cvars.threads = 6;
+        s.apply_preset(Preset::Classic);
+        assert_eq!((s.cvars.pixel_size, s.cvars.threads, s.cvars.max_fps, s.machine), (2, 6, FrameCap::ID, phone));
     }
 
     /// The console's and `config.cfg`'s words for a preset: its name, and
