@@ -47,10 +47,22 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import compare  # noqa: E402
 
-ORACLES = {"x87": HERE / "build" / "quake-oracle", "sse": HERE / "build" / "quake-oracle-sse"}
+# oracle -> (oracle/build.sh's ORACLE_FPMATH, compare.py's `fpcw`): x87store
+# is the x87 build with no float variable in an 80-bit register
+# (-ffloat-store), x87cw the x87 build in the FPU state id's x86 builds
+# rendered in (24-bit precision, chop rounding)
+ORACLES = {"x87": ("x87", False), "sse": ("sse", False), "x87store": ("x87store", False), "x87cw": ("x87", True)}
 
 
-def case_args(ns: argparse.Namespace, res, view, time_, oracle: Path) -> argparse.Namespace:
+def oracle_path(name: str) -> str:
+    """`x87`, `sse` (the tree's builds, built when missing or stale), or
+    `NAME=PATH` (another build of id's C, e.g. one with other flags)."""
+    if "=" in name:
+        return str(Path(name.split("=", 1)[1]).resolve())
+    return str(compare.ensure_oracle(fpmath=ORACLES[name][0]))
+
+
+def case_args(ns: argparse.Namespace, res, view, time_, oracle: str) -> argparse.Namespace:
     """The namespace compare.py's run_c / run_port read, for one case."""
     c_cmd = []
     if ns.mip0:
@@ -59,13 +71,14 @@ def case_args(ns: argparse.Namespace, res, view, time_, oracle: Path) -> argpars
         res=res, view=view, time=time_, settle=0, viewmodel=False, bench=0, viewsize=120,
         spans=ns.spans, exactpersp=ns.spans == 1, perspspan=8 if ns.spans == 8 else None, c_cmd=c_cmd, c_post=[],
         demo=None, aspect=ns.aspect, oracle_dt=None, id_lightstyles=False, dlights="id", pak=ns.pak,
-        pak1=None, game_dir=[], oracle=str(oracle), full=False,
+        pak1=None, game_dir=[], oracle=oracle_path(oracle), full=False,
+        fpcw=ORACLES.get(oracle, ("", False))[1],
     )
 
 
 def start_view(ns, mapname: str, res, scratch: Path) -> tuple[list[float], float]:
     """id's first frame after signon on `mapname`: its eye (x, y, z, pitch, yaw, roll) and clock."""
-    a = case_args(ns, res, None, None, ORACLES["sse"] if "sse" in ns.oracles else ORACLES["x87"])
+    a = case_args(ns, res, None, None, "sse" if "sse" in ns.oracles else "x87")
     meta = compare.run_c(a, f"{mapname}_start", mapname, False, scratch)
     return meta["vieworg"] + meta["viewangles"], meta["time"]
 
@@ -88,8 +101,8 @@ def views_for(ns, mapname: str, eye: list[float]) -> list[tuple[str, list[float]
 
 def run_case(ns, qt: Path, oracle_name: str, mapname: str, res, label: str, view, time_, out: Path, pal):
     ents = ns.mode == "ents"
-    case = f"{mapname}_{label}_{res[0]}x{res[1]}_{ns.mode}_{oracle_name}"
-    a = case_args(ns, res, view, time_, ORACLES[oracle_name])
+    case = f"{mapname}_{label}_{res[0]}x{res[1]}_{ns.mode}_{oracle_name.split('=')[0]}"
+    a = case_args(ns, res, view, time_, oracle_name)
     meta = compare.run_c(a, case, mapname, ents, out)
     compare.run_port(a, qt, case, mapname, meta, ents, out)
     c_idx = compare.read_pnm(out / f"{case}.c.pgm")
@@ -97,7 +110,7 @@ def run_case(ns, qt: Path, oracle_name: str, mapname: str, res, label: str, view
     p_idx, _ = compare.recover_indices(p_rgb, c_idx, pal)
     ys, xs = np.nonzero(p_idx != c_idx)
     diffs = [[int(x), int(y), int(c_idx[y, x]), int(p_idx[y, x])] for y, x in zip(ys, xs)]
-    return {"case": case, "map": mapname, "label": label, "res": f"{res[0]}x{res[1]}", "oracle": oracle_name,
+    return {"case": case, "map": mapname, "label": label, "res": f"{res[0]}x{res[1]}", "oracle": oracle_name.split("=")[0],
             "view": view, "time": time_, "pixels": int(c_idx.size), "diff": len(diffs), "diffs": diffs[:4000]}
 
 
@@ -120,7 +133,7 @@ def sweep(ns: argparse.Namespace, qt: Path, pal: np.ndarray, out: Path) -> bool:
     spans = {16: "16-pixel spans", 8: "8-pixel spans", 1: "exact perspective"}[ns.spans]
     mode = ns.mode + ", " + spans + (", mip 0" if ns.mip0 else "")
     print(f"{len(jobs)} cases ({mode}{f', aspect {ns.aspect}' if ns.aspect else ''}), {time.time() - t0:.0f} s")
-    for oracle_name in ns.oracles.split(","):
+    for oracle_name in (o.split("=")[0] for o in ns.oracles.split(",")):
         rows = [r for r in results if r["oracle"] == oracle_name]
         bad = sorted((r for r in rows if r["diff"]), key=lambda r: -r["diff"])
         total = sum(r["diff"] for r in rows)
@@ -144,7 +157,10 @@ def main() -> None:
     ap.add_argument("--mode", choices=("world", "ents"), default="world",
                     help="world: r_drawentities 0; ents: the port draws id's entity list (compare.py's modes)")
     ap.add_argument("--res", default="320x200", help="comma-separated WxH list")
-    ap.add_argument("--oracles", default="x87,sse", help="x87 and/or sse (oracle/build.sh, ORACLE_FPMATH=sse)")
+    ap.add_argument("--oracles", default="x87,sse",
+                    help="x87 and/or sse: id's C with x87 floats and with SSE2 floats (oracle/build.sh, "
+                         "ORACLE_FPMATH=sse), each built when missing or stale; x87store: x87 with -ffloat-store; "
+                         "x87cw: the x87 build in id's x86 rendering FPU state (compare.py --fpcw); or NAME=PATH")
     ap.add_argument("--aspect", type=float, help="vid.aspect for both renderers (compare.py --aspect)")
     ap.add_argument("--mip0", action="store_true", help="both renderers at mip 0 (d_mipscale 0)")
     ap.add_argument("--spans", type=int, choices=(16, 8, 1), default=16,
@@ -159,11 +175,9 @@ def main() -> None:
     ns = ap.parse_args()
 
     for name in ns.oracles.split(","):
-        if name not in ORACLES:
-            sys.exit(f"--oracles: x87 or sse, not {name!r}")
-        if not ORACLES[name].exists():
-            hint = "ORACLE_FPMATH=sse " if name == "sse" else ""
-            sys.exit(f"{ORACLES[name]} is missing: {hint}oracle/build.sh")
+        if name not in ORACLES and "=" not in name:
+            sys.exit(f"--oracles: x87, sse or NAME=PATH, not {name!r}")
+        oracle_path(name)  # built once here, not by every case
     qt = compare.ensure_quaketool(ns.quaketool)
     pal = np.frombuffer(compare.read_pak_file(ns.pak, "gfx/palette.lmp")[:768], dtype=np.uint8).reshape(256, 3)
     if ns.keep:

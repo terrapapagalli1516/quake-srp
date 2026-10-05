@@ -155,7 +155,7 @@ const COMMANDS: &[Command] = &[
         usage: "<pak> <map.bsp> <out.ppm> [--res WxH] [--origin x,y,z] [--angles p,y,r] [--time T] [--fov F] \
                 [--aspect A] [--vrect x,y,w,h] [--ents FILE] [--particles FILE] \
                 [--dlight x,y,z,radius[,minlight]]... [--style-values V0,V1,...] [--viewmodel M:F] [--viewent x,y,z,p,y,r] [--bench N] \
-                [--d-mipscale X] [--d-mipcap N] [video options]",
+                [--d-mipscale X] [--d-mipcap N] [--stages FILE] [video options]",
         about: "render one exact view (Quake camera convention), for the C oracle diff",
         run: render::view::cmd_view,
     },

@@ -117,12 +117,7 @@ impl SkyView {
         time: f64,
         mode: SkyScroll,
     ) -> SkyView {
-        // `temp` is a float and `(int)(cl.time / temp) * temp` a float
-        // product (exact: a whole number of 512s), `cl.time` a double.
-        const TEMP: f32 = 512.0;
-        let whole = ((time / f64::from(TEMP)) as i32) as f32 * TEMP;
-        let skytime = (time - f64::from(whole)) as f32;
-        let scroll = skytime * SKY_SPEED;
+        let scroll = sky_time(time) * SKY_SPEED;
         let front = match mode {
             // R_MakeSky: xshift = skytime*skyspeed, truncated to int.
             SkyScroll::Classic => (scroll as i32) << 16,
@@ -132,6 +127,16 @@ impl SkyView {
         };
         SkyView { forward, right, up, half_w: centre.0, half_h: centre.1, longest, scroll, front }
     }
+}
+
+/// `R_SetSkyFrame`'s `skytime` at `cl.time` `time`: `cl.time - (int)(cl.time
+/// / temp) * temp`, `temp = SKYSIZE*s1*s2` = 512 a float, the product a
+/// float's (exact: a whole number of 512s), the difference a double's,
+/// stored to a float.
+pub(super) fn sky_time(time: f64) -> f32 {
+    const TEMP: f32 = 512.0;
+    let whole = ((time / f64::from(TEMP)) as i32) as f32 * TEMP;
+    (time - f64::from(whole)) as f32
 }
 
 /// `D_Sky_uv_To_st` (d_sky.c): the 16.16 sky coordinates for screen pixel

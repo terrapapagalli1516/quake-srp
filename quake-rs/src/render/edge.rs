@@ -54,6 +54,9 @@ use crate::bsp::MipTex;
 use crate::bsp::{Bsp, CONTENTS_SOLID, DFace, TexInfo};
 use crate::math::{Vec3, dot, normalize, sub};
 
+mod stages;
+pub(super) use stages::Stages;
+
 /// "No edge / no span / no surface" in the index links.
 const NONE: u32 = u32::MAX;
 
@@ -261,6 +264,8 @@ pub(super) struct EdgeState {
     yscale: f32,
     xscaleinv: f32,
     yscaleinv: f32,
+    /// `r_refdef.horizontalFieldOfView`.
+    hfov: f32,
     fvrectx_adj: f32,
     fvrecty_adj: f32,
     fvrectright_adj: f32,
@@ -315,6 +320,8 @@ pub(super) struct EdgeState {
     bedges: Vec<BEdge>,
     dlight_bits: Vec<u32>,
     poly: Vec<Vec3>,
+    /// The frame's stages, recorded while `Some` (`quaketool view --stages`).
+    pub(super) stages: Option<Stages>,
 }
 
 impl EdgeState {
@@ -343,6 +350,7 @@ impl EdgeState {
         yscale: 1.0,
         xscaleinv: 1.0,
         yscaleinv: 1.0,
+        hfov: 2.0,
         fvrectx_adj: 0.0,
         fvrecty_adj: 0.0,
         fvrectright_adj: 0.0,
@@ -389,6 +397,7 @@ impl EdgeState {
         bedges: Vec::new(),
         dlight_bits: Vec::new(),
         poly: Vec::new(),
+        stages: None,
     };
 }
 
@@ -591,9 +600,11 @@ impl EdgeState {
         let t1 = lap();
         self.draw_bentities(bsp, &ents);
         let t2 = lap();
+        self.stage_edges(&ents);
         self.scan_edges();
         let t3 = lap();
         let world = self.prepare_surfaces(frame, caches, jobs, prof, &ents, &bits);
+        self.stage_surfaces(&world);
         self.dlight_bits = bits;
         if prof.on() {
             let t4 = lap();
@@ -673,6 +684,7 @@ impl EdgeState {
         self.yscale = yscale;
         self.xscaleinv = 1.0 / xscale;
         self.yscaleinv = 1.0 / yscale;
+        self.hfov = proj.hfov;
         let (wf, hf) = (w as f32, h as f32);
         self.fvrectx_adj = -0.5;
         self.fvrecty_adj = -0.5;
@@ -702,6 +714,19 @@ impl EdgeState {
                     self.frustum_indexes[i][j + 3] = j;
                 }
             }
+        }
+    }
+
+    /// `D_DrawSurfaces`' view of the frame: its axes, scales and centre.
+    fn grad_view(&self) -> GradView {
+        GradView {
+            vright: self.vright,
+            vup: self.vup,
+            vpn: self.vpn,
+            xscaleinv: self.xscaleinv,
+            yscaleinv: self.yscaleinv,
+            xcenter: self.xcenter,
+            ycenter: self.ycenter,
         }
     }
 
@@ -2000,15 +2025,7 @@ impl EdgeState {
         let sky_tex = sky_texture(ents[0].bsp);
         let (light_dir, _) = normalize([0.3, 0.5, 1.0]);
         let clear = R_CLEARCOLOR;
-        let gview = GradView {
-            vright,
-            vup,
-            vpn,
-            xscaleinv: self.xscaleinv,
-            yscaleinv: self.yscaleinv,
-            xcenter: self.xcenter,
-            ycenter: self.ycenter,
-        };
+        let gview = self.grad_view();
         let pass = FacePass { frame, sview: &sview, gview, mipview: &mipview, ents, bits, light_dir, clear };
         let mut faces = 0u64;
         let mut surfs = Vec::with_capacity(self.surfs.len());

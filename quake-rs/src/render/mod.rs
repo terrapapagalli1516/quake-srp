@@ -1285,6 +1285,11 @@ impl Renderer {
         for b in &bands {
             self.prof.absorb(b);
         }
+        if self.edge.stages.is_some() {
+            for (frame, world, _) in &ready {
+                self.edge.stage_grads(world, &bakes, frame.scene.time);
+            }
+        }
         self.surfaces.baked(&bakes.finish());
         let drawn = ready.len() as u64;
         for (_, world, _) in ready {
@@ -1305,6 +1310,20 @@ impl Renderer {
                 s.view_ns += ns;
             });
         }
+    }
+
+    /// Record the stages of the frames from now on (`on`), or stop: what
+    /// `oracle/pixel_trace.py` compares with id's, record by record
+    /// (`quaketool view --stages`; `render::edge::stages`). For one-view
+    /// frames; debugging only.
+    pub fn set_stages(&mut self, on: bool) {
+        self.edge.stages = on.then(edge::Stages::default);
+    }
+
+    /// The stages recorded since [`Renderer::set_stages`] (or the last take),
+    /// as text; recording goes on.
+    pub fn take_stages(&mut self) -> Option<String> {
+        self.edge.stages.as_mut().map(|st| std::mem::take(&mut st.text))
     }
 
     /// How many threads draw a frame (1, the default: the calling thread

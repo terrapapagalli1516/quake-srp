@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 # Build the oracle: id's WinQuake software renderer, headless (null sound/cd/
-# input/net drivers; our vid_oracle.c, sys_oracle.c, oracle.c and
-# walk_oracle.c), portable C paths only (id386 0: no assembly), as a static
+# input/net drivers; our vid_oracle.c, sys_oracle.c, oracle.c, walk_oracle.c
+# and stages_oracle.c), portable C paths only (id386 0: no assembly), as a static
 # 32-bit i386 binary that runs directly on the x86_64 host.
 #
 #   oracle/build.sh            -> oracle/build/quake-oracle      (x87 FPU, like 1996)
-#   ORACLE_FPMATH=sse oracle/build.sh -> oracle/build/quake-oracle-sse (SSE2 float math)
+#   ORACLE_FPMATH=sse oracle/build.sh -> oracle/build/quake-oracle-sse (SSE2 float math:
+#                                 every float operation rounded to a float, the port's target)
+#   ORACLE_FPMATH=x87store oracle/build.sh -> oracle/build/quake-oracle-x87store (x87 with
+#                                 -ffloat-store: no float variable kept in an 80-bit register)
 #
 # id's tree is never touched: it is copied to oracle/build/src and the one
 # edit (quakedef.h's id386 switch) is made on the copy.
@@ -35,7 +38,7 @@ d_vars d_zpoint host host_cmd keys menu mathlib model net_loop net_main net_vcr
 net_none nonintel pr_cmds pr_edict pr_exec r_aclip r_alias r_bsp r_light r_draw
 r_efrag r_edge r_misc r_main r_sky r_sprite r_surf r_part r_vars screen sbar
 sv_main sv_phys sv_move sv_user zone view wad world cd_null in_null snd_null
-sys_oracle vid_oracle oracle walk_oracle"
+sys_oracle vid_oracle oracle walk_oracle stages_oracle"
 SRCS=$(for f in $FILES; do printf '%s.c ' "$f"; done)
 # walk_oracle.c drives CL_SendCmd and logs the sound layer's entry points
 # (snd_null's) and the server's SV_StartSound; sys_oracle.c times
@@ -48,8 +51,11 @@ BIN=quake-oracle
 if [ "$FPMATH" = sse ]; then
     CFLAGS="$CFLAGS -msse2 -mfpmath=sse"
     BIN=quake-oracle-sse
+elif [ "$FPMATH" = x87store ]; then
+    CFLAGS="$CFLAGS -ffloat-store"
+    BIN=quake-oracle-x87store
 fi
 
 docker run --rm -u "$(id -u):$(id -g)" -v "$OUT:/w" -w /w/src "$IMAGE" \
-    sh -c "gcc $CFLAGS -o /w/$BIN $SRCS -static -Wl,--wrap=R_RenderView -Wl,--wrap=D_DrawSpans8 -Wl,--wrap=Turbulent8 $WRAPS -lm && gcc --version | head -1"
+    sh -c "gcc $CFLAGS -o /w/$BIN $SRCS -static -Wl,--wrap=R_RenderView -Wl,--wrap=D_DrawSpans8 -Wl,--wrap=Turbulent8 -Wl,--wrap=R_ScanEdges -Wl,--wrap=D_DrawSurfaces $WRAPS -lm && gcc --version | head -1"
 echo "built $OUT/$BIN"

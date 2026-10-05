@@ -32,6 +32,9 @@
 //!                    `x y z color`, in id's draw order (without it: none)
 //! --dlight x,y,z,radius[,minlight]  a live dynamic light (repeatable; the oracle
 //!                    passes id's `cl_dlights`, in slot order)
+//! --stages FILE      also write the frame's stages to FILE (the edges, surfaces,
+//!                    gradients and spans, as id's `oracle_stages` writes them:
+//!                    `oracle/pixel_trace.py` puts the two side by side)
 //! --d-mipscale X     the `d_mipscale` cvar (default 1; 0 = every surface at mip 0)
 //! --d-mipcap N       the `d_mipcap` cvar (default 0; the finest mip level allowed)
 //! --video, --fov-mode, --hires, --sky, --lightstyles, --perspspan  the port's video cvars
@@ -84,6 +87,7 @@ pub fn cmd_view(args: &[String]) -> CmdResult {
     let mut vrect: Option<(usize, usize, usize, usize)> = None;
     let (mut ents_path, mut viewmodel_arg): (Option<&str>, Option<&str>) = (None, None);
     let mut bench: Option<u32> = None;
+    let mut stages_path: Option<&str> = None;
     let mut viewent: Option<[f32; 6]> = None;
     let mut dlights: Vec<quake_rs::dlight::DynamicLight> = Vec::new();
     let mut particles: Vec<([f32; 3], u8)> = Vec::new();
@@ -159,6 +163,7 @@ pub fn cmd_view(args: &[String]) -> CmdResult {
                 viewent = Some(v.try_into().map_err(|_| format!("--viewent: expected 6 numbers, got {val:?}"))?);
             }
             "--bench" => bench = Some(val.parse::<u32>().map_err(|_| format!("--bench: bad count {val:?}"))?.max(1)),
+            "--stages" => stages_path = Some(val.as_str()),
             "--d-mipscale" | "--d-mipcap" => {
                 let x: f32 = val.parse().map_err(|_| format!("{flag}: bad number {val:?}"))?;
                 if flag == "--d-mipscale" { opts.mip.mipscale = x } else { opts.mip.mipcap = x }
@@ -333,7 +338,8 @@ pub fn cmd_view(args: &[String]) -> CmdResult {
     let dowarp = quake_rs::world::point_contents(&bsp, cam.pos) <= quake_rs::bsp::CONTENTS_WATER;
     let mut renderer = render::Renderer::new();
     renderer.set_threads(video.threads());
-    let mut render_once = || {
+    renderer.set_stages(stages_path.is_some());
+    let render_once = |renderer: &mut render::Renderer| {
         // cl.viewent as given (the oracle's), else V_CalcRefdef's for a still
         // player in a full-frame view (id at viewsize 120: no fudge, no bob).
         let (origin_ofs, gun_angles) = match viewent {
@@ -380,13 +386,18 @@ pub fn cmd_view(args: &[String]) -> CmdResult {
         }
         renderer.render(&scene)
     };
-    let img = render_once();
+    let img = render_once(&mut renderer);
+    if let Some(path) = stages_path {
+        let text = renderer.take_stages().unwrap_or_default();
+        std::fs::write(path, text).map_err(|e| format!("cannot write {path}: {e}"))?;
+        renderer.set_stages(false);
+    }
     // Warm re-renders of the same view (the first, cold frame above is excluded),
     // the port side of the oracle's `oracle_bench`: renderer cost only.
     let bench = bench.map(|n| {
         let start = std::time::Instant::now();
         for _ in 0..n {
-            std::hint::black_box(render_once());
+            std::hint::black_box(render_once(&mut renderer));
         }
         (n, start.elapsed().as_secs_f64() * 1000.0 / n as f64)
     });

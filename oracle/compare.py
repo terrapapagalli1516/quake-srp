@@ -173,12 +173,15 @@ def run_c(args, case: str, mapname: str, ents: bool, out: Path) -> dict:
         start = f"playdemo {args.demo}" if args.demo else f"map {mapname}"
         cmds += [f'oracle_shot "{out / case}.c"', start] + args.c_post
         (base / "id1" / "oracle.cfg").write_text("\n".join(cmds) + "\n")
-        cmd = [str(ensure_oracle(args.oracle)), "-basedir", str(base), "-width", str(w), "-height", str(h)]
+        oracle = ensure_oracle(args.oracle, getattr(args, "sse", False))
+        cmd = [str(oracle), "-basedir", str(base), "-width", str(w), "-height", str(h)]
         cmd += extra_flags
         if args.aspect is not None:
             cmd += ["-oracle_aspect", str(args.aspect)]
         if args.oracle_dt is not None:
             cmd += ["-oracle_dt", repr(args.oracle_dt)]
+        if getattr(args, "fpcw", False):
+            cmd += ["-oracle_fpcw"]
         cmd += ["+exec", "oracle.cfg"]
         res = subprocess.run(cmd, cwd=base, capture_output=True, text=True, timeout=120)
         meta_path = out / f"{case}.c.json"
@@ -265,6 +268,9 @@ def run_port(args, qt: Path, case: str, mapname: str, meta: dict, ents: bool, ou
                 "--viewent", ",".join(repr(float(v)) for v in vm["origin"] + vm["angles"])]
     if args.bench:
         cmd += ["--bench", str(args.bench)]
+    # the frame's stages, for pixel_trace.py (id's: `oracle_stages`)
+    if getattr(args, "stages", False):
+        cmd += ["--stages", str(out / f"{case}.port.stages")]
     # The renderer's mip cvars are the port's too: `--c-cmd "d_mipscale 0"` puts
     # both renderers at mip 0.
     for c in args.c_cmd:
@@ -403,6 +409,13 @@ def main() -> None:
                          "(id's -hipnotic/-rogue/-game convention), and tried for a --maps entry id1 doesn't have")
     ap.add_argument("--quaketool", help="use this quaketool binary instead of building quake-rs")
     ap.add_argument("--oracle", help="use this C oracle binary (default oracle/build/quake-oracle)")
+    ap.add_argument("--sse", action="store_true",
+                    help="id's C built with SSE2 floats (oracle/build/quake-oracle-sse, ORACLE_FPMATH=sse "
+                         "oracle/build.sh): strict single precision, which the port's Classic matches to the pixel; "
+                         "the default x87 build keeps intermediates in 80-bit registers")
+    ap.add_argument("--fpcw", action="store_true",
+                    help="id's x86 FPU state while rendering (-oracle_fpcw: R_RenderView_'s Sys_LowFPPrecision, "
+                         "24-bit precision and chop rounding, as sys_wina.s sets it); the x87 build's arithmetic only")
     ap.add_argument("--full", action="store_true",
                     help="C: dump the composited screen at VID_Update (sbar, console, notify text too) instead "
                          "of the 3-D view alone; give the console --settle 8+ frames to retract")

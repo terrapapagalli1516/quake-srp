@@ -523,10 +523,15 @@ static void Oracle_Trace_f (void)
 }
 
 void Oracle_Walk_Init (void);
+void Oracle_StagesInit (void);
+void Oracle_StagesBegin (void);
+void Oracle_StagesEnd (void);
+void Oracle_StagesGrads (espan_t *pspan, char *kind);
 
 void Oracle_Init (void)
 {
 	Oracle_Walk_Init ();
+	Oracle_StagesInit ();
 	Cmd_AddCommand ("oracle_trace", Oracle_Trace_f);
 	Cmd_AddCommand ("oracle_field", Oracle_Field_f);
 	Cmd_AddCommand ("oracle_entfield", Oracle_EntField_f);
@@ -812,10 +817,14 @@ void __wrap_R_RenderView (void)
 	if (active && active->has_time)
 		cl.time = active->time;
 	if (active)
+	{
 		Oracle_DumpParticles (active);
+		Oracle_StagesBegin ();
+	}
 
 	__real_R_RenderView ();
 	used_time = cl.time;
+	Oracle_StagesEnd ();
 	Oracle_Blank ();
 
 	bench_frames = 0;
@@ -1096,6 +1105,7 @@ static void Oracle_DrawSpansExact (espan_t *pspan)
 
 void __wrap_D_DrawSpans8 (espan_t *pspan)
 {
+	Oracle_StagesGrads (pspan, "spans");
 	switch ((int)oracle_spans.value)
 	{
 	case 16:
@@ -1312,6 +1322,7 @@ static void Oracle_TurbulentExact (espan_t *pspan)
 
 void __wrap_Turbulent8 (espan_t *pspan)
 {
+	Oracle_StagesGrads (pspan, "turb");
 	switch ((int)oracle_spans.value)
 	{
 	case 8:
