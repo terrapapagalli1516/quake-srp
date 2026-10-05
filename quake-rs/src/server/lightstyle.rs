@@ -176,20 +176,16 @@ pub fn lightstyle_scales_at(styles: &[String], time: f64, lerp: LerpLightStyles)
     // value is a whole number of units, so the scale is exact in f32 and the
     // renderer's `luxel * scale` is id's integer product.
     const NORMAL: f32 = 256.0;
-    // The animation phase in characters, floor(time*10) and its fraction —
-    // Classic's on the f32 clock, the glide's on the f64. A non-finite time
-    // counts as 0; a phase past i64 saturates (the `as` cast) and past the
-    // float's range has no fraction, so nothing overflows or panics.
+    // The animation phase in characters, floor(time*10) and its fraction:
+    // R_AnimateLight's `(int)(cl.time*10)`, `cl.time` a double and the
+    // product a double's (a float clock times 10 in float would round 1.9f's
+    // 18.9999998 up to 19: a tenth early). A non-finite time counts as 0; a
+    // phase past i64 saturates (the `as` cast) and past the float's range has
+    // no fraction, so nothing overflows or panics.
+    let p = if time.is_finite() { time * 10.0 } else { 0.0 };
     let (i, frac) = match lerp {
-        LerpLightStyles::Classic => {
-            let t = time as f32;
-            let p = if t.is_finite() { t * 10.0 } else { 0.0 };
-            (p.floor() as i64, 0.0)
-        }
-        LerpLightStyles::Smooth => {
-            let p = if time.is_finite() { time * 10.0 } else { 0.0 };
-            (p.floor() as i64, if p.is_finite() { (p - p.floor()) as f32 } else { 0.0 })
-        }
+        LerpLightStyles::Classic => (p.floor() as i64, 0.0),
+        LerpLightStyles::Smooth => (p.floor() as i64, if p.is_finite() { (p - p.floor()) as f32 } else { 0.0 }),
     };
     std::array::from_fn(|j| {
         let map = styles.get(j).map(|s| s.as_bytes()).unwrap_or(b"");
@@ -423,15 +419,15 @@ mod tests {
         }
     }
 
-    /// Classic is `R_AnimateLight` as the port always ran it: the letter of
-    /// tenth `floor(time*10)` on the f32 clock, before 0 too.
+    /// Classic is `R_AnimateLight`: the letter of tenth `(int)(cl.time*10)`,
+    /// the product a double's (`floor`, before 0 too).
     #[test]
     fn classic_is_r_animatelight() {
         let table = worldspawn_table();
         for n in -500..5000 {
             let t = n as f32 * 0.0137;
             let sc = lightstyle_scales_at(&table, f64::from(t), Classic);
-            let tenth = (t * 10.0).floor() as i64;
+            let tenth = (f64::from(t) * 10.0).floor() as i64;
             for (j, map) in WORLDSPAWN.iter().enumerate() {
                 assert_eq!(units(sc[j]), letter(map, tenth), "style {j} at t = {t}");
             }
@@ -442,8 +438,8 @@ mod tests {
 
     /// At every whole tenth of a second the glide is id's letter for that
     /// tenth: exactly, for each of the twelve patterns, over 2000 s of
-    /// clock. (Where the f32 clock's own `time*10` lands on the whole
-    /// number, Classic is that letter too; just below it, Classic still
+    /// clock. (Where a float clock's `time*10` lands on the whole number or
+    /// past it, Classic is that letter too; just below it, Classic still
     /// shows the tenth before, and the glide, at the end of its step, is
     /// already the letter.)
     #[test]
@@ -456,12 +452,12 @@ mod tests {
             for (j, map) in WORLDSPAWN.iter().enumerate() {
                 assert_eq!(units(smooth[j]), letter(map, n), "style {j} at tenth {n}");
             }
-            if (t * 10.0).floor() as i64 == n {
+            if (f64::from(t) * 10.0).floor() as i64 == n {
                 on_the_tenth += 1;
                 assert_eq!(smooth, lightstyle_scales_at(&table, f64::from(t), Classic), "tenth {n}: id's frame");
             }
         }
-        assert!(on_the_tenth > 15_000, "most whole tenths are whole on the f32 clock ({on_the_tenth})");
+        assert!(on_the_tenth > 9_000, "about half the tenths are on or past the whole number ({on_the_tenth})");
     }
 
     /// All through a tenth the value is the linear blend of the tenth's two
@@ -536,7 +532,7 @@ mod tests {
     /// A long level: 28 hours in, a `float` clock steps 128 times a second,
     /// so two 480 Hz frames would share a time; the glide reads the `double`
     /// clock and still moves a step every frame or two through a changing
-    /// tenth, while Classic is the letter of the `float` time as before.
+    /// tenth, while Classic is the letter of the clock's tenth, as id's.
     #[test]
     fn the_glide_runs_on_the_double_clock() {
         let table = worldspawn_table();
@@ -550,7 +546,7 @@ mod tests {
         assert!(values.windows(2).all(|w| w[1] <= w[0]), "down, never back: {values:?}");
         for k in 0..48 {
             let t = t0 + f64::from(k) / 480.0;
-            let tenth = ((t as f32) * 10.0).floor() as i64;
+            let tenth = (t * 10.0).floor() as i64;
             assert_eq!(units(lightstyle_scales_at(&table, t, Classic)[1]), letter(WORLDSPAWN[1], tenth), "{t}");
         }
     }
