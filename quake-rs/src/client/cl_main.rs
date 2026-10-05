@@ -595,7 +595,11 @@ fn client_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid, dra
     // player's can be. Everything the client does with an entity (its EF_*
     // lights, trails, spin and drawing) is gated on this; an entity out of the
     // PVS cannot light the far side of a wall.
-    let mut relinked = w.server.entities_sent_to_client();
+    // (A host's own camera is sent what a client there would be: `Walk::camera`.)
+    let mut relinked = match w.camera {
+        None => w.server.entities_sent_to_client(),
+        Some(c) => w.server.entities_sent_to_eye(c.pos),
+    };
     if w.server.vm.ent_float(w.player, w.server.vm.fo().modelindex) == 0.0 {
         if let Some(r) = usize::try_from(w.player).ok().and_then(|p| relinked.get_mut(p)) {
             *r = false;

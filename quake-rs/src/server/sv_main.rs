@@ -302,14 +302,30 @@ impl Server {
     /// (every in-use edict with a model is sent).
     pub fn entities_sent_to_client(&self) -> Vec<bool> {
         let vm = &self.vm;
+        let eye = self.player.map(|clent| {
+            let org = vm.ent_vec(clent, vm.fo().origin);
+            let ofs = vm.ent_vec(clent, vm.fo().view_ofs);
+            [org[0] + ofs[0], org[1] + ofs[1], org[2] + ofs[2]]
+        });
+        self.entities_sent_from(eye)
+    }
+
+    /// EXTRA, not id: [`Server::entities_sent_to_client`] as if the client's
+    /// eye were at `eye` — what a client there would be sent (a host's own
+    /// camera, `client::Walk::camera`, draws what it can see, not what the
+    /// player can). The client is still always sent.
+    pub fn entities_sent_to_eye(&self, eye: [f32; 3]) -> Vec<bool> {
+        self.entities_sent_from(self.player.map(|_| eye))
+    }
+
+    /// The edicts sent for a client whose eye is at `eye` (none: no client,
+    /// nothing culled).
+    fn entities_sent_from(&self, eye: Option<[f32; 3]>) -> Vec<bool> {
+        let vm = &self.vm;
         let n = vm.num_edicts();
         let mut sent = vec![false; n];
         let clent = self.player;
-        let pvs = clent.and_then(|clent| {
-            let org = vm.ent_vec(clent, vm.fo().origin);
-            let ofs = vm.ent_vec(clent, vm.fo().view_ofs);
-            self.fat_pvs([org[0] + ofs[0], org[1] + ofs[1], org[2] + ofs[2]])
-        });
+        let pvs = eye.and_then(|eye| self.fat_pvs(eye));
         for (e, slot) in sent.iter_mut().enumerate().skip(1) {
             let ent = e as i32;
             if vm.is_free_edict(ent) {
