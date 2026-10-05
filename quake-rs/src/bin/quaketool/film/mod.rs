@@ -71,6 +71,13 @@
 //! both ways in time ([`camera::Rig`]). The film's camera never changes the
 //! game, so the take that draws plays the same one. Marks ([`marks`]) are
 //! seen as each frame is drawn, against its z-buffer.
+//!
+//! A walk (`camera walk`, [`walk`]) moves the player itself, through the
+//! client's own input, and draws from its eye. It is planned by a rehearsal
+//! too ([`plan_walk`]: the moves a player makes from where it is, a stuck
+//! player an error before anything is drawn), and every take replays the
+//! plan's moves by game second: each side of an `ab` sends the same commands
+//! to its own game.
 
 use std::io::Write as _;
 use std::rc::Rc;
@@ -95,11 +102,13 @@ pub mod png;
 pub mod screen;
 pub mod shot;
 pub mod text;
+pub mod walk;
 pub mod xray;
 
 use events::{EventLog, Obj};
+use quake_rs::client::cl_input::KeyMove;
 use quake_rs::client::lerpmove::LerpMove;
-use quake_rs::server::MoveType;
+use quake_rs::server::{EntFlags, MoveType};
 use shot::{Action, CameraSpec, Clock, Corner, Player, Preset, Shot, SoundClock, Target, Warmup, World, XrayBase};
 
 /// QuakeC's `flags` bits (defs.qc).
@@ -723,7 +732,7 @@ fn rehearse(pak: &Pak, shot: &Shot, out: (usize, usize), threads: usize) -> Resu
     });
     let mut s = Shot { sound: false, events: false, marks: Vec::new(), ..shot.clone() };
     s.duration += ahead + camera::STEP + 1.0 / s.fps;
-    let mut take = Take::new(pak, s, "", out, threads, false, false, None)?;
+    let mut take = Take::new(pak, s, "", out, threads, false, false, None, None)?;
     for n in 0..take.shot.frames() {
         take.frame(pak, n, false);
     }
@@ -733,6 +742,199 @@ fn rehearse(pak: &Pak, shot: &Shot, out: (usize, usize), threads: usize) -> Resu
         }
     }
     Ok(take.seen)
+}
+
+/// Walk `shot`'s route once, undrawn ([`walk`]): the moves a player makes
+/// from where it is each host frame, recorded for every take to replay. A
+/// player that gets stuck is an error, before anything is drawn. The
+/// rehearsal runs on past the shot's end (up to [`WALK_OVERRUN`] film
+/// seconds) until the walk is over, to tell how long it really takes.
+fn plan_walk(pak: &Pak, shot: &Shot, out: (usize, usize), threads: usize) -> Result<walk::Plan, String> {
+    let Some(CameraSpec::Walk(spec)) = &shot.camera else { return Err("film: no walk to plan".into()) };
+    let walker = walk::Walker::new(spec, |t| shot.game_time(t));
+    let mut s = Shot { sound: false, events: false, marks: Vec::new(), frames: None, ..shot.clone() };
+    s.duration += WALK_OVERRUN;
+    let drive = Drive::Plan { walker: Box::new(walker), plan: walk::Plan::default() };
+    let mut take = Take::new(pak, s, "", out, threads, false, false, None, Some(drive))?;
+    let frames = shot.frames();
+    for n in 0..take.shot.frames() {
+        take.frame(pak, n, false);
+        let Some(Drive::Plan { walker, plan }) = &take.walk else { break };
+        if let Some(stuck) = walker.stuck() {
+            let key = &spec.keys[stuck.key];
+            let [x, y, z] = stuck.eye.map(|v| v.round());
+            let [kx, ky, kz] = key.pos;
+            return Err(format!(
+                "film: the walk is stuck: from film second {:.2} the player came no nearer key {} ({kx},{ky},{kz}, \
+                 T {}); its eye stands at {x},{y},{z}, {:.0} units across and {:+.0} up from the key (a wall, a \
+                 ledge higher than a step's 18 units, a key off the floor: a key is reached within {} units across \
+                 and {} up or down)",
+                shot.film_time(stuck.since).max(0.0),
+                stuck.key,
+                key.t,
+                stuck.across,
+                stuck.dz,
+                spec.within,
+                walk::REACH_Z
+            ));
+        }
+        if walker.done() && n + 1 >= frames && rest(&plan.track).is_some() {
+            break;
+        }
+    }
+    let Some(Drive::Plan { walker, mut plan }) = take.walk.take() else { return Err("film: the walk was lost".into()) };
+    plan.reached = walker.reached().to_vec();
+    Ok(plan)
+}
+
+/// How long past the shot's end a walk's rehearsal goes on, to learn how
+/// long the walk takes (film seconds).
+const WALK_OVERRUN: f64 = 20.0;
+
+/// How far (units) a side replaying another's walk may stray from it: two
+/// players' widths. Past it, the side walks another route.
+const WALK_DRIFT: f64 = 32.0;
+
+/// Replay `plan` in `shot`'s game, undrawn: the farthest its player goes
+/// from the plan's.
+fn replay_drift(
+    pak: &Pak,
+    shot: &Shot,
+    out: (usize, usize),
+    threads: usize,
+    plan: &Rc<walk::Plan>,
+) -> Result<f64, String> {
+    let s = Shot { sound: false, events: false, marks: Vec::new(), frames: None, ..shot.clone() };
+    let drive = Drive::Replay { plan: plan.clone(), drift: 0.0 };
+    let mut take = Take::new(pak, s, "", out, threads, false, false, None, Some(drive))?;
+    for n in 0..take.shot.frames() {
+        take.frame(pak, n, false);
+    }
+    Ok(match take.walk {
+        Some(Drive::Replay { drift, .. }) => drift,
+        _ => 0.0,
+    })
+}
+
+/// How a take moves a walking player (`camera walk`).
+enum Drive {
+    /// From where it is, each host frame: the rehearsal that plans the walk.
+    Plan { walker: Box<walk::Walker>, plan: walk::Plan },
+    /// By the plan's moves at the frame's game second: every take that draws.
+    /// `drift`: the farthest (across) the player has been from the plan's.
+    Replay { plan: Rc<walk::Plan>, drift: f64 },
+}
+
+impl Drive {
+    /// Send the player's move for the host frame starting at game second `g`.
+    fn input(&mut self, w: &mut Walk, g: f64) {
+        let c = match self {
+            Drive::Plan { walker, plan } => {
+                let c = walker.step(g, &walk_body(w));
+                plan.moves.push((g, c));
+                c
+            }
+            Drive::Replay { plan, .. } => plan.command(g),
+        };
+        // What the page sends from the held keys and the mouse: the view's
+        // angles, and the speeds and the jump as `CL_BaseMove` makes them.
+        (w.pitch, w.yaw) = (c.pitch as f32, c.yaw as f32);
+        w.key_move = KeyMove { fwd: c.fwd as f32, side: c.side as f32, jump: c.jump, ..KeyMove::default() };
+    }
+
+    /// The host frame ending at game second `g` has moved the player.
+    fn moved(&mut self, w: &Walk, g: f64) {
+        let o = walk_body(w).origin;
+        match self {
+            Drive::Plan { plan, .. } => plan.track.push(g, o),
+            Drive::Replay { plan, drift } => {
+                // Across: the floor sets the height, and a step up comes a
+                // host frame sooner or later on another clock.
+                let p = plan.track.raw(g);
+                *drift = drift.max((o[0] - p[0]).hypot(o[1] - p[1]));
+            }
+        }
+    }
+}
+
+/// The player as a walker reads it.
+fn walk_body(w: &Walk) -> walk::Body {
+    let vm = &w.server.vm;
+    let wide = |v: [f32; 3]| v.map(f64::from);
+    walk::Body {
+        origin: wide(vm.ent_get_vector(w.player, "origin")),
+        velocity: wide(vm.ent_get_vector(w.player, "velocity")),
+        onground: vm.flags(w.player).contains(EntFlags::ONGROUND),
+        roll: f64::from(vm.ent_get_vector(w.player, "angles")[2]),
+    }
+}
+
+/// Where the client's last frame put the player's eye (`V_CalcRefdef`, as
+/// `cl_main` has it): the origin and view height, the bob from the speed
+/// across on `cl.time`, and the stair smoothing's lag (`oldz`, below the
+/// origin while climbing, the origin otherwise).
+fn drawn_eye(w: &Walk) -> [f64; 3] {
+    let (eye, _) = w.server.player_view();
+    let vel = w.server.vm.ent_get_vector(w.player, "velocity");
+    let origin_z = w.server.vm.ent_get_vector(w.player, "origin")[2];
+    let bob = render::view_bob((vel[0] * vel[0] + vel[1] * vel[1]).sqrt(), w.clock);
+    let lag = if w.oldz.is_finite() { w.oldz - origin_z } else { 0.0 };
+    [f64::from(eye[0]), f64::from(eye[1]), f64::from(eye[2] + bob + lag)]
+}
+
+/// The game second the player came to rest for good on `track` (unmoved
+/// from there to its end, two samples at least), if it is at rest at the end.
+fn rest(track: &camera::Track) -> Option<f64> {
+    let s = track.samples();
+    let &(_, end) = s.last()?;
+    let moved = |p: &[f64; 3]| (0..3).map(|k| (p[k] - end[k]).powi(2)).sum::<f64>().sqrt() > 0.01;
+    let i = s.iter().rposition(|(_, p)| moved(p)).map_or(0, |i| i + 1);
+    (i + 1 < s.len()).then(|| s[i].0)
+}
+
+/// The report's lines on a walk: when each key was reached against its
+/// time, and the walk's length against the shot's (a mismatch flagged).
+fn walk_report(shot: &Shot, plan: &walk::Plan) -> String {
+    let Some(CameraSpec::Walk(spec)) = &shot.camera else { return String::new() };
+    let film = |g: f64| shot.film_time(g).max(0.0);
+    let mut keys = Vec::new();
+    let mut late = Vec::new();
+    for (k, (key, at)) in spec.keys.iter().zip(&plan.reached).enumerate() {
+        match at {
+            Some(g) => {
+                let t = film(*g);
+                keys.push(format!("{k} at {t:.2} ({:+.2})", t - key.t));
+                if (t - key.t).abs() > 0.25 {
+                    late.push(format!("key {k} at {t:.2} s, not {}", key.t));
+                }
+            }
+            None => keys.push(format!("{k} never")),
+        }
+    }
+    let mut s = format!("\nfilm: walk: keys reached at film seconds (against their T): {}", keys.join(", "));
+    let end = plan.reached.last().copied().flatten().map(film);
+    match end {
+        Some(end) => {
+            // The walk is over at its last key; the player slides on to rest.
+            let still = rest(&plan.track).map_or(end, film).max(end);
+            s += &format!(
+                "; the last at {end:.2} s, the player at rest at {still:.2} s; the shot is {:.2} s",
+                shot.duration
+            );
+            if shot.duration < end - 0.5 / shot.fps {
+                late.push(format!("the shot ends {:.2} s before the walk's last key", end - shot.duration));
+            } else if shot.duration < still - 0.5 / shot.fps {
+                late.push(format!("the shot ends {:.2} s before the player is at rest", still - shot.duration));
+            } else if shot.duration > still + 0.5 {
+                late.push(format!("the player stands the last {:.2} s", shot.duration - still));
+            }
+        }
+        None => late.push(format!("the walk had not ended {WALK_OVERRUN} s after the shot")),
+    }
+    if !late.is_empty() {
+        s += &format!("\nfilm: note: the walk's timing: {}", late.join("; "));
+    }
+    s
 }
 
 /// One render of a shot: its game, clocks, picture, sound and events. A shot
@@ -787,6 +989,10 @@ struct Take {
     held: usize,
     clock_at_start: f64,
     log: Option<EventLog>,
+    /// `camera walk`: how this take moves its player ([`Drive`]), and a row a
+    /// picture of where the player and its eye were (`walk.csv`).
+    walk: Option<Drive>,
+    walk_rows: Vec<String>,
 }
 
 impl Take {
@@ -794,7 +1000,8 @@ impl Take {
     /// or the demo reaches `from`) and draw one paused frame from the first
     /// camera, so the surface cache is warm at frame 0. `sound`: keep its
     /// sound; `events`: keep its log; `tracks`: where the targets its camera
-    /// follows go, as its rehearsal found ([`rehearse`]).
+    /// follows go, as its rehearsal found ([`rehearse`]); `walk`: how a
+    /// walking player is moved (`camera walk`: [`plan_walk`]).
     #[allow(clippy::too_many_arguments)]
     fn new(
         pak: &Pak,
@@ -805,6 +1012,7 @@ impl Take {
         sound: bool,
         events: bool,
         tracks: Option<Vec<camera::Track>>,
+        walk: Option<Drive>,
     ) -> Result<Take, String> {
         shot.size = out;
         let now = shot.at(0.0);
@@ -817,6 +1025,13 @@ impl Take {
         let mut calls = Vec::new();
         let mut game = build(&shot, pak, &c, &mut calls)?;
         game.renderer().set_threads(threads);
+        if let (Some(CameraSpec::Walk(spec)), Game::Walk(w)) = (&shot.camera, &mut game) {
+            // The walker stands at the first key, looking as it says, before
+            // the warm-up: it settles on the floor there.
+            let (eye, look) = walk::Walker::new(spec, |t| shot.game_time(t)).start();
+            set_origin(w, [eye[0], eye[1], eye[2] - VIEWHEIGHT].map(|v| v as f32));
+            (w.pitch, w.yaw) = (look[0] as f32, look[1] as f32);
+        }
         let mut rig = camera::Rig::new(&shot, tracks.clone());
         let bsp = match &game {
             Game::Walk(w) => &w.bsp,
@@ -896,6 +1111,8 @@ impl Take {
             held: 0,
             clock_at_start: 0.0,
             log,
+            walk,
+            walk_rows: Vec::new(),
         };
         take.gamma = render::build_gamma_table(take.c.gamma);
         take.warm_up(pak);
@@ -1005,27 +1222,30 @@ impl Take {
         // frame run (the game's gate on each: `screen`); without one, a host
         // frame per film frame (free), or id's ticks of game time up to now
         // (id). The last is drawn; with none the picture is held. A frozen
-        // world is one paused frame, redrawn from the camera.
-        let mut steps: Vec<(f64, f64)> = Vec::new();
+        // world is one paused frame, redrawn from the camera. Each is `(its
+        // game seconds, the film second its camera is at, the game second it
+        // ends at)`.
+        let mut steps: Vec<(f64, f64, f64)> = Vec::new();
+        let game_now = self.shot.game_time(t);
         match (self.screen.as_mut(), self.clock) {
-            (Some(_), _) | (None, Clock::Id) if dt <= 0.0 => steps.push((0.0, t)),
+            (Some(_), _) | (None, Clock::Id) if dt <= 0.0 => steps.push((0.0, t, game_now)),
             (Some(screen), _) => {
-                for (g, step) in screen.frames_to(self.shot.game_time(t)) {
-                    steps.push((step, self.shot.film_time(g)));
+                for (g, step) in screen.frames_to(game_now) {
+                    steps.push((step, self.shot.film_time(g), g));
                 }
                 if steps.is_empty() && self.last.is_none() {
-                    steps.push((0.0, t));
+                    steps.push((0.0, t, game_now));
                 }
             }
-            (None, Clock::Free) => steps.push((dt.min(0.1), t)),
+            (None, Clock::Free) => steps.push((dt.min(0.1), t, game_now)),
             (None, Clock::Id) => {
-                let g = self.shot.game_time(t);
-                while (self.ticks + 1) as f64 * TICK <= g + 1e-9 {
+                while (self.ticks + 1) as f64 * TICK <= game_now + 1e-9 {
                     self.ticks += 1;
-                    steps.push((TICK, self.shot.film_time(self.ticks as f64 * TICK)));
+                    let g = self.ticks as f64 * TICK;
+                    steps.push((TICK, self.shot.film_time(g), g));
                 }
                 if steps.is_empty() && self.last.is_none() {
-                    steps.push((0.0, t));
+                    steps.push((0.0, t, game_now));
                 }
             }
         }
@@ -1033,7 +1253,7 @@ impl Take {
             self.held += 1;
         }
         let count = steps.len();
-        for (i, (step, tc)) in steps.into_iter().enumerate() {
+        for (i, (step, tc, ends)) in steps.into_iter().enumerate() {
             let draw = wanted && i + 1 == count;
             if !self.shot.timed.is_empty() {
                 // The settings as the timed lines have them by now: the
@@ -1069,7 +1289,16 @@ impl Take {
             if let (true, Some(m)) = (draw, light) {
                 self.set_lightmaps(m >= 1.0);
             }
+            // A walking player's move, sent as the frame starts (a paused
+            // frame moves nobody).
+            let walking = step > 0.0;
+            if let (true, Some(drive), Game::Walk(w)) = (walking, self.walk.as_mut(), &mut self.game) {
+                drive.input(w, ends - step);
+            }
             let frame = self.game.frame(step, &self.vid, draw);
+            if let (true, Some(drive), Game::Walk(w)) = (walking, self.walk.as_mut(), &self.game) {
+                drive.moved(w, ends);
+            }
             if let Some(m) = self.mixer.as_mut() {
                 m.run(pak, &frame.sound);
             }
@@ -1094,6 +1323,7 @@ impl Take {
                     None => {}
                 }
                 self.marks = self.see_marks((frame.image.w, frame.image.h));
+                self.walk_row(n, t, ends);
                 if self.eye_in_solid() {
                     let (a, _, k) = self.in_solid.unwrap_or((n, n, 0));
                     self.in_solid = Some((a, n, k + 1));
@@ -1107,6 +1337,30 @@ impl Take {
             render::recycle_image(frame.image);
         }
         self.sound_to(n);
+    }
+
+    /// `walk.csv`'s row for the picture just drawn, film frame `n` at film
+    /// second `t`, its game at game second `g`: where the player is, where the
+    /// view was drawn from (the eye with the game's bob and stair smoothing:
+    /// [`drawn_eye`]), the view's angles, the speed across, whether on the
+    /// ground, and how many keys the walk has reached.
+    fn walk_row(&mut self, n: usize, t: f64, g: f64) {
+        let (Game::Walk(w), Some(drive)) = (&self.game, &self.walk) else { return };
+        let body = walk_body(w);
+        let eye = drawn_eye(w);
+        let reached = match drive {
+            Drive::Plan { walker, .. } => walker.target(),
+            Drive::Replay { plan, .. } => plan.reached.iter().filter(|r| r.is_some_and(|at| at <= g)).count(),
+        };
+        let [ox, oy, oz] = body.origin;
+        let [ex, ey, ez] = eye;
+        self.walk_rows.push(format!(
+            "{n},{t:.6},{g:.6},{ox:.3},{oy:.3},{oz:.3},{ex:.3},{ey:.3},{ez:.3},{:.3},{:.3},{:.3},{},{reached}",
+            w.pitch,
+            w.yaw,
+            body.velocity[0].hypot(body.velocity[1]),
+            u8::from(body.onground),
+        ));
     }
 
     /// Have the renderer draw the walls' light alone, or their textures.
@@ -1609,18 +1863,40 @@ fn run(pak_path: &str, shot: &Shot, out_dir: &str, threads: usize, format: Forma
     let shots = shot.takes()?;
     let mut takes = Vec::new();
     let split = shot.ab.as_ref().map(|ab| ab.split);
+    let place = |k: usize| match split {
+        None => ("", (ow, oh)),
+        Some(split) => {
+            let out = match split {
+                shot::Split::Side => (if k == 0 { ow / 2 } else { ow - ow / 2 }, oh),
+                shot::Split::Stack => (ow, if k == 0 { oh / 2 } else { oh - oh / 2 }),
+                _ => (ow, oh),
+            };
+            (["a", "b"][k], out)
+        }
+    };
+    // A walk is planned once, by the first side that walks, and every side
+    // replays its moves: both sides of an `ab` send the same commands.
+    let walks = |s: &Shot| match &s.camera {
+        Some(CameraSpec::Walk(w)) => Some(w.clone()),
+        _ => None,
+    };
+    let routes: Vec<shot::Walk> = shots.iter().filter_map(walks).collect();
+    if routes.windows(2).any(|r| r[0] != r[1]) {
+        return Err("film: the sides of an `ab` walk one route (it is planned once and replayed by both): give \
+                    `camera walk` and its keys outside `ab`"
+            .into());
+    }
+    let planner = shots.iter().position(|s| walks(s).is_some());
+    let plan = match planner {
+        Some(k) => Some(Rc::new(plan_walk(&pak, &shots[k], place(k).1, threads)?)),
+        None => None,
+    };
+    let walk_lines = match (planner, &plan) {
+        (Some(k), Some(plan)) => walk_report(&shots[k], plan),
+        _ => String::new(),
+    };
     for (k, s) in shots.into_iter().enumerate() {
-        let (name, out) = match split {
-            None => ("", (ow, oh)),
-            Some(split) => {
-                let out = match split {
-                    shot::Split::Side => (if k == 0 { ow / 2 } else { ow - ow / 2 }, oh),
-                    shot::Split::Stack => (ow, if k == 0 { oh / 2 } else { oh - oh / 2 }),
-                    _ => (ow, oh),
-                };
-                (["a", "b"][k], out)
-            }
-        };
+        let (name, out) = place(k);
         let sound = shot.sound
             && match shot.ab.as_ref().map(|ab| ab.sound) {
                 None | Some(shot::AbSound::Both) => true,
@@ -1629,7 +1905,22 @@ fn run(pak_path: &str, shot: &Shot, out_dir: &str, threads: usize, format: Forma
             };
         // A camera that follows the game: the game first, to know its way.
         let tracks = if s.followed().is_empty() { None } else { Some(rehearse(&pak, &s, out, threads)?) };
-        takes.push(Take::new(&pak, s, name, out, threads, sound, shot.events, tracks)?);
+        let walked = plan.as_ref().filter(|_| walks(&s).is_some());
+        if let (Some(plan), false) = (walked, Some(k) == planner) {
+            // A side that did not plan the walk replays it undrawn first: its
+            // own physics must walk the same route, or nothing is drawn.
+            let drift = replay_drift(&pak, &s, out, threads, plan)?;
+            if drift > WALK_DRIFT {
+                return Err(format!(
+                    "film: side {name} walks another route: replaying the walk's moves on its clock, its player goes \
+                     {drift:.0} units from side {}'s (more than {WALK_DRIFT}: a step caught or missed); move the keys \
+                     off the edge",
+                    ["a", "b"][planner.unwrap_or(0)]
+                ));
+            }
+        }
+        let drive = walked.map(|plan| Drive::Replay { plan: plan.clone(), drift: 0.0 });
+        takes.push(Take::new(&pak, s, name, out, threads, sound, shot.events, tracks, drive)?);
     }
     // Where each take's picture lies in the composed frame (its marks' shift).
     let shifts: Vec<(f64, f64)> = match shot.ab.as_ref().map(|ab| ab.split) {
@@ -1766,6 +2057,24 @@ fn run(pak_path: &str, shot: &Shot, out_dir: &str, threads: usize, format: Forma
                 "\nfilm: WARNING{}: the game went {d:.1} units from its rehearsal; the camera followed the rehearsal",
                 if take.name.is_empty() { String::new() } else { format!(" (side {})", take.name) }
             );
+        }
+    }
+    // A walk: its timing, how near each side's player kept to the planned
+    // walk, and where it went (`walk.csv`, `walk-a.csv`, ...).
+    report += &walk_lines;
+    for take in &takes {
+        let Some(Drive::Replay { drift, .. }) = &take.walk else { continue };
+        let csv = if take.name.is_empty() { "walk.csv".to_string() } else { format!("walk-{}.csv", take.name) };
+        report += &format!(
+            "\nfilm: walk{}: the player kept within {drift:.2} units (across) of the planned walk",
+            if take.name.is_empty() { String::new() } else { format!(" (side {})", take.name) }
+        );
+        if out_dir != "-" {
+            let path = format!("{out_dir}/{csv}");
+            let head = "frame,film_s,game_s,origin_x,origin_y,origin_z,eye_x,eye_y,eye_z,pitch,yaw,speed,onground,keys";
+            let text = std::iter::once(head).chain(take.walk_rows.iter().map(String::as_str)).collect::<Vec<_>>();
+            std::fs::write(&path, text.join("\n") + "\n").map_err(|e| format!("cannot write {path}: {e}"))?;
+            report += &format!("; {path}");
         }
     }
     let any_marks = mark_frames.iter().any(|m| !m.is_empty());
@@ -2454,5 +2763,128 @@ mod display_tests {
             assert_eq!(new, (k + 1) % 4 == 0, "id's clock, frame {}: {id:?}", k + 1);
         }
         assert!(free[10..].iter().all(|&new| new), "free: {free:?}");
+    }
+}
+
+#[cfg(test)]
+mod walk_tests {
+    use super::v2_tests::{pak_path, render};
+    use super::*;
+
+    /// A `walk.csv`'s rows: (game second, origin z, eye z, speed across).
+    fn rows(dir: &std::path::Path, name: &str) -> Vec<[f64; 4]> {
+        let text = std::fs::read_to_string(dir.join(name)).expect("walk.csv");
+        let mut lines = text.lines();
+        let head: Vec<&str> = lines.next().unwrap().split(',').collect();
+        let col = |name: &str| head.iter().position(|h| *h == name).unwrap();
+        let (g, oz, ez, v) = (col("game_s"), col("origin_z"), col("eye_z"), col("speed"));
+        lines
+            .map(|l| {
+                let f: Vec<f64> = l.split(',').map(|x| x.parse().unwrap()).collect();
+                [f[g], f[oz], f[ez], f[v]]
+            })
+            .collect()
+    }
+
+    /// From e1m1's first hall up the two 16-unit steps onto its west ledge.
+    const LEDGE: &str = "map e1m1\nduration 1.5\nfps 30\nsize 160x90\nwarmup 0.3\ngun on\ncamera walk\n\
+                         key 0 470,240,46\nkey 0.45 370,290,62\nkey 0.95 362,420,78\n";
+
+    #[test]
+    fn a_walk_climbs_e1m1_s_steps_its_eye_gliding_up_them_and_bobbing() {
+        let Some(pak) = pak_path() else { return };
+        let dir = render(&pak, LEDGE, "walk-ledge", &[]);
+        let r = rows(&dir, "walk.csv");
+        assert_eq!(r.len(), 45, "a row a picture");
+        // The origin (24 above the feet): the hall's floor, then two steps up.
+        let (first, last) = (r[0][1], r[r.len() - 1][1]);
+        assert!((first - 24.0).abs() < 0.1 && (last - 56.0).abs() < 0.1, "from {first} to {last}");
+        let steps = r.windows(2).filter(|w| (w[1][1] - w[0][1] - 16.0).abs() < 0.5).count();
+        assert_eq!(steps, 2, "two steps, each in one host frame: {:?}", r.iter().map(|x| x[1]).collect::<Vec<_>>());
+        // The eye glides up each step (the stair smoothing lags it below the
+        // origin's eye), and bobs while the player runs.
+        assert!(r.iter().any(|x| x[2] < x[1] + VIEWHEIGHT - 6.0), "the eye lags a step");
+        let running: Vec<&[f64; 4]> = r.iter().filter(|x| x[3] > 200.0).collect();
+        assert!(running.iter().any(|x| (x[2] - x[1] - VIEWHEIGHT).abs() > 2.0), "the eye bobs");
+        // At the end it stands, its eye at rest at the view height.
+        let end = r[r.len() - 1];
+        assert!(end[3] < 1.0 && (end[2] - end[1] - VIEWHEIGHT).abs() < 1e-3, "{end:?}");
+    }
+
+    #[test]
+    fn the_eye_written_is_the_eye_drawn() {
+        let Some(pak) = pak_path() else { return };
+        let bytes = std::fs::read(&pak).unwrap();
+        let pak = Pak::from_bytes("pak0.pak".into(), bytes).unwrap();
+        // `divides` has the renderer keep its view, to check against.
+        let shot = Shot::parse(&format!("{LEDGE}divides on\n")).unwrap();
+        let plan = Rc::new(plan_walk(&pak, &shot, (160, 90), 2).unwrap());
+        let drive = Drive::Replay { plan, drift: 0.0 };
+        let mut take = Take::new(&pak, shot, "", (160, 90), 2, false, false, None, Some(drive)).unwrap();
+        for n in 0..take.shot.frames() {
+            take.frame(&pak, n, true);
+            let Game::Walk(w) = &take.game else { panic!("a map") };
+            let drawn = w.renderer.xray_frame().and_then(|x| x.view.as_ref()).expect("the view").origin;
+            assert_eq!(drawn_eye(w), drawn.map(f64::from), "frame {n}");
+        }
+    }
+
+    #[test]
+    fn a_walk_into_a_wall_fails_before_anything_is_drawn() {
+        let Some(pak) = pak_path() else { return };
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join(format!("target/film-walk-test-{}-stuck", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let shot_path = dir.join("t.shot");
+        // East from the start, into the corridor's wall.
+        std::fs::write(
+            &shot_path,
+            "map e1m1\nduration 2\nfps 10\nsize 64x36\ncamera walk\nkey 0 480,-352,110\nkey 1 700,-352,110\n",
+        )
+        .unwrap();
+        let args: Vec<String> =
+            [&pak, &*shot_path.to_string_lossy(), &*dir.to_string_lossy()].iter().map(|s| s.to_string()).collect();
+        let e = cmd_film(&args).unwrap_err();
+        assert!(e.contains("stuck") && e.contains("key 1"), "{e}");
+        assert!(!dir.join("00000.png").exists(), "nothing drawn");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn both_sides_of_an_ab_walk_send_the_same_moves_on_their_own_clocks() {
+        let Some(pak) = pak_path() else { return };
+        // Classic's 72 Hz cap against slop's uncapped frames, on a 240 Hz screen
+        // at quarter speed: the same route, a few units apart at most.
+        let ab = LEDGE
+            .replace("key 0.45", "key 1.8")
+            .replace("key 0.95", "key 3.8")
+            .replace("duration 1.5", "duration 6")
+            .replace("fps 30", "fps 60")
+            + "display 240\nspeed 0.25\nab clock id | clock free; stepping uncapped\nsplit side\n";
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join(format!("target/film-walk-test-{}-ab", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let shot_path = dir.join("t.shot");
+        std::fs::write(&shot_path, &ab).unwrap();
+        let args: Vec<String> =
+            [&pak, &*shot_path.to_string_lossy(), &*dir.to_string_lossy(), "--format", "ppm", "--threads", "2"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+        let report = cmd_film(&args).unwrap();
+        let kept = |side: &str| -> f64 {
+            let at = report.find(&format!("walk (side {side}): the player kept within ")).expect(side);
+            let rest = &report[at..];
+            let n = rest.split("within ").nth(1).unwrap().split(' ').next().unwrap();
+            n.parse().unwrap()
+        };
+        assert_eq!(kept("a"), 0.0, "side a planned the walk: {report}");
+        assert!(kept("b") < 4.0, "side b replays it: {report}");
+        let (a, b) = (rows(&dir, "walk-a.csv"), rows(&dir, "walk-b.csv"));
+        assert_eq!(b.len(), 360, "the uncapped side draws every refresh, a film frame each");
+        assert!((89..=91).contains(&a.len()), "id's cap passes every 4th: {}", a.len());
+        let top = |r: &[[f64; 4]]| r.iter().map(|x| x[1]).fold(f64::MIN, f64::max);
+        assert!((top(&a) - top(&b)).abs() < 0.1, "both climb both steps");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

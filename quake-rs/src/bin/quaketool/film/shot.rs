@@ -186,12 +186,40 @@ pub struct Orbit {
     pub lag: f64,
 }
 
+/// One waypoint of a walk (`key` after `camera walk`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WalkKey {
+    /// The film second the player should reach it.
+    pub t: f64,
+    /// Where the eye passes (the player's origin plus its 22-unit view height).
+    pub pos: [f64; 3],
+    /// Where the view turns as the player nears it (`None`: where it walks).
+    pub look: Option<Look>,
+    /// The player jumps as it leaves this key.
+    pub jump: bool,
+    /// How the look turns over the segment from this key to the next.
+    pub ease: Ease,
+}
+
+/// `camera walk`: the player walks a route, the camera its own eye (`walk.rs`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Walk {
+    /// The player's top speed, units a game second (`run`: 320, `sv_maxspeed`;
+    /// `walk`: 200, `cl_forwardspeed`).
+    pub top: f64,
+    /// How near a key the player passes, across (units).
+    pub within: f64,
+    pub keys: Vec<WalkKey>,
+}
+
 /// The camera.
 #[derive(Clone, Debug, PartialEq)]
 pub enum CameraSpec {
     Player,
     Demo,
     Path(Vec<Key>),
+    /// `camera walk`: the player walks the keys, seen from its own eye.
+    Walk(Walk),
     /// `camera follow`: the eye rides with the target, looking at it; `key`
     /// lines after it are a path relative to it (their `X,Y,Z` the eye's
     /// offset from it, `at X,Y,Z` a point from the one aimed at).
@@ -592,8 +620,12 @@ impl Shot {
         if matches!(self.camera, Some(CameraSpec::Demo)) && !matches!(self.world, World::Demo { .. }) {
             return Err("`camera demo` needs a `demo` world".into());
         }
-        // The game's own cameras: the player's eye, the recording's.
-        let games = matches!(self.camera, None | Some(CameraSpec::Player | CameraSpec::Demo));
+        if let Some(CameraSpec::Walk(walk)) = &self.camera {
+            self.check_walk(walk)?;
+        }
+        // The game's own cameras: the player's eye (standing or walking), the
+        // recording's.
+        let games = matches!(self.camera, None | Some(CameraSpec::Player | CameraSpec::Demo | CameraSpec::Walk(_)));
         if games && self.fov != 90.0 {
             return Err("`fov` is the film's cameras' (path, fixed, follow, orbit): the player's eye and a \
                         demo's see id's 90"
@@ -610,6 +642,36 @@ impl Shot {
         }
         if self.ab.is_some() {
             self.takes()?;
+        }
+        Ok(())
+    }
+
+    /// What must hold of a walk: a map's player to walk it, keys to walk,
+    /// and no other line moving or turning that player.
+    fn check_walk(&self, walk: &Walk) -> Result<(), String> {
+        if !matches!(self.world, World::Map(_)) {
+            return Err("`camera walk` walks a map's player (a demo's walks as it was recorded: `camera demo`)".into());
+        }
+        if walk.keys.is_empty() {
+            return Err("`camera walk` has no `key` lines".into());
+        }
+        if self.player == Player::Camera {
+            return Err(
+                "`player camera` and `camera walk`: the walk is the player's (it starts at the first key)".into()
+            );
+        }
+        let steers = |a: &Action| match a {
+            Action::Look(..) => true,
+            Action::Console(argv) => {
+                let b = argv[0].trim_start_matches(['+', '-']);
+                argv[0] != b && ["forward", "back", "moveleft", "moveright"].contains(&b)
+            }
+            _ => false,
+        };
+        if self.actions.iter().any(|(_, a)| steers(a)) {
+            return Err("`camera walk` moves and turns the player: no `look` or `cmd +forward/+back/+moveleft/\
+                        +moveright` lines (jumps and the rest are the shot's)"
+                .into());
         }
         Ok(())
     }
@@ -942,6 +1004,7 @@ impl Shot {
                     ["player"] => CameraSpec::Player,
                     ["demo"] => CameraSpec::Demo,
                     ["path"] => CameraSpec::Path(Vec::new()),
+                    ["walk", opts @ ..] => CameraSpec::Walk(parse_walk(opts)?),
                     ["fixed", rest @ ..] => {
                         let (pos, look) = parse_place(rest)?;
                         CameraSpec::Path(vec![Key { t: 0.0, pos, look, fov: None, ease: Ease::Linear }])
@@ -951,7 +1014,7 @@ impl Shot {
                         CameraSpec::Follow { target, follow: parse_follow(opts)?, keys: Vec::new() }
                     }
                     ["orbit", centre, opts @ ..] => CameraSpec::Orbit(parse_orbit(centre, opts)?),
-                    _ => return Err(format!("`camera player|demo|path|fixed|follow|orbit ...`, got {rest:?}")),
+                    _ => return Err(format!("`camera player|demo|path|walk|fixed|follow|orbit ...`, got {rest:?}")),
                 })
             }
             "aim" => {
@@ -996,8 +1059,17 @@ impl Shot {
                 m.ok_or_else(|| format!("`markdraw {name}` before its `mark` line"))?.draw = on;
             }
             "key" => {
+                if let Some(CameraSpec::Walk(walk)) = &mut self.camera {
+                    // A waypoint: the path's key, less the fov, plus `look` and `jump`.
+                    let key = parse_walk_key(&words)?;
+                    if let Some(last) = walk.keys.last().filter(|k| k.t >= key.t) {
+                        return Err(format!("key times must rise: {} after {}", key.t, last.t));
+                    }
+                    walk.keys.push(key);
+                    return Ok(());
+                }
                 let (Some(CameraSpec::Path(keys)) | Some(CameraSpec::Follow { keys, .. })) = &mut self.camera else {
-                    return Err("`key` lines follow `camera path` (or `camera follow`)".into());
+                    return Err("`key` lines follow `camera path` (or `camera follow`, `camera walk`)".into());
                 };
                 let [t, rest @ ..] = words.as_slice() else { return Err("`key T X,Y,Z ...`".into()) };
                 let t = num(t)?;
@@ -1304,6 +1376,65 @@ fn parse_orbit(centre: &str, opts: &[&str]) -> Result<Orbit, String> {
     Ok(o)
 }
 
+/// `camera walk [run|walk|SPEED] [within R]`.
+fn parse_walk(opts: &[&str]) -> Result<Walk, String> {
+    let mut walk = Walk { top: super::walk::RUN, within: super::walk::WITHIN, keys: Vec::new() };
+    let mut it = opts.iter();
+    while let Some(w) = it.next() {
+        match *w {
+            "run" => walk.top = super::walk::RUN,
+            "walk" => walk.top = super::walk::WALK,
+            "within" => {
+                let v = it.next().ok_or("`within R`")?;
+                walk.within = v
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|r| r.is_finite() && *r >= 1.0)
+                    .ok_or_else(|| format!("`within R`: R units across, 1 or more, got {v:?}"))?;
+            }
+            v => {
+                let top = v.parse::<f64>().ok().filter(|s| s.is_finite());
+                walk.top = top.filter(|s| (super::walk::SLOWEST..=super::walk::RUN).contains(s)).ok_or_else(|| {
+                    format!(
+                        "`camera walk [run|walk|SPEED] [within R]`: SPEED from {} (the slowest a player walks on \
+                         the ground) to {} (sv_maxspeed), got {v:?}",
+                        super::walk::SLOWEST,
+                        super::walk::RUN
+                    )
+                })?;
+            }
+        }
+    }
+    Ok(walk)
+}
+
+/// A walk's `key T X,Y,Z [P,Y[,R] | at X,Y,Z | look P,Y] [jump] [ease E]`.
+fn parse_walk_key(words: &[&str]) -> Result<WalkKey, String> {
+    let usage = "`key T X,Y,Z [P,Y | at X,Y,Z | look P,Y] [jump] [ease linear|in|out|inout]` (a walk's)";
+    let [t, pos, rest @ ..] = words else { return Err(usage.into()) };
+    let t = t.parse::<f64>().ok().filter(|v| v.is_finite()).ok_or_else(|| format!("bad time {t:?}"))?;
+    let mut key = WalkKey { t, pos: xyz(pos)?, look: None, jump: false, ease: Ease::Linear };
+    let mut it = rest.iter();
+    while let Some(w) = it.next() {
+        match *w {
+            "jump" => key.jump = true,
+            "ease" => key.ease = parse_ease(it.next().ok_or("`ease E`")?)?,
+            "at" => key.look = Some(Look::At(xyz(it.next().ok_or("`at X,Y,Z`")?)?)),
+            "fov" => return Err("a walk is the player's eye, which sees id's 90: no `fov`".into()),
+            w => {
+                let angles = if w == "look" { it.next().ok_or("`look P,Y`")? } else { w };
+                let a = numbers(angles).map_err(|_| format!("{usage}: got {w:?}"))?;
+                key.look = Some(Look::Angles(match a.as_slice() {
+                    [p, y] => [*p, *y, 0.0],
+                    [p, y, r] => [*p, *y, *r],
+                    _ => return Err(format!("expected PITCH,YAW, got {angles:?}")),
+                }));
+            }
+        }
+    }
+    Ok(key)
+}
+
 /// `X,Y,Z P,Y[,R]` or `X,Y,Z at X,Y,Z`.
 fn parse_place(words: &[&str]) -> Result<([f64; 3], Look), String> {
     match words {
@@ -1570,5 +1701,38 @@ label Classic: id's 16-pixel spans
         assert_eq!((last(0.0), last(1.0), last(1.6)), (Some("1".into()), Some("2".into()), Some("0".into())));
         assert!(Shot::parse("map e1m1\nduration 2\ngun maybe at 1\n").is_err(), "checked where it is read");
         assert!(Shot::parse("map e1m1\nduration 2\nfps 30 at 1\n").is_err(), "not every setting");
+    }
+
+    #[test]
+    fn a_walk_parses_its_keys_and_options() {
+        let walk = |lines: &str| match Shot::parse(&format!("map e1m1\nduration 9\n{lines}")).expect("parses").camera {
+            Some(CameraSpec::Walk(w)) => w,
+            c => panic!("a walk: {c:?}"),
+        };
+        let w = walk(
+            "camera walk walk within 24\nkey 0 0,0,46\nkey 1 100,0,46 look 10,90 jump\nkey 2 100,100,46 at 0,0,0 ease inout\nkey 3 0,100,46 -5,180\n",
+        );
+        assert_eq!((w.top, w.within, w.keys.len()), (super::super::walk::WALK, 24.0, 4));
+        assert_eq!(w.keys[0], WalkKey { t: 0.0, pos: [0.0, 0.0, 46.0], look: None, jump: false, ease: Ease::Linear });
+        assert_eq!((w.keys[1].look, w.keys[1].jump), (Some(Look::Angles([10.0, 90.0, 0.0])), true));
+        assert_eq!((w.keys[2].look, w.keys[2].ease), (Some(Look::At([0.0, 0.0, 0.0])), Ease::InOut));
+        assert_eq!(w.keys[3].look, Some(Look::Angles([-5.0, 180.0, 0.0])), "a path's key is a walk's");
+        assert_eq!(walk("camera walk 250\nkey 0 0,0,0\n").top, 250.0);
+        let bad = |lines: &str| Shot::parse(&format!("map e1m1\nduration 2\n{lines}")).unwrap_err().message;
+        assert!(bad("camera walk\n").contains("no `key`"));
+        assert!(bad("camera walk 900\nkey 0 0,0,0\n").contains("SPEED"));
+        assert!(bad("camera walk within 0\nkey 0 0,0,0\n").contains("within"));
+        assert!(bad("camera walk\nkey 0 0,0,0 fov 100\n").contains("fov"));
+        assert!(bad("camera walk\nkey 1 0,0,0\nkey 1 9,0,0\n").contains("rise"));
+        assert!(bad("camera walk\nkey 0 0,0,0\nplayer camera\n").contains("player camera"));
+        assert!(bad("camera walk\nkey 0 0,0,0\ncmd +forward at 1\n").contains("moves and turns"));
+        assert!(bad("camera walk\nkey 0 0,0,0\nlook 0,90\n").contains("moves and turns"));
+        assert!(bad("camera walk\nkey 0 0,0,0\nfov 100\n").contains("fov"));
+        assert!(bad("camera walk\nkey 0 0,0,0\naim 87\n").contains("aim"));
+        assert!(Shot::parse("demo demo1\nduration 2\ncamera walk\nkey 0 0,0,0\n").unwrap_err().message.contains("map"));
+        assert!(
+            Shot::parse("map e1m1\nduration 2\ncamera walk\nkey 0 0,0,0\ncmd +jump at 1\n").is_ok(),
+            "a jump is the shot's"
+        );
     }
 }

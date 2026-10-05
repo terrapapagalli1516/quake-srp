@@ -94,6 +94,30 @@ camera path                    keyframes (below): positions through Catmull-Rom 
                                shortest arc, each segment eased as its first key says
 key T X,Y,Z P,Y[,R] [fov F] [ease linear|in|out|inout]
 key T X,Y,Z at X,Y,Z [fov F] [ease ...]      looking at a point (the point is interpolated too)
+camera walk [run|walk|SPEED] [within R]
+                               the player walks the keys' route as a player does, and the camera is its
+                               own eye (walk.rs): each host frame the film sends what a player at the keys
+                               and mouse sends (the view's angles, the forward and side speeds, the jump
+                               button) and the game's own movement moves it, so the steps, slopes, walls,
+                               the bob and the stair smoothing are the game's (the gun too, `gun on`). It
+                               starts standing at the first key and walks at most SPEED units a second
+                               (run: 320, sv_maxspeed, the default; walk: 200), reaching each key within R
+                               units across (default 16) and 40 up or down. A stuck player (no nearer the
+                               next key for a game second) is an error, before a frame is drawn. The report
+                               gives the film second each key was reached at against its T, and the walk's
+                               length against the shot's; walk.csv has a row a picture: the player's origin,
+                               the eye drawn (bob and stair smoothing in it), the view, the speed. The walk
+                               is planned once and its moves replayed by game second, so both sides of an
+                               `ab` send the same commands (the report says how near each side's player
+                               kept). The `player` line does not apply, nor `bob` (the eye bobs as the
+                               game's does); `look` and `cmd +forward` lines are refused
+key T X,Y,Z [P,Y | at X,Y,Z | look P,Y] [jump] [ease E]
+                               (after `camera walk`) a waypoint: the eye's place (the player's origin + 22)
+                               to reach at film second T, at the pace that gets there then (a stand, if it
+                               would be slower than 50); the view turns from the look of the key before to
+                               this one's over the way, as far as the player has come (a key with none
+                               looks along the route ahead); `jump`: the player jumps as it leaves the key;
+                               a key at the place of the one before is a pause until its T
 fov F                          the field of view of the film's cameras (90; Hor+ widens it on a wide
                                picture); `camera player` and `camera demo` see id's 90, and refuse it
 

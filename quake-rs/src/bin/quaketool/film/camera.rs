@@ -441,7 +441,7 @@ impl Rig {
     /// keeps out of walls), where it looks and its field of view.
     fn place(&self, t: f64, g: f64) -> Option<Placed> {
         let (pos, base, look, fov) = match self.spec.as_ref()? {
-            CameraSpec::Player | CameraSpec::Demo => return None,
+            CameraSpec::Player | CameraSpec::Demo | CameraSpec::Walk(_) => return None,
             CameraSpec::Path(_) => {
                 let (pos, look, fov) = self.path.as_ref()?.place(t);
                 (pos, None, look, fov)
