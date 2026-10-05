@@ -89,6 +89,7 @@ use quake_rs::stepping::Stepping;
 
 pub mod camera;
 pub mod events;
+pub mod mapgen;
 pub mod marks;
 pub mod png;
 pub mod screen;
@@ -1570,7 +1571,18 @@ fn fire_target(w: &mut Walk, name: &str) {
 fn run(pak_path: &str, shot: &Shot, out_dir: &str, threads: usize, format: Format) -> Result<String, String> {
     let started = Instant::now();
     let bytes = std::fs::read(pak_path).map_err(|e| format!("cannot read {pak_path}: {e}"))?;
-    let pak = Pak::from_bytes("pak0.pak".into(), bytes).map_err(|e| e.to_string())?;
+    let mut pak = Pak::from_bytes("pak0.pak".into(), bytes).map_err(|e| e.to_string())?;
+    // A generated map (`map gen:grazing`) goes in front of the pak, as
+    // `maps/gen_grazing.bsp`, and the game loads it like any other.
+    let generated;
+    let mut shot = shot;
+    if let World::Map(name) = &shot.world {
+        if let Some(gen) = name.strip_prefix(mapgen::PREFIX) {
+            pak = mapgen::layer(pak, gen)?;
+            generated = Shot { world: World::Map(mapgen::map_name(gen)), ..shot.clone() };
+            shot = &generated;
+        }
+    }
     let (ow, oh) = shot.size;
     // The takes: the shot, or its two sides, each at its part of the frame.
     let shots = shot.takes()?;
@@ -1994,7 +2006,7 @@ mod tests {
     }
 
     /// The frames' hashes of a shot rendered on `threads` threads.
-    fn hashes(pak: &str, shot: &str, threads: usize, tag: &str) -> Vec<u64> {
+    pub(super) fn hashes(pak: &str, shot: &str, threads: usize, tag: &str) -> Vec<u64> {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join(format!("target/film-test-{}-{tag}-{threads}", std::process::id()));
         let shot_path = dir.with_extension("shot");

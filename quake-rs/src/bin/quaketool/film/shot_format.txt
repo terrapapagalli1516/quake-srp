@@ -1,5 +1,7 @@
 # The world: a map, or a recorded demo.
 map e1m1                       the map (maps/e1m1.bsp), its game running live
+map gen:grazing                or a map made for the film, generated as the shot starts (mapgen.rs:
+                               `grazing`, a long hall of id's base for the perspective span)
 demo demo1 [from S]            or a recorded demo, from S seconds in (default 0)
 skill N                        0..3 (default 1)
 warmup S | until T             game seconds run (undrawn) before the first frame (default 1),

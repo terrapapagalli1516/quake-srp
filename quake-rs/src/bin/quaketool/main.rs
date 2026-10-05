@@ -279,6 +279,13 @@ const COMMANDS: &[Command] = &[
         about: "text in Quake's lettering (conchars, the status bar's numerals) on a transparent PNG",
         run: |a| Ok(Out::Text(film::cmd_filmtext(a)?)),
     },
+    Command {
+        name: "mapgen",
+        usage: "<pak> <name> <out.bsp|out.pak> [--pak1]",
+        about: "write a map made for the film (`map gen:NAME` in a shot: grazing), its textures id's from <pak>; \
+                a .pak holds maps/gen_NAME.bsp for `view`'s pak list, --pak1 makes it id's engine's registered pak1",
+        run: |a| Ok(Out::Text(film::mapgen::cmd_mapgen(a)?)),
+    },
 ];
 
 /// The column `--help` starts each command's `about` at: past the usage of
@@ -450,6 +457,7 @@ mod tests {
             ("framerate", 1),
             ("film", 3),
             ("filmtext", 3),
+            ("mapgen", 3),
         ];
         assert_eq!(COMMANDS.len(), expected.len());
         for (name, n) in expected {

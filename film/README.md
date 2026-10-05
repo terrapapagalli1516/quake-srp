@@ -74,6 +74,10 @@ events on
 
 - **The world.** `map e1m1` runs the map live: its monsters, doors, lifts, lights and
   torches, through the real QuakeC. `demo demo1 from 12.8` plays id's recording instead.
+  `map gen:grazing` is a map made for the film where id's own cannot show a point
+  cleanly: a long hall of id's base, its walls for seeing at a grazing angle, written as
+  a BSP when the shot starts ([`mapgen.rs`](../quake-rs/src/bin/quaketool/film/mapgen.rs))
+  and loaded like any other; `quaketool mapgen` writes it to a file.
   `warmup` runs the game before the first frame; `wake X,Y,Z at T` wakes the nearest
   monster, its enemy the player.
 - **What the player does,** at film seconds: `impulse 9 at 0`, `attack on at 0.5`,
@@ -122,7 +126,8 @@ film's), [`screen.rs`](../quake-rs/src/bin/quaketool/film/screen.rs) (the screen
 [`camera.rs`](../quake-rs/src/bin/quaketool/film/camera.rs) (paths, follow, orbit),
 [`xray.rs`](../quake-rs/src/bin/quaketool/film/xray.rs) and the renderer's side,
 [`render/xray.rs`](../quake-rs/src/render/xray.rs),
-[`events.rs`](../quake-rs/src/bin/quaketool/film/events.rs) and
+[`events.rs`](../quake-rs/src/bin/quaketool/film/events.rs),
+[`mapgen.rs`](../quake-rs/src/bin/quaketool/film/mapgen.rs) (the maps made for the film) and
 [`marks.rs`](../quake-rs/src/bin/quaketool/film/marks.rs). The world is the browser's own
 client, run natively, with only the camera the film's.
 
