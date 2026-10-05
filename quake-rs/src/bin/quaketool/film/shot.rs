@@ -1,10 +1,11 @@
 //! The shot file: what `quaketool film` renders, as lines of `key value...`.
 //!
 //! The format is the command's own and has no dependencies: one setting a
-//! line, `#` to the end of a line is a comment, blank lines are skipped, and
-//! a value with spaces (a label) runs to the end of its line. A later line
-//! sets a setting again (a command-line override is a line read last). Every
-//! key and its default:
+//! line, a `#` that starts a word (at the line's start or after a space) to
+//! the end of the line is a comment (`monster_army#0` is no comment), blank
+//! lines are skipped, and a value with spaces (a label) runs to the end of
+//! its line. A later line sets a setting again (a command-line override is
+//! a line read last). Every key and its default:
 //!
 //! ```text
 #![doc = include_str!("shot_format.txt")]
@@ -103,12 +104,136 @@ pub struct Key {
     pub ease: Ease,
 }
 
+/// What a camera follows or aims at, or a mark sticks to (`ENTITY` on a
+/// shot line): `player`, an entity's number, or `CLASS[#N]`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum Target {
+    /// The player: a map's, or a demo's recorded one (its view entity).
+    Player,
+    /// An entity by number: a map's edict, a demo's `cl_entities` slot.
+    Number(i32),
+    /// The `N`th entity of a class to appear in the shot, from 0: those
+    /// there at its first frame in entity order, then each as it appears (a
+    /// nail fired later is a later one). The class is a classname
+    /// (`monster_army`, `spike`), a model (`progs/soldier.mdl`) or a model's
+    /// short name (`soldier`); a demo, which has no classnames, knows id1's
+    /// by their models.
+    Class(String, usize),
+}
+
+impl Target {
+    pub fn parse(s: &str) -> Result<Target, String> {
+        if s == "player" {
+            return Ok(Target::Player);
+        }
+        if let Ok(n) = s.parse::<i32>() {
+            return if n > 0 { Ok(Target::Number(n)) } else { Err(format!("no entity {n} (the world is 0)")) };
+        }
+        let (class, n) = match s.split_once('#') {
+            Some((c, n)) => (c, n.parse::<usize>().map_err(|_| format!("`CLASS#N`, got {s:?}"))?),
+            None => (s, 0),
+        };
+        if class.is_empty() || class.contains(',') {
+            return Err(format!("an entity is `player`, a number or `CLASS[#N]`, got {s:?}"));
+        }
+        Ok(Target::Class(class.to_string(), n))
+    }
+}
+
+impl fmt::Display for Target {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Target::Player => write!(f, "player"),
+            Target::Number(n) => write!(f, "{n}"),
+            Target::Class(c, n) => write!(f, "{c}#{n}"),
+        }
+    }
+}
+
+/// How a camera keeps to a moving target (`camera follow`, `aim`).
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub struct Follow {
+    /// From the target to the eye (`camera follow`) or to the point aimed
+    /// at (`aim`), in the world's axes.
+    pub offset: [f64; 3],
+    /// Game seconds the eye (an aim: the point aimed at) trails a target
+    /// moving steadily, eased in and out (0: none).
+    pub lag: f64,
+    /// Game seconds ahead of the target the camera aims: where it will be.
+    pub lookahead: f64,
+}
+
+/// The middle of an orbit.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Centre {
+    Point([f64; 3]),
+    Target(Target),
+}
+
+/// `camera orbit`: the eye on a circle about a point or a target, looking
+/// at it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Orbit {
+    pub centre: Centre,
+    pub radius: f64,
+    /// The eye above the centre.
+    pub height: f64,
+    /// Degrees a film second, + anticlockwise seen from above (yaw rising).
+    pub speed: f64,
+    /// The eye's bearing from the centre at film second 0 (a yaw: 0 along +x).
+    pub from: f64,
+    /// A target centre's lag (see [`Follow::lag`]).
+    pub lag: f64,
+}
+
 /// The camera.
 #[derive(Clone, Debug, PartialEq)]
 pub enum CameraSpec {
     Player,
     Demo,
     Path(Vec<Key>),
+    /// `camera follow`: the eye rides with the target, looking at it; `key`
+    /// lines after it are a path relative to it (their `X,Y,Z` the eye's
+    /// offset from it, `at X,Y,Z` a point from the one aimed at).
+    Follow {
+        target: Target,
+        follow: Follow,
+        keys: Vec<Key>,
+    },
+    Orbit(Orbit),
+}
+
+impl CameraSpec {
+    /// The target the camera's eye follows, if any.
+    pub fn target(&self) -> Option<&Target> {
+        match self {
+            CameraSpec::Follow { target, .. } | CameraSpec::Orbit(Orbit { centre: Centre::Target(target), .. }) => {
+                Some(target)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Where a mark is.
+#[derive(Clone, Debug, PartialEq)]
+pub enum MarkAt {
+    Point([f64; 3]),
+    /// An entity where it is drawn, plus an offset.
+    Entity(Target, [f64; 3]),
+}
+
+/// `mark`: a point whose place on the picture is written for each frame.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Mark {
+    pub name: String,
+    pub at: MarkAt,
+    /// How far behind what the frame drew there the point may lie and still
+    /// be seen, in units (`None`: 8 for a point, 16 for an entity, whose
+    /// middle is inside its model).
+    pub radius: Option<f64>,
+    /// `markdraw`: a tag drawn on the frames.
+    pub draw: bool,
 }
 
 /// The base picture of an x-ray view (`xray.rs`).
@@ -319,7 +444,6 @@ pub struct Shot {
     pub display: Option<Option<f64>>,
     pub hud: bool,
     pub gun: bool,
-    pub crosshair: f32,
     pub messages: bool,
     pub notarget: bool,
     pub player: Player,
@@ -352,12 +476,20 @@ pub struct Shot {
     pub stepping: Option<bool>,
     /// `body on`: the player's own model is drawn (for a camera away from it).
     pub body: bool,
-    /// `cvar NAME VALUE at T` (T past 0): a setting that changes mid-shot,
-    /// `(film second, name, value)`, sorted.
-    pub timed: Vec<(f64, String, String)>,
+    /// `cvar ... at T`, `hud ... at T` and the other [`TIMED`] lines with
+    /// T past 0: settings that change mid-shot, `(film second, the line
+    /// without its "at T")`, by time, in line order at one time.
+    pub timed: Vec<(f64, String)>,
     /// `bob on`: a path camera bobs as the game bobs a running player's view.
     pub bob: bool,
+    /// `aim`: the film's camera looks at a target, not where its keys say.
+    pub aim: Option<(Target, Follow)>,
+    /// `mark` lines, in line order (a name given again is replaced).
+    pub marks: Vec<Mark>,
 }
+
+/// The settings a line can change mid-shot (`... at T`); [`Shot::at`].
+pub const TIMED: [&str; 6] = ["cvar", "hud", "gun", "crosshair", "messages", "body"];
 
 impl Default for Shot {
     fn default() -> Shot {
@@ -376,7 +508,6 @@ impl Default for Shot {
             display: None,
             hud: false,
             gun: false,
-            crosshair: 0.0,
             messages: false,
             notarget: true,
             player: Player::Spawn,
@@ -401,6 +532,8 @@ impl Default for Shot {
             body: false,
             timed: Vec::new(),
             bob: false,
+            aim: None,
+            marks: Vec::new(),
         }
     }
 }
@@ -411,7 +544,7 @@ impl Shot {
         let mut shot = Shot::default();
         let mut has_world = false;
         for (n, raw) in text.lines().enumerate() {
-            let line = raw.split('#').next().unwrap_or("").trim();
+            let line = strip_comment(raw).trim();
             if line.is_empty() {
                 continue;
             }
@@ -447,10 +580,50 @@ impl Shot {
         if matches!(self.camera, Some(CameraSpec::Demo)) && !matches!(self.world, World::Demo { .. }) {
             return Err("`camera demo` needs a `demo` world".into());
         }
+        // The game's own cameras: the player's eye, the recording's.
+        let games = matches!(self.camera, None | Some(CameraSpec::Player | CameraSpec::Demo));
+        if games && self.fov != 90.0 {
+            return Err("`fov` is the film's cameras' (path, fixed, follow, orbit): the player's eye and a \
+                        demo's see id's 90"
+                .into());
+        }
+        if self.aim.is_some() && (games || matches!(self.camera, Some(CameraSpec::Follow { .. }))) {
+            return Err("`aim` turns a path, fixed or orbit camera (`camera follow` aims already)".into());
+        }
+        let follows = self.camera.as_ref().and_then(CameraSpec::target).is_some();
+        if follows && self.player == Player::Camera {
+            return Err("`player camera` cannot ride a camera that follows the game: the player would move \
+                        what the camera follows"
+                .into());
+        }
         if self.ab.is_some() {
             self.takes()?;
         }
         Ok(())
+    }
+
+    /// The shot as it stands at film second `t`: with the timed lines due
+    /// by then applied, in time order.
+    pub fn at(&self, t: f64) -> Shot {
+        let mut s = self.clone();
+        for (_, line) in self.timed.iter().take_while(|(k, _)| *k <= t) {
+            // Each was applied once as it was read: it applies again.
+            let _ = s.apply(line);
+        }
+        s
+    }
+
+    /// The targets the camera follows (its eye's, then an `aim`'s), each
+    /// once: what a rehearsal of the shot records.
+    pub fn followed(&self) -> Vec<Target> {
+        let mut out: Vec<Target> = Vec::new();
+        let eye = self.camera.as_ref().and_then(CameraSpec::target);
+        for t in eye.into_iter().chain(self.aim.as_ref().map(|(t, _)| t)) {
+            if !out.contains(t) {
+                out.push(t.clone());
+            }
+        }
+        out
     }
 
     /// The renders the shot makes: itself, or with `ab` its two sides — the
@@ -491,6 +664,18 @@ impl Shot {
             }
         };
         let num = |s: &str| s.parse::<f64>().ok().filter(|v| v.is_finite()).ok_or_else(|| format!("bad number {s:?}"));
+        if let (true, [w @ .., "at", t]) = (TIMED.contains(&key), words.as_slice()) {
+            // A setting from film second T on: kept for [`Shot::at`] (and
+            // tried now, so a bad line fails where it is read).
+            let (t, line) = (num(t)?, format!("{key} {}", w.join(" ")));
+            if t <= 0.0 {
+                return self.apply(&line);
+            }
+            self.clone().apply(&line)?;
+            let at = self.timed.partition_point(|(k, _)| *k <= t);
+            self.timed.insert(at, (t, line));
+            return Ok(());
+        }
         match key {
             "map" => self.world = World::Map(one()?.trim_start_matches("maps/").trim_end_matches(".bsp").into()),
             "demo" => {
@@ -532,17 +717,12 @@ impl Shot {
                     v => return Err(format!("`preset slop|classic`, got {v:?}")),
                 }
             }
-            "cvar" => match at_time(&words)? {
-                ([name, value @ ..], t) if !value.is_empty() => {
+            "cvar" => match words.as_slice() {
+                [name, value @ ..] if !value.is_empty() => {
                     if quake_rs::cvar::find(name).is_none() {
                         return Err(format!("no cvar {name:?}"));
                     }
-                    if t > 0.0 {
-                        let at = self.timed.partition_point(|(k, ..)| *k <= t);
-                        self.timed.insert(at, (t, name.to_string(), value.join(" ")));
-                    } else {
-                        self.cvars.push((name.to_string(), value.join(" ")));
-                    }
+                    self.cvars.push((name.to_string(), value.join(" ")));
                 }
                 _ => return Err(format!("`cvar NAME VALUE [at T]`, got {rest:?}")),
             },
@@ -564,7 +744,19 @@ impl Shot {
             }
             "hud" => self.hud = on_off(one()?)?,
             "gun" => self.gun = on_off(one()?)?,
-            "crosshair" => self.crosshair = num(one()?)? as f32,
+            // The `crosshair` cvar, so that a `cvar crosshair` line (or a
+            // timed one) and this one are one setting.
+            "crosshair" => {
+                let v = match one()? {
+                    "on" => "1",
+                    "off" => "0",
+                    v => {
+                        num(v)?;
+                        v
+                    }
+                };
+                self.cvars.push(("crosshair".into(), v.into()));
+            }
             "messages" => self.messages = on_off(one()?)?,
             "notarget" => self.notarget = on_off(one()?)?,
             "sound" => {
@@ -717,12 +909,58 @@ impl Shot {
                         let (pos, look) = parse_place(rest)?;
                         CameraSpec::Path(vec![Key { t: 0.0, pos, look, fov: None, ease: Ease::Linear }])
                     }
-                    _ => return Err(format!("`camera player|demo|path|fixed ...`, got {rest:?}")),
+                    ["follow", target, opts @ ..] => {
+                        let target = Target::parse(target)?;
+                        CameraSpec::Follow { target, follow: parse_follow(opts)?, keys: Vec::new() }
+                    }
+                    ["orbit", centre, opts @ ..] => CameraSpec::Orbit(parse_orbit(centre, opts)?),
+                    _ => return Err(format!("`camera player|demo|path|fixed|follow|orbit ...`, got {rest:?}")),
                 })
             }
+            "aim" => {
+                let [target, opts @ ..] = words.as_slice() else {
+                    return Err("`aim ENTITY [offset X,Y,Z] [lag S] [lookahead S]`".into());
+                };
+                self.aim = Some((Target::parse(target)?, parse_follow(opts)?));
+            }
+            "mark" => {
+                let [name, place @ ..] = words.as_slice() else {
+                    return Err("`mark NAME X,Y,Z | entity ENTITY`".into());
+                };
+                if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+                    return Err(format!("a mark's name is letters, digits, `_` and `-`, got {name:?}"));
+                }
+                let (at, mut opts) = match place {
+                    ["entity", target, opts @ ..] => (MarkAt::Entity(Target::parse(target)?, [0.0; 3]), opts.iter()),
+                    [p, opts @ ..] => (MarkAt::Point(xyz(p)?), opts.iter()),
+                    [] => return Err("`mark NAME X,Y,Z | entity ENTITY`".into()),
+                };
+                let mut mark = Mark { name: name.to_string(), at, radius: None, draw: false };
+                while let Some(w) = opts.next() {
+                    let v = opts.next().ok_or_else(|| format!("`{w}` needs a value"))?;
+                    match (*w, &mut mark.at) {
+                        ("radius", _) => mark.radius = Some(num(v)?.max(0.0)),
+                        ("offset", MarkAt::Entity(_, o)) => *o = xyz(v)?,
+                        _ => return Err(format!("`mark` takes `offset X,Y,Z` (an entity) and `radius R`, not {w:?}")),
+                    }
+                }
+                match self.marks.iter_mut().find(|m| m.name == mark.name) {
+                    Some(m) => *m = mark,
+                    None => self.marks.push(mark),
+                }
+            }
+            "markdraw" => {
+                let (name, on) = match words.as_slice() {
+                    [name] => (*name, true),
+                    [name, v] => (*name, on_off(v)?),
+                    _ => return Err(format!("`markdraw NAME [on|off]`, got {rest:?}")),
+                };
+                let m = self.marks.iter_mut().find(|m| m.name == name);
+                m.ok_or_else(|| format!("`markdraw {name}` before its `mark` line"))?.draw = on;
+            }
             "key" => {
-                let Some(CameraSpec::Path(keys)) = &mut self.camera else {
-                    return Err("`key` lines follow `camera path`".into());
+                let (Some(CameraSpec::Path(keys)) | Some(CameraSpec::Follow { keys, .. })) = &mut self.camera else {
+                    return Err("`key` lines follow `camera path` (or `camera follow`)".into());
                 };
                 let [t, rest @ ..] = words.as_slice() else { return Err("`key T X,Y,Z ...`".into()) };
                 let t = num(t)?;
@@ -969,12 +1207,68 @@ fn parse_ease(v: &str) -> Result<Ease, String> {
     })
 }
 
+/// A line less its comment: from a `#` that starts a word to the end.
+fn strip_comment(raw: &str) -> &str {
+    let mut prev = ' ';
+    for (i, c) in raw.char_indices() {
+        if c == '#' && prev.is_whitespace() {
+            return &raw[..i];
+        }
+        prev = c;
+    }
+    raw
+}
+
+/// `X,Y,Z`.
+fn xyz(v: &str) -> Result<[f64; 3], String> {
+    let n = numbers(v)?;
+    n.as_slice().try_into().map_err(|_| format!("expected X,Y,Z, got {v:?}"))
+}
+
+/// A seconds value that cannot be negative.
+fn seconds(v: &str) -> Result<f64, String> {
+    v.parse::<f64>().ok().filter(|s| s.is_finite() && *s >= 0.0).ok_or_else(|| format!("bad seconds {v:?}"))
+}
+
+/// `[offset X,Y,Z] [lag S] [lookahead S]`, in any order.
+fn parse_follow(opts: &[&str]) -> Result<Follow, String> {
+    let mut f = Follow::default();
+    let mut it = opts.iter();
+    while let Some(w) = it.next() {
+        let v = it.next().ok_or_else(|| format!("`{w}` needs a value"))?;
+        match *w {
+            "offset" => f.offset = xyz(v)?,
+            "lag" => f.lag = seconds(v)?,
+            "lookahead" => f.lookahead = seconds(v)?,
+            _ => return Err(format!("`[offset X,Y,Z] [lag S] [lookahead S]`, got {w:?}")),
+        }
+    }
+    Ok(f)
+}
+
+/// `X,Y,Z|ENTITY radius R [height H] [speed DEG/S] [from YAW] [lag S]`.
+fn parse_orbit(centre: &str, opts: &[&str]) -> Result<Orbit, String> {
+    let centre =
+        if centre.contains(',') { Centre::Point(xyz(centre)?) } else { Centre::Target(Target::parse(centre)?) };
+    let mut o = Orbit { centre, radius: 128.0, height: 0.0, speed: 20.0, from: 0.0, lag: 0.0 };
+    let mut it = opts.iter();
+    while let Some(w) = it.next() {
+        let v = it.next().ok_or_else(|| format!("`{w}` needs a value"))?;
+        let n = v.parse::<f64>().ok().filter(|x| x.is_finite()).ok_or_else(|| format!("bad number {v:?}"));
+        match *w {
+            "radius" => o.radius = n?.max(1.0),
+            "height" => o.height = n?,
+            "speed" => o.speed = n?,
+            "from" => o.from = n?,
+            "lag" => o.lag = seconds(v)?,
+            _ => return Err(format!("`camera orbit` takes radius, height, speed, from and lag, not {w:?}")),
+        }
+    }
+    Ok(o)
+}
+
 /// `X,Y,Z P,Y[,R]` or `X,Y,Z at X,Y,Z`.
 fn parse_place(words: &[&str]) -> Result<([f64; 3], Look), String> {
-    let xyz = |v: &str| -> Result<[f64; 3], String> {
-        let n = numbers(v)?;
-        n.as_slice().try_into().map_err(|_| format!("expected X,Y,Z, got {v:?}"))
-    };
     match words {
         [pos, "at", target] => Ok((xyz(pos)?, Look::At(xyz(target)?))),
         [pos, angles] => {
@@ -1146,5 +1440,83 @@ label Classic: id's 16-pixel spans
         assert_eq!(s.mix_at(0.0), 0.0);
         assert_eq!(s.mix_at(2.0), 0.5);
         assert_eq!(s.mix_at(9.0), 1.0);
+    }
+
+    #[test]
+    fn follow_orbit_aim_and_marks_parse() {
+        let s = Shot::parse(
+            "map e1m1\nduration 3   # a comment\ncamera follow monster_army#1 offset -70,-50,48 lag 0.4 lookahead 0.2\n\
+             mark torch 1360,936,314 radius 4 # the flame\nmark grunt entity monster_army#1 offset 0,0,20\n\
+             markdraw grunt\nkey 0 0,-80,0 at 0,0,0\n",
+        )
+        .expect("parses");
+        let Some(CameraSpec::Follow { target, follow, keys }) = &s.camera else { panic!("a follow: {:?}", s.camera) };
+        assert_eq!(*target, Target::Class("monster_army".into(), 1), "a # inside a word is no comment");
+        assert_eq!(*follow, Follow { offset: [-70.0, -50.0, 48.0], lag: 0.4, lookahead: 0.2 });
+        assert_eq!(keys.len(), 1, "keys about the target");
+        assert_eq!(s.followed(), vec![Target::Class("monster_army".into(), 1)]);
+        assert_eq!(s.marks.len(), 2);
+        assert_eq!(
+            (s.marks[0].at.clone(), s.marks[0].radius, s.marks[0].draw),
+            (MarkAt::Point([1360.0, 936.0, 314.0]), Some(4.0), false)
+        );
+        assert_eq!(s.marks[1].at, MarkAt::Entity(Target::Class("monster_army".into(), 1), [0.0, 0.0, 20.0]));
+        assert!(s.marks[1].draw);
+        let o =
+            Shot::parse("demo demo1\nduration 2\ncamera orbit player radius 200 height 40 speed -30 from 90 lag 0.3\n")
+                .unwrap();
+        let Some(CameraSpec::Orbit(o)) = &o.camera else { panic!("an orbit") };
+        assert_eq!(
+            (o.centre.clone(), o.radius, o.height, o.speed, o.from, o.lag),
+            (Centre::Target(Target::Player), 200.0, 40.0, -30.0, 90.0, 0.3)
+        );
+        let a = Shot::parse("map e1m1\nduration 2\ncamera fixed 0,0,0 0,0\naim 87 lookahead 0.5\n").unwrap();
+        assert_eq!(a.aim, Some((Target::Number(87), Follow { lookahead: 0.5, ..Follow::default() })));
+        for (t, s) in
+            [(Target::Player, "player"), (Target::Number(87), "87"), (Target::Class("spike".into(), 2), "spike#2")]
+        {
+            assert_eq!((Target::parse(s), t.to_string()), (Ok(t), s.to_string()));
+        }
+        assert_eq!(Target::parse("zombie"), Ok(Target::Class("zombie".into(), 0)));
+        assert!(Target::parse("0").is_err() && Target::parse("ogre#x").is_err() && Target::parse("1,2,3").is_err());
+    }
+
+    #[test]
+    fn what_a_shot_cannot_do_is_an_error() {
+        let bad = |lines: &str| Shot::parse(&format!("map e1m1\nduration 2\n{lines}")).unwrap_err().message;
+        assert!(bad("player camera\ncamera follow 87\n").contains("player camera"));
+        assert!(bad("camera orbit monster_army#1\nplayer camera\n").contains("player camera"));
+        assert!(
+            Shot::parse("map e1m1\nduration 2\nplayer camera\ncamera orbit 0,0,0\n").is_ok(),
+            "a point is no target"
+        );
+        assert!(bad("fov 110\n").contains("fov"), "the player's eye sees id's 90");
+        assert!(Shot::parse("demo demo1\nduration 2\nfov 110\n").is_err());
+        assert!(bad("camera follow 87\naim 87\n").contains("aim"));
+        assert!(bad("aim 87\n").contains("aim"), "the player's eye is the player's");
+        assert!(bad("markdraw torch\nmark torch 0,0,0\n").contains("before its `mark`"));
+        assert!(bad("mark a,b 0,0,0\n").contains("name"));
+        assert!(bad("mark t 0,0,0 offset 1,2,3\n").contains("offset"), "a point has no offset");
+        assert!(bad("camera follow 87 lag -1\n").contains("seconds"));
+    }
+
+    #[test]
+    fn settings_change_mid_shot_as_their_lines_say() {
+        let s = Shot::parse(
+            "map e1m1\nduration 2\nhud on at 0.5\ncrosshair 1\ncvar crosshair 2 at 1\ncrosshair off at 1.5\n\
+             gun on at 1\nmessages on at 0\nbody on at 1.2\n",
+        )
+        .unwrap();
+        assert_eq!(s.timed.len(), 5, "{:?}", s.timed);
+        assert!(s.messages, "at 0: from the start");
+        let at = |t: f64| s.at(t);
+        assert!(!at(0.4).hud && at(0.5).hud && at(2.0).hud);
+        assert!(!at(0.9).gun && at(1.0).gun);
+        assert!(!at(1.1).body && at(1.2).body);
+        // The crosshair is the cvar: the line, then the timed lines in time order.
+        let last = |t: f64| at(t).cvars.iter().rev().find(|(n, _)| n == "crosshair").map(|(_, v)| v.clone());
+        assert_eq!((last(0.0), last(1.0), last(1.6)), (Some("1".into()), Some("2".into()), Some("0".into())));
+        assert!(Shot::parse("map e1m1\nduration 2\ngun maybe at 1\n").is_err(), "checked where it is read");
+        assert!(Shot::parse("map e1m1\nduration 2\nfps 30 at 1\n").is_err(), "not every setting");
     }
 }

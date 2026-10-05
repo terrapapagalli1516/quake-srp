@@ -152,19 +152,23 @@ pub struct EventLog {
     pub demo_idx: Option<usize>,
 }
 
-/// The whole file.
-pub fn file(header: &[(&str, String)], events: &[String]) -> String {
+/// The whole file: the header's fields, then each array (`events`, and the
+/// marks: `marks.rs`), an item a line.
+pub fn file(header: &[(&str, String)], arrays: &[(&str, &[String])]) -> String {
     let mut s = String::from("{\n");
     for (k, v) in header {
         let _ = writeln!(s, "  {}: {v},", quote(k));
     }
-    s += "  \"events\": [\n";
-    for (i, e) in events.iter().enumerate() {
-        s += "    ";
-        s += e;
-        s += if i + 1 < events.len() { ",\n" } else { "\n" };
+    for (a, (name, items)) in arrays.iter().enumerate() {
+        let _ = writeln!(s, "  {}: [", quote(name));
+        for (i, e) in items.iter().enumerate() {
+            s += "    ";
+            s += e;
+            s += if i + 1 < items.len() { ",\n" } else { "\n" };
+        }
+        s += if a + 1 < arrays.len() { "  ],\n" } else { "  ]\n" };
     }
-    s += "  ]\n}\n";
+    s += "}\n";
     s
 }
 
@@ -217,7 +221,8 @@ mod tests {
         );
         assert_eq!(number(1.0 / 3.0), "0.3333");
         assert_eq!(number(-0.00001), "0");
-        let f = file(&[("fps", "60".into())], &[o.clone(), o]);
-        assert!(f.starts_with("{\n  \"fps\": 60,\n  \"events\": [\n    {") && f.ends_with("}\n  ]\n}\n"));
+        let f = file(&[("fps", "60".into())], &[("events", &[o.clone(), o]), ("marks", &[])]);
+        assert!(f.starts_with("{\n  \"fps\": 60,\n  \"events\": [\n    {"), "{f}");
+        assert!(f.ends_with("}\n  ],\n  \"marks\": [\n  ]\n}\n"), "{f}");
     }
 }

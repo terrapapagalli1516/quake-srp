@@ -27,15 +27,22 @@ preset slop|classic            every setting at once (default slop)
 cvar NAME VALUE [at T]         any console variable, after the preset (r_perspspan 16, gamma 0.8, ...);
                                with `at T`, from film second T on (a span flipping 64, 32, 16, 8, a
                                torch's flicker stepping up); the sound's mixer stays the shot's first
+                               (`snd_modern` cannot change mid-shot; `volume` can). The film reads
+                               its own lines, not these: `host_maxfps` (`clock`, `stepping`),
+                               `vid_pixelsize` (`pixel`), `r_threads` (`--threads`), and
+                               `sv_max_edicts` is the map's from its start
 mode WxH                       the picture the game draws (default: slop the size over `pixel`,
                                Classic the preset's video mode, 960x600)
 pixel N                        slop's pixel size: mode = size / N, each pixel N x N (default 1)
 display W:H|square             the shape the picture is shown at (default: slop square, Classic 4:3)
-hud on|off                     the status bar at the preset's Screen size, or none: Screen size 120
-                               (default off)
-gun on|off                     the first-person weapon (default off)
-crosshair 0|1|2                the `crosshair` cvar (default 0)
-messages on|off                centre prints and notify lines (default off)
+hud on|off [at T]              the status bar at the `viewsize` cvar's Screen size (the preset's, or a
+                               `cvar viewsize` line's), or none: Screen size 120, whatever `viewsize`
+                               says (default off)
+gun on|off [at T]              the first-person weapon (default off)
+crosshair 0|1|2|on|off [at T]  the `crosshair` cvar, as a `cvar crosshair` line (default 0, the slop
+                               preset's cross too)
+messages on|off [at T]         centre prints and notify lines (default off)
+                               (These five, `cvar` and `body` take `at T`: from film second T on.)
 notarget on|off                monsters do not see the player (default on)
 player spawn|camera|X,Y,Z[,YAW]  where the player is: the map's start, carried along with the
                                camera (noclip; the map's exits are shut), or stood there
@@ -54,8 +61,8 @@ stepping id|uncapped           how a host frame steps the game, if not as its cl
                                and `stepping id` is id's code at 480 Hz
 bob on|off                     a path camera bobs as the game bobs a running player's eye (V_CalcBob,
                                from the path's own speed on the game's clock); default off
-body on|off                    the player's own model drawn (default off: id's client never draws
-                               it), for a camera that looks at the player
+body on|off [at T]             the player's own model drawn (default off: id's client never draws
+                               it), for a camera that looks at the player (a map's)
 
 # The camera. Angles in degrees, as Quake's (quaketool view --angles): pitch + looks down,
 # yaw 0 along +x and 90 along +y; X,Y,Z is the eye.
@@ -68,7 +75,52 @@ camera path                    keyframes (below): positions through Catmull-Rom 
                                shortest arc, each segment eased as its first key says
 key T X,Y,Z P,Y[,R] [fov F] [ease linear|in|out|inout]
 key T X,Y,Z at X,Y,Z [fov F] [ease ...]      looking at a point (the point is interpolated too)
-fov F                          the field of view (`fov` 90; Hor+ widens it on a wide picture)
+fov F                          the field of view of the film's cameras (90; Hor+ widens it on a wide
+                               picture); `camera player` and `camera demo` see id's 90, and refuse it
+
+# Cameras that follow the game. ENTITY is `player` (a demo's: its recorded player, at the eye), an
+# entity's number (an edict; `events.json`'s pose events name them), or CLASS[#N]: the Nth (from 0) of
+# a class to appear in the shot (those there at its start in entity order, then each as it appears: a
+# nail fired later is a later one), CLASS a classname (monster_army, spike), a model or its short
+# name (soldier; a demo knows id1's classnames by their models). e1m1's first grunt is monster_army#1
+# (at skill 1: a skill's monsters are its own).
+# Before it renders, the shot's game is run once, undrawn (a rehearsal), to learn where the
+# entity goes: the camera knows the future. It follows the entity's place as the game has it (the
+# middle of its box; a demo's: its origin), not the model as drawn, which is the preset's business
+# (Classic steps it, slop glides it): so an `ab` of the two has one camera. That place is smoothed
+# over a box as long as a monster's step (0.1 s) and a Gaussian of half that: id's 10 Hz steps
+# become a motion whose speed changes smoothly. Lags and lookaheads are in game seconds.
+camera follow ENTITY [offset X,Y,Z] [lag S] [lookahead S]
+                               the eye rides with the entity at the offset (world axes; default 0),
+                               looking at it: `lag`, the eye trails it by S seconds, eased in and out
+                               (a critically damped spring); `lookahead`, it aims at where the entity
+                               will be S seconds on. `key` lines after it are a path about the
+                               entity: each key's X,Y,Z the eye's offset, `at X,Y,Z` a point from the
+                               one aimed at (`at 0,0,0`: the entity), angles as given
+camera orbit X,Y,Z|ENTITY [radius R] [height H] [speed DEG/S] [from YAW] [lag S]
+                               the eye circles the point or the entity at R (default 128), H above it,
+                               DEG/S (default 20, + anticlockwise from above) from bearing YAW at film
+                               second 0, looking at it
+aim ENTITY [offset X,Y,Z] [lag S] [lookahead S]
+                               a path, fixed or orbit camera looks at the entity (plus the offset),
+                               its keys' angles ignored: a fixed camera pans, a dolly keeps it in frame
+                               A camera fastened to an entity or an orbit keeps out of the walls: where
+                               the world comes between it and what it follows it is pulled in, 8 units
+                               short of the wall, easing in before and out after. `player camera`
+                               cannot ride a camera that follows the game (the player would move it).
+
+# Marks: points followed onto the picture, for an edit's callouts (marks.rs).
+mark NAME X,Y,Z [radius R]     a point of the world
+mark NAME entity ENTITY [offset X,Y,Z] [radius R]
+                               an entity's place as this frame draws it (a gliding monster where it
+                               glides), plus the offset
+                               Each frame, events.json's `marks` gets the mark's place on the output
+                               frame (`screen`, in front of the camera, also off the picture), whether
+                               it is `in_view` and `visible` (in the view, and nothing the frame drew
+                               there, by its z-buffer, is nearer than the point less R: default 8 for
+                               a point, 16 for an entity's middle) and its `dist`ance from the eye
+markdraw NAME [on|off]         draw the mark's tag on the frames (after its `mark` line), for previews:
+                               corner ticks and its name, flame when seen, slate when hidden
 
 # Colours on these lines are RRGGBB (hex, no `#`, which starts a comment) or pN, Quake's palette entry N.
 # X-ray: the renderer's machinery, drawn from what it decided for the 3-D view.
@@ -98,7 +150,9 @@ wire world|entities|all|off [hidden|through] [pvs|culled]
                                only the culled ones
 vis X,Y,Z                      draw the PVS of this point instead of the camera's (r_lockpvs)
 mix T VALUE                    the x-ray's strength over the game's picture at film second T
-                               (keys interpolated; default 1)
+                               (keys interpolated; default 1); on `xray lightmaps`, between 0 and 1,
+                               each frame is drawn twice, the game's and the light alone (redrawn
+                               paused), and cross-faded
 
 # On and off in one pass: the shot rendered twice, A and B, stepped side by side.
 ab LINES | LINES               each side's own lines, after the shot's (`;` between a side's lines):
@@ -121,4 +175,5 @@ sound on|game|off              write sound.wav, the shot's game sound (default o
                                in slow motion too; `game`, the mixer on the game's clock, stretched to
                                the film's (slow motion slows and lowers it; a frozen world is silent)
 events on|off                  write events.json: each sound started, muzzle flash and monster pose
-                               change on screen, with its film second, frame and place (events.rs)
+                               change on screen, with its film second, frame and place (events.rs);
+                               a shot with marks writes it too, with them
