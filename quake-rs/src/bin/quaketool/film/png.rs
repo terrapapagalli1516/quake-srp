@@ -285,7 +285,7 @@ mod tests {
     #[test]
     fn deflate_round_trips() {
         let mut data: Vec<u8> = (0..20000u32).map(|i| (i * 7 % 13) as u8).collect();
-        data.extend(std::iter::repeat_n(9u8, 1000));
+        data.extend([9u8; 1000]);
         data.extend((0..5000u32).map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8));
         data.extend_from_slice(b"abcabcabcabcabcabd");
         for d in [&data[..], &data[..2], &[][..], &b"aaa"[..]] {

@@ -147,8 +147,9 @@ pub fn cmd_film(args: &[String]) -> Result<String, String> {
                 continue;
             }
             "--sound" => {
-                shot.sound = true;
-                i += 1;
+                // `--sound`, or the shot line's `--sound on|off`.
+                shot.sound = val.map(String::as_str) != Some("off");
+                i += if val.is_some_and(|v| v == "on" || v == "off") { 2 } else { 1 };
                 continue;
             }
             "--threads" => threads = need()?.parse().ok().filter(|&n| n > 0).ok_or("--threads N")?,
