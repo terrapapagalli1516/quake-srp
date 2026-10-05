@@ -1063,6 +1063,13 @@ impl Renderer {
         self.map = None;
     }
 
+    /// EXTRA, debug only: the point the x-ray marks the PVS from in place of
+    /// the eye ([`xray::XrayOptions::vis_from`]), if one is set.
+    #[must_use]
+    pub fn vis_from(&self) -> Option<Vec3> {
+        self.edge.xray.vis_from
+    }
+
     /// The x-ray capture of the last frame's main view (the view, not the
     /// status bar overlay's windows beside the bar), while
     /// [`Renderer::set_xray`] asked for one.

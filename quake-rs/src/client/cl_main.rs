@@ -595,10 +595,11 @@ fn client_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid, dra
     // player's can be. Everything the client does with an entity (its EF_*
     // lights, trails, spin and drawing) is gated on this; an entity out of the
     // PVS cannot light the far side of a wall.
-    // (A host's own camera is sent what a client there would be: `Walk::camera`.)
+    // (A host's own camera is sent what a client there would be: `Walk::camera`;
+    // an x-ray marking another point's PVS, what a client at that point would be.)
     let mut relinked = match w.camera {
         None => w.server.entities_sent_to_client(),
-        Some(c) => w.server.entities_sent_to_eye(c.pos),
+        Some(c) => w.server.entities_sent_to_eye(w.renderer.vis_from().unwrap_or(c.pos)),
     };
     if w.server.vm.ent_float(w.player, w.server.vm.fo().modelindex) == 0.0 {
         if let Some(r) = usize::try_from(w.player).ok().and_then(|p| relinked.get_mut(p)) {
@@ -975,10 +976,11 @@ fn client_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid, dra
         w.nail_launches.clear();
     }
     // R_MarkLeaves / R_StoreEfrags: the statics whose leaves the view's PVS
-    // (from the leaf holding r_refdef.vieworg, not fattened) reaches join the
-    // frame after the relinked entities, as they join cl_visedicts in the C.
+    // (from the leaf holding r_refdef.vieworg, not fattened; an x-ray's own
+    // point if it marks another's) reaches join the frame after the relinked
+    // entities, as they join cl_visedicts in the C.
     if !statics.is_empty() {
-        let view_leaf = render::point_in_leaf(&w.bsp, cam.pos).unwrap_or(0);
+        let view_leaf = render::point_in_leaf(&w.bsp, w.renderer.vis_from().unwrap_or(cam.pos)).unwrap_or(0);
         let view_pvs = w.bsp.leaf_pvs(view_leaf);
         for st in statics {
             if !static_is_visible(&w.bsp, &view_pvs, st.emins, st.emaxs) {
@@ -1482,5 +1484,60 @@ mod tests {
         let fa2 = super::walk_frame(&mut a, 1.0 / 72.0, false, &vid);
         let fb2 = super::walk_frame(&mut b, 1.0 / 72.0, false, &vid);
         assert_ne!(fa2.image, fb2.image, "no gun");
+    }
+
+    /// A host's camera inside the world's solid (a film's dolly that starts
+    /// in a wall: e1m5's moat shot, its eye in the wall it dollies out of) is sent
+    /// every entity the renderer could draw: from the solid leaf the renderer
+    /// marks every leaf (`mod_novis`) and draws the whole world, and id's fat
+    /// PVS there is empty, so the health boxes on the moat's ledge appeared
+    /// only as the eye came within 8 units of the open air. (When id's pak is
+    /// here.)
+    #[test]
+    fn a_hosts_camera_inside_a_wall_is_sent_what_it_draws() {
+        use crate::client::{Vid, host_cmd};
+        use crate::render;
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../quake-data/ID1/PAK0.PAK");
+        let Ok(pak) = crate::pak::Pak::open(&path) else {
+            eprintln!("skipped: no shareware pak at {}", path.display());
+            return;
+        };
+        let vid = Vid {
+            width: 320,
+            height: 200,
+            display_aspect: 4.0 / 3.0,
+            persp_span: render::PerspSpan::Spans16,
+            video: render::VideoCvars::CLASSIC,
+            mip: render::MipCvars::DEFAULT,
+        };
+        let rand = std::rc::Rc::new(crate::qrand::QRand::new());
+        let mut w = host_cmd::build_walk_map(pak, "maps/e1m5.bsp", &rand, &mut Vec::new(), 600).expect("e1m5");
+        for _ in 0..36 {
+            render::recycle_image(super::walk_frame_undrawn(&mut w, 1.0 / 72.0, false, &vid).image);
+        }
+        let s = &w.server;
+        let vm = &s.vm;
+        let health = (1..vm.num_edicts() as i32)
+            .find(|&e| {
+                !vm.is_free_edict(e)
+                    && vm.ent_string_ref(e, "classname") == "item_health"
+                    && vm.ent_get_vector(e, "origin")[..2] == [-464.0, 176.0]
+            })
+            .expect("e1m5's health box on the moat's ledge") as usize;
+        let in_wall = [-576.0, 120.0, 225.0];
+        assert_eq!(render::point_in_leaf(&w.bsp, in_wall), Some(0), "the eye is in the solid leaf");
+        assert!(s.fat_pvs(in_wall).unwrap().iter().all(|&v| !v), "id's fat PVS: nothing from a solid leaf");
+        let sent = s.entities_sent_to_eye(in_wall);
+        assert!(sent[health], "the box the whole world drawn shows");
+        let modelled = |e: usize| {
+            !vm.is_free_edict(e as i32)
+                && vm.ent_float(e as i32, vm.fo().modelindex) != 0.0
+                && !vm.ent_str(e as i32, vm.fo().model).is_empty()
+        };
+        assert!((1..sent.len()).all(|e| sent[e] == modelled(e) || Some(e as i32) == s.player), "every one");
+        // Out of the solid, the fat PVS holds its leaf's PVS: id's own.
+        let (eye, _) = s.player_view();
+        assert_ne!(render::point_in_leaf(&w.bsp, eye), Some(0));
+        assert_eq!(s.entities_sent_to_eye(eye), s.entities_sent_to_client());
     }
 }

@@ -174,7 +174,9 @@ pub struct Walk {
     /// listener and the view's contents (the underwater warp and tint) are
     /// the camera's, exactly as given: no bob, stair smoothing, punch, kick
     /// or roll; the entities drawn are those the server would send a client
-    /// whose eye is there (its fat PVS), and the player's own is not drawn.
+    /// whose eye is there (its fat PVS, joined with the PVS the world is
+    /// drawn from: from inside a wall, all of them, as the whole world is),
+    /// and the player's own is not drawn.
     /// The game goes on around it; the player stays where it is.
     pub camera: Option<render::Camera>,
     /// `r_drawviewmodel` (r_main.c, id's cvar, 1 by default): whether the
