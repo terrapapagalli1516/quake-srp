@@ -405,6 +405,7 @@ fn apply_settings(game: &mut Game, shot: &Shot, c: &Cvars, stepping: Stepping) {
             d.lerpmove = c.lerpmove;
             d.lerpmodels = c.lerpmodels;
             d.draw_viewmodel = shot.gun;
+            d.draw_player = shot.body;
             if !shot.messages {
                 d.centerprint = None;
                 d.notify = ConNotify::default();
@@ -2334,5 +2335,21 @@ mod v3_tests {
             let [x, y] = s.expect("in front");
             assert!(*visible && (x - 80.0).abs() < 30.0 && (y - 45.0).abs() < 25.0, "frame {n}: {x} {y} {visible}");
         }
+    }
+
+    #[test]
+    fn an_orbit_keeps_a_demo_s_player_in_the_middle_and_body_draws_it() {
+        let Some(pak) = pak_path() else { return };
+        let shot = "demo demo1 from 12.8\nduration 0.5\nfps 30\nsize 160x90\n\
+                    camera orbit player radius 140 height 40 speed 45\nmark p entity player\n";
+        let bare = render(&pak, shot, "orbit-bare", &[]);
+        let body = render(&pak, &format!("{shot}body on\n"), "orbit-body", &[]);
+        let p = marks(&body, "p");
+        assert_eq!(p.len(), 15);
+        for (n, (s, _, visible)) in p.iter().enumerate() {
+            let [x, y] = s.expect("in front");
+            assert!(*visible && (x - 80.0).abs() < 8.0 && (y - 45.0).abs() < 8.0, "frame {n}: {x} {y}");
+        }
+        assert_ne!(frame(&bare, 7), frame(&body, 7), "the recorded player, drawn");
     }
 }

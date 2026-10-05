@@ -458,6 +458,10 @@ pub struct DemoPlay {
     pub camera: Option<render::Camera>,
     /// `r_drawviewmodel`, as [`Walk::draw_viewmodel`].
     pub draw_viewmodel: bool,
+    /// EXTRA, not id: the recorded player's own model is drawn too, where
+    /// the client relinks the view entity, as [`Walk::draw_player`]: for a
+    /// host's camera that looks at the player from outside.
+    pub draw_player: bool,
     /// How this frame steps playback ([`Stepping`]), set by the host each
     /// frame like `viewsize`.
     pub stepping: Stepping,
@@ -561,6 +565,7 @@ impl DemoPlay {
             show_fps: false,
             camera: None,
             draw_viewmodel: true,
+            draw_player: false,
             stepping: Stepping::Classic,
             lerpmove: LerpMove::Classic,
             glides: StepGlides::default(),

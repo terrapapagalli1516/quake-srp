@@ -62,7 +62,7 @@ stepping id|uncapped           how a host frame steps the game, if not as its cl
 bob on|off                     a path camera bobs as the game bobs a running player's eye (V_CalcBob,
                                from the path's own speed on the game's clock); default off
 body on|off [at T]             the player's own model drawn (default off: id's client never draws
-                               it), for a camera that looks at the player (a map's)
+                               it), for a camera that looks at the player (a demo's recorded one too)
 
 # The camera. Angles in degrees, as Quake's (quaketool view --angles): pitch + looks down,
 # yaw 0 along +x and 90 along +y; X,Y,Z is the eye.

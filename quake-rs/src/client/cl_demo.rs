@@ -602,6 +602,11 @@ fn cl_relink_entities(d: &mut DemoPlay, frac: f32, first_read: usize, lerpmove: 
         }
         v.entities.push(drawn);
     }
+    // EXTRA, not id (`DemoPlay::draw_player`): the recorded player's model,
+    // where the view entity was relinked above.
+    if let (true, Some(e)) = (d.draw_player, f.view_entity) {
+        v.entities.push(EntSnapshot { origin: v.view_entity_origin, angles: v.view_entity_angles, ..e });
+    }
     if smooth {
         d.glides.end_frame();
     } else {
@@ -1562,6 +1567,32 @@ mod tests {
         d.models = Vec::new();
         cl_relink_entities(&mut d, 1.0, 0, LerpMove::Classic);
         assert_eq!(d.view.entities[0].angles[1], 30.0, "no EF_ROTATE: the recorded yaw");
+    }
+
+    /// id's client never draws the recorded player; `draw_player` (a host's
+    /// camera outside it) draws its model where the view entity is relinked.
+    #[test]
+    fn the_recorded_player_is_drawn_only_when_asked() {
+        let player = EntSnapshot { num: 1, modelindex: 3, frame: 6, skin: 0, ..Default::default() };
+        let mut d = playback(vec![DemoFrame {
+            time: 1.5,
+            prev_time: 1.4,
+            view_entity_origin: [10.0, 20.0, 30.0],
+            view_prev_origin: [0.0, 20.0, 30.0],
+            view_entity_angles: [0.0, 90.0, 0.0],
+            view_prev_entity_angles: [0.0, 90.0, 0.0],
+            view_entity: Some(player),
+            entities: vec![EntSnapshot { num: 2, modelindex: 1, ..Default::default() }],
+            ..Default::default()
+        }]);
+        cl_relink_entities(&mut d, 0.5, 0, LerpMove::Classic);
+        assert!(d.view.entities.iter().all(|e| e.num != 1), "id's: not drawn");
+        d.draw_player = true;
+        cl_relink_entities(&mut d, 0.5, 1, LerpMove::Classic);
+        let drawn = d.view.entities.iter().find(|e| e.num == 1).expect("drawn");
+        assert_eq!((drawn.modelindex, drawn.frame), (3, 6));
+        assert_eq!(drawn.origin, d.view.view_entity_origin, "where the view entity is relinked");
+        assert_eq!(drawn.origin, [5.0, 20.0, 30.0], "halfway from the message before");
     }
 
     // ----- Dynamic lights in playback (CL_RelinkEntities, CL_ParseTEnt) -----

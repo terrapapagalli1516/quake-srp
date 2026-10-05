@@ -393,6 +393,11 @@ pub struct DemoFrame {
     /// message did not update it. Its `EF_MUZZLEFLASH` is the recorded
     /// player's weapon discharging — the view weapon's flash.
     pub view_effects: i32,
+    /// EXTRA, not id: the view entity itself as the message left it — the
+    /// recorded player's model, frame and skin — when it has a model. id's
+    /// client never draws it (the eye is inside it); a host's camera outside
+    /// the player may ([`crate::client::DemoPlay::draw_player`]).
+    pub view_entity: Option<EntSnapshot>,
     /// `cl.viewheight` (`svc_clientdata`'s `SU_VIEWHEIGHT`).
     pub viewheight: f32,
     /// `cl.mvelocity[1]`: the player's velocity in the message before
@@ -1057,12 +1062,8 @@ fn snapshot(cl: &mut ClientState) -> DemoFrame {
         .map_or(0, |ve| ve.effects);
 
     let mut entities: Vec<EntSnapshot> = Vec::new();
+    let mut view_entity = None;
     for (i, e) in cl.entities.iter().enumerate() {
-        // Skip the view entity: Quake hides the local player's own model in
-        // first person (otherwise it fills the screen at the camera origin).
-        if i == cl.viewentity {
-            continue;
-        }
         // CL_RelinkEntities: empty slots (no model) are skipped, and any entity
         // that was NOT included in the most recent server message (its msgtime
         // fell behind mtime[0]) is removed — it went silent and must stop
@@ -1070,10 +1071,10 @@ fn snapshot(cl: &mut ClientState) -> DemoFrame {
         if !e.active || e.modelindex <= 0 {
             continue;
         }
-        if e.msgtime != cl.mtime[0] {
+        if e.msgtime != cl.mtime[0] && i != cl.viewentity {
             continue;
         }
-        entities.push(EntSnapshot {
+        let snap = EntSnapshot {
             num: i as i32,
             modelindex: e.modelindex as usize,
             frame: e.frame,
@@ -1085,7 +1086,15 @@ fn snapshot(cl: &mut ClientState) -> DemoFrame {
             prev_angles: e.msg_angles[1],
             forcelink: e.forcelink,
             step: e.nolerp,
-        });
+        };
+        // The view entity is kept apart: Quake hides the local player's own
+        // model in first person (otherwise it fills the screen at the camera
+        // origin).
+        if i == cl.viewentity {
+            view_entity = Some(snap);
+        } else {
+            entities.push(snap);
+        }
     }
     for e in &cl.statics {
         // Statics are always emitted (they were spawned with a model) and never
@@ -1129,6 +1138,7 @@ fn snapshot(cl: &mut ClientState) -> DemoFrame {
         view_prev_entity_angles,
         view_forcelink,
         view_effects,
+        view_entity,
         viewheight: cl.viewheight,
         prev_velocity: cl.mvelocity[1],
         entities,
