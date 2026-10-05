@@ -207,8 +207,8 @@ The tests build their own maps, models, paks and QuakeC programs in Rust (for ex
 `../gen_samples.py` and `../gen_progs.py` write similar files to disk, for trying
 `quaketool` by hand. Two other places test against the real shareware pak:
 - `../quake-wasm`'s end-to-end tests;
-- `../oracle/classic_check.py`, which compares Classic with id's own C (see the
-  [top-level README](../README.md#proof)).
+- `../oracle/classic_check.py`, Classic's proof: ten checks, six of them against id's own C
+  (see the [top-level README](../README.md#proof)).
 
 ## quaketool
 
