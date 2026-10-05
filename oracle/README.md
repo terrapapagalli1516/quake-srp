@@ -7,7 +7,10 @@ diffs the two frames pixel for pixel.
 
 ```sh
 oracle/build.sh               # ~20 s, docker (the tools run it themselves when the binary is missing or older than oracle/c/*)
+ORACLE_FPMATH=sse oracle/build.sh   # the same C with SSE2 floats: the build the port matches to the pixel
 uv run oracle/compare.py      # e1m1/2/3/7 x world/ents, 320x200: table + side-by-side PNGs
+uv run oracle/exact_sweep.py  # many views, both builds: the pixels that differ (see "Bit for bit")
+uv run oracle/pixel_trace.py --maps e1m1   # a differing pixel's stages, id's beside the port's
 oracle/characterise.sh        # re-derive every number and crop in this README (~10 s)
 uv run oracle/screen2d.py     # the 2-D layer (status bar, menus, console, ...): see its section
 uv run oracle/sound.py        # id's mixer against the port's, sample for sample: see "Sound"
@@ -28,7 +31,9 @@ Needs docker (for the build only), uv, cargo, and the shareware pak at
 | `--time T` | pin `cl.time` (light styles, sky, turb, texture and alias animation) |
 | `--settle N` | shoot N frames after signon instead of the first |
 | `--crop name:x,y,w,h` | extra 6x C / port / diff PNG of a region |
-| `--spans 8\|16\|1` | id's span routine: 8 = `D_DrawSpans8`, id's portable C (default); 16 = the x86 asm's `D_DrawSpans16` in C, its integer steps included (what DOS/Win players saw, `d_subdiv16 1` — and what the port draws); 1 = exact per-pixel perspective (an experiment, not id) |
+| `--spans 8\|16\|1` | id's span routine: 8 = `D_DrawSpans8`, id's portable C (default); 16 = the x86 asm's `D_DrawSpans16` in C, its integer steps included (what DOS/Win players saw, `d_subdiv16 1` — and what the port draws); 1 = exact per-pixel perspective (not id: the port's extra, its reference transcribed in double). Liquids follow, as the port's `r_perspspan` steps them: `Turbulent8` (id's, 16-pixel segments) at 16, its arithmetic at 8, exact at 1 |
+| `--sse` | id's C built with SSE2 floats (`ORACLE_FPMATH=sse oracle/build.sh`): every float operation rounded to a float, the C's types honoured — the port's Classic matches it to the pixel. The default build is x87's (see "Bit for bit") |
+| `--fpcw` | the x87 build in the FPU state id's x86 builds rendered in: `Sys_LowFPPrecision`'s 24-bit precision and chop rounding from `R_RenderView_`'s frame setup on (`-oracle_fpcw`) |
 | `--exactpersp` | the port's exact per-pixel perspective extra (`quaketool view --exactpersp 1`) instead of its default 16-pixel spans; pair it with `--spans 1` |
 | `--perspspan 16\|8\|4\|1` | the port's perspective span (`quaketool view --perspspan`, `r_perspspan`): 8 is id's C `D_DrawSpans8`, so `--spans 8 --perspspan 8` puts the port's 8 against id's portable C |
 | `--aspect A` | `vid.aspect` for both renderers (`-oracle_aspect` / `quaketool view --aspect`). Default 1.0, square pixels; `0.8333333` is id's DOS/Win 16:10 modes on a 4:3 monitor — and what the browser page shows (every preset is 16:10, presented at 4:3) |
@@ -62,7 +67,7 @@ gives the match rate over the pixels an entity touches (in either renderer). The
 edited in place), makes one edit on the copy — `quakedef.h`'s `id386` switch, so
 the portable C paths are used (the `nonintel.c` route, no assembly) — and
 compiles `Makefile.linuxi386`'s C files with `cd_null`/`in_null`/`snd_null`,
-loopback-only `net_none`, and four files of ours (`c/`, GPL like id's):
+loopback-only `net_none`, and five files of ours (`c/`, GPL like id's):
 
 - `vid_oracle.c` — `vid_null.c` at any resolution (`-width`/`-height`, up to id's
   1280x1024 `MAXWIDTH`/`MAXHEIGHT`), buffers sized with `D_SurfaceCacheForRes` as
@@ -74,12 +79,13 @@ loopback-only `net_none`, and four files of ours (`c/`, GPL like id's):
   sets the step; `-oracle_loadtime T` makes a level load take T seconds of it, as
   loads took seconds on id's machines, so the frame after one runs
   `Host_FilterTime`'s 0.1 s clamp). `Sys_Quit` never writes `config.cfg`, so runs
-  cannot leak cvars into each other.
+  cannot leak cvars into each other. `-oracle_fpcw` makes `Sys_LowFPPrecision`
+  load the x87 control word id's x86 builds rendered with (24-bit, chop).
 - `oracle.c` — console commands (`oracle_view`, `oracle_time`, `oracle_shot`,
   `oracle_settle`, `oracle_stage`, `oracle_exit`, `oracle_entfield num field v…` to
   pose any edict for a shot, as `rotate_check.py` swings a door; cvars `oracle_spans`,
-  `oracle_bench`; see the file header). The link wraps `R_RenderView` and
-  `D_DrawSpans8` (`-Wl,--wrap`), so a shot can pin the view/clock for one frame and
+  `oracle_bench`; see the file header). The link wraps `R_RenderView`,
+  `D_DrawSpans8` and `Turbulent8` (`-Wl,--wrap`), so a shot can pin the view/clock for one frame and
   dump `vid.buffer` the instant the 3-D view is done — before the sbar, console,
   notify text or centerprint touch it — as `.pgm` (raw palette indices, the real
   output), `.ppm`, `.json` (vieworg/angles, `cl.time`, vrect, fov, the 64
@@ -91,6 +97,10 @@ loopback-only `net_none`, and four files of ours (`c/`, GPL like id's):
   `CL_SendCmd`) and a log of every call into the sound layer (`oracle_sndlog`:
   `snd_null`'s entry points and the server's `SV_StartSound`, wrapped at link
   time); `sound_walk.py` drives both (see "Sound").
+- `stages_oracle.c` — `oracle_stages path`: the shot frame's stages (the view,
+  every edge, span and surface, each span routine's gradients and block), from
+  wrapped `R_ScanEdges` and `D_DrawSurfaces`, for `pixel_trace.py` (see "Bit for
+  bit").
 
 It is built as a static 32-bit i386 binary (1996 code assumes 32-bit pointers) in
 a digest-pinned `i386/debian` container and runs directly on the x86_64 host.
@@ -113,7 +123,124 @@ from `static float oldz = 0` and clamps to 12 below the origin; `--settle 2` giv
 the steady eye. (The port's live path starts `oldz` at the origin, so its first
 0.15 s differs from id's here — cosmetic.)
 
+## Bit for bit (2026-10-05, `exact_sweep.py`, `pixel_trace.py`)
+
+```sh
+uv run oracle/exact_sweep.py                                   # e1m1/2/3/7, 19 views each, both builds
+uv run oracle/exact_sweep.py --maps start,e1m1,e1m2,e1m3,e1m4,e1m5,e1m6,e1m7,e1m8 --views standard,sweep,roll --mode ents
+uv run oracle/exact_sweep.py --spans 8      # id's portable D_DrawSpans8 against the port's --perspspan 8 (1: exact)
+uv run oracle/exact_sweep.py --res 640x480,1280x1024 --views standard,roll --oracles sse,x87,x87store,x87cw
+uv run oracle/pixel_trace.py --maps e1m3 --view=-735.96875,-1591.96875,98.03125,30,210,0   # where a pixel parts
+```
+
+**The result.** Against id's C built with SSE2 floats (`ORACLE_FPMATH=sse
+oracle/build.sh`; `compare.py --sse`) the port's Classic frame is id's on every
+pixel of every view tried, and `pixel_trace.py` finds every stage of the frames it
+traced — the nine maps' first frames, world and entities, and swept views at
+640x400: the view, the edges, the spans, the surfaces, the gradients, the blocks —
+the same to the bit:
+
+- the shareware's nine maps: each map's first frame after signon, 18 yaws and
+  pitches and 4 rolled views (`exact_sweep.py`'s `standard,sweep,roll`, 23 a map),
+  world and entities, at id's 16-pixel spans, at id's portable 8 (`--spans 8`
+  against the port's `--perspspan 8`) and at the exact perspective (`--spans 1`
+  against `--exactpersp`): 1,242 frames;
+- the same maps at 640x480, 640x400, 1024x768 and 1280x1024, at the page's
+  0.8333 aspect (320x200 and 640x400), and at mip 0: 693 frames;
+- the registered game's maps and the mission packs' (59 maps, 23 views each, the
+  entities drawn, with the player's own paks; e2m1, e3m1, e4m1, hip1m1 and hip1m3
+  ask for a `b_exbox2.bsp` the paks used here lack);
+- the frames 1 to 13 after signon on e1m1 and e1m2 with the gun; the shotgun's
+  flash and puffs at 320x200, 640x400 and 1280x800; rockets' explosion sprites;
+  161 demo frames with id's lights handed over (`demo_lights.py --sse --sample
+  150`; the 92 whose lights have exact radii with the port's own playback lights
+  too); underwater at
+  320x200, 640x400 and 960x600; viewsize 100; the e1m2 altar (an ogre and two
+  torches); Armagon's rotating door at four poses (`rotate_check.py`).
+
+**What it took.** Pixels are the sweep of e1m1/2/3/7 (23 views each, world,
+320x200) against the SSE build: 499 differed before.
+1. *The view* — 499 → 474. `AngleVectors` with the angle, the sines and every
+   product the floats the C declares (`math::angle_vectors_f32`; the camera had its
+   own f64 basis), `R_ViewChanged`'s `horizontalFieldOfView` with `fov_x/360` a
+   float division (`render::horizontal_fov`), and the `screenedge` planes from id's
+   fields of view (they were derived back from `xscale`).
+2. *`D_CalcGradients`* — 474 → 72. `sadjust` is `(int)(DotProduct (p_temp1,
+   p_saxis) * 0x10000 + 0.5) - ((texturemins << 16) >> miplevel) + vecs[0][3]*t`:
+   a float dot product, a double `+ 0.5`, the `int` difference converted to a
+   float and added to a float product — the eye's coordinate at a float's 24 bits,
+   truncated. The port took exact f64 planes and rounded the eye's coordinate; a
+   texel edge at a 16.16 unit's distance fell the other way
+   (`raster::calc_gradients`).
+3. *The span routines' floats* — 72 → 0. `D_DrawSpans16`, `D_DrawSpans8` and
+   `Turbulent8` step `sdivz`, `tdivz` and `zi` by float adds and divide in floats
+   at each segment's end; the port evaluated f64 planes there
+   (`raster::FloatSpan`).
+
+Off the sweep: `R_AnimateLight`'s `(int)(cl.time*10)` is a double product, where
+the port multiplied a float clock in float and 1.9f's 18.9999998 became 19: the
+light styles a tenth early (1,208 pixels of e1m1's third frame — the "settle 3"
+arch of "Results" below — and of every frame whose float clock is just short of
+a tenth); the alias models' projection and clipping in floats
+(`R_AliasProjectFinalVert`, the unclipped projection, `ziscale`, `R_Alias_clip_*`'s
+int+float sums, `D_PolysetCalcGradients`' int differences stored to floats: 4
+pixels of an ogre in a rolled e1m8 view); `syncbase` (a group frame's phase: 7
+pixels of a wizard's spike in demo1's frame 4223); `D_DrawParticle`'s double `+
+0.5` and its `xscaleshrink` (no pixel in the views tried). And the harness: the
+time handed over as a double, `--spans 8` and `1` drawing their liquids as the
+port does, the exact perspective's transcription in double, a mission pack's
+search path.
+
+**The x87 build, and which build is the target.** Against the default build
+(gcc 12 `-O2`, x87) 0.005% of pixels still differ: 638 of 13.2 M over the nine
+maps' 207 views, 5,210 of 86.8 M over the 59 registered and pack maps. All of it
+is the x87's 80-bit registers, and only where gcc keeps a `float` *variable* in
+one across statements: the same C built `-ffloat-store` (`ORACLE_FPMATH=x87store`,
+which stores every float variable at its assignment and changes nothing else) is
+identical to the SSE build — and to the port — on every pixel of the 207 views,
+and stage for stage in the frames traced. `pixel_trace.py` against the x87 build names the stages: the clip planes'
+`dist` (`R_TransformFrustum` keeps `v2[]` in registers and dots `modelorg` with
+the unrounded values: `fsts` stores a float, the register stays 80-bit), every
+edge's `1/z` in its last bits, a surface's key now and then (a face emitted or not
+at a clip plane), and `D_CalcGradients`' `sadjust`/`tadjust` a unit off — the
+nearest cause of 98 of the 99 pixels of six first frames. Which variables live in
+registers is gcc 12's register allocation, inlining and scalar replacement at
+`-O2`: another compiler, version or flag moves them, and the C source does not say
+(C89 leaves excess precision to the implementation; only C99's `FLT_EVAL_METHOD`
+2, gcc's `-fexcess-precision=standard`, defines it, and that build differs from
+the default one too). So the x87 build is not a target someone else could
+reproduce, and a slow path emulating 80-bit registers would reproduce one binary,
+not id's C; it is not done. Nor is the x87 build what 1996 players saw:
+WinQuake's and quake.exe's `R_RenderView_` call `Sys_LowFPPrecision` once the frame
+is set up, which loads `single_cw` (sys_wina.s: 24-bit precision, chop rounding)
+for the rest of the frame — a third arithmetic, by MSVC and DJGPP's code and id's
+asm routines. The x87 build in that state (`--fpcw`, `exact_sweep.py --oracles
+x87cw`) differs from the port on 1,887 of the 207 views' 13.2 M pixels. The SSE
+build is the definition of "id's C" a fitness proof can rest on: the C source
+with every operation in its declared type, which any conforming compiler gives
+(`sin`, `cos` and `tan` are the C library's, rounded to a float: a last-bit
+difference between two libraries would show only on a knife edge).
+
+**The tools.**
+- `exact_sweep.py` — one process of id's C a view (fresh caches, as the port's
+  `view`), the port beside it, the differing pixels counted per build
+  (`--oracles x87,sse,x87store,x87cw` or `NAME=PATH`); the views (`standard`,
+  `sweep`, `roll`), modes, spans, resolutions, aspect, mip 0, `--pak1`/`--game-dir`;
+  `--keep` writes every differing pixel to `diffs.json`. Its exit status is the
+  SSE build's. Seconds for a few hundred views.
+- `pixel_trace.py` — one view, both renderers writing their frame's stages (id's
+  `oracle_stages`, `c/stages_oracle.c`; the port's `quaketool view --stages`,
+  `render/edge/stages.rs`): every float as its bits; per differing pixel the stages
+  that differ along its path, the nearest last; a count by stage.
+- The builds: `oracle/build.sh` (x87), `ORACLE_FPMATH=sse` and `=x87store`; the
+  `-oracle_fpcw` flag (`compare.py --fpcw`).
+
 ## Results (320x200 unless stated, 2026-09-25)
+
+*These are against the x87 build, before "Bit for bit" above: against the SSE build
+every row below now reads 100.00, every pixel; against the x87 build the
+`--spans 16` world rows read 99.97 / 99.98 / 99.96 / 100.00 (22, 14, 25 and 1
+pixels; e1m7 was 57).*
 
 After the Session 7 fixes (branch `quake/fid1`: classes 2, 3, 4, 5, 8 and 9 below),
 the mip levels and lightmap stepping (branch `quake/w2a`: classes 1 and 6), and the
@@ -139,10 +266,9 @@ and 6: 84.76 / 64.07 / 65.83 / 75.65 against `--spans 8`.) Against `--spans 8` w
 remains is id's portable C's 8-pixel segments against the port's 16 (class 7).
 (Before the edge renderer e1m2 read 99.21 and 96.09: one face at a finer mip in id
 than its geometry gives, class 1's open note, which id's edge cache produces and the
-port now does too.) What is left in the `--spans 16` rows is single pixels on
+port now does too.) What was left in the `--spans 16` rows was single pixels on
 texel boundaries along 45-degree lines of floor texture and a few sky pixels —
-float noise of the texel arithmetic (carrying the edge arithmetic in f64 instead of
-the C's floats moves nothing). The entity-pixel column counts the world pixels
+not noise: the port's own arithmetic where id's C has floats ("Bit for bit"). The entity-pixel column counts the world pixels
 around and behind an entity too. nonpal% is 0 in every case (was up to 0.45).
 
 **Pixel aspect** (`--aspect 0.8333333`: id's 16:10 modes on a 4:3 monitor, which
@@ -175,12 +301,12 @@ The rest of that frame is the settle-3 arch below.
 An entity-heavy view (e1m2 altar: ogre + two torches, `--view
 1432.386,1397.978,233.254,9.344,-103.449,0`, `--spans 16`) scores 99.99% world and
 with entities, its entity pixels 100.00% (788 px; 664 px, 100%, at the page's
-aspect). With the viewmodel drawn (`--viewmodel --settle 3`), e1m1 scores 98.07%,
-the same as the world-only frame at that settle. At a settle of 3 or more e1m1's
-far arch differs for a harness reason: id's light styles in that frame (its
-`.json`) are the ones the port derives for 0.1 s earlier (measured) — probably id flooring a double
-`cl.time` that the harness hands over rounded to a float. Passing id's `d_lightstylevalue` to
-the port would remove it (not done).
+aspect). With the viewmodel drawn (`--viewmodel --settle 3`), e1m1 scored 98.07%,
+the same as the world-only frame at that settle: e1m1's far arch at a settle of 3
+or more was lit with the light styles of 0.1 s later. Not the harness: the port's
+`R_AnimateLight` multiplied its float clock by 10 in float, where the C's
+`(int)(cl.time*10)` is a double product (1.9f's 18.9999998 is not 19). Fixed on
+`fleet/pixelexact`: 100.00%, every pixel, at every settle from 1 to 13.
 
 **Attribution ladder** — id's renderer made to drop one known difference at a time
 against the port as it ships (16-pixel spans; world only; `characterise.sh` prints it):
@@ -203,11 +329,13 @@ renderer). Mip 0 + exact at 640x480:
 `--view=544,288,32,-15,100,12`) 100.00. Over 72 more views
 (the four start positions, 6 yaws x 3 pitches) against id's exact perspective and
 its own mip levels, the mean is 99.99% and the worst 99.83 (before the 16-pixel
-spans, measured with the exact extra's arithmetic). What is left elsewhere is the size of id's own floating-point noise: the oracle built with SSE2 float math
-instead of x87 (`ORACLE_FPMATH=sse oracle/build.sh`) differs from the x87 build on
-0.003-0.031% of pixels. So **projection, fov, pixel centres, edge rules, near
-clipping, texture alignment, PVS and the camera convention are faithful**; every
-larger difference is one of the classes below.
+spans, measured with the exact extra's arithmetic). What was left then was the
+size of the gap between id's own two builds: the oracle built with SSE2 float
+math instead of x87 (`ORACLE_FPMATH=sse oracle/build.sh`) differs from the x87
+build on 0.003-0.031% of pixels — and was closed, against the SSE build, by
+following the C's types ("Bit for bit"). So **projection, fov, pixel centres,
+edge rules, near clipping, texture alignment, PVS and the camera convention are
+faithful**; every larger difference is one of the classes below.
 
 ## Discrepancy classes, ranked
 
@@ -355,13 +483,18 @@ has none of). Timings are noisy: compare within one sitting.
   reproduces `D_DrawSpans16` in C with the asm's integer steps (since
   `quake/w2b`; before, `D_DrawSpans8`'s — the two differ on 0-40 pixels of a
   320x200 frame), not the asm's x87 single-precision chop
-  rounding. Other asm-vs-C differences are unmeasured.
+  rounding. Other asm-vs-C differences are unmeasured. The x87 build in id's
+  rendering FPU state (`--fpcw`) differs from the port on 0.014% of pixels ("Bit
+  for bit").
 - 32-bit build with modern gcc 12 (`-O2 -fwrapv -fno-strict-aliasing`), not MSVC
-  1996. The x87-vs-SSE check bounds the float noise at ~0.03%.
-- Only e1m1/2/3/7, a handful of views, 320x200-1280x1024. No sprites or
-  intermission were compared (the oracle can render them; nobody looked yet);
-  the underwater warp in one view and particles in one burst (above). Dynamic
-  lights: the muzzle-flash frames above, since PERF_PLAN A2 (`AUDIT.md`).
+  1996. The SSE build is the port's exact target: the C with every operation in
+  its type, which any conforming compiler gives; the x87 build differs from it by
+  gcc's choice of the float variables it keeps in 80-bit registers ("Bit for bit").
+- The views of "Bit for bit" (some 3,300 frames over the shareware's, the
+  registered game's and the packs' maps, 320x200-1280x1024), the demo frames of
+  `demo_lights.py`, particles in one burst, explosions, the underwater warp in one
+  view. The intermission was not compared (the oracle can render it; nobody
+  looked yet). Dynamic lights: the muzzle-flash frames above and the demo frames.
 - The entity mode tests rendering of id's entity list; it says nothing about
   whether the port's simulation produces the same list.
 - `viewsize` below 120: the 3-D view rectangle is compared (`--viewsize N`);
@@ -655,12 +788,13 @@ to each tool's own output):
 
 | check | what | against |
 |---|---|---|
-| `goldens` | `quaketool scene` of e1m1/e1m2/e1m3 | the sha256 prefixes `4807aaa1` / `9ae2b478` / `c65b7046` |
+| `goldens` | `quaketool scene` of e1m1/e1m2/e1m3 | the sha256 prefixes `790c53d3` / `3684efc6` / `e18bb516` (`4807aaa1` / `9ae2b478` / `c65b7046` before `fleet/pixelexact`) |
 | `play` | `quaketool play`: the browser's client frames natively, id's three demos and four scripted walks at 320x200, 640x400 and 960x600, a hash every 30 frames and the sound-call tallies | the recorded list |
 | `timedemo` | id's `timedemo` of demo1..3 at 320x200 and 640x400: the frame counts (969 for demo1, as id's C) | the recorded list |
 | `census` | `quaketool census`: all nine maps through the real QuakeC (the report, by hash) | the recorded list |
 | `edicts` | id's server edicts (this oracle) diffed against the port's, nine maps at t = 1.7 / 4.7 / 10.7 s (`census/`): the diff report, by hash. What it still shows: each matched entity's number one below id's (the player is the port's last edict, CENSUS L25); monsters' random idle frames and wandering; a door pair on e1m6 caught at another point of its slide at 1.7 s; the fireballs and bubbles random numbers start. The statics' rows are gone since `fleet/makestatic` (1,185 rows to 606) | the recorded list |
-| `oracle` | `compare.py --aspect 0.8333333 --spans 16`: the eight standard rows | id's C: none below its recorded match (100.00%; e1m7 99.9969%, two pixels) |
+| `oracle` | `compare.py --aspect 0.8333333 --spans 16 --sse`: the eight standard rows | id's C built with SSE floats: none below its recorded match, 100.0000% every row (against the x87 build e1m7 read 99.9969%, two pixels, before `fleet/pixelexact`) |
+| `exact` | `exact_sweep.py`: the nine maps' first frames, 18 yaws and pitches and 4 rolled views, entities drawn, at 320x200 and at the page's 640x400 and aspect (414 frames) | id's C built with SSE floats: not one pixel differs (the x87 build's count is in `exact.txt`, not judged) |
 | `screen2d` | `screen2d.py`, 320x200 and 640x400, the port in its Classic preset | id's C: no shot below its recorded `2d exact%` (the residues above) |
 | `demolerp` | `demo_lerp.py`: id's client against the port's over the attract loop, frame by frame — the camera, the entities and the dynamic lights (below) | id's C: every demo MATCH |
 | `sound` | `sound.py`: id's mixer against the engine's `Fixes::NONE`; `sound_walk.py`: a walk through id's game and the port's | id's C: every case sample-identical; every call the walk makes identical |
@@ -670,24 +804,25 @@ recording (first on `a50d8d7`, the settings branch's base). A change that
 moves an identity value on purpose is re-recorded with `--record --note`,
 and says so where the fidelity change is recorded (AUDIT.md).
 
-**Last run** (branch `q26/docs` on `244bcd5`, the end of the 2026 push,
-2026-09-26; about a minute with everything built):
+**Last run** (branch `fleet/pixelexact`, 2026-10-05; about two minutes with
+everything built; timings are noisy):
 
 ```
 PASS  goldens      0.1 s  3 values match
-PASS  play        12.5 s  42 values match
-PASS  timedemo     3.9 s  3 values match
-PASS  census       1.2 s  1 values match
-PASS  edicts       2.1 s  9 values match
-PASS  oracle       0.9 s  8 values match
-PASS  screen2d    10.4 s  146 values match
-PASS  demolerp    20.0 s  0 values match
-PASS  sound        3.3 s  0 values match
+PASS  play        19.5 s  42 values match
+PASS  timedemo     4.0 s  3 values match
+PASS  census       1.3 s  1 values match
+PASS  edicts       2.3 s  9 values match
+PASS  oracle       0.7 s  8 values match
+PASS  exact        6.2 s  0 values match
+PASS  screen2d    14.5 s  146 values match
+PASS  demolerp    32.4 s  0 values match
+PASS  sound        5.7 s  0 values match
 ALL PASS
 ```
 
 "Values match" counts the values compared with `classic_expected.txt`. The
-`demolerp` and `sound` rows record nothing: they compare the port with id's C
+`exact`, `demolerp` and `sound` rows record nothing: they compare the port with id's C
 live, in the same run (every demo MATCH, every case sample-identical), so their
 count is 0 and their PASS is the live comparison's. The `oracle` and `screen2d`
 rows do both: the live comparison with id's C, checked against the recorded match

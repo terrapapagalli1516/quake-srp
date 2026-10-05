@@ -461,7 +461,9 @@ written for its own engine)
 
 **Older LOW tail** *(2026-05/06, not re-checked)*: `PF_particle`'s byte count and
 direction quantising; `clip_box`'s inopen/plane-distance coordinates; `SV_NewChaseDir`'s
-integer abs; `OP_ADDRESS`'s world guard; `AngleVectors` in f64; `ST_RAND` syncbase;
+integer abs; `OP_ADDRESS`'s world guard; `AngleVectors` in f64 (the game code's; the
+renderer's is the C's floats since `fleet/pixelexact`); `ST_RAND` syncbase (the renderer
+takes one since `fleet/pixelexact`; the live clients pass 0);
 tracer parity; sky-name case; `push_entity`'s trigger order against `SV_Impact`; sprite
 group syncbase (Round 2, Round 5).
 
@@ -3893,3 +3895,134 @@ After trying them, the user asked for fewer indicators and resets that reset:
   Options alone, from id's row, and Escape goes back to Options.
 - **The frame-rate cap starts at none on every machine** (a touch screen too); Classic's is
   id's 72.
+
+## Bit for bit: Classic's renderer in id's C types (2026-10-05, branch `fleet/pixelexact`)
+
+The user asked why it was not pixel-by-pixel identical. The standard views matched id's C
+but for 2 pixels on e1m7, the swept views at 99.83-100%, and the rest was called float
+noise ("carrying the edge arithmetic in f64 instead of the C's floats moves nothing").
+It was not noise. id's C has two builds in `oracle/` — x87, and SSE2 floats
+(`ORACLE_FPMATH=sse`), every float operation rounded to a float as the C's types say —
+and against the SSE build the port's own arithmetic was the whole of the difference.
+The port now computes Classic's frame as the C does, type for type: against the SSE
+build every pixel of every view tried is id's (`oracle/README.md`, "Bit for bit").
+
+**The causes** (pixels: e1m1/2/3/7, 23 views each, world, 320x200, against the SSE
+build: 499 before; over the nine shareware maps' 207 views, 939):
+- ✅ *The view* (499 → 474). `Camera::basis` (render/mod.rs:342) built its own f64
+  basis where `R_SetupFrame` calls `AngleVectors`, whose angle, sines and products are
+  floats (`math::angle_vectors_f32`; `math::angle_vectors`, double, stays for the game
+  code, which is measured against the x87 build). `Projection::new` (mod.rs:547) took
+  `tan` of the half angle in f64 where `R_ViewChanged` divides `fov_x/360` as a float
+  (`render::horizontal_fov`, now the alias models' and particles' too); `screen_edges`
+  (edge.rs:434) derived the fields of view back from `xscale` where id keeps
+  `horizontalFieldOfView` and divides it by `screenAspect`.
+- ✅ *`D_CalcGradients`* (474 → 72). The port's gradients were analytic f64 planes
+  (`PolyGrads::for_plane`, raster.rs:257) and `sadjust` the eye's coordinate rounded
+  (`BlockFixed::new`, raster.rs:533); id's is `(int)(DotProduct (p_temp1, p_saxis) *
+  0x10000 + 0.5) - ((texturemins << 16) >> miplevel) + vecs[0][3]*t`, a float dot
+  product, a double add, an `int` converted to a float and a float sum, then
+  truncated: a texel edge one 16.16 unit away fell on the other side
+  (`raster::calc_gradients`, `SurfGrads`).
+- ✅ *The span routines' floats* (72 → 0). `D_DrawSpans16`, `D_DrawSpans8` and
+  `Turbulent8` step `sdivz`/`tdivz`/`zi` by float adds and divide in floats at each
+  segment's end; the port evaluated f64 planes there (`Span::knot`, raster.rs:407).
+  Now `raster::FloatSpan` and `SegmentEnds`; the C's clamps and integer steps were
+  already there. The exact perspective (not id's) starts from the same gradients, in
+  double (`Span::from_grads`).
+- ✅ *`R_AnimateLight`* (server/lightstyle.rs:185). Classic multiplied a float clock by
+  10 in float, where the C's `(int)(cl.time*10)` is a double product: 1.9f is
+  18.9999998 tenths, which the float product rounds to 19, so the styles ran a tenth
+  early whenever the clock's float is just short of a tenth (about half of them on a
+  float clock). It was oracle/README.md's "settle 3" arch, put down to the harness:
+  1,208 pixels of e1m1's third frame after signon.
+- ✅ *The alias models.* `alias_project` (alias.rs:605) and the unclipped projection
+  (alias.rs:710) summed in f64, `ziscale` was an f64 (the gun's `3*2^31*zi` rounds as
+  a float), `R_Alias_clip_*`'s `int + float` sums were done in f64 (alias.rs:807),
+  `D_PolysetCalcGradients` (polyse.rs:345) kept its `int` differences in f64 where the
+  C stores them to floats, `res_scale` was not stored to a float before
+  `r_aliastransition`'s product, and the entity's `AngleVectors` was the double one: 4
+  pixels of an ogre in a rolled e1m8 view.
+- ✅ *`syncbase`.* `R_AliasSetupFrame`, `R_AliasSetupSkin` and `R_GetSpriteframe` pick a
+  group's sub-frame at `cl.time + syncbase`; the port had no syncbase
+  (`ModelInstance::syncbase`, `SpriteInstance::syncbase` now; `quaketool view` takes
+  id's from the `.ents` line): a wizard's spike (a four-frame group) in demo1's frame
+  4223, 7 pixels.
+- ✅ *`D_DrawParticle`* (part.rs:90, 201): `(int)(xcenter + zi*x + 0.5)` adds its 0.5
+  in double, and `xscaleshrink` comes from id's `horizontalFieldOfView`. No pixel in
+  the views tried.
+- ✅ *The clock* reaches the renderer as a double (`Scene::time`): the sky's `skytime`,
+  the liquids' and the warp's `(int)(cl.time*SPEED)` and `R_TextureAnimation`'s
+  `(int)(cl.time*10)` are double arithmetic in the C. The live clients still hand it
+  their float clocks (below).
+- ✅ *The harness:* `quaketool view --time` a double; `--spans 8` and `1` drew liquids
+  with id's 16-pixel `Turbulent8` where the port's `--perspspan` steps them as walls
+  (`Turbulent8` is wrapped now); the oracle's exact perspective was in floats, the
+  port's in double (both are the port's reference now); `compare.py` searched id1's
+  paks before a mission pack's (`start.bsp` was id1's).
+
+**The counts.** Against the SSE build, 0 differing pixels: the nine shareware maps,
+23 views each, world and entities, at 16-pixel spans, id's portable 8 and the exact
+perspective (1,242 frames); 640x480 to 1280x1024, the page's aspect, mip 0 (693); 59
+registered and mission-pack maps (1,357; five more need a `b_exbox2.bsp` the paks
+here lack); frames 1-13 after signon with the gun; the shotgun's particles;
+explosions; 161 demo frames with id's lights (`demo_lights.py --sse`); underwater;
+viewsize 100; Armagon's rotating door (`rotate_check.py`). Against the x87 build:
+the 92 swept views 528 → 297 pixels, the 207 views 1,001 → 638 (0.0048%), the 59
+registered and pack maps 5,210 of 86.8 M; the eight `classic_check` rows (page
+aspect) 100.00 but for e1m7's two pixels before, and now every row against the SSE
+build, which `classic_check` measures (its `oracle` row with `--sse`, and a new
+`exact` row: 414 views, no pixel off).
+
+**The x87 build is not a target.** Its last 0.005% is gcc 12's choice of the
+`float` variables it keeps in 80-bit registers: the same C with `-ffloat-store`
+(`ORACLE_FPMATH=x87store`) is the SSE build's frame on every pixel of the 207 views,
+stage for stage where traced (`pixel_trace.py`), and the stages that part are `R_TransformFrustum`'s clip-plane
+`dist` (its `v2[]` stays in registers), edges' `1/z` in the last bits, and
+`D_CalcGradients`' `sadjust` (98 of 99 pixels of six first frames). That depends on a
+compiler's register allocation, not on the C, so it is not emulated. What 1996
+players saw is a third arithmetic again: the x86 builds' `R_RenderView_` renders with
+the FPU at 24-bit precision and chop rounding (`Sys_LowFPPrecision`); the x87 build in
+that state (`compare.py --fpcw`) differs from the port on 0.014%.
+
+**Goldens** (`quaketool scene`, 640x400, the port only): `4807aaa1` / `9ae2b478` /
+`c65b7046` → `790c53d3` / `3684efc6` / `e18bb516` (5, 51 and 18 pixels: texel edges).
+`classic_check` re-recorded: the goldens, every `play` frame hash (the renderer's
+pixels, and the light styles a tenth late in the live walks), the `oracle` rows
+(100.0000); every sound tally, timedemo, census, edicts, screen2d, demolerp and sound
+value unchanged.
+
+**Slop.** The arithmetic is shared: slop's frames move by the same single texel-edge
+pixels, now id's (1080p, six views: 0.011% of pixels at its 8-pixel spans, 0.006% with
+the exact perspective). Its 8-pixel spans are now `D_DrawSpans8`'s floats exactly,
+and the exact perspective's gradients id's floats in double.
+
+**Tools** (`oracle/README.md`, "Bit for bit"): `exact_sweep.py` (many views, the
+differing pixels per build, `diffs.json`), `pixel_trace.py` (a differing pixel's
+stages, id's `oracle_stages` beside `quaketool view --stages`), the `sse`, `x87store`
+and `x87cw` builds.
+
+**Cost** (against main @ `f695c9a`; timings were noisy, so the counts are the
+evidence and the timings the check). Instructions, which other load does not
+move (the process's own counters): a warm Classic frame +0.8% (e1m3 1280x800) to
++2.1% (e1m2 640x400 with entities); slop's 8-pixel spans at 1080p +2.0%, the exact
+perspective +1.7%; a whole `timedemo demo1` +1.2% / +1.5% / +2.6% at 320x200 /
+640x400 / slop 1080p — with fewer cycles (-2.0% / -4.1% / -5.1%: float divides where
+the port's were double, and no f64 plane setup for every face). The exact
+conversions cost the first version more (slop's 8-pixel spans +7.8%): a C `(int)`
+is one test and Rust's saturating `as` (`raster::c_ftoi`), and the pixels step in
+`i64` as before. Timed under `with.sh measure`, interleaved, five runs each, on a
+quiet spell: `timedemo demo1` Classic 320x200 / 640x400 / 1280x800 2614 → 2666 /
+1240 → 1286 / 457 → 481 fps, slop 1080p one thread 228 → 240, eight threads 802 →
+788 (-1.7%; a rerun -2.4% and -0.8% on demo1 and demo2, with other load running).
+The browser (headless Chromium, the threads build, `web/bench.py`, two runs each, the
+worker's frame): Classic demo1 640x400 1.13 → 1.15 ms, walk_e1m1 0.68 → 0.68, slop
+1280x800 one thread 2.81 → 2.73, all threads 1.43 → 1.42 — within the runs' own
+spread. Being exact costs Classic nothing measurable; slop neither, beyond the
+eight-thread run's 1-2%, inside the noise.
+
+**Still open.** The live clients hand the renderer their float clocks (`w.clock`, the
+demo's `v.time`): `Scene::time` takes a double now, the clients do not yet give one.
+id's random `ST_RAND` syncbase is not made by the live clients (the renderer takes
+one). The game code's `AngleVectors` is the double one (`math::angle_vectors`), the
+x87 build's near enough; the server's and QuakeC's arithmetic was not part of this.
