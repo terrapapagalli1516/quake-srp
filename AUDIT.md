@@ -2951,7 +2951,7 @@ against id's WinQuake:
 - **`in_touch`** (`Cvars::touch`) is a departure, the touch controls for
   play: on in 2026, and since 2026-10-04 (`10b1cc2`) on in Classic too, a
   shared control ("The controls are shared"), so Reset to Classic does not
-  leave a phone unplayable. The settings page's last row, "Touch controls".
+  leave a phone unplayable. Its row: Slop Options > Controls > Touch controls.
   `in_touchaccel` (look acceleration, console only, default 0) reads
   nothing in the game, so it is no departure. With `in_touch` off, a touch
   screen keeps only a MENU button and the tappable menu, so a phone is
