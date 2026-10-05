@@ -1454,6 +1454,15 @@ mod tests {
         };
         let (mut a, mut b, mut c) = (walk(), walk(), walk());
         let (eye, ang) = b.server.player_view();
+        // Sent to the camera: at the player's eye, what the player is sent;
+        // in the first grunt's doorway, the grunt the start cannot see.
+        assert_eq!(b.server.entities_sent_to_eye(eye), b.server.entities_sent_to_client());
+        let vm = &b.server.vm;
+        let grunt = (1..vm.num_edicts() as i32)
+            .find(|&e| !vm.is_free_edict(e) && vm.ent_get_vector(e, "origin")[..2] == [0.0, 576.0])
+            .expect("e1m1's first grunt") as usize;
+        assert!(!b.server.entities_sent_to_client()[grunt], "out of the start's PVS");
+        assert!(b.server.entities_sent_to_eye([224.0, 616.0, 46.0])[grunt], "in the doorway's");
         b.camera = Some(render::Camera { pos: eye, yaw: ang[1], pitch: -ang[0], roll: ang[2], fov_deg: 90.0 });
         let fa = super::walk_frame(&mut a, 1.0 / 72.0, false, &vid);
         let fb = super::walk_frame(&mut b, 1.0 / 72.0, false, &vid);
