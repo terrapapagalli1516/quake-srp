@@ -353,9 +353,9 @@ const SURF_BLOCK_MAX: usize = 1 << 20;
 /// A baked surface block ([`SurfaceCaches::surface`]): the palette indices,
 /// `bw * bh` row-major, at mip level `mip`, whose texel `(i, j)` is the
 /// surface's `(texmins[0] + i, texmins[1] + j)` in that level's texels. The
-/// span walker reads it through gradients scaled to the level
-/// ([`PolyGrads::mip_scaled`](super::raster::PolyGrads::mip_scaled)), as
-/// `D_CalcGradients` scales its steps by `mipscale`.
+/// span walker reads it through the level's gradients
+/// ([`calc_gradients`](super::raster::calc_gradients)'s `mipscale`, as
+/// `D_CalcGradients` scales its steps).
 pub(super) struct SurfBlock {
     pub(super) block: Arc<Vec<u8>>,
     pub(super) bw: usize,
