@@ -21,6 +21,10 @@ cmd COMMAND [ARGS] [at T]      a console command: +/-attack, +/-jump, +/-forward
 duration S                     seconds of film (required)
 fps N                          frames a second of film (default 60)
 size WxH                       the output frames (default 1920x1080)
+frames A..B                    only film frames A to B-1 written (the game still runs from frame 0,
+                               undrawn before A): a window of a longer shot, its clock unchanged
+threads N                      the renderer's threads (default every core); the pixels are the same
+                               on any number, but for `xray bands`, which shows them
 
 # The game's settings.
 preset slop|classic            every setting at once (default slop)
@@ -29,7 +33,7 @@ cvar NAME VALUE [at T]         any console variable, after the preset (r_perspsp
                                torch's flicker stepping up); the sound's mixer stays the shot's first
                                (`snd_modern` cannot change mid-shot; `volume` can). The film reads
                                its own lines, not these: `host_maxfps` (`clock`, `stepping`),
-                               `vid_pixelsize` (`pixel`), `r_threads` (`--threads`), and
+                               `vid_pixelsize` (`pixel`), `r_threads` (`threads`), and
                                `sv_max_edicts` is the map's from its start
 mode WxH                       the picture the game draws (default: slop the size over `pixel`,
                                Classic the preset's video mode, 960x600)

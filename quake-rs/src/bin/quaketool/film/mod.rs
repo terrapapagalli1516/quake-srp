@@ -27,16 +27,19 @@
 //!
 //! The overrides are the shot file's lines given last, as `--KEY VALUE`
 //! (`--preset classic`, `--fps 30`, `--size 640x360`, `--cvar "r_perspspan 1"`,
-//! `--xray z`), and the command's own:
+//! `--xray z`, `--frames 60..120`, `--threads 4`), and the command's own:
 //!
 //! ```text
-//! --threads N        the renderer's threads (default: every core); the pixels are the same for any N
 //! --format png|ppm   the frames' files (default png: <out-dir>/00000.png ...)
 //! --raw              the frames as raw RGB24 to stdout instead, for `ffmpeg -f rawvideo`
 //!                    (out-dir `-`: none, when there is no sound to write)
-//! --frames A..B      only film frames A to B-1 (the game still runs from the start)
 //! --sound            write <out-dir>/sound.wav too (as `sound on`)
 //! ```
+//!
+//! `--frames A..B` (only film frames A to B-1; the game still runs from the
+//! start) and `--threads N` (the renderer's threads, every core by default;
+//! the pixels are the same for any N) are shot lines like the rest, so a
+//! shot file can keep its window and, for `xray bands`, its threads.
 //!
 //! The frame size the shot gives (`size`) is the output's: the game's
 //! picture (its `mode`) is scaled into it by whole pixels where it fits
@@ -152,9 +155,7 @@ pub fn cmd_film(args: &[String]) -> Result<String, String> {
     let (pak_path, shot_path, out_dir) = (&args[0], &args[1], &args[2]);
     let text = std::fs::read_to_string(shot_path).map_err(|e| format!("cannot read {shot_path}: {e}"))?;
     let mut shot = Shot::parse(&text).map_err(|e| e.to_string())?;
-    let mut threads = std::thread::available_parallelism().map_or(1, |n| n.get());
     let mut format = Format::Png;
-    let mut range: Option<(usize, usize)> = None;
     let rest = &args[3..];
     let mut i = 0;
     while i < rest.len() {
@@ -181,7 +182,6 @@ pub fn cmd_film(args: &[String]) -> Result<String, String> {
                 }
                 continue;
             }
-            "--threads" => threads = need()?.parse().ok().filter(|&n| n > 0).ok_or("--threads N")?,
             "--format" => {
                 format = match need()?.as_str() {
                     "png" => Format::Png,
@@ -189,11 +189,6 @@ pub fn cmd_film(args: &[String]) -> Result<String, String> {
                     "raw" => Format::Raw,
                     v => return Err(format!("--format png|ppm|raw, got {v:?}")),
                 }
-            }
-            "--frames" => {
-                let v = need()?;
-                let (a, b) = v.split_once("..").ok_or("--frames A..B")?;
-                range = Some((a.parse().map_err(|_| "--frames A..B")?, b.parse().map_err(|_| "--frames A..B")?));
             }
             _ => {
                 let key = flag.strip_prefix("--").ok_or_else(|| format!("film: unknown argument {flag:?}"))?;
@@ -203,6 +198,7 @@ pub fn cmd_film(args: &[String]) -> Result<String, String> {
         i += 2;
     }
     shot.check()?;
+    let threads = shot.threads.unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()));
     if out_dir == "-" {
         if format != Format::Raw || shot.sound {
             return Err("film: out-dir `-` is for --raw without sound".into());
@@ -210,7 +206,7 @@ pub fn cmd_film(args: &[String]) -> Result<String, String> {
     } else {
         std::fs::create_dir_all(out_dir).map_err(|e| format!("cannot make {out_dir}: {e}"))?;
     }
-    let report = run(pak_path, &shot, out_dir, threads, format, range)?;
+    let report = run(pak_path, &shot, out_dir, threads, format)?;
     Ok(report)
 }
 
@@ -1546,14 +1542,7 @@ fn fire_target(w: &mut Walk, name: &str) {
 }
 
 /// Render the shot (see the module doc). Returns the report.
-fn run(
-    pak_path: &str,
-    shot: &Shot,
-    out_dir: &str,
-    threads: usize,
-    format: Format,
-    range: Option<(usize, usize)>,
-) -> Result<String, String> {
+fn run(pak_path: &str, shot: &Shot, out_dir: &str, threads: usize, format: Format) -> Result<String, String> {
     let started = Instant::now();
     let bytes = std::fs::read(pak_path).map_err(|e| format!("cannot read {pak_path}: {e}"))?;
     let pak = Pak::from_bytes("pak0.pak".into(), bytes).map_err(|e| e.to_string())?;
@@ -1594,7 +1583,7 @@ fn run(
     let mut mark_frames: Vec<Vec<Vec<String>>> = takes.iter().map(|t| vec![Vec::new(); t.shot.marks.len()]).collect();
     let palette = takes[0].palette;
     let frames = shot.frames();
-    let (first, end) = range.map_or((0, frames), |(a, b)| (a.min(frames), b.min(frames)));
+    let (first, end) = shot.frames.map_or((0, frames), |(a, b)| (a.min(frames), b.min(frames)));
     let mut stdout = std::io::stdout().lock();
     // Frames waiting for their files, encoded a batch at a time on the threads.
     let mut pending: Vec<(usize, Vec<u8>)> = Vec::new();

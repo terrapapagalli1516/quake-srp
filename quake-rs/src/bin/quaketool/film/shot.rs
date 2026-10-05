@@ -435,6 +435,10 @@ pub struct Shot {
     pub duration: f64,
     pub fps: f64,
     pub size: (usize, usize),
+    /// `frames A..B`: only film frames `A..B` written (the game runs from 0).
+    pub frames: Option<(usize, usize)>,
+    /// `threads N`: the renderer's threads (`None`: every core).
+    pub threads: Option<usize>,
     pub preset: Preset,
     /// `cvar NAME VALUE` lines, in order.
     pub cvars: Vec<(String, String)>,
@@ -501,6 +505,8 @@ impl Default for Shot {
             duration: 0.0,
             fps: 60.0,
             size: (1920, 1080),
+            frames: None,
+            threads: None,
             preset: Preset::Slop,
             cvars: Vec::new(),
             mode: None,
@@ -710,6 +716,19 @@ impl Shot {
             "duration" => self.duration = num(one()?)?,
             "fps" => self.fps = num(one()?)?,
             "size" => self.size = parse_size(one()?)?,
+            "frames" => {
+                let bad = || format!("`frames A..B` (film frames A to B-1), got {rest:?}");
+                let (a, b) = one()?.split_once("..").ok_or_else(bad)?;
+                let (a, b) = (a.parse::<usize>().map_err(|_| bad())?, b.parse::<usize>().map_err(|_| bad())?);
+                if a >= b {
+                    return Err(bad());
+                }
+                self.frames = Some((a, b));
+            }
+            "threads" => {
+                let n = one()?.parse::<usize>().ok().filter(|&n| n > 0);
+                self.threads = Some(n.ok_or_else(|| format!("`threads N`, N at least 1, got {rest:?}"))?);
+            }
             "preset" => {
                 self.preset = match one()? {
                     "slop" | "modern" | "2026" => Preset::Slop,
@@ -1370,6 +1389,21 @@ label Classic: id's 16-pixel spans
         s.set("key 0 0,0,0 0,90").unwrap();
         s.set("fps 30").unwrap();
         assert_eq!(s.check(), Ok(()));
+    }
+
+    #[test]
+    fn a_window_and_the_threads_are_lines_too() {
+        // What `--frames A..B` and `--threads N` say, a shot file can say: a
+        // window of a longer shot, and the threads `xray bands` shows.
+        let mut s = Shot::parse("map e1m1\nduration 4\nframes 60..180\nthreads 8\n").unwrap();
+        assert_eq!((s.frames, s.threads), (Some((60, 180)), Some(8)));
+        assert_eq!(s.frames(), 240, "the window does not change the shot's clock");
+        s.set("frames 0..1").unwrap();
+        assert_eq!(s.frames, Some((0, 1)), "an override is a line read last");
+        assert_eq!(Shot::parse("map e1m1\nduration 4\n").unwrap().frames, None);
+        for bad in ["frames 60", "frames 180..60", "frames 60..60", "frames a..b", "threads 0", "threads all"] {
+            assert!(Shot::parse(&format!("map e1m1\nduration 4\n{bad}\n")).is_err(), "{bad}");
+        }
     }
 
     #[test]
