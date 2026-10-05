@@ -373,6 +373,9 @@ marked *(2026-06)* were not re-checked since. Struck items were closed on 2026-0
   (PERF_PLAN C4). Architecture, not pixels.
 - Kept, id's: at high resolutions the maps' sub-pixel gaps (T-junctions) show the
   background on about one pixel every 40 frames at 4K (hires).
+- The live clients hand the renderer their float clocks (`w.clock`, the demo's `v.time`)
+  where id's `cl.time` is a double, and make no random `ST_RAND` syncbase; the renderer
+  takes both, and the oracle's views hand it id's ("Bit for bit", pixelexact).
 
 **The 2026 profile** (not Classic; what the port's own departures still leave)
 - Uncapped, a few per-frame roundings in id's code still drift with the frame rate:
