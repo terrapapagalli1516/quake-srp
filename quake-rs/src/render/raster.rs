@@ -393,10 +393,12 @@ impl Span {
     }
 
     /// The 16.16 texel coordinates at pixel `k` of the span, unclamped: `z =
-    /// 0x10000 / zi`, `s = (long long)(sdivz * z) + sadjust`, the planes
-    /// evaluated in f64 at the pixel. A zero `zi` (rounding at a near-clipped
-    /// edge) makes `z` infinite and the cast `0x8000000000000000`; the add
-    /// wraps (never a debug-build overflow panic), and the callers clamp.
+    /// 0x10000 / zi`, `s = (sdivz * z) as i64 + sadjust`, the planes evaluated
+    /// in f64 at the pixel. A zero `zi` (rounding at a near-clipped edge)
+    /// makes `z` infinite and the cast saturates (a NaN is 0: the exact
+    /// perspective's own rule, which the oracle's transcription of it
+    /// follows); the add wraps (never a debug-build overflow panic), and the
+    /// callers clamp.
     #[inline]
     fn st_at(&self, k: usize, sadjust: i64, tadjust: i64) -> (i64, i64) {
         let Knot { s, t, .. } = self.knot(k, sadjust, tadjust);
@@ -410,8 +412,8 @@ impl Span {
         let kf = k as f64;
         let z = 65536.0 / (self.zi + kf * self.dzi);
         Knot {
-            s: c_dtoi64((self.sz + kf * self.dsz) * z).wrapping_add(sadjust),
-            t: c_dtoi64((self.tz + kf * self.dtz) * z).wrapping_add(tadjust),
+            s: (((self.sz + kf * self.dsz) * z) as i64).wrapping_add(sadjust),
+            t: (((self.tz + kf * self.dtz) * z) as i64).wrapping_add(tadjust),
             z,
         }
     }
@@ -443,25 +445,19 @@ struct Knot {
 // in double from these gradients ([`Span::from_grads`]).
 
 /// `(int)x` of a C `float` as x86's `cvttss2si` gives it: truncation toward
-/// zero, and `0x80000000` for a NaN or a value out of range (Rust's `as`
-/// saturates).
+/// zero, and `0x80000000` for a NaN or a value out of range, where Rust's
+/// `as` saturates. Below the range `as` already gives `0x80000000`, so one
+/// test does: a NaN fails it too. (Every span's segment end converts two:
+/// the test is cheaper than a range's two.)
 #[inline]
 pub(super) fn c_ftoi(x: f32) -> i32 {
-    // -2^31 and 2^31 are floats: the range is the float's own.
-    if (-2_147_483_648.0..2_147_483_648.0).contains(&x) { x as i32 } else { i32::MIN }
+    if x < 2_147_483_648.0 { x as i32 } else { i32::MIN }
 }
 
 /// `(int)x` of a C `double` (`cvttsd2si`): as [`c_ftoi`].
 #[inline]
 pub(super) fn c_dtoi(x: f64) -> i32 {
-    if x > -2_147_483_649.0 && x < 2_147_483_648.0 { x as i32 } else { i32::MIN }
-}
-
-/// `(long long)x` of a C `double` as x86 gives it: truncation, and
-/// `0x8000000000000000` for a NaN or a value out of range.
-#[inline]
-pub(super) fn c_dtoi64(x: f64) -> i64 {
-    if (-9_223_372_036_854_775_808.0..9_223_372_036_854_775_808.0).contains(&x) { x as i64 } else { i64::MIN }
+    if x < 2_147_483_648.0 { x as i32 } else { i32::MIN }
 }
 
 /// A screen-space plane as `D_CalcGradients` and `R_RenderFace` leave it, in
@@ -868,17 +864,18 @@ fn span16_cached(crow: &mut [u8], u: usize, v: usize, g: &SurfGrads, block: &[u8
     // The last segment: `n` steps land on the span's last pixel, the
     // positions `s + i*ds` with 16.
     let (ss, ts) = match ends.last() {
-        Some((1, (sn, tn))) => (sn - s, tn - t),
+        Some((1, (sn, tn))) => (i64::from(sn - s), i64::from(tn - t)),
         Some((n, (sn, tn))) => (
-            ((i64::from(sn - s) * RECIPROCAL_16[n]) >> 31) as i32,
-            ((i64::from(tn - t) * RECIPROCAL_16[n]) >> 31) as i32,
+            i64::from(((i64::from(sn - s) * RECIPROCAL_16[n]) >> 31) as i32),
+            i64::from(((i64::from(tn - t) * RECIPROCAL_16[n]) >> 31) as i32),
         ),
         None => (0, 0),
     };
+    let (mut ps, mut pt) = (i64::from(s), i64::from(t));
     for c in &mut crow[k0..] {
-        *c = block.get((t >> 16) as usize * bw + (s >> 16) as usize).copied().unwrap_or(0);
-        s += ss;
-        t += ts;
+        *c = block.get((pt >> 16) as usize * bw + (ps >> 16) as usize).copied().unwrap_or(0);
+        ps += ss;
+        pt += ts;
     }
 }
 
@@ -924,30 +921,35 @@ fn span_c_cached<const N: usize>(crow: &mut [u8], u: usize, v: usize, g: &SurfGr
     // The full segments, `N` pixels each: a loop of a constant length, which
     // the compiler unrolls (one of a variable length cost 8 nearly what
     // exact perspective costs). Then the last, `n` pixels.
+    // (The pixels step in `i64`: the same values as the C's `int`s, which the
+    // clamps keep between a segment's ends, and no sign extension a pixel.)
     let mut k0 = 0;
     let mut ahead = ends.next();
     while let Some((snext, tnext)) = ahead {
         ahead = ends.next();
-        let (sstep, tstep) = ((snext - s) >> shift, (tnext - t) >> shift);
+        let (sstep, tstep) = (i64::from((snext - s) >> shift), i64::from((tnext - t) >> shift));
+        let (mut ps, mut pt) = (i64::from(s), i64::from(t));
         let seg: &mut [u8; N] = (&mut crow[k0..k0 + N]).try_into().expect("N pixels");
         for c in seg {
-            *c = block.get((t >> 16) as usize * bw + (s >> 16) as usize).copied().unwrap_or(0);
-            s += sstep;
-            t += tstep;
+            *c = block.get((pt >> 16) as usize * bw + (ps >> 16) as usize).copied().unwrap_or(0);
+            ps += sstep;
+            pt += tstep;
         }
         (s, t) = (snext, tnext);
         k0 += N;
     }
     let (sstep, tstep) = match ends.last() {
-        Some((n, (snext, tnext))) => ((snext - s) / n as i32, (tnext - t) / n as i32),
+        Some((n, (snext, tnext))) => (i64::from((snext - s) / n as i32), i64::from((tnext - t) / n as i32)),
         None => (0, 0),
     };
+    let (mut ps, mut pt) = (i64::from(s), i64::from(t));
     for c in &mut crow[k0..] {
-        *c = block.get((t >> 16) as usize * bw + (s >> 16) as usize).copied().unwrap_or(0);
-        s += sstep;
-        t += tstep;
+        *c = block.get((pt >> 16) as usize * bw + (ps >> 16) as usize).copied().unwrap_or(0);
+        ps += sstep;
+        pt += tstep;
     }
 }
+
 /// The exact perspective's texel at every pixel of one span of a
 /// surface-cache block: `D_DrawSpans8`'s 16.16 arithmetic with the divide at
 /// every pixel, clamped into the block.
@@ -958,8 +960,8 @@ fn span_exact_reference(crow: &mut [u8], sp: &Span, fx: &BlockFixed, block: &[u8
         // No z test: a non-positive `zi` (rounding at a clipped edge) saturates
         // and the clamp keeps the read in the block.
         let z = 65536.0 / zi;
-        let s = c_dtoi64(sz * z).wrapping_add(fx.sadjust) >> 16;
-        let t = c_dtoi64(tz * z).wrapping_add(fx.tadjust) >> 16;
+        let s = ((sz * z) as i64).wrapping_add(fx.sadjust) >> 16;
+        let t = ((tz * z) as i64).wrapping_add(fx.tadjust) >> 16;
         // Nearly every pixel is inside the block: one test for both
         // coordinates (as unsigned, a negative is past any width) before the
         // four of the two clamps.
@@ -1270,8 +1272,8 @@ impl<'a> ExactReplay<'a> {
                 self.k += 1;
             }
             let z = 65536.0 / self.zi;
-            s = c_dtoi64(self.sz * z).wrapping_add(fx.sadjust);
-            t = c_dtoi64(self.tz * z).wrapping_add(fx.tadjust);
+            s = ((self.sz * z) as i64).wrapping_add(fx.sadjust);
+            t = ((self.tz * z) as i64).wrapping_add(fx.tadjust);
         }
         let bx = (s >> 16).clamp(0, self.bw as i64 - 1) as usize;
         let by = (t >> 16).clamp(0, self.bh as i64 - 1) as usize;
@@ -1439,8 +1441,8 @@ fn turb_exact(crow: &mut [u8], sp: &Span, fx: &BlockFixed, liquid: &Liquid) {
     let (mut zi, mut sz, mut tz) = (sp.zi, sp.sz, sp.tz);
     for c in crow.iter_mut() {
         let z = 65536.0 / zi;
-        let s = c_dtoi64(sz * z).wrapping_add(fx.sadjust).clamp(0, fx.bbextents) as i32;
-        let t = c_dtoi64(tz * z).wrapping_add(fx.tadjust).clamp(0, fx.bbextentt) as i32;
+        let s = ((sz * z) as i64).wrapping_add(fx.sadjust).clamp(0, fx.bbextents) as i32;
+        let t = ((tz * z) as i64).wrapping_add(fx.tadjust).clamp(0, fx.bbextentt) as i32;
         liquid.draw(std::slice::from_mut(c), (s & TURB_COORD_MASK, t & TURB_COORD_MASK), (0, 0));
         zi += sp.dzi;
         sz += sp.dsz;
@@ -2151,12 +2153,12 @@ mod tests {
     #[test]
     fn a_span_at_zero_1_over_z_wraps_like_the_c_int() {
         // zi exactly 0 at a near-clipped edge: z = 0x10000 / 0 is infinite,
-        // the cast gives the C's 0x80000000 (0x8000000000000000 in the exact
-        // perspective's double), and `+ sadjust` wraps as the C's `s =
-        // (int)(sdivz * z) + sadjust` does (an overflow panicked in a debug
-        // build once); the span routines clamp into the surface.
+        // the cast gives the C's 0x80000000 (the exact perspective's double
+        // saturates), and `+ sadjust` wraps as the C's `s = (int)(sdivz * z) +
+        // sadjust` does (an overflow panicked in a debug build once); the span
+        // routines clamp into the surface.
         let sp = Span { zi: 0.0, sz: 1.0, tz: -1.0, dzi: 0.0, dsz: 0.0, dtz: 0.0 };
-        assert_eq!(sp.st_at(0, 5, -5), (i64::MIN.wrapping_add(5), i64::MIN.wrapping_add(-5)));
+        assert_eq!(sp.st_at(0, 5, -5), (i64::MAX.wrapping_add(5), i64::MIN.wrapping_add(-5)));
         let flat = |origin| FloatPlane { origin, stepu: 0.0, stepv: 0.0 };
         let g = SurfGrads {
             zi: flat(0.0),
@@ -2521,8 +2523,8 @@ mod tests {
         let (mut zi, mut sz, mut tz) = (sp.zi, sp.sz, sp.tz);
         for c in crow.iter_mut() {
             let z = 65536.0 / zi;
-            let bx = (c_dtoi64(sz * z).wrapping_add(fx.sadjust) >> 16).clamp(0, bw as i64 - 1) as usize;
-            let by = (c_dtoi64(tz * z).wrapping_add(fx.tadjust) >> 16).clamp(0, bh as i64 - 1) as usize;
+            let bx = (((sz * z) as i64).wrapping_add(fx.sadjust) >> 16).clamp(0, bw as i64 - 1) as usize;
+            let by = (((tz * z) as i64).wrapping_add(fx.tadjust) >> 16).clamp(0, bh as i64 - 1) as usize;
             *c = block[by * bw + bx];
             zi += sp.dzi;
             sz += sp.dsz;

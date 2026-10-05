@@ -1031,17 +1031,20 @@ static void Oracle_DrawSpans16 (espan_t *pspan)
 =============
 Oracle_DtoI64
 
-(long long)x as x86 gives it, written out: truncation, and
-0x8000000000000000 for a NaN or a value out of range (a 32-bit build
-converts through the x87 or a libgcc call, whose out-of-range result is
-not the C's to promise). The port's c_dtoi64.
+The exact perspective's conversion of a double to a 64-bit integer, as the
+port's Rust `as i64` makes it: truncation, saturating at the range's ends,
+a NaN 0. (Its own rule, not x86's: the exact perspective is the port's.)
 =============
 */
 static long long Oracle_DtoI64 (double x)
 {
-	if (x >= -9223372036854775808.0 && x < 9223372036854775808.0)
-		return (long long)x;
-	return (long long)(-9223372036854775807LL - 1);
+	if (x != x)
+		return 0;
+	if (x >= 9223372036854775808.0)
+		return 9223372036854775807LL;
+	if (x < -9223372036854775808.0)
+		return -9223372036854775807LL - 1;
+	return (long long)x;
 }
 
 /*
