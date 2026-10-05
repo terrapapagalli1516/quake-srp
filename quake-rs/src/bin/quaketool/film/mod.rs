@@ -768,6 +768,9 @@ struct Take {
     rehearsed: Option<Vec<camera::Track>>,
     /// The marks as the last picture shows them.
     marks: Vec<marks::Seen>,
+    /// The film frames drawn from inside the world's solid (the first, the
+    /// last and how many), for the report.
+    in_solid: Option<(usize, usize, usize)>,
     mixer: Option<Mixer>,
     /// The sound on the film's clock (with `sound game`, stretched from
     /// `game_pcm`, the mixer's on the game's clock).
@@ -881,6 +884,7 @@ impl Take {
             seen,
             rehearsed: tracks,
             marks: Vec::new(),
+            in_solid: None,
             mixer,
             pcm: Vec::new(),
             game_pcm: Vec::new(),
@@ -1090,6 +1094,10 @@ impl Take {
                     None => {}
                 }
                 self.marks = self.see_marks((frame.image.w, frame.image.h));
+                if self.eye_in_solid() {
+                    let (a, _, k) = self.in_solid.unwrap_or((n, n, 0));
+                    self.in_solid = Some((a, n, k + 1));
+                }
                 let (ow, oh) = self.out;
                 let mut out = fit(&rgb, frame.image.w, frame.image.h, self.aspect, ow, oh);
                 self.overlays(&mut out, (frame.image.w, frame.image.h), tc);
@@ -1215,6 +1223,19 @@ impl Take {
                 fov_deg: 90.0,
             }),
         }
+    }
+
+    /// The camera's eye is inside the world's solid (the BSP's leaf 0, as a
+    /// free camera through a wall has it): the renderer marks every leaf
+    /// from there (`mod_novis`), as `noclip` shows the world, the client
+    /// draws every entity with it, and the sound's ambient channels fall
+    /// silent (the leaf's levels are 0).
+    fn eye_in_solid(&self) -> bool {
+        let bsp = match &self.game {
+            Game::Walk(w) => &w.bsp,
+            Game::Demo(d) => &d.bsp,
+        };
+        render::point_in_leaf(bsp, self.view_camera().pos) == Some(0)
     }
 
     /// Where the view lies on the take's output frame.
@@ -1730,6 +1751,16 @@ fn run(pak_path: &str, shot: &Shot, out_dir: &str, threads: usize, format: Forma
         }
     }
     for take in &takes {
+        if let Some((a, b, k)) = take.in_solid {
+            report += &format!(
+                "\nfilm: note{}: the camera is inside the world's solid from film frame {a} to {b} ({:.2} to {:.2} s, \
+                 {k} pictures): from there every leaf is drawn, as noclip shows the world (but for a `vis` point's \
+                 x-ray), and the ambient sound is silent",
+                if take.name.is_empty() { String::new() } else { format!(" (side {})", take.name) },
+                a as f64 / shot.fps,
+                b as f64 / shot.fps
+            );
+        }
         if let Some(d) = take.divergence().filter(|&d| d > 0.5) {
             report += &format!(
                 "\nfilm: WARNING{}: the game went {d:.1} units from its rehearsal; the camera followed the rehearsal",
