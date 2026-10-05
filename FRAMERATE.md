@@ -791,7 +791,11 @@ are clamped to 8/65536 where the asm clamps to 1/16 texel. Against id's C
 (`compare.py --spans 8 --perspspan 8`, the oracle running `D_DrawSpans8`) the
 eight standard rows are 100.00% at the page's aspect (the port's 16 against
 them: 91.97-97.43%) and 99.97-99.99% at 640x480 and 1280x1024, the float
-residue 16 has against `--spans 16`. 4, 32 and 64 are the same arithmetic at
+residue 16 had against `--spans 16` — against the x87 build. Against the SSE
+build, the port's target since `fleet/pixelexact`, 8 is every pixel: the nine
+maps' views at 320x200, and e1m1/2/3/7's standard and swept views, world and
+entities, at 640x480 and 1280x1024 (`oracle/exact_sweep.py --spans 8`;
+`oracle/README.md`, "Bit for bit"). 4, 32 and 64 are the same arithmetic at
 their length: the C's form, because it is id's pattern for any power of two
 (`>> 3` and the guard of 8 are its only 8s), where the asm is tied to 16 by
 `reciprocal_table_16` and its 20-bit carry. At 64 it still holds: the ends
