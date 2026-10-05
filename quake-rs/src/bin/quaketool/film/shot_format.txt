@@ -39,6 +39,14 @@ mode WxH                       the picture the game draws (default: slop the siz
                                Classic the preset's video mode, 960x600)
 pixel N                        slop's pixel size: mode = size / N, each pixel N x N (default 1)
 display W:H|square             the shape the picture is shown at (default: slop square, Classic 4:3)
+display HZ                     the screen the film watches (10 to 1000 Hz): on each of its refreshes
+                               the game's own gate decides, as the page's does, whether a host frame
+                               runs (`clock id`: id's 72 fps cap passes every refresh at 60 Hz, every
+                               4th at 240; `clock free`: every refresh), and a film frame shows the
+                               last picture drawn. The screen's seconds are the game's: `display 240`
+                               with `speed 0.25` at fps 60 is a 240 Hz screen at quarter speed, a
+                               refresh a film frame. One line can say both: `display 4:3 240`.
+                               Default: no screen, the film is one (see `clock`)
 hud on|off [at T]              the status bar at the `viewsize` cvar's Screen size (the preset's, or a
                                `cvar viewsize` line's), or none: Screen size 120, whatever `viewsize`
                                says (default off)
@@ -51,14 +59,19 @@ notarget on|off                monsters do not see the player (default on)
 player spawn|camera|X,Y,Z[,YAW]  where the player is: the map's start, carried along with the
                                camera (noclip; the map's exits are shut), or stood there
                                (default spawn)
-clock id|free                  how the game's clock meets the film's: id's 72 Hz ticks of game time,
-                               each picture held until the next (a 60 fps film steps unevenly; slow
-                               motion shows the ticks), or a host frame for every film frame, stepped
-                               as the uncapped page steps (default: Classic id, slop free)
+clock id|free                  the game's frame gate: id's (`Host_FilterTime`: at most 72 host frames
+                               a second) or the uncapped page's (a host frame every refresh, stepped
+                               as the uncapped page steps) (default: Classic id, slop free). With
+                               `display`, it runs on the screen's refreshes. Without, the film is the
+                               screen: `free` is a host frame every film frame, `id` id's ticks, a
+                               host frame every 1/72 s of game time, each picture held to the film
+                               frames after it (slow motion shows the ticks; at 60 fps one tick in six
+                               never shows, a judder no 60 Hz screen has: `display 60` shows what one
+                               does)
 speed S [at T]                 the game's speed from film second T on (default 1 from 0; 0.25 is slow
                                motion; 0 freezes the world while the camera goes on); with `clock
-                               free` the game runs at fps / S host frames a second: fps 60 and speed
-                               0.25 is the game at 240 Hz
+                               free` and no `display` the game runs at fps / S host frames a second:
+                               fps 60 and speed 0.25 is the game at 240 Hz
 stepping id|uncapped           how a host frame steps the game, if not as its clock does (id: id's
                                per-frame code, which drifts away from 72 Hz; uncapped: slop's, which
                                lands on id's 72 Hz results at any rate): `clock free`, `speed 0.125`

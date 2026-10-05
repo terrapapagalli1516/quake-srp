@@ -11,15 +11,23 @@
 //! the view, the sound's listener and the underwater test follow it, and
 //! the game goes on around it). How the game's clock meets the film's:
 //!
-//! - `clock free` (slop's): a host frame for every film frame, the game
-//!   stepped by the film frame's share of game time ([`Stepping::Uncapped`],
-//!   the uncapped page's) — monsters glide, lights glide, as the slop preset
-//!   draws at any refresh rate.
-//! - `clock id` (Classic's): id's 72 Hz — a host frame every 1/72 s of game
-//!   time, each picture (the camera's too) held until the next, as id's
-//!   renderer only drew on a host frame. A film frame shows the last tick at
-//!   or before it: at 60 a second, one tick in six is never seen and the
-//!   motion steps unevenly; in slow motion every tick shows, held.
+//! - `display HZ`: the film watches a screen ([`screen`]). On each of its
+//!   refreshes the game's gate decides, as the page's does, whether a host
+//!   frame runs: id's 72 fps cap (`clock id`, Classic's: every refresh at
+//!   60 Hz, every 4th at 240) or the uncapped page's (`clock free`, slop's:
+//!   every refresh). A film frame shows the last picture drawn. The screen
+//!   runs on the game's seconds, so `speed` slows it with the world.
+//! - Without `display` the film is the screen. `clock free`: a host frame
+//!   for every film frame, the game stepped by the film frame's share of
+//!   game time ([`Stepping::Uncapped`], the uncapped page's) — monsters
+//!   glide, lights glide, as the slop preset draws at any refresh rate.
+//!   `clock id`: id's 72 Hz ticks — a host frame every 1/72 s of game time,
+//!   each picture (the camera's too) held until the next, as id's renderer
+//!   only drew on a host frame. A film frame shows the last tick at or
+//!   before it: at 60 a second, one tick in six is never seen and the
+//!   motion steps unevenly, which no 60 Hz screen shows (its refreshes pass
+//!   id's gate every time: `display 60`); in slow motion every tick shows,
+//!   held.
 //!
 //! `speed` slows the game (the film's seconds stay seconds) and 0 freezes it
 //! while the camera goes on: a frozen frame is a paused one (the server
@@ -83,6 +91,7 @@ pub mod camera;
 pub mod events;
 pub mod marks;
 pub mod png;
+pub mod screen;
 pub mod shot;
 pub mod text;
 pub mod xray;
@@ -766,6 +775,9 @@ struct Take {
     sound_start: i64,
     /// clock id: the 1/72 s ticks of game time run since film second 0.
     ticks: u64,
+    /// `display HZ`: the screen the film watches, and the game's gate on
+    /// its refreshes (in place of `ticks`, or a host frame each film frame).
+    screen: Option<screen::Screen>,
     last: Option<Vec<u8>>,
     drawn: usize,
     held: usize,
@@ -847,6 +859,7 @@ impl Take {
                 }
             }
         }
+        let display = screen::Screen::of(&shot);
         let mut take = Take {
             shot,
             now,
@@ -872,6 +885,7 @@ impl Take {
             game_pcm: Vec::new(),
             sound_start: 0,
             ticks: 0,
+            screen: display,
             last: None,
             drawn: 0,
             held: 0,
@@ -921,10 +935,11 @@ impl Take {
             }
         }
         // On the shot's game clock: film frame 0 steps a frame past the
-        // warm-up (`clock free`), or none (`clock id`).
-        let first_step = match self.clock {
-            Clock::Free => (shot.game_time(0.0) - shot.game_time(-1.0 / shot.fps)).min(0.1),
-            Clock::Id => 0.0,
+        // warm-up (`clock free`), or none (`clock id`, or a `display`: its
+        // refresh 0 shows the warm-up's last frame).
+        let first_step = match (&self.screen, self.clock) {
+            (None, Clock::Free) => (shot.game_time(0.0) - shot.game_time(-1.0 / shot.fps)).min(0.1),
+            (Some(_), _) | (None, Clock::Id) => 0.0,
         };
         for (w, places) in history {
             for (track, p) in self.seen.iter_mut().zip(places) {
@@ -981,14 +996,24 @@ impl Take {
             }
         }
         // This film frame's host frames, each with the film second its camera
-        // is at: one per film frame (free); or id's ticks of game time up to
-        // now (id), the last drawn and none if no tick is due, the picture
-        // held; a frozen world is one paused frame, redrawn from the camera.
+        // is at: with a `display`, those its refreshes since the last film
+        // frame run (the game's gate on each: `screen`); without one, a host
+        // frame per film frame (free), or id's ticks of game time up to now
+        // (id). The last is drawn; with none the picture is held. A frozen
+        // world is one paused frame, redrawn from the camera.
         let mut steps: Vec<(f64, f64)> = Vec::new();
-        match self.clock {
-            Clock::Free => steps.push((dt.min(0.1), t)),
-            Clock::Id if dt <= 0.0 => steps.push((0.0, t)),
-            Clock::Id => {
+        match (self.screen.as_mut(), self.clock) {
+            (Some(_), _) | (None, Clock::Id) if dt <= 0.0 => steps.push((0.0, t)),
+            (Some(screen), _) => {
+                for (g, step) in screen.frames_to(self.shot.game_time(t)) {
+                    steps.push((step, self.shot.film_time(g)));
+                }
+                if steps.is_empty() && self.last.is_none() {
+                    steps.push((0.0, t));
+                }
+            }
+            (None, Clock::Free) => steps.push((dt.min(0.1), t)),
+            (None, Clock::Id) => {
                 let g = self.shot.game_time(t);
                 while (self.ticks + 1) as f64 * TICK <= g + 1e-9 {
                     self.ticks += 1;
@@ -1647,7 +1672,7 @@ fn run(pak_path: &str, shot: &Shot, out_dir: &str, threads: usize, format: Forma
     for take in &takes {
         let side = if take.name.is_empty() { String::new() } else { format!("side {}: ", take.name) };
         report += &format!(
-            "film: {side}{} frames ({first}..{end} of {frames}) at {}x{} ({}x{} drawn, {}, clock {}), {} drawn, {} held, cl.time {:.3} at frame 0",
+            "film: {side}{} frames ({first}..{end} of {frames}) at {}x{} ({}x{} drawn, {}, clock {}{}), {} drawn, {} held, cl.time {:.3} at frame 0",
             end - first,
             take.out.0,
             take.out.1,
@@ -1655,6 +1680,7 @@ fn run(pak_path: &str, shot: &Shot, out_dir: &str, threads: usize, format: Forma
             take.vid.height,
             if take.shot.preset == Preset::Classic { "Classic" } else { "slop" },
             if take.clock == Clock::Id { "id" } else { "free" },
+            take.shot.refresh.map_or(String::new(), |hz| format!(", display {hz} Hz")),
             take.drawn,
             take.held,
             take.clock_at_start,
@@ -2340,5 +2366,50 @@ mod v3_tests {
             assert!(*visible && (x - 80.0).abs() < 8.0 && (y - 45.0).abs() < 8.0, "frame {n}: {x} {y}");
         }
         assert_ne!(frame(&bare, 7), frame(&body, 7), "the recorded player, drawn");
+    }
+}
+
+#[cfg(test)]
+mod display_tests {
+    use super::v2_tests::{pak_path, render};
+
+    /// Whether each film frame after the first shows a new picture.
+    fn changes(dir: &std::path::Path, frames: usize) -> Vec<bool> {
+        let read = |n: usize| std::fs::read(dir.join(format!("{n:05}.ppm"))).unwrap();
+        (1..frames).map(|n| read(n) != read(n - 1)).collect()
+    }
+
+    /// e1m1's player strafing down the first corridor, looking across it,
+    /// in Classic.
+    const STRAFE: &str = "map e1m1\nduration 2\nfps 60\nsize 160x100\npreset classic\nmode 320x200\n\
+                          player 480,-352,88,0\ncamera player\ncmd +moveleft\n";
+
+    #[test]
+    fn a_screen_shows_each_picture_for_as_long_as_the_game_s_gate_holds_it() {
+        let Some(pak) = pak_path() else { return };
+        // A 60 Hz screen: id's gate passes every refresh, as the uncapped
+        // game does, so both are a new picture every film frame.
+        for clock in ["id", "free"] {
+            let dir = render(&pak, STRAFE, &format!("d60-{clock}"), &["--display", "60", "--clock", clock]);
+            let c = changes(&dir, 120);
+            assert!(c[10..].iter().all(|&new| new), "clock {clock}: {c:?}");
+        }
+        // A 240 Hz screen at quarter speed, a refresh a film frame: id's gate
+        // passes every 4th (frames 4, 8, ...) and the screen holds each
+        // picture between, byte for byte; the uncapped game draws them all.
+        let at = |clock: &str| {
+            let dir = render(
+                &pak,
+                STRAFE,
+                &format!("d240-{clock}"),
+                &["--display", "240", "--speed", "0.25", "--clock", clock],
+            );
+            changes(&dir, 120)
+        };
+        let (id, free) = (at("id"), at("free"));
+        for (k, &new) in id.iter().enumerate().skip(10) {
+            assert_eq!(new, (k + 1) % 4 == 0, "id's clock, frame {}: {id:?}", k + 1);
+        }
+        assert!(free[10..].iter().all(|&new| new), "free: {free:?}");
     }
 }

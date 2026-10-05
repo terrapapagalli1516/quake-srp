@@ -84,11 +84,17 @@ events on
   `cvar r_perspspan 16`, from a film second on if it says so: `cvar r_torchflicker 1 at
   7.8`. `mode` and `display` set the picture's pixels and shape; `hud`, `gun` and
   `crosshair` take `at T` too.
-- **The clock.** `clock id` is id's: a game frame every 1/72 s, each picture held until
-  the next, so a 60 fps film steps unevenly, as Classic does. `clock free` is slop's: a
-  game frame for every film frame. `speed 0.125` is slow motion (with `clock free` at 30
-  film frames a second, the game runs at 240 Hz); `speed 0` freezes the world while the
-  camera goes on.
+- **The clock and the screen.** `display 60` films a 60 Hz screen: on each refresh the
+  game's own frame gate decides, as the browser's does, whether a game frame runs, and the
+  screen shows the last picture drawn. `clock id` is id's gate, its 72 fps cap (Classic's);
+  `clock free` is slop's, a frame every refresh. On a 60 Hz screen both draw every refresh;
+  on a 240 Hz one id's gate draws every 4th. `speed 0.25` is slow motion and slows the
+  screen with the world: `display 240` and `speed 0.25` in a 60 fps film is a 240 Hz
+  screen at quarter speed. Without `display` the film is the screen: `clock free` is a
+  game frame for every film frame (at `speed 0.125` and 30 film frames a second, the game
+  runs at 240 Hz), and `clock id` is id's 72 Hz ticks, each picture held to the film
+  frames after it, so a 60 fps film drops one tick in six, which no screen shows. `speed
+  0` freezes the world while the camera goes on.
 - **The camera.** The player's eye or the demo's; `camera fixed`; `camera path` through
   `key` lines (a smooth curve through the keys, each segment eased as its key says);
   `camera follow` and `camera orbit` an entity (the game is rehearsed once, undrawn, so
@@ -110,7 +116,9 @@ events on
 
 The code is in [`quaketool/film/`](../quake-rs/src/bin/quaketool/film/):
 [`mod.rs`](../quake-rs/src/bin/quaketool/film/mod.rs) (how the game's clock meets the
-film's), [`shot.rs`](../quake-rs/src/bin/quaketool/film/shot.rs) (the format),
+film's), [`screen.rs`](../quake-rs/src/bin/quaketool/film/screen.rs) (the screen
+`display` watches, the game's gate on each refresh),
+[`shot.rs`](../quake-rs/src/bin/quaketool/film/shot.rs) (the format),
 [`camera.rs`](../quake-rs/src/bin/quaketool/film/camera.rs) (paths, follow, orbit),
 [`xray.rs`](../quake-rs/src/bin/quaketool/film/xray.rs) and the renderer's side,
 [`render/xray.rs`](../quake-rs/src/render/xray.rs),

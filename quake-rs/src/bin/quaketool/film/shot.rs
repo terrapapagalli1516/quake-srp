@@ -444,8 +444,13 @@ pub struct Shot {
     pub cvars: Vec<(String, String)>,
     pub mode: Option<(usize, usize)>,
     pub pixel: usize,
-    /// `None`: the preset's.
+    /// `display W:H|square`: the shape the picture is shown at (`None`: the
+    /// preset's).
     pub display: Option<Option<f64>>,
+    /// `display HZ`: the screen the film watches, refreshing HZ times a
+    /// second of the game's real time, the game's gate on each refresh
+    /// ([`super::screen`]). `None`: the film is the screen (see `clock`).
+    pub refresh: Option<f64>,
     pub hud: bool,
     pub gun: bool,
     pub messages: bool,
@@ -512,6 +517,7 @@ impl Default for Shot {
             mode: None,
             pixel: 1,
             display: None,
+            refresh: None,
             hud: false,
             gun: false,
             messages: false,
@@ -748,18 +754,30 @@ impl Shot {
             "bob" => self.bob = on_off(one()?)?,
             "mode" => self.mode = Some(parse_size(one()?)?),
             "pixel" => self.pixel = (num(one()?)? as usize).clamp(1, 8),
+            // The screen: its shape, its refresh rate, or both.
             "display" => {
-                self.display = Some(match one()? {
-                    "square" => None,
-                    v => {
-                        let (a, b) = v.split_once(':').ok_or_else(|| format!("`display W:H|square`, got {v:?}"))?;
-                        let (a, b) = (num(a)?, num(b)?);
-                        if !(a > 0.0 && b > 0.0) {
-                            return Err(format!("`display`: {v:?} is not a shape"));
+                if words.is_empty() {
+                    return Err("`display W:H|square [HZ]` or `display HZ`".into());
+                }
+                for v in &words {
+                    match *v {
+                        "square" => self.display = Some(None),
+                        v if v.contains(':') => {
+                            let (a, b) = v.split_once(':').unwrap_or_default();
+                            let (a, b) = (num(a)?, num(b)?);
+                            if !(a > 0.0 && b > 0.0) {
+                                return Err(format!("`display`: {v:?} is not a shape"));
+                            }
+                            self.display = Some(Some(a / b));
                         }
-                        Some(a / b)
+                        v => {
+                            let hz = num(v).ok().filter(|hz| super::screen::RATES.contains(hz));
+                            self.refresh = Some(hz.ok_or_else(|| {
+                                format!("`display`: {v:?} is neither a shape (W:H, square) nor a refresh rate (10 to 1000 Hz)")
+                            })?);
+                        }
                     }
-                })
+                }
             }
             "hud" => self.hud = on_off(one()?)?,
             "gun" => self.gun = on_off(one()?)?,
