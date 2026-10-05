@@ -34,7 +34,7 @@ pub(super) fn warp_screen(
     tables: &mut WarpTables,
     view: &Image,
     out: WarpTarget,
-    clock: f32,
+    clock: f64,
     hires: bool,
     threads: usize,
 ) {
@@ -71,7 +71,7 @@ pub(crate) fn warp_scale(out_w: usize, out_h: usize) -> f64 {
 /// (`AMP2 * scale` pixels over `CYCLE * scale`, the phase advancing `SPEED *
 /// scale` a second): at 1 exactly `D_WarpScreen`. A degenerate view or
 /// target writes black.
-fn warp_scaled(tables: &mut WarpTables, view: &Image, out: WarpTarget, clock: f32, scale: f64, threads: usize) {
+fn warp_scaled(tables: &mut WarpTables, view: &Image, out: WarpTarget, clock: f64, scale: f64, threads: usize) {
     const SPEED: f64 = 20.0;
     let WarpTarget { rows, stride, x0, w: out_w, h: out_h, below } = out;
     // The view's own rows, and the `below` under them (id: none).
@@ -89,7 +89,7 @@ fn warp_scaled(tables: &mut WarpTables, view: &Image, out: WarpTarget, clock: f3
     }
     let scale = if scale.is_finite() && scale > 1.0 { scale } else { 1.0 };
     let cycle = (WARP_CYCLE as f64 * scale).round() as i64;
-    let phase = ((clock as f64 * SPEED * scale) as i64).rem_euclid(cycle) as usize;
+    let phase = ((clock * SPEED * scale) as i64).rem_euclid(cycle) as usize;
     tables.prepare(w, h, out_w, out_h, below, scale, phase + out_w.max(out_rows));
     let WarpTables { rowptr, column, sin, .. } = &*tables;
     super::band::for_rows(threads, out_rows, rows, stride, |v0, run| {
@@ -252,44 +252,11 @@ impl TurbTable {
     }
 }
 
-/// A liquid surface coordinate in `Turbulent8`'s 16.16 fixed point:
-/// `(int)(sdivz*z) + sadjust`, clamped to `[0, bbextents]` — with the extents
-/// `Mod_LoadFaces` gives every turbulent face (`texturemins = -8192`,
-/// `extents = 16384`), so the fixed value is `(s + 8192) * 0x10000`. `s` is the
-/// texinfo coordinate the rasteriser interpolates.
-#[inline]
-fn turb_fixed(s: f32) -> i32 {
-    // s*0x10000 is exact in f32 (a power of two); `as` truncates like the C cast.
-    let v = (s * 65536.0) as i32 as i64 + (8192 << 16);
-    v.clamp(0, (16384 << 16) - 1) as i32
-}
-
-/// Apply the SOFTWARE liquid warp to the surface coordinate `(s,t)` at game
-/// `time`, returning the texel `(sturb, tturb)` to sample — `D_DrawTurbulent8Span`
-/// (`d_scan.c`) on `Turbulent8`'s fixed-point coordinates:
-///
-/// ```text
-/// turb  = sintable + ((int)(cl.time*SPEED) & (CYCLE-1));
-/// sturb = ((s + turb[(t>>16)&(CYCLE-1)]) >> 16) & 63;
-/// tturb = ((t + turb[(s>>16)&(CYCLE-1)]) >> 16) & 63;
-/// ```
-///
-/// The 16.16 table value is added to the 16.16 coordinate BEFORE the `>> 16`, so
-/// the fractional parts carry. The caller wraps into the texture (`rem_euclid`;
-/// = `& 63` for the 64x64 liquids id ships). The coordinate here is exact per
-/// pixel: the port's exact-perspective extra. id steps it linearly across
-/// 16-pixel segments, as the default does (`raster_turb16`; class 7 in
-/// `oracle/README.md`, the span-subdivision item, shared with the walls).
-#[inline]
-pub(super) fn warp_st(turb: &TurbTable, s: f32, t: f32, time: f32) -> (i32, i32) {
-    turb.texel(turb_phase(time), turb_fixed(s), turb_fixed(t))
-}
-
 /// `Turbulent8`'s table phase: `r_turb_turb = sintable + ((int)(cl.time*SPEED)
 /// & (CYCLE-1))`.
 #[inline]
-pub(super) fn turb_phase(time: f32) -> usize {
-    ((time * TURB_SPEED) as i32 & (TURB_CYCLE as i32 - 1)) as usize
+pub(super) fn turb_phase(time: f64) -> usize {
+    ((time * f64::from(TURB_SPEED)) as i32 & (TURB_CYCLE as i32 - 1)) as usize
 }
 
 /// `(CYCLE << 16) - 1`: `Turbulent8` masks each segment's start coordinates
@@ -313,14 +280,14 @@ impl TurbTable {
 mod tests {
     use super::*;
     use crate::render::fixtures::synthetic_liquid_pixels;
-    use crate::render::raster::{AttrVert, PerspSpan, PolyGrads, span_at, span_turb};
+    use crate::render::raster::{AttrVert, PerspSpan, PolyGrads, SurfGrads, span_turb};
 
     /// `D_WarpScreen` at `scale` into an `out_w x out_h` image of its own,
     /// on fresh tables, on `threads` threads.
     fn warp_at(view: Image, out_w: usize, out_h: usize, clock: f32, scale: f64, threads: usize) -> Image {
         let mut out = Image::new(out_w, out_h, 7);
         let target = WarpTarget { rows: &mut out.pixels, stride: out_w, x0: 0, w: out_w, h: out_h, below: 0 };
-        warp_scaled(&mut WarpTables::default(), &view, target, clock, scale, threads);
+        warp_scaled(&mut WarpTables::default(), &view, target, f64::from(clock), scale, threads);
         out
     }
 
@@ -506,20 +473,20 @@ mod tests {
     }
 
     #[test]
-    fn warp_st_is_turbulent8_fixed_point() {
+    fn the_turb_texel_is_d_draw_turbulent8_span() {
         // D_DrawTurbulent8Span on Turbulent8's coordinates: the 16.16 sine is added
         // to the 16.16 coordinate (texturemins -8192) BEFORE the >>16, so a
         // fraction carries into the texel.
         let turb = TurbTable::new();
-        let (s, t) = (20.75f32, 33.5f32);
-        let phase = (0.37f32 * 20.0) as usize; // 7
+        let phase = turb_phase(0.37); // (int)(0.37*20) = 7
+        assert_eq!(phase, 7);
         let sf = ((20.75 + 8192.0) * 65536.0) as i32;
         let tf = ((33.5 + 8192.0) * 65536.0) as i32;
         let want_s = (sf + turb.tab[phase + ((tf >> 16) & 127) as usize]) >> 16;
         let want_t = (tf + turb.tab[phase + ((sf >> 16) & 127) as usize]) >> 16;
-        assert_eq!(warp_st(&turb, s, t, 0.37), (want_s, want_t));
+        assert_eq!(turb.texel(phase, sf, tf), (want_s, want_t));
         // Animated: the time phase shifts the table index.
-        assert_ne!(warp_st(&turb, s, t, 0.0), warp_st(&turb, s, t, 0.37));
+        assert_ne!(turb.texel(turb_phase(0.0), sf, tf), turb.texel(phase, sf, tf));
         // Bounded: the offset from the base texel (plus id's +8192) is in [0, 16].
         for (warped, base) in [(want_s, sf >> 16), (want_t, tf >> 16)] {
             assert!((0..=16).contains(&(warped - base)), "displacement out of range");
@@ -541,11 +508,12 @@ mod tests {
         let v1 = AttrVert { x: w as f32, y: 0.0, vz: 1.0, s: 128.0, t: 0.0 };
         let v2 = AttrVert { x: 0.0, y: h as f32, vz: 1.0, s: 0.0, t: 128.0 };
         let g = PolyGrads::from_vertices(&[v0, v1, v2]).expect("triangle");
-        let render_at = |time: f32| {
+        let g = SurfGrads::from_poly(&g, [-8192.0; 2], 16384, 16384);
+        let render_at = |time: f64| {
             let mut img = Image::new(w, h, 0);
             for y in 0..h {
                 let row = &mut img.pixels[y * w..(y + 1) * w];
-                span_turb(row, &span_at(&g, 0, y), &g, &pixels, 64, 64, &turb, time, PerspSpan::Exact);
+                span_turb(row, 0, y, &g, &pixels, 64, 64, &turb, time, PerspSpan::Exact);
             }
             img
         };

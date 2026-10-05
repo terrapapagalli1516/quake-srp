@@ -490,7 +490,7 @@ pub fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> CmdRes
         let colormap = read("gfx/colormap.lmp").ok();
         let scene = render::Scene {
             colormap: colormap.as_deref(),
-            time: server.time(),
+            time: f64::from(server.time()),
             light_styles: &light_styles,
             dlights: &peak_dlights,
             bmodels: &bmodels,

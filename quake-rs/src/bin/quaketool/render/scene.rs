@@ -265,7 +265,7 @@ pub fn cmd_scene(pak_path: &str, map_name: &str, out: &str, opts: &[String]) -> 
     let colormap = pak.read_file("gfx/colormap.lmp").ok().flatten();
     let scene = render::Scene {
         colormap: colormap.as_deref(),
-        time: server.time(),
+        time: f64::from(server.time()),
         light_styles: &light_styles,
         dlights: &injected_dlights,
         bmodels: &bmodels,

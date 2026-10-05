@@ -115,7 +115,7 @@ impl SpriteView {
     pub(super) fn new(frame: &Frame) -> SpriteView {
         let (cam, w, h) = (&frame.cam, frame.w, frame.h);
         let proj = Projection::new(cam, &frame.geom, frame.scene.options.aspect());
-        let Projection { cx, cy, xscale, yscale } = proj;
+        let Projection { cx, cy, xscale, yscale, .. } = proj;
         let (vpn, vright, vup) = cam.basis();
         let (wf, hf) = (w as f32, h as f32);
         SpriteView {
@@ -654,7 +654,7 @@ mod tests {
     /// `zbuf`, as the renderer's bands draw them.
     fn draw(img: &mut Image, zbuf: &mut [i16], cam: Camera, sprites: &[SpriteInstance], time: f32) {
         let world = crate::render::demo_room();
-        let scene = Scene { sprites, time, ..Scene::new(&world, cam, img.w, img.h, &[[0; 3]; 256]) };
+        let scene = Scene { sprites, time: time.into(), ..Scene::new(&world, cam, img.w, img.h, &[[0; 3]; 256]) };
         let frame = Frame::new(&scene, img.w, img.h);
         let view = SpriteView::new(&frame);
         let mut band = Band::whole(img.w, &mut img.pixels, zbuf);

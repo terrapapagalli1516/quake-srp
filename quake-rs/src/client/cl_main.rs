@@ -1144,7 +1144,7 @@ fn client_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid, dra
     };
     let scene = render::Scene {
         colormap: w.colormap.as_deref(),
-        time: w.clock,
+        time: f64::from(w.clock),
         light_styles: &light_styles,
         dlights: &active_dlights,
         bmodels: &bmodels,
@@ -1198,7 +1198,7 @@ fn client_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid, dra
     // over the screen's view rectangle while it wobbles, BEFORE the content
     // tint so the screen ripples, not just darkens.
     if let Some(view) = warp_view {
-        w.renderer.warp_into(view, &mut img, vrect, below, w.clock, vid.video.hires);
+        w.renderer.warp_into(view, &mut img, vrect, below, f64::from(w.clock), vid.video.hires);
     }
     // The 2-D oracle harness paints the view one flat colour (the C oracle's
     // `oracle_blank`), so a shot measures the 2-D layer alone (`set_view_hook`).

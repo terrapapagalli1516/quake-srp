@@ -102,7 +102,7 @@ pub fn cmd_view(args: &[String]) -> CmdResult {
             "--res" => res = Some(val),
             "--origin" => origin = Some(parse_vec3(flag, val)?),
             "--angles" => angles = Some(parse_vec3(flag, val)?),
-            "--time" => time = Some(val.parse::<f32>().map_err(|_| format!("--time: bad number {val:?}"))?),
+            "--time" => time = Some(val.parse::<f64>().map_err(|_| format!("--time: bad number {val:?}"))?),
             "--fov" => fov = val.parse().map_err(|_| format!("--fov: bad number {val:?}"))?,
             "--vrect" => {
                 let v: Vec<usize> = val
@@ -212,8 +212,8 @@ pub fn cmd_view(args: &[String]) -> CmdResult {
     };
     let angles = angles.unwrap_or([0.0, start.map_or(0.0, |(_, a)| a), 0.0]);
     let cam = Camera { pos: origin, yaw: angles[1], pitch: -angles[0], roll: angles[2], fov_deg: fov };
-    let time = time.unwrap_or_else(|| server.time());
-    let mut light_styles = server.lightstyle_scales(f64::from(time), video.cvars.lightstyles);
+    let time: f64 = time.unwrap_or_else(|| f64::from(server.time()));
+    let mut light_styles = server.lightstyle_scales(time, video.cvars.lightstyles);
     // `R_BuildLightMap` multiplies a luxel by `d_lightstylevalue[style]` against a white point of 256.
     for (scale, value) in light_styles.iter_mut().zip(style_values.iter().flatten()) {
         *scale = value / 256.0;

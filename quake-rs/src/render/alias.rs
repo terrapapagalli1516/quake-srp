@@ -7,8 +7,9 @@
 
 use super::light::{COLORMAP_LEN, LIGHTSTYLES, r_light_point_hit};
 use super::polyse::{PolyFramebuffer, screen_box};
+use super::raster::{c_dtoi, c_ftoi};
 use super::stats::Profiler;
-use super::{Camera, Frame, ViewGeom, nearest_index};
+use super::{Camera, Frame, ViewGeom, horizontal_fov, nearest_index};
 use crate::bsp::Bsp;
 use crate::math::{Vec3, dot};
 
@@ -230,22 +231,22 @@ impl AliasView {
     fn new(cam: &Camera, scr_fov: f32, geom: &ViewGeom, pixel_aspect: f32) -> AliasView {
         let (w, h) = (geom.proj_w, geom.proj_h);
         let (vpn, vright, vup) = cam.basis();
-        // R_ViewChanged: horizontalFieldOfView = 2*tan(fov_x/360*M_PI),
-        // aliasxscale = vrect.width / it, aliasyscale = aliasxscale * pixelAspect.
-        let hfov = (2.0 * (cam.fov_deg as f64 / 360.0 * std::f64::consts::PI).tan()) as f32;
-        let hfov = if hfov.abs() > 1e-6 { hfov } else { 2.0 };
+        // R_ViewChanged: horizontalFieldOfView, aliasxscale = vrect.width /
+        // it, aliasyscale = aliasxscale * pixelAspect.
+        let hfov = horizontal_fov(cam.fov_deg);
         let xscale = w as f32 / hfov;
         // r_aliastransition's res_scale: sqrt(width*height / (320*152)) *
-        // (2 / horizontalFieldOfView). When Hor+ has widened the view
-        // (`fov_x` over `scr_fov`) it is the 4:3 view's it widens, the width
-        // `w * hfov(scr_fov) / hfov`: models are drawn at that view's size,
-        // so they change drawing path at the same distance.
+        // (2 / horizontalFieldOfView), in double, stored to a float. When
+        // Hor+ has widened the view (`fov_x` over `scr_fov`) it is the 4:3
+        // view's it widens, the width `w * hfov(scr_fov) / hfov`: models are
+        // drawn at that view's size, so they change drawing path at the same
+        // distance.
         let res_scale = if cam.fov_deg == scr_fov {
-            ((w * h) as f64 / (320.0 * 152.0)).sqrt() * (2.0 / hfov as f64)
+            (((w * h) as f64 / (320.0 * 152.0)).sqrt() * (2.0 / f64::from(hfov))) as f32
         } else {
-            let hfov_ref = 2.0 * (scr_fov as f64 / 360.0 * std::f64::consts::PI).tan();
-            let w_ref = w as f64 * hfov_ref / hfov as f64;
-            (w_ref * h as f64 / (320.0 * 152.0)).sqrt() * (2.0 / hfov_ref)
+            let hfov_ref = f64::from(horizontal_fov(scr_fov));
+            let w_ref = w as f64 * hfov_ref / f64::from(hfov);
+            ((w_ref * h as f64 / (320.0 * 152.0)).sqrt() * (2.0 / hfov_ref)) as f32
         };
         AliasView {
             vpn,
@@ -259,8 +260,8 @@ impl AliasView {
             yscale: xscale * pixel_aspect,
             right: geom.w as i32,
             bottom: geom.h as i32,
-            transition: (R_ALIASTRANSBASE as f64 * res_scale) as f32,
-            resfudge: (R_ALIASTRANSADJ as f64 * res_scale) as f32,
+            transition: R_ALIASTRANSBASE * res_scale,
+            resfudge: R_ALIASTRANSADJ * res_scale,
         }
     }
 
@@ -321,7 +322,7 @@ fn alias_setup_transform(
     trivial_accept: i32,
 ) -> ([[f32; 4]; 3], [Vec3; 3]) {
     let angles = [-ent.angles[0], ent.angles[1], ent.angles[2]];
-    let (fwd, right, up) = crate::math::angle_vectors(angles);
+    let (fwd, right, up) = crate::math::angle_vectors_f32(angles);
     let mut tmatrix = [[0.0f32; 4]; 3];
     for (i, row) in tmatrix.iter_mut().enumerate() {
         row[i] = header.scale[i];
@@ -533,7 +534,7 @@ pub(super) struct AliasSetup<'a> {
     pub(super) r_ambientlight: i32,
     pub(super) r_shadelight: f32,
     pub(super) plightvec: Vec3,
-    pub(super) ziscale: f64,
+    pub(super) ziscale: f32,
     /// `r_affinetridesc.drawtype`: recursive subdivision instead of the edge walker.
     pub(super) subdiv: bool,
     pub(super) skin: Option<&'a [u8]>,
@@ -602,11 +603,11 @@ impl AliasSetup<'_> {
 
 /// `R_AliasProjectFinalVert` (r_alias.c): project a view-space point (z at
 /// least `ALIAS_Z_CLIP_PLANE`) to integer screen coordinates and scaled 1/z.
-fn alias_project(fv: &mut FinalVert, av: [f32; 3], view: &AliasView, ziscale: f64) {
+fn alias_project(fv: &mut FinalVert, av: [f32; 3], view: &AliasView, ziscale: f32) {
     let zi = 1.0 / av[2];
-    fv.v[5] = (zi as f64 * ziscale) as i32;
-    fv.v[0] = ((av[0] as f64 * view.xscale as f64 * zi as f64) + view.xcenter as f64) as i32;
-    fv.v[1] = ((av[1] as f64 * view.yscale as f64 * zi as f64) + view.ycenter as f64) as i32;
+    fv.v[5] = c_ftoi(zi * ziscale);
+    fv.v[0] = c_ftoi(av[0] * view.xscale * zi + view.xcenter);
+    fv.v[1] = c_ftoi(av[1] * view.yscale * zi + view.ycenter);
 }
 
 /// One triangle for `D_PolysetDraw`: its screen vertices, and whether it
@@ -688,7 +689,7 @@ fn alias_prepare<'a>(
         r_ambientlight,
         r_shadelight,
         plightvec,
-        ziscale: if viewmodel { ALIAS_ZISCALE * 3.0 } else { ALIAS_ZISCALE },
+        ziscale: (if viewmodel { ALIAS_ZISCALE * 3.0 } else { ALIAS_ZISCALE }) as f32,
         subdiv: trivial_accept == 3,
         skin: skin.as_ref().map(|s| &s.pixels[..s.width * s.height]),
         skinwidth,
@@ -706,9 +707,9 @@ fn alias_prepare<'a>(
             // R_AliasTransformAndProjectFinalVerts: the transform is prescaled,
             // so 1/z comes out times 2^31 and x, y in screen units.
             let zi = 1.0 / av[2];
-            fv.v[5] = zi as i32;
-            fv.v[0] = ((av[0] * zi) as f64 + view.xcenter as f64) as i32;
-            fv.v[1] = ((av[1] * zi) as f64 + view.ycenter as f64) as i32;
+            fv.v[5] = c_ftoi(zi);
+            fv.v[0] = c_ftoi(av[0] * zi + view.xcenter);
+            fv.v[1] = c_ftoi(av[1] * zi + view.ycenter);
         } else if av[2] < ALIAS_Z_CLIP_PLANE {
             fv.flags |= ALIAS_Z_CLIP;
         } else {
@@ -803,8 +804,11 @@ fn alias_clip_screen(a: &FinalVert, b: &FinalVert, axis: usize, bound: i32) -> F
     let (p0, p1) = if a.v[1] >= b.v[1] { (a, b) } else { (b, a) };
     let scale = (bound - p0.v[axis]) as f32 / (p1.v[axis] - p0.v[axis]) as f32;
     let mut out = FinalVert::default();
+    // `pfv0->v[i] + (pfv1->v[i] - pfv0->v[i])*scale + 0.5`: an int plus a
+    // float is a float sum, then the double `+ 0.5`.
     for i in 0..6 {
-        out.v[i] = (p0.v[i] as f64 + ((p1.v[i] - p0.v[i]) as f32 * scale) as f64 + 0.5) as i32;
+        let x = p0.v[i] as f32 + p1.v[i].wrapping_sub(p0.v[i]) as f32 * scale;
+        out.v[i] = c_dtoi(f64::from(x) + 0.5);
     }
     out
 }
@@ -840,7 +844,7 @@ fn alias_clip_triangle(
             let avout = [av0[0] + (av1[0] - av0[0]) * scale, av0[1] + (av1[1] - av0[1]) * scale, ALIAS_Z_CLIP_PLANE];
             let mut out = FinalVert::default();
             for i in 2..5 {
-                out.v[i] = (p0.0.v[i] as f32 + (p1.0.v[i] - p0.0.v[i]) as f32 * scale) as i32;
+                out.v[i] = c_ftoi(p0.0.v[i] as f32 + p1.0.v[i].wrapping_sub(p0.0.v[i]) as f32 * scale);
             }
             alias_project(&mut out, avout, view, setup.ziscale);
             out
@@ -907,7 +911,7 @@ pub(super) fn prepare_alias_model<'a>(
         s.alias_tris += inst.mdl.header.numtris.max(0) as u64;
     });
     let light = alias_entity_light(scene.world, inst.origin, scene.light_styles, frame.torches, scene.dlights, false);
-    alias_prepare(&view, &ent, trivial_accept, light, false, scene.time, scene.colormap)
+    alias_prepare(&view, &ent, trivial_accept, light, false, scene.time as f32, scene.colormap)
 }
 
 /// `r_avertexnormals` (anorms.h): the 162 precomputed vertex normals an MDL
@@ -1033,7 +1037,7 @@ pub(super) fn prepare_viewmodel<'a>(frame: &Frame<'_, 'a>, vm: &Viewmodel<'a>) -
         color: nearest_index(scene.palette, [180, 180, 180]),
     };
     let light = alias_entity_light(scene.world, origin, scene.light_styles, frame.torches, scene.dlights, true);
-    alias_prepare(&view, &ent, 0, light, true, scene.time, scene.colormap)
+    alias_prepare(&view, &ent, 0, light, true, scene.time as f32, scene.colormap)
 }
 
 #[cfg(test)]
@@ -1877,7 +1881,7 @@ mod tests {
             r_ambientlight: amb,
             r_shadelight: shade,
             plightvec: lv,
-            ziscale: ALIAS_ZISCALE,
+            ziscale: ALIAS_ZISCALE as f32,
             subdiv: false,
             skin: None,
             skinwidth: 0,

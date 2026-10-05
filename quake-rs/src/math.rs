@@ -224,8 +224,10 @@ pub fn angle_wrap(a: f32) -> f32 {
 /// `AngleVectors(angles, forward, right, up)`.
 ///
 /// Returns `(forward, right, up)`. Trig is done in `double` (libm `sin`/`cos`)
-/// then cast back to `float`, matching the C. The deg→rad factor is
-/// `M_PI*2 / 360` exactly as written.
+/// and so are the products, cast back to `float` at the end: the x87
+/// build's extended registers, near enough (the C declares the angle and
+/// the sines `float`; [`angle_vectors_f32`] rounds each, as an SSE build
+/// does). The deg→rad factor is `M_PI*2 / 360` exactly as written.
 #[must_use]
 pub fn angle_vectors(angles: Vec3) -> (Vec3, Vec3, Vec3) {
     // angle = angles[..] * (M_PI*2 / 360);  with M_PI the double 3.14159...
@@ -246,6 +248,35 @@ pub fn angle_vectors(angles: Vec3) -> (Vec3, Vec3, Vec3) {
     let right: Vec3 = [(-sr * sp * cy + -cr * -sy) as f32, (-sr * sp * sy + -cr * cy) as f32, (-sr * cp) as f32];
     let up: Vec3 = [(cr * sp * cy + -sr * -sy) as f32, (cr * sp * sy + -sr * cy) as f32, (cr * cp) as f32];
 
+    (forward, right, up)
+}
+
+/// `AngleVectors` with every intermediate the C type it is declared as: the
+/// angle a `float` (`angles[YAW] * (M_PI*2 / 360)`, computed in double and
+/// stored), `sin`/`cos` of it in double stored to the `float`s `sy`, `cy`,
+/// ..., and every product and sum a `float` operation in the C's order.
+/// That is id's C compiled with strict IEEE single precision (gcc
+/// `-mfpmath=sse`, the oracle's SSE build), the renderer's target: its
+/// `R_SetupFrame`, `R_AliasSetUpTransform` and `R_DrawSprite` take these.
+///
+/// [`angle_vectors`] keeps the intermediates in double instead, as the x87
+/// build's registers mostly do; the game code (QuakeC's `makevectors`, the
+/// player's movement) uses that one, and is measured against the x87
+/// build. The two differ in a vector's last bit or so.
+#[must_use]
+pub fn angle_vectors_f32(angles: Vec3) -> (Vec3, Vec3, Vec3) {
+    let factor = std::f64::consts::PI * 2.0 / 360.0;
+    let sin_cos = |a: f32| {
+        let angle = f64::from((f64::from(a) * factor) as f32);
+        (angle.sin() as f32, angle.cos() as f32)
+    };
+    let (sy, cy) = sin_cos(angles[YAW]);
+    let (sp, cp) = sin_cos(angles[PITCH]);
+    let (sr, cr) = sin_cos(angles[ROLL]);
+    let forward: Vec3 = [cp * cy, cp * sy, -sp];
+    // The C spells these `-1*sr*...`; unary negation is bit-identical.
+    let right: Vec3 = [-sr * sp * cy + -cr * -sy, -sr * sp * sy + -cr * cy, -sr * cp];
+    let up: Vec3 = [cr * sp * cy + -sr * -sy, cr * sp * sy + -sr * cy, cr * cp];
     (forward, right, up)
 }
 

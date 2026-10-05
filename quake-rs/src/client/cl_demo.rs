@@ -964,7 +964,7 @@ fn render_demo_frame(
     };
     let scene = render::Scene {
         colormap: d.colormap.as_deref(),
-        time: v.time,
+        time: f64::from(v.time),
         light_styles: &demo_styles,
         dlights: &lights,
         bmodels: &bmodels,
@@ -993,7 +993,7 @@ fn render_demo_frame(
         let below = warp_below(&refdef, vid);
         let view = d.renderer.render_extended(&scene, below);
         lap(Phase::Render3d);
-        d.renderer.warp_into(view, &mut img, vrect, below, v.time, vid.video.hires);
+        d.renderer.warp_into(view, &mut img, vrect, below, f64::from(v.time), vid.video.hires);
     } else {
         draw_view(&mut d.renderer, &scene, &refdef, &mut img);
         lap(Phase::Render3d);

@@ -36,7 +36,10 @@
 use super::band::Band;
 use super::light::{LightMap, any_dlight_reaches, face_lightmap_with, mark_dlights, mark_dlights_more};
 use super::raster::PolyGrads;
-use super::raster::{BlockFixed, ScreenProj, hash_index, shade_index, span_at, span_cached, span_tex, span_turb};
+use super::raster::{
+    FloatPlane, GradFace, GradView, ScreenProj, SurfGrads, calc_gradients, hash_index, shade_index, span_at,
+    span_cached, span_tex, span_turb,
+};
 use super::sky::{SkyView, draw_sky_span, sky_dome_scale, sky_texture};
 use super::stats::Profiler;
 use super::surf::{
@@ -428,12 +431,9 @@ fn child_ref(c: i16) -> i32 {
 
 /// `R_ViewChanged`'s `screenedge`: the normals, in view space (right, up,
 /// forward), of the planes through the eye and the view's left, right, top
-/// and bottom sides, from the fields of view the projection implies
-/// (`horizontalFieldOfView` = width / xscale, `verticalFieldOfView` = height
-/// / yscale).
-pub(super) fn screen_edges(w: usize, h: usize, xscale: f32, yscale: f32) -> [Vec3; 4] {
-    let hfov = w as f32 / xscale;
-    let vfov = h as f32 / yscale;
+/// and bottom sides, from its `horizontalFieldOfView` and
+/// `verticalFieldOfView` ([`Projection`]), `xOrigin = yOrigin = 0.5`.
+pub(super) fn screen_edges(hfov: f32, vfov: f32) -> [Vec3; 4] {
     [
         vector_normalize([-1.0 / (0.5 * hfov), 0.0, 1.0]),
         vector_normalize([1.0 / (0.5 * hfov), 0.0, 1.0]),
@@ -453,7 +453,7 @@ pub(super) fn screen_edges(w: usize, h: usize, xscale: f32, yscale: f32) -> [Vec
 /// is 0 or negative (a side on or past the centre), where id's has none.
 pub(super) fn view_edges(geom: &ViewGeom, p: &Projection) -> [Vec3; 4] {
     if geom.is_whole() {
-        return screen_edges(geom.w, geom.h, p.xscale, p.yscale);
+        return screen_edges(p.hfov, p.vfov);
     }
     let left = p.cx / p.xscale;
     let right = (geom.w as f32 - p.cx) / p.xscale;
@@ -662,7 +662,7 @@ impl EdgeState {
         let (cam, w, h) = (&frame.cam, frame.w, frame.h);
         self.framecount = self.framecount.wrapping_add(1);
         let proj = Projection::new(cam, &frame.geom, frame.scene.options.aspect());
-        let Projection { cx, cy, xscale, yscale } = proj;
+        let Projection { cx, cy, xscale, yscale, .. } = proj;
         let (vpn, vright, vup) = cam.basis();
         self.w = w;
         self.h = h;
@@ -1256,6 +1256,8 @@ impl EdgeState {
 struct FacePass<'p, 's, 'a> {
     frame: &'p Frame<'s, 'a>,
     sview: &'p ScreenProj,
+    /// `D_DrawSurfaces`' view: the frame's axes, scales and centre.
+    gview: GradView,
     mipview: &'p MipView,
     ents: &'p [Ent<'a>],
     bits: &'p [u32],
@@ -1979,7 +1981,7 @@ impl EdgeState {
         bits: &[u32],
     ) -> WorldDraw<'a> {
         let (cam, opts) = (&frame.cam, &frame.scene.options);
-        let Projection { cx, cy, xscale, yscale } = Projection::new(cam, &frame.geom, opts.aspect());
+        let Projection { cx, cy, xscale, yscale, .. } = Projection::new(cam, &frame.geom, opts.aspect());
         let (vpn, vright, vup) = (self.vpn, self.vright, self.vup);
         let sview = ScreenProj { forward: vpn, right: vright, up: vup, cx, cy, xscale, yscale };
         let mipview = MipView::new(xscale, yscale, opts.mip);
@@ -1998,7 +2000,16 @@ impl EdgeState {
         let sky_tex = sky_texture(ents[0].bsp);
         let (light_dir, _) = normalize([0.3, 0.5, 1.0]);
         let clear = R_CLEARCOLOR;
-        let pass = FacePass { frame, sview: &sview, mipview: &mipview, ents, bits, light_dir, clear };
+        let gview = GradView {
+            vright,
+            vup,
+            vpn,
+            xscaleinv: self.xscaleinv,
+            yscaleinv: self.yscaleinv,
+            xcenter: self.xcenter,
+            ycenter: self.ycenter,
+        };
+        let pass = FacePass { frame, sview: &sview, gview, mipview: &mipview, ents, bits, light_dir, clear };
         let mut faces = 0u64;
         let mut surfs = Vec::with_capacity(self.surfs.len());
         let t_lookup = prof.now();
@@ -2052,7 +2063,7 @@ impl EdgeState {
         jobs: &mut Vec<BakeJob<'a>>,
         prof: &mut Profiler,
     ) -> Paint<'a> {
-        let FacePass { frame, sview, mipview, ents, bits, light_dir, clear } = *pass;
+        let FacePass { frame, sview, mipview, ents, bits, light_dir, clear, .. } = *pass;
         let scene = frame.scene;
         let (light_styles, colormap, time) = (scene.light_styles, scene.colormap, scene.time);
         let e = &ents[s.ent as usize];
@@ -2064,24 +2075,20 @@ impl EdgeState {
         let tex = ti.and_then(|t| {
             let mi: usize = t.miptex.try_into().ok()?;
             let anim_mi = texture_animation(bsp, mi, e.frame, time);
-            bsp.textures.get(anim_mi).and_then(|o| o.as_ref()).map(|mt| (anim_mi, mt))
+            bsp.textures.get(anim_mi).and_then(|o| o.as_ref()).map(|mt| (t, anim_mi, mt))
         });
-        // The face's gradients from the eye in the model's frame: `D_CalcGradients`'
-        // own R_RotateBmodel re-do, by rotating the eye and the (shared, world)
-        // view axes into this entity's rest frame together — identity for the
-        // world and for an unrotated bmodel (`e.rotation` is then exactly
-        // `IDENTITY_ROTATION`, so this is byte-for-byte the plain translation
-        // below it used to be), id's own rotated-door math otherwise.
-        let eye = world::entity_rotate(&e.rotation, sub(frame.cam.pos, e.origin));
-        let local_sview = ScreenProj {
-            forward: world::entity_rotate(&e.rotation, sview.forward),
-            right: world::entity_rotate(&e.rotation, sview.right),
-            up: world::entity_rotate(&e.rotation, sview.up),
-            ..*sview
+        // What `D_CalcGradients` projects with: the eye along the frame's own
+        // axes (`TransformVector (local_modelorg)`, before `R_RotateBmodel`
+        // turns them), and the axes as turned for this entity (`e.rotation`:
+        // the identity for the world and an unrotated brush model).
+        let transformed_modelorg = pass.gview.transform(sub(self.r_origin, e.origin));
+        let gview = GradView {
+            vright: world::entity_rotate(&e.rotation, pass.gview.vright),
+            vup: world::entity_rotate(&e.rotation, pass.gview.vup),
+            vpn: world::entity_rotate(&e.rotation, pass.gview.vpn),
+            ..pass.gview
         };
-        let Some(grads) = face_grads(bsp, face, &local_sview, eye, ti) else {
-            return Paint::Fill(clear);
-        };
+        let zi = FloatPlane { origin: s.d_ziorigin, stepu: s.d_zistepu, stepv: s.d_zistepv };
         let face_bits = if e.world_bsp { bits.get(fi).copied().unwrap_or(0) } else { 0 };
         // The steady torches lighting it (`r_torchflicker`): the world's
         // faces and its brush models', lit in place as LIGHT.EXE lit them.
@@ -2097,6 +2104,20 @@ impl EdgeState {
         let normal = super::surf::face_normal(bsp, face).unwrap_or([0.0, 0.0, 1.0]);
         let normal = world::entity_rotate_transpose(&e.rotation, normal);
         let shade = (0.5 + 0.5 * dot(normal, light_dir).max(0.0)).min(1.0);
+        // The port's fallbacks for a face with no surface block (never id's
+        // data) draw per pixel from analytic gradients in f64, from the eye
+        // and the view axes rotated into the entity's rest frame; none when
+        // the eye is on the face's plane.
+        let port_grads = || {
+            let eye = world::entity_rotate(&e.rotation, sub(frame.cam.pos, e.origin));
+            let local_sview = ScreenProj {
+                forward: world::entity_rotate(&e.rotation, sview.forward),
+                right: world::entity_rotate(&e.rotation, sview.right),
+                up: world::entity_rotate(&e.rotation, sview.up),
+                ..*sview
+            };
+            face_grads(bsp, face, &local_sview, eye, ti)
+        };
         let turbulent = s.flags & SURF_DRAWTURB != 0;
         // Only walls are lightmapped (sky and liquids are TEX_SPECIAL).
         let lightmap: Option<LightMap> = if turbulent {
@@ -2110,9 +2131,11 @@ impl EdgeState {
             None
         };
         match tex {
-            Some((tex_index, mt)) if !mt.pixels.is_empty() && mt.width > 0 && mt.height > 0 => {
+            Some((TexInfo { vecs, .. }, tex_index, mt)) if !mt.pixels.is_empty() && mt.width > 0 && mt.height > 0 => {
                 if turbulent {
-                    return Paint::Turb { grads, mt };
+                    // Mod_LoadFaces gives a liquid a frame of its own.
+                    let face = GradFace { vecs, texturemins: [-8192; 2], extents: [16384; 2], miplevel: 0 };
+                    return Paint::Turb { grads: calc_gradients(&gview, transformed_modelorg, face, zi), mt };
                 }
                 let found = match (lightmap, colormap) {
                     (Some(lightmap), Some(colormap)) => caches.surface(
@@ -2137,13 +2160,24 @@ impl EdgeState {
                 match found {
                     Surface::Block(block, job) => {
                         prof.add(|st| st.surf_hits += 1);
-                        let grads = grads.mip_scaled(block.mip);
-                        let fixed = BlockFixed::new(&grads, block.texmins, block.bw, block.bh);
-                        Paint::Cached { grads, fixed, block, job }
+                        // The block is the face's `extents >> mip` texels from
+                        // its `texturemins >> mip` (whole multiples of 16, so
+                        // the shifts back are exact).
+                        let miplevel = block.mip;
+                        let face = GradFace {
+                            vecs,
+                            texturemins: block.texmins.map(|m| (m as i32) << miplevel),
+                            extents: [(block.bw as i32) << miplevel, (block.bh as i32) << miplevel],
+                            miplevel,
+                        };
+                        Paint::Cached { grads: calc_gradients(&gview, transformed_modelorg, face, zi), block, job }
                     }
                     Surface::PerPixel(lightmap) => {
                         prof.add(|st| st.surf_misses += 1);
-                        Paint::Texels { grads, texture: Some(mt), shade, lightmap }
+                        match port_grads() {
+                            Some(grads) => Paint::Texels { grads, texture: Some(mt), shade, lightmap },
+                            None => Paint::Fill(clear),
+                        }
                     }
                 }
             }
@@ -2153,9 +2187,10 @@ impl EdgeState {
                 // texture lit by the lightmap when there is one.
                 let key = ti.map(|t| t.miptex as i64).unwrap_or(face.texinfo as i64);
                 let colour = hash_index(key);
-                match lightmap {
-                    Some(lm) => Paint::Flat { grads, colour, shade, lightmap: lm },
-                    None => Paint::Fill(shade_index(scene.palette, colour, shade)),
+                match (lightmap, port_grads()) {
+                    (Some(lm), Some(grads)) => Paint::Flat { grads, colour, shade, lightmap: lm },
+                    (None, _) => Paint::Fill(shade_index(scene.palette, colour, shade)),
+                    (_, None) => Paint::Fill(clear),
                 }
             }
         }
@@ -2191,21 +2226,11 @@ impl WorldDraw<'_> {
                     }
                     Paint::Turb { grads, mt } => {
                         let (tw, th) = (mt.width as usize, mt.height as usize);
-                        span_turb(
-                            row,
-                            &span_at(grads, u, v),
-                            grads,
-                            &mt.pixels,
-                            tw,
-                            th,
-                            &frame.turb,
-                            scene.time,
-                            persp,
-                        );
+                        span_turb(row, u, v, grads, &mt.pixels, tw, th, &frame.turb, scene.time, persp);
                     }
-                    Paint::Cached { grads, fixed, block, job } => {
+                    Paint::Cached { grads, block, job } => {
                         let texels = job.map_or(&block.block[..], |job| bakes.block(job));
-                        span_cached(row, &span_at(grads, u, v), fixed, texels, block.bw, block.bh, persp);
+                        span_cached(row, u, v, grads, texels, block.bw, block.bh, persp);
                     }
                     Paint::Texels { grads, texture, shade, lightmap } => {
                         let (pixels, tw, th) = texture
@@ -2267,11 +2292,11 @@ enum Paint<'a> {
     /// The two-layer sky (`D_DrawSkyScans8`).
     Sky(&'a MipTex),
     /// A liquid (`Turbulent8`), the raw texel.
-    Turb { grads: PolyGrads, mt: &'a MipTex },
+    Turb { grads: SurfGrads, mt: &'a MipTex },
     /// A wall from its lit surface-cache block (`D_DrawSpans16`); the
     /// gradients are the block's mip level's. With `job`, the block is one
     /// the frame bakes ([`Bakes::block`]), and `block` has only its shape.
-    Cached { grads: PolyGrads, fixed: BlockFixed, block: SurfBlock, job: Option<usize> },
+    Cached { grads: SurfGrads, block: SurfBlock, job: Option<usize> },
     /// A wall with no block, lit per pixel (no colormap, or a block past the
     /// size cap — never in id's maps).
     Texels { grads: PolyGrads, texture: Option<&'a MipTex>, shade: f32, lightmap: Option<LightMap<'a>> },

@@ -111,7 +111,7 @@ pub(super) fn classify_surface(name: &str) -> SurfKind {
 /// texture count) and every lookup is `.get()`-checked, so a broken cycle in
 /// malformed map data returns the last reachable frame instead of looping or
 /// panicking (the C `Sys_Error`s).
-pub(super) fn texture_animation(bsp: &Bsp, base_index: usize, ent_frame: i32, time: f32) -> usize {
+pub(super) fn texture_animation(bsp: &Bsp, base_index: usize, ent_frame: i32, time: f64) -> usize {
     // Resolve the entity-frame alternate switch first (C: `if (currententity->
     // frame) { if (base->alternate_anims) base = base->alternate_anims; }`).
     let mut idx = base_index;
@@ -1445,7 +1445,7 @@ mod tests {
             for k in 0..12 {
                 let dl = [DynamicLight::new([-1352.0, -600.0 + 40.0 * k as f32, -40.0], 250.0, f32::MAX, 0.0, 0.0, 0)];
                 let scene = Scene {
-                    time: 3.0 + k as f32 / 144.0,
+                    time: f64::from(3.0 + k as f32 / 144.0),
                     light_styles: &styles,
                     dlights: &dl,
                     colormap: Some(&cm),
