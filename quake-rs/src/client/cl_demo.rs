@@ -849,6 +849,9 @@ fn render_demo_frame(
             fov_deg: 90.0,
         }
     };
+    // EXTRA, not id: the host's own camera (`DemoPlay::camera`), as given;
+    // the recorded view above still ran (its smoothing and kick go on).
+    let cam = d.camera.unwrap_or(cam);
     // Sound listener pose + the per-leaf ambient channels follow the demo
     // camera (the C's S_Update runs in demo playback too — the recorded e1m3
     // run drifts past water and open sky, and its placed torch loops pan with
@@ -856,7 +859,14 @@ fn render_demo_frame(
     {
         let yaw_rad = (v.view_angles[1] as f64).to_radians();
         let (sy, cy) = (yaw_rad.sin() as f32, yaw_rad.cos() as f32);
-        let listener = Listener { pos: v.view_origin, forward: [cy, sy, 0.0], right: [sy, -cy, 0.0] };
+        let listener = match d.camera {
+            None => Listener { pos: v.view_origin, forward: [cy, sy, 0.0], right: [sy, -cy, 0.0] },
+            Some(c) => {
+                let yaw = (c.yaw as f64).to_radians();
+                let (sy, cy) = (yaw.sin() as f32, yaw.cos() as f32);
+                Listener { pos: c.pos, forward: [cy, sy, 0.0], right: [sy, -cy, 0.0] }
+            }
+        };
         sound.push(s_update(&d.bsp, listener, dt));
     }
     // The recorded server time animates the demo's liquids/sky too. The live
@@ -901,7 +911,8 @@ fn render_demo_frame(
     // SU_WEAPONFRAME its animation frame. Hidden exactly like R_DrawViewModel
     // (r_main.c ~606): invisible POV (Ring of Shadows), dead POV, or an
     // intermission (V_CalcIntermissionRefdef sets `view->model = NULL`).
-    let hide_gun = f.intermission != 0 || client.health <= 0 || client.items & IT_INVISIBILITY != 0;
+    let hide_gun =
+        f.intermission != 0 || !d.draw_viewmodel || client.health <= 0 || client.items & IT_INVISIBILITY != 0;
     let viewmodel = if hide_gun {
         None
     } else {

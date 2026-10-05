@@ -835,7 +835,11 @@ fn client_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid, dra
     //    punch, no strafe/death roll — plus the forced v_idlescale=1 sway of
     //    V_AddIdle (the gentle drift id's intermission camera has).
     let intermission = w.intermission != 0;
-    let (mut eye, ang) = if intermission {
+    let (mut eye, ang) = if let Some(c) = w.camera {
+        // EXTRA, not id: the host's own camera (`Walk::camera`), as given.
+        // Its angles in QuakeC's order and sign (pitch +down).
+        (c.pos, [-c.pitch, c.yaw, c.roll])
+    } else if intermission {
         // ent->origin / ent->angles: the QC set `angles = pos.mangle` (fixangle)
         // and froze the player MOVETYPE_NONE, which SV_ClientThink early-outs on,
         // so the spot's angles survive the per-frame mouse v_angle updates.
@@ -863,7 +867,7 @@ fn client_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid, dra
     // Bob the rendered eye only (the listener pose above stays steady so audio
     // panning does not jitter with the head-bob). Skipped during intermission
     // (V_CalcIntermissionRefdef has no bob and no stair smoothing).
-    if !intermission {
+    if !intermission && w.camera.is_none() {
         eye[2] += bob;
         // Stair-step view smoothing (view.c V_CalcRefdef ~960): while on the ground
         // and the player's origin Z rose this frame, lag the eye Z behind by up to 12
@@ -892,7 +896,9 @@ fn client_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid, dra
             w.oldz = origin_z;
         }
     }
-    let cam = if intermission {
+    let cam = if let Some(c) = w.camera {
+        c
+    } else if intermission {
         // V_AddIdle with v_idlescale forced to 1 (view.c V_CalcIntermissionRefdef):
         // angle += sin(cl.time * v_i*_cycle) * v_i*_level, with the stock cvar
         // defaults — roll 0.5/0.1, pitch 1/0.3, yaw 2/0.3.
@@ -940,6 +946,7 @@ fn client_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid, dra
     // death-cam, and stays visible while invisible. The intermission camera also
     // hides it (V_CalcIntermissionRefdef: `view->model = NULL`).
     let hide_gun = intermission
+        || !w.draw_viewmodel
         || w.server.vm.ent_float(w.player, w.server.vm.fo().health) <= 0.0
         || (w.server.vm.ent_float(w.player, w.server.vm.fo().items) as i32) & IT_INVISIBILITY != 0;
     // r_nailbarrels (a slop option): each of the player's nails drawn
@@ -1408,5 +1415,51 @@ mod tests {
         assert_eq!(server_items(&pack, 0), 4097 | (1 << 24), "Hipnotic's wetsuit");
         pack.vm.ent_set_float(0, "items2", 64.0 + 128.0);
         assert_eq!(server_items(&pack, 0), 4097 | (1 << 29) | (1 << 30), "Rogue's shield and belt");
+    }
+
+    /// The host's own camera (`Walk::camera`, `quaketool film`'s): placed
+    /// where the player's eye is, looking where it looks, it draws the
+    /// player's own frame; placed elsewhere, another; and `draw_viewmodel`
+    /// (`r_drawviewmodel`) takes the gun away. (When id's pak is here.)
+    #[test]
+    fn a_hosts_camera_at_the_players_eye_draws_the_players_frame() {
+        use crate::client::{Vid, host_cmd};
+        use crate::render;
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../quake-data/ID1/PAK0.PAK");
+        let Ok(pak) = crate::pak::Pak::open(&path) else {
+            eprintln!("skipped: no shareware pak at {}", path.display());
+            return;
+        };
+        let vid = Vid {
+            width: 320,
+            height: 200,
+            display_aspect: 4.0 / 3.0,
+            persp_span: render::PerspSpan::Spans16,
+            video: render::VideoCvars::CLASSIC,
+            mip: render::MipCvars::DEFAULT,
+        };
+        let walk = || {
+            let rand = std::rc::Rc::new(crate::qrand::QRand::new());
+            let mut w =
+                host_cmd::build_walk_map(pak.clone(), "maps/e1m1.bsp", &rand, &mut Vec::new(), 600).expect("e1m1");
+            for _ in 0..36 {
+                let f = super::walk_frame_undrawn(&mut w, 1.0 / 72.0, false, &vid);
+                render::recycle_image(f.image);
+            }
+            w
+        };
+        let (mut a, mut b, mut c) = (walk(), walk(), walk());
+        let (eye, ang) = b.server.player_view();
+        b.camera = Some(render::Camera { pos: eye, yaw: ang[1], pitch: -ang[0], roll: ang[2], fov_deg: 90.0 });
+        let fa = super::walk_frame(&mut a, 1.0 / 72.0, false, &vid);
+        let fb = super::walk_frame(&mut b, 1.0 / 72.0, false, &vid);
+        assert_eq!(fa.image, fb.image, "the camera at the eye is the player's view");
+        c.camera = Some(render::Camera { pos: [eye[0], eye[1] + 100.0, eye[2]], ..b.camera.unwrap() });
+        let fc = super::walk_frame(&mut c, 1.0 / 72.0, false, &vid);
+        assert_ne!(fc.image, fa.image, "elsewhere, another view");
+        a.draw_viewmodel = false;
+        let fa2 = super::walk_frame(&mut a, 1.0 / 72.0, false, &vid);
+        let fb2 = super::walk_frame(&mut b, 1.0 / 72.0, false, &vid);
+        assert_ne!(fa2.image, fb2.image, "no gun");
     }
 }

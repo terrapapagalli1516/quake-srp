@@ -169,6 +169,15 @@ pub struct Walk {
     /// notify lines start a text row lower ([`render::notify_top`]). Set
     /// like `viewsize`.
     pub show_fps: bool,
+    /// EXTRA, not id: a camera the host places itself (`quaketool film`),
+    /// or `None` (id's: the player's eye). With one, the 3-D view, the sound
+    /// listener and the view's contents (the underwater warp and tint) are
+    /// the camera's, exactly as given: no bob, stair smoothing, punch, kick
+    /// or roll. The game goes on around it; the player stays where it is.
+    pub camera: Option<render::Camera>,
+    /// `r_drawviewmodel` (r_main.c, id's cvar, 1 by default): whether the
+    /// first-person weapon is drawn.
+    pub draw_viewmodel: bool,
     /// How this frame steps the game ([`Stepping`]): Classic, id's per-frame
     /// code, unless the host runs uncapped. Set by the host each frame, like
     /// `key_move`.
@@ -438,6 +447,11 @@ pub struct DemoPlay {
     pub sbar_layout: render::SbarLayout,
     /// `wasm_showfps` this frame (see `Walk::show_fps`).
     pub show_fps: bool,
+    /// EXTRA, not id: a camera the host places itself, as [`Walk::camera`]
+    /// (the recording's entities are still only those its player could see).
+    pub camera: Option<render::Camera>,
+    /// `r_drawviewmodel`, as [`Walk::draw_viewmodel`].
+    pub draw_viewmodel: bool,
     /// How this frame steps playback ([`Stepping`]), set by the host each
     /// frame like `viewsize`.
     pub stepping: Stepping,
@@ -539,6 +553,8 @@ impl DemoPlay {
             crosshair: render::Crosshair::Off,
             sbar_layout: render::SbarLayout::Classic,
             show_fps: false,
+            camera: None,
+            draw_viewmodel: true,
             stepping: Stepping::Classic,
             lerpmove: LerpMove::Classic,
             glides: StepGlides::default(),
@@ -669,6 +685,8 @@ pub fn assemble_walk(
         crosshair: render::Crosshair::Off,
         sbar_layout: render::SbarLayout::Classic,
         show_fps: false,
+        camera: None,
+        draw_viewmodel: true,
         stepping: Stepping::Classic,
         lerpmove: LerpMove::Classic,
         glides: StepGlides::default(),
