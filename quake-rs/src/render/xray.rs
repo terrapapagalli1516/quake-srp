@@ -42,6 +42,11 @@ pub struct XrayOptions {
     /// sees what that point's PVS lets the renderer walk, and nothing else. A
     /// point in solid (or a map without vis) marks every leaf, as id does.
     pub vis_from: Option<Vec3>,
+    /// Keep the view's pixels as drawn and its world drawn again with exact
+    /// perspective ([`XrayFrame::drawn`], [`XrayFrame::exact`]): which pixels
+    /// the frame's perspective span puts off the exact texel. A second world
+    /// pass, on the calling thread.
+    pub exact: bool,
 }
 
 /// The projection of a frame's view (`R_ViewChanged`, `R_SetupFrame`): a
@@ -236,6 +241,19 @@ pub struct XrayFrame {
     pub brush_edges: Vec<[Vec3; 2]>,
     /// The world's leaves the PVS marked (`mleaf_t.visframe` current).
     pub leaf_visible: Vec<bool>,
+    /// With [`XrayOptions::exact`]: the view's pixels as the frame drew them
+    /// (entities and all), and its world's spans drawn again with exact
+    /// perspective ([`PerspSpan::Exact`]) from the same surface-cache blocks.
+    /// Where no entity covers a pixel, the two differ only where the frame's
+    /// span read another texel than the exact one.
+    pub drawn: Vec<u8>,
+    pub exact: Vec<u8>,
+    /// The main view's row bands as the renderer's threads drew them:
+    /// `(first row, end row, thread)`, threads numbered as they started
+    /// (which thread takes which band is the scheduler's: the pixels are the
+    /// same whichever does), and how many threads drew the frame.
+    pub bands: Vec<(u32, u32, u32)>,
+    pub threads: u32,
 }
 
 impl XrayFrame {
@@ -293,7 +311,7 @@ pub(super) fn model_edges(bsp: &Bsp, model: usize, origin: Vec3, rotation: &[[f3
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::render::{Camera, Image, NEUTRAL_LIGHTSTYLE_SCALES, Renderer, Scene, parse_palette};
+    use crate::render::{Camera, Image, NEUTRAL_LIGHTSTYLE_SCALES, PerspSpan, Renderer, Scene, parse_palette};
 
     /// Render `scene` with `options` (none: id's renderer) on `threads`.
     fn draw(scene: &Scene, options: Option<XrayOptions>, threads: usize) -> (Image, Option<XrayFrame>) {
@@ -304,7 +322,7 @@ mod tests {
         (img, r.xray_frame().cloned())
     }
 
-    const CAPTURE: XrayOptions = XrayOptions { capture: true, lightmaps: None, vis_from: None };
+    const CAPTURE: XrayOptions = XrayOptions { capture: true, lightmaps: None, vis_from: None, exact: false };
 
     /// The shareware pak's map `name`, its palette and colormap, when the pak is here.
     fn map(name: &str) -> Option<(Bsp, [[u8; 3]; 256], Vec<u8>)> {
@@ -340,6 +358,16 @@ mod tests {
             }
             assert!(hits.iter().all(|&n| n == 1), "every pixel in exactly one span");
             assert_eq!(x.world_z, x.zbuf, "no entity: the z-buffer is the world's");
+            // The bands: every row once, by as many threads as drew it.
+            let mut rows = vec![0u32; 61];
+            for &(y0, y1, thread) in &x.bands {
+                assert!(thread < x.threads, "{thread} of {}", x.threads);
+                for r in &mut rows[y0 as usize..y1 as usize] {
+                    *r += 1;
+                }
+            }
+            assert!(rows.iter().all(|&n| n == 1), "every row in one band: {rows:?}");
+            assert_eq!(x.threads as usize, threads);
             assert!(x.surfaces.iter().flatten().any(|s| s.model == XrayModel::World));
         }
     }
@@ -361,6 +389,35 @@ mod tests {
         let inside = |p: Vec3| view.frustum(100, 60).iter().all(|(n, d)| dot(*n, p) >= *d - 1e-3);
         assert!(inside([0.0, 0.0, 40.0]));
         assert!(!inside([0.0, -200.0, 40.0]));
+    }
+
+    #[test]
+    fn the_exact_pass_is_the_frame_drawn_exactly() {
+        // A grazing view down e1m1's first corridor at id's 16-pixel spans:
+        // the capture's exact pass is the world an exact renderer draws, its
+        // `drawn` the frame itself, and the two differ (the spans' error).
+        let Some((bsp, pal, cm)) = map("e1m1") else { return };
+        let cam = Camera { pos: [480.0, -352.0, 110.0], yaw: 75.0, pitch: 0.0, roll: 0.0, fov_deg: 90.0 };
+        let mut styles = NEUTRAL_LIGHTSTYLE_SCALES;
+        styles[0] = 264.0 / 256.0;
+        let at = |persp| Scene {
+            colormap: Some(&cm),
+            light_styles: &styles,
+            options: crate::render::RenderOptions { persp_span: persp, ..Default::default() },
+            ..Scene::new(&bsp, cam, 320, 200, &pal)
+        };
+        let (exact, _) = draw(&at(PerspSpan::Exact), None, 1);
+        for threads in [1, 4] {
+            let (img, x) = draw(&at(PerspSpan::Spans16), Some(XrayOptions { exact: true, ..CAPTURE }), threads);
+            let x = x.unwrap();
+            assert_eq!(x.drawn, img.pixels, "the view as drawn");
+            assert_eq!(x.exact, exact.pixels, "the world drawn exactly");
+            let off = x.drawn.iter().zip(&x.exact).filter(|(a, b)| a != b).count();
+            assert!(off > 100, "id's spans put pixels off exact here: {off}");
+        }
+        let (_, x) = draw(&at(PerspSpan::Exact), Some(XrayOptions { exact: true, ..CAPTURE }), 2);
+        let x = x.unwrap();
+        assert_eq!(x.drawn, x.exact, "exact is exact");
     }
 
     #[test]

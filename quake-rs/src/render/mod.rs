@@ -1301,6 +1301,10 @@ impl Renderer {
         let bakes = surf::Bakes::new(jobs);
         let t = self.prof.now();
         let (prof, workers) = (&self.prof, self.workers);
+        // EXTRA, debug only: with an x-ray capture, which thread drew which
+        // rows of the main view (each thread numbered as it starts).
+        let capture_bands = self.xray.is_some();
+        let (ordinals, band_log) = (std::sync::atomic::AtomicU32::new(0), std::sync::Mutex::new(Vec::new()));
         let start = || {
             let (t, mut prof) = (prof.now(), prof.for_band());
             bakes.work();
@@ -1308,9 +1312,18 @@ impl Renderer {
                 let ns = t.elapsed().as_nanos() as u64;
                 prof.add(|s| s.surf_bake_ns += ns);
             }
-            prof
+            let ordinal = if capture_bands { ordinals.fetch_add(1, std::sync::atomic::Ordering::Relaxed) } else { 0 };
+            (prof, ordinal)
         };
-        let bands = workers.run(rows, stride, targets, start, |view, band, prof| {
+        let bands = workers.run(rows, stride, targets, start, |view, band, (prof, ordinal)| {
+            if capture_bands && view == 0 {
+                let r = band.rows();
+                band_log.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push((
+                    r.start as u32,
+                    r.end as u32,
+                    *ordinal,
+                ));
+            }
             let (frame, world, entities) = &ready[view];
             let tw = prof.now();
             let drawn = world.draw_band(band, frame, &bakes);
@@ -1325,7 +1338,7 @@ impl Renderer {
             entities.draw(band, prof);
         });
         let threads = bands.len() as u64;
-        for b in &bands {
+        for (b, _) in &bands {
             self.prof.absorb(b);
         }
         // EXTRA, debug only: the captured view's spans, its z-buffers and its
@@ -1333,6 +1346,9 @@ impl Renderer {
         if let (Some(x), Some((frame, world, entities))) = (self.xray.as_deref_mut(), ready.first()) {
             if x.view.is_some() && x.spans.is_empty() && frame.scene.options.window.is_none() {
                 world.xray_spans(frame.h, &mut x.spans, &mut x.world_z);
+                x.bands = band_log.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner);
+                x.bands.sort_unstable();
+                x.threads = threads as u32;
                 x.zbuf.clear();
                 x.zbuf.extend_from_slice(&self.zbuf[..self.zlen]);
                 x.triangles.clear();
@@ -1341,6 +1357,21 @@ impl Renderer {
                 }
                 if let Some(gun) = &entities.gun {
                     x.triangles.extend(gun.xray_triangles().map(|v| xray::XrayTriangle { v, gun: true }));
+                }
+                // The view as drawn, and its world again with exact perspective.
+                let (w, h) = (frame.w, frame.h);
+                let main = views.first().filter(|v| v.size() == (w, h) && (v.y + h) * stride <= rows.len());
+                if let (true, Some(v)) = (self.edge.xray.exact, main) {
+                    x.drawn.clear();
+                    for y in 0..h {
+                        let at = (v.y + y) * stride + v.x;
+                        x.drawn.extend_from_slice(&rows[at..at + w]);
+                    }
+                    x.exact.clear();
+                    x.exact.resize(w * h, 0);
+                    let mut z = vec![0i16; w * h];
+                    let mut band = band::Band::whole(w, &mut x.exact, &mut z);
+                    world.draw_band_with(&mut band, frame, &bakes, PerspSpan::Exact);
                 }
             }
         }

@@ -393,7 +393,7 @@ impl EdgeState {
         bedges: Vec::new(),
         dlight_bits: Vec::new(),
         poly: Vec::new(),
-        xray: XrayOptions { capture: false, lightmaps: None, vis_from: None },
+        xray: XrayOptions { capture: false, lightmaps: None, vis_from: None, exact: false },
         xray_models: Vec::new(),
         xray_brush_edges: Vec::new(),
     };
@@ -2300,9 +2300,21 @@ impl WorldDraw<'_> {
     /// surface — a block the frame bakes from `bakes` — and their `1/z`.
     /// Returns the pixels drawn (the background's not counted).
     pub(super) fn draw_band(&self, band: &mut Band, frame: &Frame, bakes: &Bakes) -> u64 {
+        self.draw_band_with(band, frame, bakes, self.persp)
+    }
+
+    /// [`WorldDraw::draw_band`] with the walls and liquids drawn at `persp`
+    /// (an x-ray's exact pass draws the frame's world again exactly).
+    pub(super) fn draw_band_with(
+        &self,
+        band: &mut Band,
+        frame: &Frame,
+        bakes: &Bakes,
+        persp: super::raster::PerspSpan,
+    ) -> u64 {
         let w = self.w as i32;
         let scene = frame.scene;
-        let (palette, colormap, persp) = (scene.palette, scene.colormap, self.persp);
+        let (palette, colormap) = (scene.palette, scene.colormap);
         let mut drawn = 0u64;
         for v in band.rows() {
             let (Some(&first), Some(&end)) = (self.rows.get(v), self.rows.get(v + 1)) else { break };
