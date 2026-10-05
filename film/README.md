@@ -157,7 +157,8 @@ how ("Assembly"). The conventions:
 | Smooth motion | `S45-id`, `S45-slop` | a grunt at 240 Hz: id's steps against slop's glide |
 | | `S46a-held`, `S46a-blended`, `S46a-track` | its poses held against blended |
 | | `ST3` | demo1's zombies, the options so far on |
-| No frame cap | `LAB4a-id`, `LAB4a-uncapped` | id's 72 Hz ticks against a frame every refresh |
+| No frame cap | `LAB4a-id`, `LAB4a-uncapped` | id's 72 Hz ticks on a 60 fps film (no `display`: a judder no screen shows) against a frame every refresh |
+| | `LAB4a2` | a 240 Hz screen at quarter speed: id's gate draws every 4th refresh, against every refresh |
 | | `N3c-turn`, `N4` | a run at 480 frames a second; jumps and grenades |
 | Fluid sky | `LAB5-id`, `LAB5-slop` | id's clouds against slop's |
 | Native pixels, horizontal plus | `BURST-a`, `BURST-b` | the Classic box bursting to native 16:9 |
