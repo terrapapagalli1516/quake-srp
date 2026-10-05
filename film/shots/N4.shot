@@ -1,0 +1,38 @@
+# N4: the player at e1m1's start, its own eye, god mode, with the grenade launcher
+# (`impulse 9`, `impulse 6`): it jumps (file seconds 2.0, 5.5, 10.0, 14.0) and fires
+# grenades down the corridor (3.0, 7.0, 12.0) ("jumps peak higher"). Slop at 1920x1080,
+# the status bar and the gun.
+
+map e1m1
+
+duration 19.3
+fps 60
+size 1920x1080
+
+preset slop
+hud on
+gun on
+player 480,-352,88,90
+cvar gamma 0.8
+
+impulse 9 at 0
+impulse 6 at 0.1
+cmd +jump at 2.0
+cmd -jump at 2.3
+attack on at 3.0
+attack off at 3.4
+cmd +jump at 5.5
+cmd -jump at 5.8
+attack on at 7.0
+attack off at 7.4
+cmd +jump at 10.0
+cmd -jump at 10.3
+attack on at 12.0
+attack off at 12.4
+cmd +jump at 14.0
+cmd -jump at 14.3
+
+camera player
+
+sound on
+events on

@@ -1,0 +1,24 @@
+# N2e: e1m6's corridor at exact perspective (`r_perspspan 1`), turning from yaw 74.7 to
+# 99.3 over the file, the rig's second pass.
+#
+# Assembly (N2e): a white box outlines one 32-pixel segment of row 450 on the right-hand
+# wall (x 1238 to 1269 at yaw 100), the segment the edit's diagram plots, projected onto
+# the frame at each frame's yaw.
+
+map e1m6
+
+duration 19.2
+fps 60
+size 1920x1080
+
+preset slop
+hud off
+cvar r_perspspan 1
+cvar gamma 0.8
+
+camera path
+key 0     504,500,242  0,74.7209  ease linear
+key 19.2  504,500,242  0,99.2791
+
+sound on
+events on

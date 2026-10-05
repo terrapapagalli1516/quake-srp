@@ -1,0 +1,22 @@
+# S08: S07's room in the `leaves` x-ray: each visible point coloured by its BSP leaf. The
+# pan continues S07's at 4 degrees a second: the file's second 1.0 is the frame after the
+# last one of S07 the film shows. Classic at 320x200.
+
+map e1m1
+
+duration 4
+fps 60
+size 1920x1080
+
+preset classic
+mode 320x200
+hud off
+cvar gamma 0.7
+
+camera path
+key 0  -208,2736,192  20,207.8667  ease linear
+key 4  -208,2736,192  20,191.8667
+
+xray leaves
+
+events on

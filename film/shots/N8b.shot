@@ -1,0 +1,25 @@
+# N8b: N8a at real speed, the trigger held from film second 0.5: id's nails start wide of
+# the gun's barrels ("At ten-eighty").
+
+map e1m1
+
+duration 3.9
+fps 60
+size 1920x1080
+
+preset slop
+hud on
+gun on
+crosshair 1
+player 480,-352,88,90
+cvar r_nailbarrels 0
+cvar gamma 0.8
+
+impulse 9 at 0
+impulse 4 at 0.1
+attack on at 0.5
+
+camera player
+
+sound on
+events on

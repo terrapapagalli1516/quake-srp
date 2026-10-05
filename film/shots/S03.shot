@@ -1,0 +1,20 @@
+# S03: e1m8, a crane over the ziggurat in its lava, Classic at 320x200, no status bar. The
+# first key is id's intermission camera for the map; the move is eased over file seconds 1
+# to 4.5 and the handles hold its end poses. Brightness 0.6: e1m8 is dark.
+
+map e1m8
+
+duration 5.5
+fps 60
+size 1920x1080
+
+preset classic
+mode 320x200
+hud off
+cvar gamma 0.6
+
+camera path
+key 1    144,592,-112  30,315  ease inout
+key 4.5  200,560,-40   35,300
+
+events on

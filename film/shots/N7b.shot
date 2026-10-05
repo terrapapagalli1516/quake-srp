@@ -1,0 +1,30 @@
+# N7b: the eye under e1m1's pool, as 1996's default.cfg binds the keys: A looks up (pitch
+# 0 to -35 from file second 1.3), then D swims up through the surface (from 2.2). Slop, no
+# status bar.
+#
+# Assembly (N7b): the central 940x1040 crops of N7b ("1996", left) and N7b-2026 (right),
+# at (13,20) and (967,20) of a black 1920x1080 frame, each half with W, A, S and D keycaps
+# near its bottom, A lit while A acts (file seconds 1.3 to 1.8) and D while D acts (2.2 to
+# 3.0). The sound is N7b's.
+
+map e1m1
+
+duration 4.5
+fps 60
+size 1920x1080
+
+preset slop
+hud off
+player camera
+cvar gamma 0.8
+
+camera path
+key 0    750,898,-332  0,90    ease linear
+key 1.3  750,898,-332  0,90    ease inout
+key 1.8  750,898,-332  -35,90  ease linear
+key 2.2  750,898,-332  -35,90  ease inout
+key 3.0  750,898,-270  -35,90  ease linear
+key 4.5  750,898,-270  -35,90
+
+sound on
+events on

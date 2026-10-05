@@ -1,0 +1,32 @@
+# S45-id: e1m1's first-room grunt woken, at 240 Hz, played at 1/8 ("Monsters still
+# think"). id's drawing: the grunt moves in 0.1 s steps and changes pose on them. The
+# player stands in the doorway, inside the closed door's brush, so the grunt never has a
+# clear shot and keeps running. The camera is the player's eye, framed tighter (fov 64).
+# Film second 0 is the wake; 30 film frames a second at speed 1/8 is one 240 Hz host frame
+# each. The window, frames 66 to 392, is game seconds 0.275 to 1.6375 after the wake.
+#
+# Assembly (S45): the 940x1040 crops at (350,20) of S45-id and of S45-slop, side by side
+# at (13,20) and (967,20) of a black 1920x1080 frame, each film frame shown twice (1/8
+# speed at 60 fps), labelled "id's" and "slop".
+
+map e1m1
+wake 0,576,24 at 0
+
+duration 13.1
+fps 30
+size 1920x1080
+frames 66..393
+
+preset slop
+speed 0.125
+hud off
+player 224,616,24,190
+cvar gamma 0.8
+cvar r_lerpmove 0
+cvar r_lerpmodels 0
+
+camera fixed 224,616,46 2,200
+fov 64
+
+sound off
+events on

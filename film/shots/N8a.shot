@@ -1,0 +1,30 @@
+# N8a: the nailgun at 1080p with id's nails (`r_nailbarrels 0`), at 1/4 speed (`speed
+# 0.25`: a host frame of 1/240 s of game for every film frame) ("QuakeC fires"). The
+# player at e1m1's start, its own eye, god mode, the status bar, the gun and the
+# crosshair; `impulse 9`, `impulse 4`, then the trigger held from film second 2.1. The
+# sound runs on the game's clock, slowed with the picture. The freeze on a nail's first
+# frame is the edit's.
+
+map e1m1
+
+duration 6.4
+fps 60
+size 1920x1080
+
+preset slop
+speed 0.25
+hud on
+gun on
+crosshair 1
+player 480,-352,88,90
+cvar r_nailbarrels 0
+cvar gamma 0.8
+
+impulse 9 at 0
+impulse 4 at 0.1
+attack on at 2.1
+
+camera player
+
+sound game
+events on

@@ -1,0 +1,25 @@
+# S16-S17-classic: the start map's entrance hall, a slow linear dolly, the status bar and
+# the gun, in the Classic preset (960x600 in its 4:3 box). One clock for S16 ("and you get
+# Classic") and S17 ("the same renderer, given a 2026 machine").
+#
+# Assembly: S16 is S16-S17-classic's frames 0 to 563, "Classic" at the 4:3 box's top left.
+# S17 is frames 444 to 869: S16-S17-slop, "slop" at its top left, wipes in from the left
+# over the Classic picture between film seconds 8.4 and 10.0 (smoothstep), behind a
+# 4-pixel bronze line. Each label sits on a 60% dark band.
+
+map start
+
+duration 14.5
+fps 60
+size 1920x1080
+
+preset classic
+hud on
+gun on
+cvar gamma 0.7
+
+camera path
+key 0     544,269.44,54  0,90  ease linear
+key 14.5  544,538.56,54  0,90
+
+events on

@@ -1,0 +1,20 @@
+# F03: LAB10a's view in the `z` x-ray, the z-buffer (near light, far dark) ("One thread or
+# eight"). The diagram of a row stored 8 pixels at a time over it is the edit's.
+
+map e1m1
+
+duration 4
+fps 60
+size 1920x1080
+
+preset slop
+hud on
+gun on
+cvar gamma 0.8
+
+camera fixed 480,-352,110 0,90
+
+xray z
+
+sound off
+events on

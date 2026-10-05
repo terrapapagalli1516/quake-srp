@@ -1,0 +1,17 @@
+# S04: demo2 (e1m4) from 4.0 s: a Scrag overhead, firing. Classic at 320x200, the status
+# bar and the gun, id's recorded camera and its sound.
+
+demo demo2 from 3.0
+
+duration 3.5
+fps 60
+size 1920x1080
+
+preset classic
+mode 320x200
+hud on
+gun on
+cvar gamma 0.7
+
+sound on
+events on

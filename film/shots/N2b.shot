@@ -1,0 +1,24 @@
+# N2b: N2a with a thin mark at every perspective divide ("Here is every divide"). The
+# divide rig: e1m6's corridor from (504,500,242), a linear turn from yaw 104 down at 0.778
+# degrees a second, no status bar, slop at 1920x1080. N2a, N2b, N2c and PER4 are the same
+# turn; the film cuts each where its line falls.
+
+map e1m6
+
+duration 40.1
+fps 60
+size 1920x1080
+
+preset slop
+hud off
+cvar gamma 0.8
+cvar r_perspspan 16
+
+camera path
+key 0     504,500,242  0,104.7778  ease linear
+key 40.1  504,500,242  0,73.5889
+
+divides on p244 width 1 alpha 1
+
+sound off
+events off

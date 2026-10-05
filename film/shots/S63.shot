@@ -1,0 +1,22 @@
+# S63: the bookend, S01's corridor again ("And underneath, pixel for pixel, it is still
+# 1996"): Classic at 320x200 shown 4:3, id's 72 Hz ticks, no status bar, S01's Brightness
+# 0.7. A linear dolly carried through the handles. No sound: the corridor is silent in
+# id's mixer.
+
+map e1m1
+
+duration 7.2
+fps 60
+size 1920x1080
+
+preset classic
+mode 320x200
+hud off
+cvar gamma 0.7
+
+camera path
+key 0    480,-363.92,110  0,90  ease linear
+key 7.2  480,-278.08,110  0,90
+
+sound off
+events on

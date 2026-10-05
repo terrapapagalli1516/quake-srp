@@ -1,0 +1,19 @@
+# F06: demo3 (e1m6) from 15 s: an ogre's chainsaw lands, the damage flash ("a gamepad").
+# Slop, the status bar and the gun, id's recorded camera and its sound.
+#
+# Assembly (F06): a gamepad in bronze line art at the bottom right, on a dark band, shakes
+# by up to 6 pixels for 0.3 s from each red damage flash, with "rumble" beside it.
+
+demo demo3 from 15
+
+duration 4
+fps 60
+size 1920x1080
+
+preset slop
+hud on
+gun on
+cvar gamma 0.8
+
+sound on
+events on

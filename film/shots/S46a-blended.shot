@@ -1,0 +1,29 @@
+# S46a-blended: S46a-held with the poses blended (r_lerpmodels 1).
+#
+# Assembly (S46a): a 470x520 crop that follows the grunt, enlarged 2x (nearest), from
+# S46a-held at (13,20) and S46a-blended at (967,20) of a black 1920x1080 frame, each film
+# frame shown twice, labelled "poses held (id's)" and "poses blended (slop)". The crop's
+# centre: S46a-track draws only the moving models' wireframe on black; each frame's lit
+# pixels, less those lit in most frames, give the grunt's centre (scaled to 1080p), and a
+# cubic fitted through the centres over the window is the crop's path. (Today `camera
+# follow monster_army#N` does such a follow in the engine.)
+
+map e1m1
+wake 0,576,24 at 0
+
+duration 13.3
+fps 30
+size 1920x1080
+frames 114..397
+
+preset slop
+speed 0.125
+hud off
+player 190,616,24,190
+cvar gamma 0.8
+cvar r_lerpmodels 1
+
+camera fixed 190,616,46 2,200
+
+sound off
+events on

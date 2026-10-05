@@ -1,0 +1,20 @@
+# N9: e1m1's computer corridor, between its two ambient hums, eased forward over the shot
+# ("id's mixer runs at"). Slop at 1920x1080, no status bar. The film's sound here is not
+# this shot's: see film/README.md.
+
+map e1m1
+
+duration 10.2
+fps 60
+size 1920x1080
+
+preset slop
+hud off
+cvar gamma 0.8
+
+camera path
+key 1.0  480,120,110  10,90  ease inout
+key 9.2  480,180,110  0,90
+
+sound on
+events on

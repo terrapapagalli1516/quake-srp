@@ -1,0 +1,18 @@
+# S02: demo1 (e1m3) from 2.2 s, Classic at 320x200 with the status bar and the gun. id's
+# recorded camera. The grenade's blast lands 3.77 s into the file. Its sound is the
+# game's, id's mixer at 11025 Hz.
+
+demo demo1 from 1.2
+
+duration 6
+fps 60
+size 1920x1080
+
+preset classic
+mode 320x200
+hud on
+gun on
+cvar gamma 0.7
+
+sound on
+events on

@@ -1,0 +1,18 @@
+# S26: demo1 (e1m3) from 12.8 s, Classic at 320x200 with the status bar and the gun: the
+# gibs burst at about 14 s. id's recorded camera and its sound ("The mixer matches"). The
+# four lines of text over it are the edit's.
+
+demo demo1 from 11.8
+
+duration 8.6
+fps 60
+size 1920x1080
+
+preset classic
+mode 320x200
+hud on
+gun on
+cvar gamma 0.75
+
+sound on
+events on

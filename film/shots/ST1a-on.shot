@@ -1,0 +1,23 @@
+# ST1a-on: ST1a-off with slop's torch flicker (`r_torchflicker 1`).
+#
+# Assembly (ST1a): ST1a-on wipes in from the right over ST1a-off between file seconds 1.4
+# and 5.4 (smoothstep), behind a 4-pixel bronze line; the 1440x1080 picture sits at x 240
+# of a black 1920x1080 frame. Labels "ID'S: BAKED, STILL" (top left) and "SLOP:
+# FLICKERING" (bottom right until the line passes it, then top right), on 82% dark bands.
+# The sound is ST1a-on's.
+
+demo demo1 from 32.5
+
+duration 7.3
+fps 60
+size 1440x1080
+
+preset classic
+mode 960x600
+display 4:3
+hud off
+cvar gamma 0.8
+cvar r_torchflicker 1
+
+sound on
+events on

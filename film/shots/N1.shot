@@ -1,0 +1,18 @@
+# N1: demo1 continued after S26, from 17.3 s: Classic at 320x200 shown 4:3, the status bar
+# and the gun, id's mixer ("One command runs all of it"). The console lines over it are
+# the edit's.
+
+demo demo1 from 17.3
+
+duration 7
+fps 60
+size 1920x1080
+
+preset classic
+mode 320x200
+hud on
+gun on
+cvar gamma 0.8
+
+sound on
+events on

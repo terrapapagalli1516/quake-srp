@@ -1,0 +1,27 @@
+# S07: e1m1's big tech room from id's intermission camera, the world's and the models'
+# polygons as a wireframe on black, dissolving to the textured picture. Classic at
+# 320x200. The pan never stops: 4 degrees a second for the whole file. The x-ray (`xray
+# black`, `wire all`) holds to film second 2.5 and mixes out by 3.5.
+
+map e1m1
+
+duration 7.5
+fps 60
+size 1920x1080
+
+preset classic
+mode 320x200
+hud off
+cvar gamma 0.7
+
+camera path
+key 0    -208,2736,192  20,229  ease linear
+key 7.5  -208,2736,192  20,199
+
+xray black
+wire all
+mix 0    1
+mix 2.5  1
+mix 3.5  0
+
+events on

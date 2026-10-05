@@ -1,0 +1,25 @@
+# S61: e1m7, the camera craning back from the lava pit as Chthon rises ("id Software
+# released Quake's source"). Chthon is woken the game's own way, by its `use` with the
+# player as the activator, as taking the rune does: `fire t4 at 1.9`. The player waits
+# behind the entrance corridor's end wall, out of the line of fire, so no damage flash
+# tints the picture. Slop, no status bar.
+
+map e1m7
+
+duration 9
+fps 60
+size 1920x1080
+
+preset slop
+hud off
+player -600,64,56,0
+cvar gamma 0.8
+
+fire t4 at 1.9
+
+camera path
+key 1.0  -100,64,200  15,0  ease inout
+key 8.0  -170,64,270  20,0
+
+sound on
+events on
