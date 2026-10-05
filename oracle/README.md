@@ -775,7 +775,7 @@ What it shows:
 ## Classic (`classic_check.py`)
 
 ```sh
-uv run oracle/classic_check.py                        # about a minute once built; exit 0 = Classic is id's
+uv run oracle/classic_check.py                        # exit 0 = Classic is id's
 uv run oracle/classic_check.py --only goldens,play    # some of it
 uv run oracle/classic_check.py --record --note "..."  # re-record, saying why
 ```
@@ -783,8 +783,12 @@ uv run oracle/classic_check.py --record --note "..."  # re-record, saying why
 The port's Classic preset (`quake_rs::settings`: every slop option off; the
 controls are shared with slop's, and the harnesses pin id's own by name:
 `Settings::id`, `idcontrols`) must stay WinQuake. One command runs every check of
-that and writes a report (`oracle/build/classic-check/classic_check.txt`, next
-to each tool's own output):
+that, ten of them, and writes a report (`oracle/build/classic-check/classic_check.txt`,
+next to each tool's own output). Four compare the port with values recorded from a
+tree known to be right; six run id's C in the same run. `oracle` and `exact` run
+the SSE build, the port's target ("Bit for bit"); the other four run the x87
+build, which the port's game code, 2-D layer and mixer follow where the two
+part:
 
 | check | what | against |
 |---|---|---|
@@ -792,7 +796,7 @@ to each tool's own output):
 | `play` | `quaketool play`: the browser's client frames natively, id's three demos and four scripted walks at 320x200, 640x400 and 960x600, a hash every 30 frames and the sound-call tallies | the recorded list |
 | `timedemo` | id's `timedemo` of demo1..3 at 320x200 and 640x400: the frame counts (969 for demo1, as id's C) | the recorded list |
 | `census` | `quaketool census`: all nine maps through the real QuakeC (the report, by hash) | the recorded list |
-| `edicts` | id's server edicts (this oracle) diffed against the port's, nine maps at t = 1.7 / 4.7 / 10.7 s (`census/`): the diff report, by hash. What it still shows: each matched entity's number one below id's (the player is the port's last edict, CENSUS L25); monsters' random idle frames and wandering; a door pair on e1m6 caught at another point of its slide at 1.7 s; the fireballs and bubbles random numbers start. The statics' rows are gone since `fleet/makestatic` (1,185 rows to 606) | the recorded list |
+| `edicts` | id's server edicts (this oracle) diffed against the port's, nine maps at t = 1.7 / 4.7 / 10.7 s (`census/`): the diff report, by hash. What it still shows: each matched entity's number one below id's (the player is the port's last edict, CENSUS L25); monsters' random idle frames and wandering; a door pair on e1m6 caught at another point of its slide at 1.7 s; the fireballs and bubbles random numbers start. The statics' rows are gone since `fleet/makestatic` (1,185 rows to 606) | id's C: the diff report as recorded |
 | `oracle` | `compare.py --aspect 0.8333333 --spans 16 --sse`: the eight standard rows | id's C built with SSE floats: none below its recorded match, 100.0000% every row (against the x87 build e1m7 read 99.9969%, two pixels, before `fleet/pixelexact`) |
 | `exact` | `exact_sweep.py`: the nine maps' first frames, 18 yaws and pitches and 4 rolled views, entities drawn, at 320x200 and at the page's 640x400 and aspect (414 frames) | id's C built with SSE floats: not one pixel differs (the x87 build's count is in `exact.txt`, not judged) |
 | `screen2d` | `screen2d.py`, 320x200 and 640x400, the port in its Classic preset | id's C: no shot below its recorded `2d exact%` (the residues above) |

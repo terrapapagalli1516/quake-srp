@@ -1,6 +1,7 @@
-# Classic's proof, by hand (Actions > oracle > Run workflow): the goldens, the
-# play hashes, the timedemo counts, the census, and id's own C against the
-# port — the 3-D view, the 2-D layer, demo playback and the mixer
+# Classic's proof, by hand (Actions > oracle > Run workflow): ten checks. The
+# goldens, the play hashes, the timedemo counts, the census; and id's own C
+# against the port — the server's edicts, the 3-D view (the standard rows and
+# a 414-view sweep), the 2-D layer, demo playback and the mixer
 # (oracle/README.md, "Classic"). The same as `uv run oracle/classic_check.py`
 # on a machine with the data.
 #
@@ -8,8 +9,9 @@
 # - id's shareware pak, from the archive README.md names (ci/fetch_shareware.sh
 #   checks its hashes);
 # - id's WinQuake source (GPL), cloned from id-Software/Quake into quake-c/;
-# - docker, which builds the C oracle as a static 32-bit i386 program
-#   (oracle/build.sh, oracle/build_sound.sh) that the x86-64 runner runs.
+# - docker, which builds the C oracles as static 32-bit i386 programs
+#   (oracle/build.sh, its SSE2 build ORACLE_FPMATH=sse oracle/build.sh,
+#   oracle/build_sound.sh) that the x86-64 runner runs.
 # Best effort: it has not run on GitHub's runners yet, only on the machine the
 # port was built on. The report is uploaded whether it passes or not.
 name: oracle
