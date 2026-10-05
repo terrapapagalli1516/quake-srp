@@ -51,5 +51,5 @@ if [ "$FPMATH" = sse ]; then
 fi
 
 docker run --rm -u "$(id -u):$(id -g)" -v "$OUT:/w" -w /w/src "$IMAGE" \
-    sh -c "gcc $CFLAGS -o /w/$BIN $SRCS -static -Wl,--wrap=R_RenderView -Wl,--wrap=D_DrawSpans8 $WRAPS -lm && gcc --version | head -1"
+    sh -c "gcc $CFLAGS -o /w/$BIN $SRCS -static -Wl,--wrap=R_RenderView -Wl,--wrap=D_DrawSpans8 -Wl,--wrap=Turbulent8 $WRAPS -lm && gcc --version | head -1"
 echo "built $OUT/$BIN"
