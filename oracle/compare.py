@@ -87,7 +87,8 @@ def pak_has_file(pak: Path, name: str) -> bool:
 def pak_for_map(args, mapname: str) -> str:
     """The `quaketool view` pak argument for `mapname`: `--pak` (plus `--pak1`)
     alone when it has the map, unchanged from before `--game-dir` existed;
-    otherwise that layered under the first `--game-dir` pack that has it
+    `--pak` and `--pak1` when `--pak1` has it; otherwise those layered under
+    the first `--game-dir` pack that has it
     instead (a mission pack's own map, e.g. hip1m1 in hipnotic/pak0.pak),
     comma-joined the way `quaketool view`'s layered pak list reads (the last
     one searched first) — the mission pack's own bsp/progs over id1's shared
@@ -96,6 +97,9 @@ def pak_for_map(args, mapname: str) -> str:
     if pak_has_file(args.pak, want):
         return str(args.pak)
     base = [str(args.pak)] + ([str(args.pak1)] if args.pak1 else [])
+    if args.pak1 and pak_has_file(args.pak1, want):
+        # a registered map (e2m1), or one `quaketool mapgen --pak1` wrote
+        return ",".join(base)
     for _name, path in args.game_dir:
         pak = Path(path) / "pak0.pak"
         if pak.exists() and pak_has_file(pak, want):
