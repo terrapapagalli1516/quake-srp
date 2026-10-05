@@ -26,9 +26,13 @@ Two kinds of check:
     port's for all nine maps at t = 1.7, 4.7 and 10.7 s (`census/`) — the
     diff report, by hash: a change means the port's game state moved.
 - **Against id's C** (absolute, the C oracle built from id's source):
-  - `oracle`: `compare.py --aspect 0.8333333 --spans 16`, the eight standard
-    3-D rows (e1m1/2/3/7, world and entities) at the page's aspect: every
-    row 100.00%;
+  - `oracle`: `compare.py --aspect 0.8333333 --spans 16 --sse`, the eight
+    standard 3-D rows (e1m1/2/3/7, world and entities) at the page's aspect,
+    against id's C built with SSE floats: every row 100.0000%;
+  - `exact`: `exact_sweep.py` against the same build — every map's first
+    frame, 18 yaws and pitches and 4 rolled views, the entities drawn, at
+    320x200 and at the page's 640x400 and aspect: not one pixel differs
+    (the x87 build's count is in its report, `exact.txt`, not judged);
   - `screen2d`: `screen2d.py`, id's composited 2-D layer at 320x200 and
     640x400, the port in its Classic preset: no shot below its recorded
     `2d exact%` (the known residues, oracle/README.md, are recorded);
@@ -41,9 +45,10 @@ Two kinds of check:
     sound call the walk makes identical.
 
 Needs cargo, uv, the shareware pak at `quake-data/ID1/PAK0.PAK`, and for
-`edicts`/`oracle`/`screen2d`/`demolerp`/`sound` the C oracles (`oracle/build.sh`,
-`oracle/build_sound.sh`: docker; each tool builds its oracle when it is missing
-or older than its sources, `oraclebin.py`). The report (and every tool's own
+`edicts`/`oracle`/`exact`/`screen2d`/`demolerp`/`sound` the C oracles
+(`oracle/build.sh`, its SSE build `ORACLE_FPMATH=sse oracle/build.sh`,
+`oracle/build_sound.sh`: docker; each tool builds its oracle when it is
+missing or older than its sources, `oraclebin.py`). The report (and every tool's own
 output) goes to `--out` (default `oracle/build/classic-check`); the exit
 status is 0 only when every check passed.
 """
@@ -69,7 +74,7 @@ TIMEDEMO_RES = "320x200,640x400"
 # The server times of the edict dumps, and the 0.1 s frames id's oracle
 # waits for each after the last (the player connects at sv.time 1.2).
 EDICT_TIMES = [(1.7, 5), (4.7, 30), (10.7, 60)]
-CHECKS = ["goldens", "play", "timedemo", "census", "edicts", "oracle", "screen2d", "demolerp", "sound"]
+CHECKS = ["goldens", "play", "timedemo", "census", "edicts", "oracle", "exact", "screen2d", "demolerp", "sound"]
 
 
 def run(cmd, cwd=PROJECT, timeout=1800) -> str:
@@ -180,13 +185,27 @@ def check_edicts(qt: Path, out: Path) -> dict:
 
 def check_oracle(qt: Path, out: Path) -> dict:
     d = out / "compare"
-    text = run(["uv", "run", HERE / "compare.py", "--aspect", "0.8333333", "--spans", "16",
+    text = run(["uv", "run", HERE / "compare.py", "--aspect", "0.8333333", "--spans", "16", "--sse",
                 "--quaketool", qt, "--out", d])
     (out / "compare.txt").write_text(text)
     rows = json.loads((d / "summary.json").read_text())
     if len(rows) != 8:
         raise RuntimeError(f"{len(rows)} rows, not the eight standard ones")
     return {f"oracle.{k}": f"{v['exact_pct']:.4f}" for k, v in rows.items()}
+
+
+def check_exact(qt: Path, out: Path) -> dict:
+    sweep = ["uv", "run", str(HERE / "exact_sweep.py"), "--quaketool", str(qt), "--maps", ",".join(MAPS),
+             "--views", "standard,sweep,roll", "--mode", "ents", "--oracles", "sse,x87"]
+    text, failed = "", False
+    for extra in ([], ["--res", "640x400", "--aspect", "0.8333333"]):
+        res = subprocess.run(sweep + extra, cwd=PROJECT, capture_output=True, text=True, timeout=1800)
+        text += res.stdout + res.stderr
+        failed |= res.returncode != 0
+    (out / "exact.txt").write_text(text)
+    if failed:
+        raise RuntimeError("exact_sweep.py: a view differs from id's SSE build (see exact.txt)")
+    return {}
 
 
 def check_screen2d(qt: Path, out: Path) -> dict:
