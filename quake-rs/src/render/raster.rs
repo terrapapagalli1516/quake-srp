@@ -546,9 +546,12 @@ impl BlockFixed {
 /// full segment starts there (a full segment is one with pixels after it).
 ///
 /// The span loops call this for the segment AFTER the one they are about to
-/// draw. id's routines divide for a segment's end on reaching the segment,
-/// and its pixels cannot start before the quotient is there; asked for a
-/// segment early, the divide runs while the segment before is drawn. The
+/// draw. id's portable C (`d_scan.c`) divides for a segment's end on
+/// reaching the segment, and its pixels cannot start before the quotient is
+/// there; asked for a segment early, the divide runs while the segment
+/// before is drawn. That is id's x86 trick in portable form: `d_draw16.s` and
+/// `d_draw.s` start the next segment's FDIV halfway through the segment
+/// before ("this is what we've gone to all this trouble to overlap"). The
 /// values are the same (each end is a function of its pixel alone), the wall
 /// spans a tenth to a fifth faster (PERF_PLAN.md, §15).
 #[inline]
@@ -2170,8 +2173,9 @@ mod tests {
         }
     }
 
-    /// `D_DrawSpans16`'s arithmetic in the asm's order — each segment's end
-    /// divided for on reaching the segment — as [`span16_cached`] was before
+    /// `D_DrawSpans16`'s arithmetic with each segment's end divided for on
+    /// reaching the segment (the C's order; the asm starts that divide
+    /// halfway through the segment before), as [`span16_cached`] was before
     /// its ends were asked for a segment ahead: the reference the fuzz holds
     /// it to.
     fn d_draw_spans16_in_order(crow: &mut [u8], sp: &Span, fx: &BlockFixed, block: &[u8], bw: usize) {
@@ -2232,7 +2236,7 @@ mod tests {
     /// negative now and then, huge steps): the same pixels, and no position
     /// off the block (the transcription's unchecked read panics). A debug
     /// build (`cargo test --lib fuzz`) checks every add for overflow too.
-    /// And `D_DrawSpans16` against its arithmetic in the asm's order: the
+    /// And `D_DrawSpans16` against its arithmetic in the C's order: the
     /// span loops ask for each segment's end a segment ahead
     /// ([`segments_ahead`]), the references on reaching it. And the exact
     /// span, both ways (by parabolas and by the divide), against its two
