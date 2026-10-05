@@ -550,10 +550,10 @@ impl BlockFixed {
 /// reaching the segment, and its pixels cannot start before the quotient is
 /// there; asked for a segment early, the divide runs while the segment
 /// before is drawn. That is id's x86 trick in portable form: `d_draw16.s` and
-/// `d_draw.s` start the next segment's FDIV halfway through the segment
-/// before ("this is what we've gone to all this trouble to overlap"). The
-/// values are the same (each end is a function of its pixel alone), the wall
-/// spans a tenth to a fifth faster (PERF_PLAN.md, §15).
+/// `d_draw.s` start the FDIV for the next segment's end halfway through the
+/// one they are drawing ("this is what we've gone to all this trouble to
+/// overlap"). The values are the same (each end is a function of its pixel
+/// alone), the wall spans a tenth to a fifth faster (PERF_PLAN.md, §15).
 #[inline]
 fn segments_ahead<const N: usize, E>(k0: usize, end: usize, seg_end: impl Fn(usize) -> E) -> Option<E> {
     (k0 + N < end).then(|| seg_end(k0 + N))
