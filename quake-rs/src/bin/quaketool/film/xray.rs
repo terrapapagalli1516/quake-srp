@@ -1,0 +1,469 @@
+//! The x-ray views: a frame's 3-D view redrawn from what the renderer
+//! decided on the way to it ([`quake_rs::render::xray::XrayFrame`]), for a
+//! film about how it works.
+//!
+//! The base picture (`xray MODE`):
+//!
+//! | mode | each pixel of the 3-D view |
+//! |---|---|
+//! | `game` | the game's own |
+//! | `black` | black (for a wireframe alone) |
+//! | `z` | its 16-bit `1/z`, the z-buffer the entities test, as grey: near is light |
+//! | `surfaces` | one palette colour per surface, as id's `r_drawflat` painted them |
+//! | `spans` | one colour per span: the rows the edge scan cut each surface into |
+//! | `segments` | the game's picture, each span's affine segments shaded in turn and the pixel of each perspective divide marked: id's 16, slop's 8, or none at exact |
+//! | `mip` | the mip level each wall was drawn at: 0 green, 1 yellow, 2 orange, 3 red, over the picture's grey |
+//! | `cache` | the surface-cache block each wall was drawn from, a colour each, its lightmap's 16-texel cells outlined; a block the frame baked (new, or its light changed) shines |
+//! | `leaves` | the BSP leaf the visible point is in, a colour each |
+//! | `lightmaps` | the walls' light alone (the renderer draws it: `XrayOptions::lightmaps`) |
+//! | `error` | how far the affine spans' texel is from the exact one, in texels: none dark, half a texel yellow, one or more red |
+//!
+//! Where an entity covers the world (an alias model, a sprite, the gun) the
+//! machinery views show the game's pixels: those are drawn after the edge
+//! scan, against the z-buffer.
+//!
+//! The wireframe (`wire`) is drawn over any of them: the world's polygon
+//! edges, the brush entities' and the alias models' triangles, anti-aliased,
+//! each tested against the z-buffer (`hidden`) or not (`through`); with
+//! `pvs`, the world's edges are coloured by what the renderer did with their
+//! face — drawn (has a span), in the PVS but not drawn (hidden or outside
+//! the view), or outside the PVS.
+
+use quake_rs::bsp::Bsp;
+use quake_rs::render::xray::{XrayFrame, XrayGrads, XrayModel, XrayPaint, XraySurface, XrayView, ZBUF_SCALE};
+use quake_rs::render::{PerspSpan, point_in_leaf};
+
+use super::shot::{Wire, XrayBase};
+
+/// An RGB picture.
+pub struct Rgb<'a> {
+    pub w: usize,
+    pub h: usize,
+    pub px: &'a mut [u8],
+}
+
+/// A palette colour for `key` from Quake's palette, avoiding the darkest
+/// and the fullbright rows: rows 1..14 of 16, each row's brighter half.
+fn palette_colour(palette: &[[u8; 3]; 256], key: u64) -> [u8; 3] {
+    let h = key.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 40;
+    let row = 1 + (h % 13) as usize;
+    let col = 2 + ((h >> 8) % 6) as usize;
+    palette[row * 16 + col]
+}
+
+fn luma(c: [u8; 3]) -> f32 {
+    0.299 * f32::from(c[0]) + 0.587 * f32::from(c[1]) + 0.114 * f32::from(c[2])
+}
+
+fn mix(a: [u8; 3], b: [u8; 3], t: f32) -> [u8; 3] {
+    let t = t.clamp(0.0, 1.0);
+    [0, 1, 2].map(|k| (f32::from(a[k]) + (f32::from(b[k]) - f32::from(a[k])) * t).round() as u8)
+}
+
+fn grey(v: f32) -> [u8; 3] {
+    let v = v.clamp(0.0, 255.0) as u8;
+    [v, v, v]
+}
+
+/// The texels a pixel of `s` is read in: mip `level`'s.
+fn texel_scale(s: &XraySurface) -> f64 {
+    f64::from(1u32 << s.mip.unwrap_or(0).min(3))
+}
+
+/// Redraw the 3-D view at `(vx, vy)` of `screen` as `base` and `wire` say,
+/// blended over the game's picture by `strength` (0: the game's alone).
+#[allow(clippy::too_many_arguments)]
+pub fn composite(
+    screen: &mut Rgb,
+    (vx, vy): (usize, usize),
+    x: &XrayFrame,
+    bsp: &Bsp,
+    palette: &[[u8; 3]; 256],
+    base: XrayBase,
+    wire: Wire,
+    strength: f64,
+) {
+    let Some(view) = x.view else { return };
+    let (w, h) = (x.w, x.h);
+    if strength <= 0.0 || w == 0 || h == 0 || vx + w > screen.w || vy + h > screen.h {
+        return;
+    }
+    // The game's picture of the view, which every mode starts from.
+    let mut game = vec![[0u8; 3]; w * h];
+    for y in 0..h {
+        for xx in 0..w {
+            let at = ((vy + y) * screen.w + vx + xx) * 3;
+            game[y * w + xx] = [screen.px[at], screen.px[at + 1], screen.px[at + 2]];
+        }
+    }
+    let mut out = base_picture(x, bsp, palette, base, &view, &game);
+    if wire.world || wire.entities {
+        wireframe(&mut out, x, bsp, &view, wire);
+    }
+    let t = strength.clamp(0.0, 1.0) as f32;
+    for y in 0..h {
+        for xx in 0..w {
+            let at = ((vy + y) * screen.w + vx + xx) * 3;
+            let c = mix(game[y * w + xx], out[y * w + xx], t);
+            screen.px[at..at + 3].copy_from_slice(&c);
+        }
+    }
+}
+
+/// The base picture of the view.
+fn base_picture(
+    x: &XrayFrame,
+    bsp: &Bsp,
+    palette: &[[u8; 3]; 256],
+    base: XrayBase,
+    view: &XrayView,
+    game: &[[u8; 3]],
+) -> Vec<[u8; 3]> {
+    let (w, h) = (x.w, x.h);
+    match base {
+        XrayBase::Game | XrayBase::Lightmaps => return game.to_vec(),
+        XrayBase::Black => return vec![[0; 3]; w * h],
+        XrayBase::Z => {
+            // Depth on a log scale from 16 to 1024 units: near is light.
+            return x
+                .zbuf
+                .iter()
+                .map(|&zb| {
+                    let z = ZBUF_SCALE / f32::from(zb.max(1));
+                    let t = ((z.max(16.0) / 16.0).ln() / 64.0f32.ln()).clamp(0.0, 1.0);
+                    grey(255.0 * (1.0 - t).powf(1.5))
+                })
+                .collect();
+        }
+        _ => {}
+    }
+    let mut out = game.to_vec();
+    let entity = |i: usize| x.zbuf.get(i) != x.world_z.get(i);
+    let span_px = x.persp.pixels().max(1) as usize;
+    for (si, sp) in x.spans.iter().enumerate() {
+        let Some(Some(s)) = x.surfaces.get(sp.surface as usize) else { continue };
+        let row = sp.v as usize * w;
+        let surf_key = match s.model {
+            XrayModel::Background => 0,
+            XrayModel::World => s.face as u64 + 1,
+            XrayModel::Inline(m) => (m as u64) << 32 | s.face as u64,
+            XrayModel::External(e) => (e as u64 + 1) << 48 | s.face as u64,
+        };
+        for k in 0..sp.count as usize {
+            let xx = sp.u as usize + k;
+            let i = row + xx;
+            if i >= out.len() || entity(i) {
+                continue;
+            }
+            let g = game[i];
+            let (px, py) = (xx as f64 + 0.5, sp.v as f64 + 0.5);
+            out[i] = match base {
+                XrayBase::Surfaces => {
+                    if s.model == XrayModel::Background {
+                        [0; 3]
+                    } else {
+                        palette_colour(palette, surf_key)
+                    }
+                }
+                // The surface's colour, every other span of a row darker:
+                // each surface is cut into one span a row.
+                XrayBase::Spans => {
+                    let c = palette_colour(palette, surf_key);
+                    if (sp.v + si as u32) % 2 == 1 { mix(c, [0, 0, 0], 0.45) } else { c }
+                }
+                XrayBase::Segments => {
+                    if !matches!(s.paint, XrayPaint::Cached | XrayPaint::PerPixel | XrayPaint::Liquid) || span_px == 1 {
+                        g
+                    } else if k % span_px == 0 {
+                        // The perspective divide: this pixel's texel is exact.
+                        [255, 220, 64]
+                    } else if (k / span_px) % 2 == 1 {
+                        mix(g, [0, 0, 0], 0.45)
+                    } else {
+                        g
+                    }
+                }
+                XrayBase::Mip => match (s.paint, s.mip) {
+                    (XrayPaint::Cached, Some(m)) => {
+                        const MIP: [[u8; 3]; 4] = [[64, 200, 64], [230, 220, 60], [240, 140, 40], [220, 50, 40]];
+                        mix(grey(luma(g)), MIP[m.min(3) as usize], 0.6)
+                    }
+                    _ => grey(luma(g) * 0.5),
+                },
+                XrayBase::Cache => match (s.paint, s.grads) {
+                    (XrayPaint::Cached, Some(gr)) => {
+                        let c = palette_colour(palette, surf_key << 2 | u64::from(s.mip.unwrap_or(0)));
+                        let base = mix(grey(luma(g)), c, 0.55);
+                        let base = if s.baked { mix(base, [255, 200, 90], 0.5) } else { base };
+                        if on_grid(&gr, px, py, 16.0) { mix(base, [255, 255, 255], 0.8) } else { base }
+                    }
+                    _ => grey(luma(g) * 0.4),
+                },
+                XrayBase::Leaves => match (s.paint, s.grads) {
+                    (XrayPaint::Sky | XrayPaint::Fill, _) | (_, None) => grey(luma(g) * 0.3),
+                    (_, Some(gr)) => {
+                        let zi = gr.zi(px, py);
+                        if zi <= 0.0 {
+                            g
+                        } else {
+                            // The visible point, a unit towards the eye, and its leaf.
+                            let z = 1.0 / zi - 1.0;
+                            let (rx, ry) = (
+                                (xx as f64 - f64::from(view.xcenter)) / f64::from(view.xscale),
+                                (f64::from(view.ycenter) - sp.v as f64) / f64::from(view.yscale),
+                            );
+                            let p: [f32; 3] = [0, 1, 2].map(|c| {
+                                (f64::from(view.origin[c])
+                                    + z * (f64::from(view.forward[c])
+                                        + rx * f64::from(view.right[c])
+                                        + ry * f64::from(view.up[c]))) as f32
+                            });
+                            let leaf = point_in_leaf(bsp, p).unwrap_or(0);
+                            mix(grey(luma(g)), palette_colour(palette, leaf as u64 + 7), 0.7)
+                        }
+                    }
+                },
+                XrayBase::Error => match s.grads {
+                    Some(gr) if matches!(s.paint, XrayPaint::Cached | XrayPaint::PerPixel | XrayPaint::Liquid) => {
+                        let e = affine_error(&gr, sp.u as usize, sp.count as usize, k, sp.v as usize, x.persp)
+                            / texel_scale(s);
+                        heat(g, e)
+                    }
+                    _ => grey(luma(g) * 0.3),
+                },
+                _ => g,
+            };
+        }
+    }
+    out
+}
+
+/// Whether the pixel at `(x, y)` lies on a line of the `cell`-texel grid
+/// (mip 0 texels): the cell under it differs from its right or lower
+/// neighbour's.
+fn on_grid(g: &XrayGrads, x: f64, y: f64, cell: f64) -> bool {
+    let c = |x: f64, y: f64| {
+        let [s, t] = g.st(x, y);
+        ((s / cell).floor(), (t / cell).floor())
+    };
+    let here = c(x, y);
+    here != c(x + 1.0, y) || here != c(x, y + 1.0)
+}
+
+/// The texel distance (mip 0) between the exact texel at pixel `k` of a span
+/// of `count` from column `u` in row `v` and the one the affine spans of
+/// `persp` read there: exact at each segment's first pixel and at the next
+/// one's (or the span's last pixel, for a short last segment), straight in
+/// between, as `D_DrawSpans8`/`16` step.
+pub fn affine_error(g: &XrayGrads, u: usize, count: usize, k: usize, v: usize, persp: PerspSpan) -> f64 {
+    let n = persp.pixels().max(1) as usize;
+    if n == 1 {
+        return 0.0;
+    }
+    let y = v as f64 + 0.5;
+    let x = |k: usize| (u + k) as f64 + 0.5;
+    let k0 = k / n * n;
+    let k1 = (k0 + n).min(count - 1);
+    let exact = g.st(x(k), y);
+    if k1 <= k0 {
+        return 0.0;
+    }
+    let (a, b) = (g.st(x(k0), y), g.st(x(k1), y));
+    let f = (k - k0) as f64 / (k1 - k0) as f64;
+    let affine = [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f];
+    (affine[0] - exact[0]).hypot(affine[1] - exact[1])
+}
+
+/// A heat colour for an error of `e` texels over the picture's grey.
+fn heat(g: [u8; 3], e: f64) -> [u8; 3] {
+    let dark = grey(luma(g) * 0.35);
+    let e = e as f32;
+    if e < 0.5 {
+        mix(dark, [240, 200, 40], e / 0.5)
+    } else {
+        mix([240, 200, 40], [230, 40, 30], ((e - 0.5) / 0.5).min(1.0))
+    }
+}
+
+/// Every world face drawn this frame, and every face in a leaf the PVS marked.
+fn world_faces(x: &XrayFrame, bsp: &Bsp) -> (Vec<bool>, Vec<bool>) {
+    let mut drawn = vec![false; bsp.faces.len()];
+    for s in x.surfaces.iter().flatten() {
+        if s.model == XrayModel::World {
+            if let Some(d) = drawn.get_mut(s.face) {
+                *d = true;
+            }
+        }
+    }
+    let mut in_pvs = vec![false; bsp.faces.len()];
+    for (leaf, l) in bsp.leafs.iter().enumerate().skip(1) {
+        if !x.leaf_visible.get(leaf).copied().unwrap_or(false) {
+            continue;
+        }
+        let first = usize::from(l.firstmarksurface);
+        for &f in bsp.marksurfaces.get(first..first + usize::from(l.nummarksurfaces)).unwrap_or(&[]) {
+            if let Some(p) = in_pvs.get_mut(usize::from(f)) {
+                *p = true;
+            }
+        }
+    }
+    (drawn, in_pvs)
+}
+
+/// The colours of the wireframe.
+const WIRE_WORLD: [u8; 3] = [255, 170, 60];
+const WIRE_ENTITY: [u8; 3] = [140, 255, 120];
+const WIRE_GUN: [u8; 3] = [120, 200, 255];
+const WIRE_PVS: [u8; 3] = [150, 95, 50];
+const WIRE_CULLED: [u8; 3] = [150, 40, 40];
+
+/// Draw the wireframe over `out`.
+fn wireframe(out: &mut [[u8; 3]], x: &XrayFrame, bsp: &Bsp, view: &XrayView, wire: Wire) {
+    let mut lines = Lines { out, w: x.w, h: x.h, zbuf: &x.zbuf, through: wire.through };
+    if wire.world {
+        let (drawn, in_pvs) = if wire.pvs { world_faces(x, bsp) } else { (Vec::new(), Vec::new()) };
+        // Each edge once, in the colour of the most-drawn face it bounds.
+        let mut best: Vec<u8> = vec![0; bsp.edges.len()];
+        let model = bsp.models.first();
+        let faces = model.map_or(0..0, |m| {
+            let first = m.firstface.max(0) as usize;
+            first..(first + m.numfaces.max(0) as usize).min(bsp.faces.len())
+        });
+        for fi in faces {
+            let face = &bsp.faces[fi];
+            let rank = match (wire.pvs, drawn.get(fi), in_pvs.get(fi)) {
+                (false, ..) | (_, Some(true), _) => 3,
+                (_, _, Some(true)) => 2,
+                _ => 1,
+            };
+            for k in 0..face.numedges.max(0) as usize {
+                if let Some(&se) = bsp.surfedges.get(face.firstedge.max(0) as usize + k) {
+                    if let Some(b) = best.get_mut(se.unsigned_abs() as usize) {
+                        *b = (*b).max(rank);
+                    }
+                }
+            }
+        }
+        for (ei, &rank) in best.iter().enumerate() {
+            if rank == 0 || (rank == 1 && !wire.through) {
+                continue;
+            }
+            let e = &bsp.edges[ei];
+            let (Some(a), Some(b)) = (bsp.vertexes.get(e.v[0] as usize), bsp.vertexes.get(e.v[1] as usize)) else {
+                continue;
+            };
+            let (colour, strength) = match rank {
+                3 => (WIRE_WORLD, 1.0),
+                2 => (WIRE_PVS, 0.8),
+                _ => (WIRE_CULLED, 0.6),
+            };
+            lines.world(view, a.point, b.point, colour, strength);
+        }
+    }
+    if wire.entities {
+        for e in &x.brush_edges {
+            lines.world(view, e[0], e[1], WIRE_ENTITY, 1.0);
+        }
+        for t in &x.triangles {
+            let colour = if t.gun { WIRE_GUN } else { WIRE_ENTITY };
+            for k in 0..3 {
+                let (a, b) = (t.v[k], t.v[(k + 1) % 3]);
+                lines.screen(a, b, colour, 0.9);
+            }
+        }
+    }
+}
+
+/// Lines into a view-sized picture, tested against its z-buffer.
+struct Lines<'a> {
+    out: &'a mut [[u8; 3]],
+    w: usize,
+    h: usize,
+    zbuf: &'a [i16],
+    through: bool,
+}
+
+impl Lines<'_> {
+    /// A world-space segment: clipped to the near plane, projected.
+    fn world(&mut self, view: &XrayView, a: [f32; 3], b: [f32; 3], colour: [u8; 3], strength: f32) {
+        const NEAR: f32 = 1.0;
+        let (mut va, mut vb) = (view.to_view(a), view.to_view(b));
+        if va[2] < NEAR && vb[2] < NEAR {
+            return;
+        }
+        if va[2] < NEAR || vb[2] < NEAR {
+            let t = (NEAR - va[2]) / (vb[2] - va[2]);
+            let p = [0, 1, 2].map(|k| va[k] + (vb[k] - va[k]) * t);
+            if va[2] < NEAR {
+                va = p;
+            } else {
+                vb = p;
+            }
+        }
+        self.screen(view.screen(va), view.screen(vb), colour, strength);
+    }
+
+    /// A screen-space segment `(x, y, 1/z)`, anti-aliased (Xiaolin Wu's),
+    /// each pixel tested against the z-buffer unless `through`.
+    fn screen(&mut self, a: [f32; 3], b: [f32; 3], colour: [u8; 3], strength: f32) {
+        let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+        let len = dx.abs().max(dy.abs());
+        if !len.is_finite() || len > 1e5 {
+            return;
+        }
+        let steps = len.ceil().max(1.0) as usize;
+        let steep = dy.abs() > dx.abs();
+        for i in 0..=steps {
+            let t = i as f32 / steps as f32;
+            let (x, y, zi) = (a[0] + dx * t, a[1] + dy * t, a[2] + (b[2] - a[2]) * t);
+            // The two pixels across the line, by how near its centre is.
+            let (main, cross) = if steep { (y, x) } else { (x, y) };
+            let c0 = cross.floor();
+            let f = cross - c0;
+            for (c, cover) in [(c0, 1.0 - f), (c0 + 1.0, f)] {
+                let (px, py) = if steep { (c, main.round()) } else { (main.round(), c) };
+                self.plot(px, py, zi, colour, cover * strength);
+            }
+        }
+    }
+
+    fn plot(&mut self, x: f32, y: f32, zi: f32, colour: [u8; 3], cover: f32) {
+        if x < 0.0 || y < 0.0 || cover <= 0.0 {
+            return;
+        }
+        let (x, y) = (x as usize, y as usize);
+        if x >= self.w || y >= self.h {
+            return;
+        }
+        let i = y * self.w + x;
+        if !self.through {
+            // Behind what the frame drew there: hidden (a little slack for the
+            // 16-bit buffer and an edge on the boundary of what it bounds).
+            let zb = f32::from(self.zbuf.get(i).copied().unwrap_or(0));
+            if zi * 1.03 + 1.5 < zb {
+                return;
+            }
+        }
+        self.out[i] = mix(self.out[i], colour, cover);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_affine_error_is_zero_at_each_divide_and_at_exact() {
+        // A wall receding to the right: 1/z falls along the row.
+        let g = XrayGrads { zi: [0.02, -0.00001, 0.0], sz: [0.5, 0.01, 0.0], tz: [0.0, 0.0, 0.01], st_eye: [0.0, 0.0] };
+        for k in [0, 16, 32] {
+            assert!(affine_error(&g, 100, 40, k, 50, PerspSpan::Spans16) < 1e-9, "pixel {k}");
+        }
+        assert!(affine_error(&g, 100, 40, 8, 50, PerspSpan::Spans16) > 1e-6, "mid-segment");
+        assert!(
+            affine_error(&g, 100, 40, 8, 50, PerspSpan::Spans16) > affine_error(&g, 100, 40, 4, 50, PerspSpan::Spans8),
+            "shorter spans err less"
+        );
+        assert_eq!(affine_error(&g, 100, 40, 8, 50, PerspSpan::Exact), 0.0);
+    }
+}
