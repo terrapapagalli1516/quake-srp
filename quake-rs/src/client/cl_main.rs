@@ -696,7 +696,8 @@ fn client_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid, dra
     let mut player_nails: Vec<(usize, i32)> = Vec::new();
     for e in 0..n {
         let ent = e as i32;
-        if ent == w.player || w.server.vm.is_free_edict(ent) {
+        // (A host's camera away from the player may draw it: `Walk::draw_player`.)
+        if (ent == w.player && !w.draw_player) || w.server.vm.is_free_edict(ent) {
             continue;
         }
         if !is_relinked(ent) {
@@ -1470,6 +1471,13 @@ mod tests {
         c.camera = Some(render::Camera { pos: [eye[0], eye[1] + 100.0, eye[2]], ..b.camera.unwrap() });
         let fc = super::walk_frame(&mut c, 1.0 / 72.0, false, &vid);
         assert_ne!(fc.image, fa.image, "elsewhere, another view");
+        // From behind the player, its own model is drawn only when asked.
+        let behind = render::Camera { pos: [eye[0], eye[1] - 80.0, eye[2] + 10.0], ..b.camera.unwrap() };
+        c.camera = Some(behind);
+        let without = super::walk_frame(&mut c, 0.0, true, &vid);
+        c.draw_player = true;
+        let with = super::walk_frame(&mut c, 0.0, true, &vid);
+        assert_ne!(with.image, without.image, "the player's model, from behind it");
         a.draw_viewmodel = false;
         let fa2 = super::walk_frame(&mut a, 1.0 / 72.0, false, &vid);
         let fb2 = super::walk_frame(&mut b, 1.0 / 72.0, false, &vid);

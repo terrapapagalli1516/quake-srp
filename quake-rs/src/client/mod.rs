@@ -180,6 +180,10 @@ pub struct Walk {
     /// `r_drawviewmodel` (r_main.c, id's cvar, 1 by default): whether the
     /// first-person weapon is drawn.
     pub draw_viewmodel: bool,
+    /// EXTRA, not id: the player's own model is drawn too (id's client
+    /// never draws its view entity), for a host's camera that looks at the
+    /// player from outside ([`Walk::camera`]).
+    pub draw_player: bool,
     /// How this frame steps the game ([`Stepping`]): Classic, id's per-frame
     /// code, unless the host runs uncapped. Set by the host each frame, like
     /// `key_move`.
@@ -689,6 +693,7 @@ pub fn assemble_walk(
         show_fps: false,
         camera: None,
         draw_viewmodel: true,
+        draw_player: false,
         stepping: Stepping::Classic,
         lerpmove: LerpMove::Classic,
         glides: StepGlides::default(),
