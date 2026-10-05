@@ -2948,13 +2948,14 @@ the home screen and plays it offline (`web/sw.js`); `web/PLATFORM.md`,
 "Touch" and "Offline and install", has the design. What that changed
 against id's WinQuake:
 
-- **`in_touch`** (`Cvars::touch`) is a departure, on in 2026, off in
-  Classic: the touch controls for play. The settings page's last row,
-  "Touch controls". `in_touchaccel` (look acceleration, console only,
-  default 0) reads nothing in the game, so it is no departure. Classic on a
-  touch screen keeps only a MENU button and the tappable menu, so a phone
-  is never stranded; Classic on a desktop is untouched (touch.js is not
-  even loaded).
+- **`in_touch`** (`Cvars::touch`) is a departure, the touch controls for
+  play: on in 2026, and since 2026-10-04 (`10b1cc2`) on in Classic too, a
+  shared control ("The controls are shared"), so Reset to Classic does not
+  leave a phone unplayable. The settings page's last row, "Touch controls".
+  `in_touchaccel` (look acceleration, console only, default 0) reads
+  nothing in the game, so it is no departure. With `in_touch` off, a touch
+  screen keeps only a MENU button and the tappable menu, so a phone is
+  never stranded; a desktop is untouched (touch.js is not even loaded).
 - **The menu answers taps** (`Menu::tap` / `point` / `item_at`, quake-rs
   `menu.rs`, "Taps"): the port's input path, not id's. A tap becomes the
   key id's menu already takes (`M_Keydown` through `Key_Event`), so no
@@ -2966,10 +2967,10 @@ against id's WinQuake:
   test draws every list and checks the cursor is where a tap finds it.
 - **The State record** gains three flags: 128 `in_touch`, 256 the menu
   asks y/n (Quit, New Game's question), 512 the live game is paused.
-- **Hidden page, 2026 with touch:** the live game pauses (`pause`, id's
-  plaque and its "paused the game" line) under the menu, and unpauses when
-  the player is back in the game. Classic only stops getting ticks, as
-  every browser page does when hidden.
+- **Hidden page, with the touch controls on** (either preset): the live
+  game pauses (`pause`, id's plaque and its "paused the game" line) under
+  the menu, and unpauses when the player is back in the game. With them
+  off it only stops getting ticks, as every browser page does when hidden.
 - `player_field NAME` (automation): a read-only call the checks read the
   player's edict through.
 

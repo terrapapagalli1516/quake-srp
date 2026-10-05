@@ -310,10 +310,9 @@ pub const MOTION_ROWS: [SettingRow; 6] = [
 ];
 
 /// [`SlopPage::Controls`]'s rows: the mouse and keys, the pad, the touch
-/// screen. Every one but the wheel and the touch controls is a shared
-/// control, on in both presets by default and kept by a preset
-/// (`quake_rs::settings`' module docs say why); still switched here like
-/// any other row.
+/// screen. Every one but the wheel is a shared control, on in both presets
+/// by default and kept by a preset (`quake_rs::settings`' module docs say
+/// why); still switched here like any other row.
 pub const CONTROLS_ROWS: [SettingRow; 7] = [
     SettingRow {
         cvar: "freelook",
