@@ -87,6 +87,7 @@ fn texel_scale(s: &XraySurface) -> f64 {
 /// the mode's size) as `base` says, blended over the game's picture by
 /// `strength` (0: the game's alone). The wireframe is drawn later, over the
 /// output frame ([`wire_over`]).
+#[allow(clippy::too_many_arguments)]
 pub fn composite(
     screen: &mut Rgb,
     (vx, vy): (usize, usize),
@@ -94,6 +95,7 @@ pub fn composite(
     bsp: &Bsp,
     palette: &[[u8; 3]; 256],
     base: XrayBase,
+    tint: &TintRgb,
     strength: f64,
 ) {
     let Some(view) = x.view else { return };
@@ -112,7 +114,7 @@ pub fn composite(
     if base == XrayBase::Game {
         return;
     }
-    let out = base_picture(x, bsp, palette, base, &view, &game);
+    let out = base_picture(x, bsp, palette, base, &view, &game, tint);
     let t = strength.clamp(0.0, 1.0) as f32;
     for y in 0..h {
         for xx in 0..w {
@@ -131,6 +133,7 @@ fn base_picture(
     base: XrayBase,
     view: &XrayView,
     game: &[[u8; 3]],
+    tint: &TintRgb,
 ) -> Vec<[u8; 3]> {
     let (w, h) = (x.w, x.h);
     match base {
@@ -151,6 +154,20 @@ fn base_picture(
         _ => {}
     }
     let mut out = game.to_vec();
+    if base == XrayBase::Bands {
+        // Each thread's bands in its own colour over the picture, a dark
+        // line where one band meets the next.
+        const THREAD: [usize; 8] = [LAVA, BLUE, 63, 251, 111, 208, 40, 183];
+        for &(y0, y1, thread) in &x.bands {
+            let c = palette[THREAD[thread as usize % THREAD.len()]];
+            for y in y0 as usize..(y1 as usize).min(h) {
+                for px in &mut out[y * w..(y + 1) * w] {
+                    *px = if y == y0 as usize && y0 > 0 { [0, 0, 0] } else { mix(*px, c, 0.45) };
+                }
+            }
+        }
+        return out;
+    }
     let entity = |i: usize| x.zbuf.get(i) != x.world_z.get(i);
     // Where a pixel's surface differs from its right or lower neighbour's.
     let surfaces = if base == XrayBase::Cache { x.surface_map() } else { Vec::new() };
@@ -196,7 +213,7 @@ fn base_picture(
                     } else if span_px == 1 {
                         // Exact: every pixel its own divide.
                         palette[if k % 2 == 0 { LAVA } else { DEEP_LAVA }]
-                    } else if k % span_px == 0 {
+                    } else if is_divide(k, sp.count as usize, span_px) {
                         // The perspective divide: this pixel's texel is exact.
                         palette[LAVA]
                     } else {
@@ -256,6 +273,11 @@ fn base_picture(
                         }
                     }
                 },
+                XrayBase::PixelsOff => {
+                    let stepped = matches!(s.paint, XrayPaint::Cached | XrayPaint::Liquid);
+                    let off = stepped && x.drawn.get(i).is_some() && x.drawn.get(i) != x.exact.get(i);
+                    if off { mix(g, tint.colour, tint.alpha) } else { mix(g, [0, 0, 0], tint.dim) }
+                }
                 XrayBase::Error => match s.grads {
                     Some(gr) if matches!(s.paint, XrayPaint::Cached | XrayPaint::PerPixel | XrayPaint::Liquid) => {
                         let e = affine_error(&gr, sp.u as usize, sp.count as usize, k, sp.v as usize, x.persp)
@@ -283,6 +305,15 @@ fn on_grid(g: &XrayGrads, x: f64, y: f64, cell: f64) -> bool {
     here != c(x + 1.0, y) || here != c(x, y + 1.0)
 }
 
+/// Whether pixel `k` of a span of `count` pixels is one where the span's
+/// texel is found exactly — a perspective divide — when the walls step
+/// `n` pixels between them (`D_DrawSpans8`/`16`): the span's first pixel,
+/// every `n`th after it, and its last (the last segment's end); every pixel
+/// at exact (`n` 1).
+pub fn is_divide(k: usize, count: usize, n: usize) -> bool {
+    n <= 1 || k % n == 0 || k + 1 == count
+}
+
 /// The texel distance (mip 0) between the exact texel at pixel `k` of a span
 /// of `count` from column `u` in row `v` and the one the affine spans of
 /// `persp` read there: exact at each segment's first pixel and at the next
@@ -305,6 +336,77 @@ pub fn affine_error(g: &XrayGrads, u: usize, count: usize, k: usize, v: usize, p
     let f = (k - k0) as f64 / (k1 - k0) as f64;
     let affine = [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f];
     (affine[0] - exact[0]).hypot(affine[1] - exact[1])
+}
+
+/// `xray pixelsoff`'s look, in RGB: the pixels off exact `alpha` of the way
+/// to `colour`, the rest `dim` of the way to black.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TintRgb {
+    pub colour: [u8; 3],
+    pub alpha: f32,
+    pub dim: f32,
+}
+
+/// `divides`' marks: `colour`, `width` output pixels wide, `alpha` opaque.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Marks {
+    pub colour: [u8; 3],
+    pub width: f32,
+    pub alpha: f32,
+}
+
+/// A thin mark at each perspective divide of the walls and liquids (the
+/// pixels whose texel the span finds exactly, [`is_divide`]) over the output
+/// frame `out`, as the perspective explainer page marks them: a bar `width`
+/// output pixels wide down the middle of each such pixel, whatever the
+/// mode's pixel size; at exact, where every pixel divides, each pixel whole.
+/// Not where an entity covers the wall.
+pub fn divides_over(out: &mut [u8], (ow, oh): (usize, usize), place: Place, x: &XrayFrame, marks: &Marks) {
+    if marks.alpha <= 0.0 {
+        return;
+    }
+    let n = x.persp.pixels().max(1) as usize;
+    let half = marks.width / 2.0;
+    let mut cover = |col: usize, row: usize, a: f32| {
+        if col < ow && row < oh && a > 0.0 {
+            let at = (row * ow + col) * 3;
+            let c = mix([out[at], out[at + 1], out[at + 2]], marks.colour, a.min(1.0) * marks.alpha);
+            out[at..at + 3].copy_from_slice(&c);
+        }
+    };
+    for sp in &x.spans {
+        let Some(Some(s)) = x.surfaces.get(sp.surface as usize) else { continue };
+        if !matches!(s.paint, XrayPaint::Cached | XrayPaint::Liquid) {
+            continue;
+        }
+        let v = sp.v as usize;
+        let rows = |y: f32| (y.round().max(0.0) as usize).min(oh);
+        let (r0, r1) = (
+            rows(place.y0 + (v as f32 + place.vy) * place.ky),
+            rows(place.y0 + (v as f32 + 1.0 + place.vy) * place.ky),
+        );
+        for k in 0..sp.count as usize {
+            let u = sp.u as usize + k;
+            let i = v * x.w + u;
+            if !is_divide(k, sp.count as usize, n) || x.zbuf.get(i) != x.world_z.get(i) {
+                continue;
+            }
+            let left = place.x0 + (u as f32 + place.vx) * place.kx;
+            let (a, b) = if n <= 1 {
+                (left, left + place.kx)
+            } else {
+                let mid = left + place.kx / 2.0;
+                (mid - half, mid + half)
+            };
+            for col in (a.floor().max(0.0) as usize)..(b.ceil().max(0.0) as usize).min(ow) {
+                // How much of the output column the bar covers.
+                let c = (b.min(col as f32 + 1.0) - a.max(col as f32)).clamp(0.0, 1.0);
+                for row in r0..r1 {
+                    cover(col, row, c);
+                }
+            }
+        }
+    }
 }
 
 /// A heat colour for an error of `e` texels over the picture's grey.

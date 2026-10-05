@@ -7,6 +7,16 @@ warmup S | until T             game seconds run (undrawn) before the first frame
 wake X,Y,Z [at T]              wake the monster nearest the point (its enemy the player, QuakeC's
                                FoundTarget) at film second T (default 0); a line each
 
+# What the player does, at film seconds (each line `[at T]`, default 0; in line order at one time).
+impulse N [at T]               the console's `impulse N` (9: every weapon, 1..8: choose one)
+attack on|off [at T]           `+attack` / `-attack`
+fire NAME [at T]               every entity whose targetname is NAME used, as a trigger's
+                               SUB_UseTargets uses it, the player its activator (e1m7's `t4`: Chthon)
+look P,Y [at T]                the player's view angles (pitch + down, yaw), for `camera player`
+cmd COMMAND [ARGS] [at T]      a console command: +/-attack, +/-jump, +/-forward, +/-back,
+                               +/-moveleft, +/-moveright, +/-movedown, or god, noclip, fly, kill,
+                               impulse N, give ITEM [N]
+
 # The film.
 duration S                     seconds of film (required)
 fps N                          frames a second of film (default 60)
@@ -33,7 +43,15 @@ clock id|free                  how the game's clock meets the film's: id's 72 Hz
                                motion shows the ticks), or a host frame for every film frame, stepped
                                as the uncapped page steps (default: Classic id, slop free)
 speed S [at T]                 the game's speed from film second T on (default 1 from 0; 0.25 is slow
-                               motion; 0 freezes the world while the camera goes on)
+                               motion; 0 freezes the world while the camera goes on); with `clock
+                               free` the game runs at fps / S host frames a second: fps 60 and speed
+                               0.25 is the game at 240 Hz
+stepping id|uncapped           how a host frame steps the game, if not as its clock does (id: id's
+                               per-frame code, which drifts away from 72 Hz; uncapped: slop's, which
+                               lands on id's 72 Hz results at any rate): `clock free`, `speed 0.125`
+                               and `stepping id` is id's code at 480 Hz
+body on|off                    the player's own model drawn (default off: id's client never draws
+                               it), for a camera that looks at the player
 
 # The camera. Angles in degrees, as Quake's (quaketool view --angles): pitch + looks down,
 # yaw 0 along +x and 90 along +y; X,Y,Z is the eye.
@@ -48,6 +66,7 @@ key T X,Y,Z P,Y[,R] [fov F] [ease linear|in|out|inout]
 key T X,Y,Z at X,Y,Z [fov F] [ease ...]      looking at a point (the point is interpolated too)
 fov F                          the field of view (`fov` 90; Hor+ widens it on a wide picture)
 
+# Colours on these lines are RRGGBB (hex, no `#`, which starts a comment) or pN, Quake's palette entry N.
 # X-ray: the renderer's machinery, drawn from what it decided for the 3-D view.
 xray MODE                      the picture: game (default), black, z (the z-buffer, near light),
                                surfaces (a colour each, id's r_drawflat), spans (each surface's
@@ -58,7 +77,16 @@ xray MODE                      the picture: game (default), black, z (the z-buff
                                this frame baked, lit), luxels (the lightmap's 16-texel cells),
                                leaves (the BSP leaf of each visible point), lightmaps (the light
                                alone), error (the affine texel's distance from the exact one: dark
-                               none, yellow half a texel, red one or more)
+                               none, yellow half a texel, red one or more), pixelsoff [COLOUR]
+                               [alpha A] [dim D] (the pixels the perspective span puts off the exact
+                               texel, tinted ff3d8b over the picture; the rest dimmed by D, default 0),
+                               bands (each renderer thread's bands of rows, a colour a thread: which
+                               thread takes which band is the scheduler's, the pixels the same)
+divides on|off [COLOUR] [width W] [alpha A]
+                               a thin mark at each perspective divide (where the walls' and liquids'
+                               texel is found exactly: every 16 pixels in id's spans, 8 in slop's,
+                               every pixel at exact) over the picture: colour 39c2ff, W output pixels
+                               wide (default a 720th of the frame's height), alpha 0.85
 wire world|entities|all|off [hidden|through] [pvs|culled]
                                polygon edges over the picture: the world's, the entities' (brush
                                models, alias models' triangles); hidden by what is in front, or
@@ -68,7 +96,25 @@ vis X,Y,Z                      draw the PVS of this point instead of the camera'
 mix T VALUE                    the x-ray's strength over the game's picture at film second T
                                (keys interpolated; default 1)
 
+# On and off in one pass: the shot rendered twice, A and B, stepped side by side.
+ab LINES | LINES               each side's own lines, after the shot's (`;` between a side's lines):
+                               `ab cvar r_torchflicker 0 | cvar r_torchflicker 1`
+ablabels TEXT | TEXT           each side's label (conchars, bronze)
+split line|side|stack|diff     one frame cut by a vertical line (A left, B right; default), the
+                               halves side by side or stacked (each framed for its half), or A with
+                               each pixel B draws otherwise tinted lava orange
+splitat T X                    the line's place at film second T, 0 the left edge to 1 the right
+                               (keys interpolated, default 0.5): `splitat 1 1` + `splitat 3 0` wipes
+                               B in from the right over two seconds
+absound a|b|both               whose sound: A's, B's (default), or B's in sound.wav and each side's
+                               in sound-a.wav and sound-b.wav
+
 # Output.
 label TEXT                     burned into every frame in Quake's lettering (conchars, bronze)
 labelpos tl|tr|bl|br           its corner (default bl)
-sound on|off                   write sound.wav, the shot's game sound (default off)
+sound on|game|off              write sound.wav, the shot's game sound (default off): `on`, each sound
+                               starts with the frame that shows its cause and plays at its own speed,
+                               in slow motion too; `game`, the mixer on the game's clock, stretched to
+                               the film's (slow motion slows and lowers it; a frozen world is silent)
+events on|off                  write events.json: each sound started, muzzle flash and monster pose
+                               change on screen, with its film second, frame and place (events.rs)

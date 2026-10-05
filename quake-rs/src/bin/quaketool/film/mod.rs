@@ -43,7 +43,16 @@
 //! (nearest neighbour, never smoothed) at its display's shape, centred, black
 //! around it. `sound.wav` is the engine's mixer (the preset's: id's at 11025
 //! Hz in Classic, the slop mixer at 48000 Hz), mixed to each frame's end, so
-//! its sample `n` is heard at film second `n / rate`.
+//! its sample `n` is heard at film second `n / rate` and a sound starts with
+//! the frame that shows its cause, at any speed (`sound game` runs the mixer
+//! on the game's clock and stretches it instead). `events.json`
+//! ([`events`]) logs what the frames did: the sounds started, the muzzle
+//! flashes, the monsters' poses.
+//!
+//! An `ab` shot is two takes ([`Take`]): the shot with each side's lines,
+//! stepped together film frame by film frame — each its own game, clock and
+//! sound — and composed into one frame (`split`), so an option on and off is
+//! one render.
 
 use std::io::Write as _;
 use std::rc::Rc;
@@ -61,12 +70,14 @@ use quake_rs::snd::Mixer;
 use quake_rs::stepping::Stepping;
 
 pub mod camera;
+pub mod events;
 pub mod png;
 pub mod shot;
 pub mod text;
 pub mod xray;
 
-use shot::{CameraSpec, Clock, Corner, Player, Preset, Shot, Warmup, World, XrayBase};
+use events::{EventLog, Obj};
+use shot::{Action, CameraSpec, Clock, Corner, Player, Preset, Shot, SoundClock, Warmup, World, XrayBase};
 
 /// QuakeC's `flags` bits (defs.qc).
 const FL_GODMODE: f32 = 64.0;
@@ -147,9 +158,17 @@ pub fn cmd_film(args: &[String]) -> Result<String, String> {
                 continue;
             }
             "--sound" => {
-                // `--sound`, or the shot line's `--sound on|off`.
-                shot.sound = val.map(String::as_str) != Some("off");
-                i += if val.is_some_and(|v| v == "on" || v == "off") { 2 } else { 1 };
+                // `--sound`, or the shot line's `--sound on|game|off`.
+                match val.map(String::as_str) {
+                    Some(v @ ("on" | "off" | "game" | "film")) => {
+                        shot.set(&format!("sound {v}"))?;
+                        i += 2;
+                    }
+                    _ => {
+                        shot.sound = true;
+                        i += 1;
+                    }
+                }
                 continue;
             }
             "--threads" => threads = need()?.parse().ok().filter(|&n| n > 0).ok_or("--threads N")?,
@@ -358,6 +377,7 @@ fn apply_settings(game: &mut Game, shot: &Shot, c: &Cvars, stepping: Stepping) {
             w.lerpmodels = c.lerpmodels;
             w.nailbarrels = c.nailbarrels;
             w.draw_viewmodel = shot.gun;
+            w.draw_player = shot.body;
             if !shot.messages {
                 w.centerprint = None;
                 w.notify = ConNotify::default();
@@ -488,7 +508,655 @@ fn camera_at(shot: &Shot, path: Option<&camera::Path>, t: f64) -> Option<camera:
     }
 }
 
-/// Render the shot (see the module doc). Returns the report line.
+/// The palette index the lightmaps view lights: a light grey, so the
+/// colormap's 64 shades run from it to black.
+const XRAY_GREY: u8 = 9;
+
+/// One render of a shot: its game, clocks, picture, sound and events. A shot
+/// is one take, or with `ab` two, stepped side by side.
+struct Take {
+    shot: Shot,
+    /// `""`, or `"a"` / `"b"` for an `ab` shot's sides.
+    name: &'static str,
+    c: Cvars,
+    vid: Vid,
+    aspect: f64,
+    clock: Clock,
+    stepping: Stepping,
+    gamma: [u8; 256],
+    palette: [[u8; 3]; 256],
+    game: Game,
+    path: Option<camera::Path>,
+    /// The take's output frame size (an `ab` side's half, or the shot's).
+    out: (usize, usize),
+    /// The x-ray base picture is drawn (not `game`), the renderer captures.
+    wants_base: bool,
+    mixer: Option<Mixer>,
+    /// The sound on the film's clock (with `sound game`, stretched from
+    /// `game_pcm`, the mixer's on the game's clock).
+    pcm: Vec<i16>,
+    game_pcm: Vec<i16>,
+    sound_start: i64,
+    /// clock id: the 1/72 s ticks of game time run since film second 0.
+    ticks: u64,
+    last: Option<Vec<u8>>,
+    drawn: usize,
+    held: usize,
+    clock_at_start: f64,
+    log: Option<EventLog>,
+}
+
+impl Take {
+    /// Build `shot`'s game, warm it up (undrawn: the map's monsters settle,
+    /// or the demo reaches `from`) and draw one paused frame from the first
+    /// camera, so the surface cache is warm at frame 0. `sound`: keep its
+    /// sound; `events`: keep its log.
+    fn new(
+        pak: &Pak,
+        mut shot: Shot,
+        name: &'static str,
+        out: (usize, usize),
+        threads: usize,
+        sound: bool,
+        events: bool,
+    ) -> Result<Take, String> {
+        shot.size = out;
+        let c = shot_cvars(&shot);
+        quake_rs::draw::set_scaled_2d(c.scaled_2d);
+        let (vid, aspect) = shot_vid(&shot, &c);
+        let clock = shot.clock();
+        let uncapped = shot.stepping.unwrap_or(clock == Clock::Free);
+        let stepping = if uncapped { Stepping::Uncapped } else { Stepping::Classic };
+        let mut calls = Vec::new();
+        let mut game = build(&shot, pak, &c, &mut calls)?;
+        game.renderer().set_threads(threads);
+        let path = match &shot.camera {
+            Some(CameraSpec::Path(keys)) => Some(camera::Path::new(keys, shot.fov)),
+            _ => None,
+        };
+        let wants_base = shot.xray != XrayBase::Game;
+        let capture = wants_base || shot.wire.world || shot.wire.entities || shot.divides.is_some();
+        game.renderer().set_xray(Some(XrayOptions {
+            capture,
+            lightmaps: (shot.xray == XrayBase::Lightmaps).then_some(XRAY_GREY),
+            vis_from: shot.vis,
+            exact: shot.xray == XrayBase::PixelsOff,
+        }));
+        let palette = game.palette();
+        // The sound: the preset's mixer, painted to each frame's end.
+        let mut mixer: Option<Mixer> = sound.then(|| {
+            let mut m = c.sound.mixer(pak, 48000);
+            m.cvars.volume = c.volume;
+            m
+        });
+        if let Some(m) = mixer.as_mut() {
+            m.run(pak, &calls);
+        }
+        let mut log = events.then(EventLog::default);
+        if let Some(log) = log.as_mut() {
+            for call in &calls {
+                if let SoundCall::Static(loops) = call {
+                    for l in loops {
+                        let e = Obj::kind("loop").num("t", 0.0).str("sample", &l.sample).vec("origin", &l.origin);
+                        let e = e.num("volume", f64::from(l.volume)).num("attenuation", f64::from(l.attenuation));
+                        log.events.push(take_tag(e, name).end());
+                    }
+                }
+            }
+        }
+        let mut take = Take {
+            shot,
+            name,
+            c,
+            vid,
+            aspect,
+            clock,
+            stepping,
+            gamma: render::build_gamma_table(1.0),
+            palette,
+            game,
+            path,
+            out,
+            wants_base,
+            mixer,
+            pcm: Vec::new(),
+            game_pcm: Vec::new(),
+            sound_start: 0,
+            ticks: 0,
+            last: None,
+            drawn: 0,
+            held: 0,
+            clock_at_start: 0.0,
+            log,
+        };
+        take.gamma = render::build_gamma_table(take.c.gamma);
+        take.warm_up(pak);
+        Ok(take)
+    }
+
+    fn warm_up(&mut self, pak: &Pak) {
+        let shot = &self.shot;
+        apply_settings(&mut self.game, shot, &self.c, Stepping::Classic);
+        let mut warmed = 0.0;
+        let done = |game: &Game, warmed: f64| match (&shot.world, shot.warmup, game) {
+            (World::Demo { from, .. }, ..) => warmed + 1e-9 >= *from,
+            (World::Map(_), Warmup::For(s), _) => warmed + 1e-9 >= s,
+            (World::Map(_), Warmup::Until(t), Game::Walk(w)) => f64::from(w.clock) + 1e-6 >= t || warmed > 600.0,
+            (World::Map(_), Warmup::Until(_), Game::Demo(_)) => true,
+        };
+        let first = camera_at(shot, self.path.as_ref(), 0.0);
+        while !done(&self.game, warmed) {
+            if let (Game::Walk(w), Player::Camera, Some(pose)) = (&mut self.game, shot.player, first) {
+                set_origin(w, [pose.pos[0], pose.pos[1], pose.pos[2] - VIEWHEIGHT].map(|v| v as f32));
+            }
+            let frame = self.game.frame(TICK, &self.vid, false);
+            warmed += TICK;
+            if let Some(m) = self.mixer.as_mut() {
+                // Mixed and dropped: the warm-up's sound is not the shot's.
+                m.run(pak, &frame.sound);
+                paint_to(m, (warmed * f64::from(m.rate())).round() as i64, &mut Vec::new());
+            }
+            render::recycle_image(frame.image);
+        }
+        self.set_camera(first);
+        let frame = self.game.frame(0.0, &self.vid, true);
+        render::recycle_image(frame.image);
+        self.sound_start = self.mixer.as_ref().map_or(0, |m| m.painted_time());
+        self.clock_at_start = self.game_time();
+    }
+
+    /// The game's clock (`cl.time`).
+    fn game_time(&self) -> f64 {
+        match &self.game {
+            Game::Walk(w) => f64::from(w.clock),
+            Game::Demo(d) => d.time,
+        }
+    }
+
+    fn set_camera(&mut self, pose: Option<camera::Pose>) {
+        match &mut self.game {
+            Game::Walk(w) => {
+                w.camera = pose.map(|p| p.camera());
+                if let (Player::Camera, Some(p)) = (self.shot.player, pose) {
+                    set_origin(w, [p.pos[0], p.pos[1], p.pos[2] - VIEWHEIGHT].map(|v| v as f32));
+                }
+            }
+            Game::Demo(d) => d.camera = pose.map(|p| p.camera()),
+        }
+    }
+
+    /// Film frame `n`: the shot's actions due, the host frames it takes (its
+    /// picture into [`Take::last`] when `wanted`), its sound to the frame's
+    /// end and its events.
+    fn frame(&mut self, pak: &Pak, n: usize, wanted: bool) {
+        quake_rs::draw::set_scaled_2d(self.c.scaled_2d);
+        let fps = self.shot.fps;
+        let t = n as f64 / fps;
+        let prev = t - 1.0 / fps;
+        let dt = self.shot.game_time(t) - self.shot.game_time(prev);
+        if let Game::Walk(w) = &mut self.game {
+            for &(at, when) in &self.shot.wake {
+                if when <= t && (when > prev || n == 0) {
+                    wake_monster(w, at);
+                }
+            }
+            for action in self.shot.actions_due(prev, t, n == 0) {
+                run_action(w, action);
+            }
+        }
+        // This film frame's host frames, each with the film second its camera
+        // is at: one per film frame (free); or id's ticks of game time up to
+        // now (id), the last drawn and none if no tick is due, the picture
+        // held; a frozen world is one paused frame, redrawn from the camera.
+        let mut steps: Vec<(f64, f64)> = Vec::new();
+        match self.clock {
+            Clock::Free => steps.push((dt.min(0.1), t)),
+            Clock::Id if dt <= 0.0 => steps.push((0.0, t)),
+            Clock::Id => {
+                let g = self.shot.game_time(t);
+                while (self.ticks + 1) as f64 * TICK <= g + 1e-9 {
+                    self.ticks += 1;
+                    steps.push((TICK, self.shot.film_time(self.ticks as f64 * TICK)));
+                }
+                if steps.is_empty() && self.last.is_none() {
+                    steps.push((0.0, t));
+                }
+            }
+        }
+        if steps.is_empty() {
+            self.held += 1;
+        }
+        let count = steps.len();
+        for (i, (step, tc)) in steps.into_iter().enumerate() {
+            let draw = wanted && i + 1 == count;
+            let pose = camera_at(&self.shot, self.path.as_ref(), tc);
+            apply_settings(&mut self.game, &self.shot, &self.c, self.stepping);
+            self.set_camera(pose);
+            let frame = self.game.frame(step, &self.vid, draw);
+            if let Some(m) = self.mixer.as_mut() {
+                m.run(pak, &frame.sound);
+            }
+            if self.log.is_some() {
+                self.log_events(n, t, &frame.sound);
+            }
+            if draw {
+                let mut rgb = present(&frame, &self.palette, &self.gamma);
+                if self.wants_base {
+                    self.xray_base(&mut rgb, tc);
+                }
+                let (ow, oh) = self.out;
+                let mut out = fit(&rgb, frame.image.w, frame.image.h, self.aspect, ow, oh);
+                self.overlays(&mut out, (frame.image.w, frame.image.h), tc);
+                self.last = Some(out);
+                self.drawn += 1;
+            }
+            render::recycle_image(frame.image);
+        }
+        self.sound_to(n);
+    }
+
+    /// Paint the sound to the end of film frame `n`: sample `k` of
+    /// [`Take::pcm`] is heard at film second `k / rate`.
+    fn sound_to(&mut self, n: usize) {
+        let Some(m) = self.mixer.as_mut() else { return };
+        let rate = f64::from(m.rate());
+        let film_end = ((n + 1) as f64 / self.shot.fps * rate).round() as i64;
+        match self.shot.sound_clock {
+            SoundClock::Film => paint_to(m, self.sound_start + film_end, &mut self.pcm),
+            SoundClock::Game => {
+                // The mixer on the game's clock, then each film sample read
+                // from where the game's clock was at it (linear between pairs).
+                let g_end = (self.shot.game_time((n + 1) as f64 / self.shot.fps) * rate).round() as i64;
+                paint_to(m, self.sound_start + g_end, &mut self.game_pcm);
+                let pairs = self.game_pcm.len() / 2;
+                let mut j = (self.pcm.len() / 2) as i64;
+                while j < film_end {
+                    let g = self.shot.game_time(j as f64 / rate) * rate;
+                    let i0 = (g.floor().max(0.0) as usize).min(pairs.saturating_sub(1));
+                    let i1 = (i0 + 1).min(pairs.saturating_sub(1));
+                    let f = (g - g.floor()).clamp(0.0, 1.0);
+                    for ch in 0..2 {
+                        let (a, b) = (
+                            f64::from(self.game_pcm.get(2 * i0 + ch).copied().unwrap_or(0)),
+                            f64::from(self.game_pcm.get(2 * i1 + ch).copied().unwrap_or(0)),
+                        );
+                        self.pcm.push((a + (b - a) * f).round() as i16);
+                    }
+                    j += 1;
+                }
+            }
+        }
+    }
+
+    /// The camera this frame was drawn from: the shot's, the player's eye,
+    /// or the demo's recorded view (the renderer's convention: pitch + up).
+    fn view_camera(&self) -> render::Camera {
+        match &self.game {
+            Game::Walk(w) => w.camera.unwrap_or_else(|| {
+                let (eye, a) = w.server.player_view();
+                render::Camera { pos: eye, yaw: a[1], pitch: -a[0], roll: 0.0, fov_deg: 90.0 }
+            }),
+            Game::Demo(d) => d.camera.unwrap_or(render::Camera {
+                pos: d.view.view_origin,
+                yaw: d.view.view_angles[1],
+                pitch: -d.view.view_angles[0],
+                roll: d.view.view_angles[2],
+                fov_deg: 90.0,
+            }),
+        }
+    }
+
+    /// Where the view lies on the take's output frame.
+    fn place(&self, (sw, sh): (usize, usize)) -> xray::Place {
+        let viewsize = if self.shot.hud { self.c.viewsize } else { 120.0 };
+        let v = render::calc_refdef(self.vid.width, self.vid.height, viewsize, false, self.c.sbar_layout).vrect;
+        let (ow, oh) = self.out;
+        let (x0, y0, rw, rh) = fit_rect(self.aspect, ow, oh);
+        xray::Place {
+            vx: v.x as f32,
+            vy: v.y as f32,
+            x0: x0 as f32,
+            y0: y0 as f32,
+            kx: rw as f32 / sw as f32,
+            ky: rh as f32 / sh as f32,
+        }
+    }
+
+    /// The x-ray base picture over the 3-D view of `rgb` (the screen).
+    fn xray_base(&mut self, rgb: &mut [u8], t: f64) {
+        let viewsize = if self.shot.hud { self.c.viewsize } else { 120.0 };
+        let v = render::calc_refdef(self.vid.width, self.vid.height, viewsize, false, self.c.sbar_layout).vrect;
+        let strength = self.shot.mix_at(t);
+        let (bsp, x) = match &self.game {
+            Game::Walk(w) => (&w.bsp, w.renderer.xray_frame()),
+            Game::Demo(d) => (&d.bsp, d.renderer.xray_frame()),
+        };
+        let Some(x) = x else { return };
+        let tint = self.shot.tint;
+        let tint =
+            xray::TintRgb { colour: tint.colour.rgb(&self.palette), alpha: tint.alpha as f32, dim: tint.dim as f32 };
+        let mut screen = xray::Rgb { w: self.vid.width, h: self.vid.height, px: rgb };
+        xray::composite(&mut screen, (v.x, v.y), x, bsp, &self.palette, self.shot.xray, &tint, strength);
+    }
+
+    /// The wireframe and the divide marks over the output frame `out` (the
+    /// screen `sw x sh` fitted into it).
+    fn overlays(&self, out: &mut [u8], screen: (usize, usize), t: f64) {
+        let shot = &self.shot;
+        if !(shot.wire.world || shot.wire.entities || shot.divides.is_some()) {
+            return;
+        }
+        let (bsp, x) = match &self.game {
+            Game::Walk(w) => (&w.bsp, w.renderer.xray_frame()),
+            Game::Demo(d) => (&d.bsp, d.renderer.xray_frame()),
+        };
+        let Some(x) = x else { return };
+        let place = self.place(screen);
+        let strength = shot.mix_at(t);
+        if shot.wire.world || shot.wire.entities {
+            xray::wire_over(out, self.out, place, x, bsp, &self.palette, shot.wire, strength);
+        }
+        if let Some(d) = shot.divides {
+            let width = d.width.unwrap_or(self.out.1 as f64 / 720.0).max(0.25) as f32;
+            let marks = xray::Marks { colour: d.colour.rgb(&self.palette), width, alpha: (d.alpha * strength) as f32 };
+            xray::divides_over(out, self.out, place, x, &marks);
+        }
+    }
+
+    /// What this host frame did, into the log: the sounds it started, the
+    /// muzzle flashes, the monsters' poses on screen.
+    fn log_events(&mut self, n: usize, t: f64, sound: &[SoundCall]) {
+        let game_t = self.game_time();
+        let cam = self.view_camera();
+        let proj = Projector::new(&cam, &self.vid, self.aspect, self.out, self.shot.hud, &self.c);
+        let stamp = |kind: &str| Obj::kind(kind).num("t", t).int("frame", n as i64).num("game_t", game_t);
+        let mut events = Vec::new();
+        // The sounds: where, how loud, and the channel the mixer gave each.
+        let mut taken: Vec<usize> = Vec::new();
+        for call in sound {
+            let SoundCall::Start { events: starts, .. } = call else { continue };
+            for s in starts {
+                let mut e = stamp("sound")
+                    .str("sample", &s.sample)
+                    .int("entity", i64::from(s.entity))
+                    .int("channel", i64::from(s.channel))
+                    .vec("origin", &s.origin)
+                    .num("volume", f64::from(s.volume))
+                    .num("attenuation", f64::from(s.attenuation))
+                    .num("dist", f64::from(proj.dist(s.origin)))
+                    .num("pan", f64::from(proj.pan(s.origin)))
+                    .opt_vec("screen", proj.screen(s.origin).as_ref().map(|p| &p[..]));
+                if let Some(m) = &self.mixer {
+                    let ch = m.channels().find(|c| {
+                        c.pos == 0
+                            && !taken.contains(&c.index)
+                            && c.entnum == s.entity
+                            && c.entchannel == s.channel
+                            && c.sample == s.sample
+                    });
+                    if let Some(c) = ch {
+                        taken.push(c.index);
+                        e = e.int("left", i64::from(c.leftvol)).int("right", i64::from(c.rightvol));
+                    }
+                }
+                events.push(take_tag(e, self.name).end());
+            }
+        }
+        let log = self.log.as_mut().expect("logging");
+        match &self.game {
+            Game::Walk(w) => {
+                let vm = &w.server.vm;
+                for l in w.server.lit_entities().filter(|l| l.effects & quake_rs::server::EF_MUZZLEFLASH != 0) {
+                    let e = stamp("flash")
+                        .int("entity", i64::from(l.key))
+                        .bool("player", l.key == w.player)
+                        .vec("origin", &l.origin)
+                        .opt_vec("screen", proj.screen(l.origin).as_ref().map(|p| &p[..]));
+                    events.push(take_tag(e, self.name).end());
+                }
+                let sent = w.server.entities_sent_to_eye(cam.pos);
+                for m in 1..vm.num_edicts() as i32 {
+                    // A monster: FL_MONSTER, or a monster_ that never sets it (Chthon).
+                    let monster = vm.ent_get_float(m, "flags") as i32 & FL_MONSTER != 0
+                        || vm.ent_string_ref(m, "classname").starts_with("monster_");
+                    if vm.is_free_edict(m) || !monster {
+                        continue;
+                    }
+                    let origin = vm.ent_get_vector(m, "origin");
+                    let on_screen = sent.get(m as usize).copied().unwrap_or(false) && proj.screen(origin).is_some();
+                    let pose = vm.ent_get_float(m, "frame") as i32;
+                    let model = vm.ent_string_ref(m, "model");
+                    let mdl = w.model_cache.get(model).and_then(Option::as_ref);
+                    if let Some(e) = pose_event(log, m, pose, on_screen, mdl, &stamp) {
+                        let e = e
+                            .str("class", vm.ent_string_ref(m, "classname"))
+                            .str("model", model)
+                            .vec("origin", &origin)
+                            .opt_vec("screen", proj.screen(origin).as_ref().map(|p| &p[..]));
+                        events.push(take_tag(e, self.name).end());
+                    }
+                }
+            }
+            Game::Demo(d) => {
+                // A message's flashes once, in the frame that reads it.
+                if log.demo_idx != Some(d.idx) {
+                    log.demo_idx = Some(d.idx);
+                    let f = &d.demo.frames[d.idx];
+                    if f.view_effects & quake_rs::server::EF_MUZZLEFLASH != 0 {
+                        let e =
+                            stamp("flash").int("entity", -1).bool("player", true).vec("origin", &d.view.view_origin);
+                        events.push(take_tag(e.null("screen"), self.name).end());
+                    }
+                    for en in d.view.entities.iter().filter(|e| e.num >= 0) {
+                        if en.effects & quake_rs::server::EF_MUZZLEFLASH != 0 {
+                            let e = stamp("flash")
+                                .int("entity", i64::from(en.num))
+                                .bool("player", false)
+                                .vec("origin", &en.origin)
+                                .opt_vec("screen", proj.screen(en.origin).as_ref().map(|p| &p[..]));
+                            events.push(take_tag(e, self.name).end());
+                        }
+                    }
+                }
+                for en in d.view.entities.iter().filter(|e| e.num >= 0) {
+                    let model = d.demo.model_precache.get(en.modelindex).map_or("", String::as_str);
+                    if !events::MONSTER_MODELS.contains(&model) {
+                        continue;
+                    }
+                    let mdl = d.models.get(en.modelindex).and_then(Option::as_ref);
+                    let on_screen = proj.screen(en.origin).is_some();
+                    if let Some(e) = pose_event(log, en.num, en.frame, on_screen, mdl, &stamp) {
+                        let e = e
+                            .str("class", model.trim_start_matches("progs/").trim_end_matches(".mdl"))
+                            .str("model", model)
+                            .vec("origin", &en.origin)
+                            .opt_vec("screen", proj.screen(en.origin).as_ref().map(|p| &p[..]));
+                        events.push(take_tag(e, self.name).end());
+                    }
+                }
+            }
+        }
+        log.events.extend(events);
+    }
+}
+
+/// A monster's pose this frame against the log's: the event of a change
+/// seen on screen (or of its first pose there), or `None`.
+fn pose_event(
+    log: &mut EventLog,
+    entity: i32,
+    pose: i32,
+    on_screen: bool,
+    mdl: Option<&quake_rs::mdl::Mdl>,
+    stamp: &dyn Fn(&str) -> Obj,
+) -> Option<Obj> {
+    if !on_screen {
+        log.poses.remove(&entity);
+        return None;
+    }
+    let from = log.poses.insert(entity, pose);
+    if from == Some(pose) {
+        return None;
+    }
+    let name = |f: i32| mdl.and_then(|m| events::frame_name(m, f));
+    Some(
+        stamp("pose")
+            .int("entity", i64::from(entity))
+            .int("pose", i64::from(pose))
+            .opt_str("name", name(pose).as_deref())
+            .opt_int("from", from.map(i64::from))
+            .opt_str("from_name", from.and_then(name).as_deref()),
+    )
+}
+
+/// An event of an `ab` side carries its side.
+fn take_tag(e: Obj, name: &str) -> Obj {
+    if name.is_empty() { e } else { e.str("take", name) }
+}
+
+/// A world point on a take's output frame, as the frame's camera projected
+/// it (`R_ViewChanged`'s projection of the view, then the fit).
+struct Projector {
+    pos: [f32; 3],
+    forward: [f64; 3],
+    right: [f64; 3],
+    up: [f64; 3],
+    /// The view's centre and scales, in output pixels.
+    cx: f64,
+    cy: f64,
+    xscale: f64,
+    yscale: f64,
+    /// The view's rectangle on the output.
+    rect: [f64; 4],
+}
+
+impl Projector {
+    fn new(cam: &render::Camera, vid: &Vid, aspect: f64, out: (usize, usize), hud: bool, c: &Cvars) -> Projector {
+        let viewsize = if hud { c.viewsize } else { 120.0 };
+        let v = render::calc_refdef(vid.width, vid.height, viewsize, false, c.sbar_layout).vrect;
+        let pixel_aspect = render::vid_aspect(vid.width, vid.height, vid.display_aspect);
+        let fov_x = vid.video.fov_mode.fov_x(cam.fov_deg, vid.width, vid.height, pixel_aspect);
+        let (x0, y0, rw, rh) = fit_rect(aspect, out.0, out.1);
+        let (kx, ky) = (rw as f64 / vid.width as f64, rh as f64 / vid.height as f64);
+        let xscale = (v.w as f64 / 2.0) / (f64::from(fov_x) * 0.5).to_radians().tan();
+        let (y, p, r) =
+            (f64::from(cam.yaw).to_radians(), f64::from(cam.pitch).to_radians(), f64::from(cam.roll).to_radians());
+        let forward = [p.cos() * y.cos(), p.cos() * y.sin(), p.sin()];
+        let right0 = [y.sin(), -y.cos(), 0.0];
+        let up0 = [
+            right0[1] * forward[2] - right0[2] * forward[1],
+            right0[2] * forward[0] - right0[0] * forward[2],
+            right0[0] * forward[1] - right0[1] * forward[0],
+        ];
+        let (sr, cr) = (r.sin(), r.cos());
+        let right = [0, 1, 2].map(|k| right0[k] * cr - up0[k] * sr);
+        let up = [0, 1, 2].map(|k| right0[k] * sr + up0[k] * cr);
+        Projector {
+            pos: cam.pos,
+            forward,
+            right,
+            up,
+            cx: x0 as f64 + (v.x as f64 + v.w as f64 / 2.0) * kx,
+            cy: y0 as f64 + (v.y as f64 + v.h as f64 / 2.0) * ky,
+            xscale: xscale * kx,
+            yscale: xscale * f64::from(pixel_aspect) * ky,
+            rect: [
+                x0 as f64 + v.x as f64 * kx,
+                y0 as f64 + v.y as f64 * ky,
+                x0 as f64 + (v.x + v.w) as f64 * kx,
+                y0 as f64 + (v.y + v.h) as f64 * ky,
+            ],
+        }
+    }
+
+    fn rel(&self, p: [f32; 3]) -> [f64; 3] {
+        [0, 1, 2].map(|k| f64::from(p[k]) - f64::from(self.pos[k]))
+    }
+
+    fn dist(&self, p: [f32; 3]) -> f32 {
+        let d = self.rel(p);
+        (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt() as f32
+    }
+
+    /// -1 (left of the camera) to 1 (right).
+    fn pan(&self, p: [f32; 3]) -> f32 {
+        let d = self.rel(p);
+        let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+        if len < 1e-6 {
+            return 0.0;
+        }
+        ((d[0] * self.right[0] + d[1] * self.right[1] + d[2] * self.right[2]) / len) as f32
+    }
+
+    /// The point in output pixels, if it is in front of the camera and in
+    /// the view.
+    fn screen(&self, p: [f32; 3]) -> Option<[f32; 2]> {
+        let d = self.rel(p);
+        let dot = |v: [f64; 3]| d[0] * v[0] + d[1] * v[1] + d[2] * v[2];
+        let z = dot(self.forward);
+        if z < 1.0 {
+            return None;
+        }
+        let (x, y) = (self.cx + self.xscale * dot(self.right) / z, self.cy - self.yscale * dot(self.up) / z);
+        let [l, t, r, b] = self.rect;
+        (x >= l && x < r && y >= t && y < b).then_some([x as f32, y as f32])
+    }
+}
+
+/// Do `action` to the game (`Shot::actions`).
+fn run_action(w: &mut Walk, action: &Action) {
+    match action {
+        Action::Impulse(i) => w.next_impulse = *i,
+        Action::Attack(on) => w.in_attack = *on,
+        Action::Fire(name) => fire_target(w, name),
+        Action::Look(pitch, yaw) => (w.pitch, w.yaw) = (*pitch, *yaw),
+        Action::Console(argv) => {
+            let name = argv[0].as_str();
+            let on = name.starts_with('+');
+            match name.trim_start_matches(['+', '-']) {
+                "attack" if name != "attack" => w.in_attack = on,
+                "jump" if name != "jump" => w.in_jump = on,
+                "movedown" if name != "movedown" => w.in_down = on,
+                "forward" if name != "forward" => w.in_fwd = if on { 1.0 } else { 0.0 },
+                "back" if name != "back" => w.in_fwd = if on { -1.0 } else { 0.0 },
+                "moveright" if name != "moveright" => w.in_side = if on { 1.0 } else { 0.0 },
+                "moveleft" if name != "moveleft" => w.in_side = if on { -1.0 } else { 0.0 },
+                _ => {
+                    let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
+                    let (mut said, mut sound) = (Vec::new(), Vec::new());
+                    host_cmd::run_game_command(w, name, &argv, &mut said, &mut sound);
+                }
+            }
+        }
+    }
+}
+
+/// `SUB_UseTargets` for one name: each entity whose `targetname` is `name`
+/// has its `use` run, the player its `activator` and `other` (as a trigger
+/// the player touched fires its targets).
+fn fire_target(w: &mut Walk, name: &str) {
+    let p = w.player;
+    let vm = &mut w.server.vm;
+    let t = vm.sv_time() as f32;
+    let targets: Vec<i32> = (1..vm.num_edicts() as i32)
+        .filter(|&e| !vm.is_free_edict(e) && vm.ent_string_ref(e, "targetname") == name)
+        .collect();
+    for e in targets {
+        let f = vm.ent_get_int(e, "use");
+        if f <= 0 {
+            continue;
+        }
+        vm.gset_int("self", e);
+        vm.gset_int("other", p);
+        vm.gset_int("activator", p);
+        vm.gset_float("time", t);
+        if vm.execute(f as usize).is_err() {
+            vm.reset_execution();
+        }
+    }
+}
+
+/// Render the shot (see the module doc). Returns the report.
 fn run(
     pak_path: &str,
     shot: &Shot,
@@ -500,184 +1168,73 @@ fn run(
     let started = Instant::now();
     let bytes = std::fs::read(pak_path).map_err(|e| format!("cannot read {pak_path}: {e}"))?;
     let pak = Pak::from_bytes("pak0.pak".into(), bytes).map_err(|e| e.to_string())?;
-    let c = shot_cvars(shot);
-    quake_rs::draw::set_scaled_2d(c.scaled_2d);
-    let (vid, aspect) = shot_vid(shot, &c);
-    let clock = shot.clock();
-    let stepping = if clock == Clock::Free { Stepping::Uncapped } else { Stepping::Classic };
-    let gamma = render::build_gamma_table(c.gamma);
-    let mut calls = Vec::new();
-    let mut game = build(shot, &pak, &c, &mut calls)?;
-    game.renderer().set_threads(threads);
-    let path = match &shot.camera {
-        Some(CameraSpec::Path(keys)) => Some(camera::Path::new(keys, shot.fov)),
-        _ => None,
-    };
-    let wants_xray = shot.xray != XrayBase::Game || shot.wire.world || shot.wire.entities;
-    let wants_base = shot.xray != XrayBase::Game;
-    let xray_options = XrayOptions {
-        capture: wants_xray,
-        lightmaps: (shot.xray == XrayBase::Lightmaps).then_some(XRAY_GREY),
-        vis_from: shot.vis,
-    };
-    game.renderer().set_xray(Some(xray_options));
-    let palette = game.palette();
-
-    // The sound: the preset's mixer, mixing exactly to each frame's end.
-    let mut mixer: Option<Mixer> = shot.sound.then(|| {
-        let mut m = c.sound.mixer(&pak, 48000);
-        m.cvars.volume = c.volume;
-        m
-    });
-    if let Some(m) = mixer.as_mut() {
-        m.run(&pak, &calls);
-    }
-    let mut pcm: Vec<i16> = Vec::new();
-
-    // Warm up (undrawn): the map's monsters settle, or the demo reaches `from`.
-    apply_settings(&mut game, shot, &c, Stepping::Classic);
-    let mut warmed = 0.0;
-    let warm_done = |game: &Game, warmed: f64| match (&shot.world, shot.warmup, game) {
-        (World::Demo { from, .. }, ..) => warmed + 1e-9 >= *from,
-        (World::Map(_), Warmup::For(s), _) => warmed + 1e-9 >= s,
-        (World::Map(_), Warmup::Until(t), Game::Walk(w)) => f64::from(w.clock) + 1e-6 >= t || warmed > 600.0,
-        (World::Map(_), Warmup::Until(_), Game::Demo(_)) => true,
-    };
-    while !warm_done(&game, warmed) {
-        if let Game::Walk(w) = &mut game {
-            if let (Player::Camera, Some(pose)) = (shot.player, camera_at(shot, path.as_ref(), 0.0)) {
-                set_origin(w, [pose.pos[0], pose.pos[1], pose.pos[2] - VIEWHEIGHT].map(|v| v as f32));
+    let (ow, oh) = shot.size;
+    // The takes: the shot, or its two sides, each at its part of the frame.
+    let shots = shot.takes()?;
+    let mut takes = Vec::new();
+    let split = shot.ab.as_ref().map(|ab| ab.split);
+    for (k, s) in shots.into_iter().enumerate() {
+        let (name, out) = match split {
+            None => ("", (ow, oh)),
+            Some(split) => {
+                let out = match split {
+                    shot::Split::Side => (if k == 0 { ow / 2 } else { ow - ow / 2 }, oh),
+                    shot::Split::Stack => (ow, if k == 0 { oh / 2 } else { oh - oh / 2 }),
+                    _ => (ow, oh),
+                };
+                (["a", "b"][k], out)
             }
-        }
-        let frame = game.frame(TICK, &vid, false);
-        warmed += TICK;
-        if let Some(m) = mixer.as_mut() {
-            // Mixed and dropped: the warm-up's sound is not the shot's.
-            m.run(&pak, &frame.sound);
-            paint_to(m, (warmed * f64::from(m.rate())).round() as i64, &mut Vec::new());
-        }
-        render::recycle_image(frame.image);
+        };
+        let sound = shot.sound
+            && match shot.ab.as_ref().map(|ab| ab.sound) {
+                None | Some(shot::AbSound::Both) => true,
+                Some(shot::AbSound::A) => k == 0,
+                Some(shot::AbSound::B) => k == 1,
+            };
+        takes.push(Take::new(&pak, s, name, out, threads, sound, shot.events)?);
     }
-    // One paused frame from the first camera, drawn and dropped: the surface
-    // cache is warm at frame 0, as a running game's is.
-    if let Game::Walk(w) = &mut game {
-        w.camera = camera_at(shot, path.as_ref(), 0.0).map(|p| p.camera());
-    } else if let Game::Demo(d) = &mut game {
-        d.camera = camera_at(shot, path.as_ref(), 0.0).map(|p| p.camera());
-    }
-    let frame = game.frame(0.0, &vid, true);
-    render::recycle_image(frame.image);
-    let sound_start = mixer.as_ref().map_or(0, |m| m.painted_time());
-    let clock_at_start = match &game {
-        Game::Walk(w) => f64::from(w.clock),
-        Game::Demo(d) => d.time,
-    };
-
+    let palette = takes[0].palette;
     let frames = shot.frames();
     let (first, end) = range.map_or((0, frames), |(a, b)| (a.min(frames), b.min(frames)));
-    let (ow, oh) = shot.size;
-    let mut last: Option<Vec<u8>> = None;
-    // clock id: the 1/72 s ticks of game time run since film second 0.
-    let mut ticks = 0u64;
     let mut stdout = std::io::stdout().lock();
     // Frames waiting for their files, encoded a batch at a time on the threads.
     let mut pending: Vec<(usize, Vec<u8>)> = Vec::new();
-    let mut drawn = 0usize;
-    let mut held = 0usize;
-    let label_glyphs = match (&shot.label, wad(&pak)) {
-        (Some(_), Some(w)) => Some(text::Glyphs::new(&w, text::Font::Gold)?),
-        _ => None,
-    };
+    let glyphs = wad(&pak).map(|w| text::Glyphs::new(&w, text::Font::Gold)).transpose()?;
     let t_frames = Instant::now();
     for n in 0..end {
-        let t = n as f64 / shot.fps;
-        let prev = t - 1.0 / shot.fps;
-        let dt = shot.game_time(t) - shot.game_time(prev);
         let wanted = n >= first;
-        // The monsters to wake by now.
-        if let Game::Walk(w) = &mut game {
-            for &(at, when) in &shot.wake {
-                if when <= t && (when > prev || n == 0) {
-                    wake_monster(w, at);
-                }
-            }
-        }
-        // This film frame's host frames, each with the film second its camera
-        // is at: one per film frame (free); or id's ticks of game time up to
-        // now (id), the last drawn and none if no tick is due, the picture
-        // held; a frozen world is one paused frame, redrawn from the camera.
-        let mut steps: Vec<(f64, f64)> = Vec::new();
-        match clock {
-            Clock::Free => steps.push((dt.min(0.1), t)),
-            Clock::Id if dt <= 0.0 => steps.push((0.0, t)),
-            Clock::Id => {
-                let g = shot.game_time(t);
-                while (ticks + 1) as f64 * TICK <= g + 1e-9 {
-                    ticks += 1;
-                    steps.push((TICK, shot.film_time(ticks as f64 * TICK)));
-                }
-                if steps.is_empty() && last.is_none() {
-                    steps.push((0.0, t));
-                }
-            }
-        }
-        if steps.is_empty() {
-            held += 1;
-        }
-        let count = steps.len();
-        for (i, (step, tc)) in steps.into_iter().enumerate() {
-            let draw = wanted && i + 1 == count;
-            let pose = camera_at(shot, path.as_ref(), tc);
-            apply_settings(&mut game, shot, &c, stepping);
-            if let Game::Walk(w) = &mut game {
-                w.camera = pose.map(|p| p.camera());
-                if let (Player::Camera, Some(p)) = (shot.player, pose) {
-                    set_origin(w, [p.pos[0], p.pos[1], p.pos[2] - VIEWHEIGHT].map(|v| v as f32));
-                }
-            } else if let Game::Demo(d) = &mut game {
-                d.camera = pose.map(|p| p.camera());
-            }
-            let frame = game.frame(step, &vid, draw);
-            if let Some(m) = mixer.as_mut() {
-                m.run(&pak, &frame.sound);
-            }
-            if draw {
-                let mut rgb = present(&frame, &palette, &gamma);
-                if wants_base {
-                    composite_xray(&mut game, shot, &vid, &c, &palette, &mut rgb, tc);
-                }
-                let mut out = fit(&rgb, frame.image.w, frame.image.h, aspect, ow, oh);
-                if shot.wire.world || shot.wire.entities {
-                    wire_xray(&game, shot, &vid, &c, &palette, &mut out, (frame.image.w, frame.image.h), aspect, tc);
-                }
-                if let (Some(g), Some(label)) = (&label_glyphs, &shot.label) {
-                    draw_label(g, &mut out, (ow, oh), &palette, label, shot.labelpos);
-                }
-                last = Some(out);
-                drawn += 1;
-            }
-            render::recycle_image(frame.image);
-        }
-        if let Some(m) = mixer.as_mut() {
-            // Mixed to this frame's end: sample `k` is heard at film second `k / rate`.
-            let end = sound_start + ((n + 1) as f64 / shot.fps * f64::from(m.rate())).round() as i64;
-            paint_to(m, end, &mut pcm);
+        for take in &mut takes {
+            take.frame(&pak, n, wanted);
             if n < first {
-                pcm.clear();
+                take.pcm.clear();
             }
         }
         if !wanted {
             continue;
         }
-        let Some(out) = last.as_ref() else { continue };
+        let t = n as f64 / shot.fps;
+        let mut out = match (&shot.ab, takes.as_slice()) {
+            (Some(ab), [a, b]) => match (&a.last, &b.last) {
+                (Some(pa), Some(pb)) => compose_ab(shot, ab, (pa, a.out), (pb, b.out), t, &palette, glyphs.as_ref()),
+                _ => continue,
+            },
+            (_, [take, ..]) => match &take.last {
+                Some(p) => p.clone(),
+                None => continue,
+            },
+            _ => continue,
+        };
+        if let (Some(g), Some(label)) = (&glyphs, &shot.label) {
+            draw_label(g, &mut out, (ow, oh), &palette, label, shot.labelpos);
+        }
         match format {
             Format::Raw => {
-                if let Err(e) = stdout.write_all(out) {
+                if let Err(e) = stdout.write_all(&out) {
                     return Err(format!("stdout: {e}"));
                 }
             }
             Format::Png | Format::Ppm => {
-                pending.push((n, out.clone()));
+                pending.push((n, out));
                 if pending.len() >= threads {
                     write_frames(&mut pending, out_dir, format, (ow, oh))?;
                 }
@@ -687,25 +1244,68 @@ fn run(
     write_frames(&mut pending, out_dir, format, (ow, oh))?;
     let _ = stdout.flush();
     let frames_s = t_frames.elapsed().as_secs_f64();
-    let mut report = format!(
-        "film: {} frames ({}..{} of {frames}) at {}x{} ({}x{} drawn, {}, clock {}), {drawn} drawn, {held} held, cl.time {clock_at_start:.3} at frame 0; {:.1} s ({:.0} ms a frame), {:.1} s in all",
-        end - first,
-        first,
-        end,
-        ow,
-        oh,
-        vid.width,
-        vid.height,
-        if shot.preset == Preset::Classic { "Classic" } else { "slop" },
-        if clock == Clock::Id { "id" } else { "free" },
+    let mut report = String::new();
+    for take in &takes {
+        let side = if take.name.is_empty() { String::new() } else { format!("side {}: ", take.name) };
+        report += &format!(
+            "film: {side}{} frames ({first}..{end} of {frames}) at {}x{} ({}x{} drawn, {}, clock {}), {} drawn, {} held, cl.time {:.3} at frame 0",
+            end - first,
+            take.out.0,
+            take.out.1,
+            take.vid.width,
+            take.vid.height,
+            if take.shot.preset == Preset::Classic { "Classic" } else { "slop" },
+            if take.clock == Clock::Id { "id" } else { "free" },
+            take.drawn,
+            take.held,
+            take.clock_at_start,
+        );
+        report += "\n";
+    }
+    report += &format!(
+        "film: {:.1} s ({:.0} ms a frame), {:.1} s in all",
         frames_s,
         frames_s * 1000.0 / (end - first).max(1) as f64,
-        started.elapsed().as_secs_f64(),
+        started.elapsed().as_secs_f64()
     );
-    if let Some(m) = mixer.as_ref() {
-        let path = format!("{out_dir}/sound.wav");
-        std::fs::write(&path, wav_bytes(&pcm, m.rate())).map_err(|e| format!("cannot write {path}: {e}"))?;
-        report += &format!("; {path} at {} Hz, {:.2} s", m.rate(), pcm.len() as f64 / 2.0 / f64::from(m.rate()));
+    // The sound: the take's, or an `ab` shot's chosen side's (and with
+    // `absound both`, each side's too).
+    let keep = match shot.ab.as_ref().map(|ab| ab.sound) {
+        Some(shot::AbSound::A) => 0,
+        _ => takes.len() - 1,
+    };
+    let mut rate = None;
+    for (k, take) in takes.iter().enumerate() {
+        let Some(m) = take.mixer.as_ref() else { continue };
+        let mut names = Vec::new();
+        if k == keep {
+            names.push("sound.wav".to_string());
+            rate = Some(m.rate());
+        }
+        if !take.name.is_empty() && shot.ab.as_ref().is_some_and(|ab| ab.sound == shot::AbSound::Both) {
+            names.push(format!("sound-{}.wav", take.name));
+        }
+        for name in names {
+            let path = format!("{out_dir}/{name}");
+            std::fs::write(&path, wav_bytes(&take.pcm, m.rate())).map_err(|e| format!("cannot write {path}: {e}"))?;
+            report +=
+                &format!("; {path} at {} Hz, {:.2} s", m.rate(), take.pcm.len() as f64 / 2.0 / f64::from(m.rate()));
+        }
+    }
+    if shot.events {
+        let events: Vec<String> =
+            takes.iter_mut().flat_map(|t| t.log.take().map(|l| l.events).unwrap_or_default()).collect();
+        let header = [
+            ("fps", format!("{}", shot.fps)),
+            ("frames", format!("{frames}")),
+            ("first", format!("{first}")),
+            ("size", format!("[{ow}, {oh}]")),
+            ("sound_rate", rate.map_or("null".into(), |r| r.to_string())),
+            ("sound_clock", events::quote(if shot.sound_clock == SoundClock::Game { "game" } else { "film" })),
+        ];
+        let path = format!("{out_dir}/events.json");
+        std::fs::write(&path, events::file(&header, &events)).map_err(|e| format!("cannot write {path}: {e}"))?;
+        report += &format!("; {path}: {} events", events.len());
     }
     // With --raw, stdout is the frames': the report goes to stderr.
     if format == Format::Raw {
@@ -715,65 +1315,98 @@ fn run(
     Ok(report + "\n")
 }
 
-/// The palette index the lightmaps view lights: a light grey, so the
-/// colormap's 64 shades run from it to black.
-const XRAY_GREY: u8 = 9;
-
-/// The shot's x-ray views over the 3-D view of `rgb` (the screen).
-fn composite_xray(
-    game: &mut Game,
+/// An `ab` shot's two pictures as one frame (`split`): cut by the moving
+/// line, side by side, stacked, or A with B's differences tinted; each side
+/// labelled.
+fn compose_ab(
     shot: &Shot,
-    vid: &Vid,
-    c: &Cvars,
-    palette: &[[u8; 3]; 256],
-    rgb: &mut [u8],
+    ab: &shot::Ab,
+    (a, aout): (&[u8], (usize, usize)),
+    (b, bout): (&[u8], (usize, usize)),
     t: f64,
-) {
-    let viewsize = if shot.hud { c.viewsize } else { 120.0 };
-    let refdef = render::calc_refdef(vid.width, vid.height, viewsize, false, c.sbar_layout);
-    let v = refdef.vrect;
-    let strength = shot.mix_at(t);
-    let (bsp, x) = match game {
-        Game::Walk(w) => (&w.bsp, w.renderer.xray_frame()),
-        Game::Demo(d) => (&d.bsp, d.renderer.xray_frame()),
-    };
-    let Some(x) = x else { return };
-    let mut screen = xray::Rgb { w: vid.width, h: vid.height, px: rgb };
-    xray::composite(&mut screen, (v.x, v.y), x, bsp, palette, shot.xray, strength);
-}
-
-/// The shot's wireframe over the output frame `out` (the screen `sw x sh`
-/// fitted into it at `aspect`).
-#[allow(clippy::too_many_arguments)]
-fn wire_xray(
-    game: &Game,
-    shot: &Shot,
-    vid: &Vid,
-    c: &Cvars,
     palette: &[[u8; 3]; 256],
-    out: &mut [u8],
-    (sw, sh): (usize, usize),
-    aspect: f64,
-    t: f64,
-) {
-    let viewsize = if shot.hud { c.viewsize } else { 120.0 };
-    let v = render::calc_refdef(vid.width, vid.height, viewsize, false, c.sbar_layout).vrect;
-    let (bsp, x) = match game {
-        Game::Walk(w) => (&w.bsp, w.renderer.xray_frame()),
-        Game::Demo(d) => (&d.bsp, d.renderer.xray_frame()),
-    };
-    let Some(x) = x else { return };
-    let (ow, oh) = shot.size;
-    let (x0, y0, rw, rh) = fit_rect(aspect, ow, oh);
-    let place = xray::Place {
-        vx: v.x as f32,
-        vy: v.y as f32,
-        x0: x0 as f32,
-        y0: y0 as f32,
-        kx: rw as f32 / sw as f32,
-        ky: rh as f32 / sh as f32,
-    };
-    xray::wire_over(out, (ow, oh), place, x, bsp, palette, shot.wire, shot.mix_at(t));
+    glyphs: Option<&text::Glyphs>,
+) -> Vec<u8> {
+    let (w, h) = shot.size;
+    let mut out = vec![0u8; w * h * 3];
+    let bronze = palette[106];
+    let line_w = (h / 270).max(2);
+    let mut regions = [(0, 0, w, h); 2];
+    match ab.split {
+        shot::Split::Line => {
+            let x = (shot.split_at(t) * w as f64).round() as usize;
+            for y in 0..h {
+                let row = y * w * 3;
+                out[row..row + x * 3].copy_from_slice(&a[row..row + x * 3]);
+                out[row + x * 3..row + w * 3].copy_from_slice(&b[row + x * 3..row + w * 3]);
+                if x > 0 && x < w {
+                    for px in x.saturating_sub(line_w / 2)..(x + line_w - line_w / 2).min(w) {
+                        out[row + px * 3..row + px * 3 + 3].copy_from_slice(&bronze);
+                    }
+                }
+            }
+            regions = [(0, 0, x, h), (x, 0, w - x, h)];
+        }
+        shot::Split::Side | shot::Split::Stack => {
+            let side = ab.split == shot::Split::Side;
+            for (k, (px, (pw, ph))) in [(a, aout), (b, bout)].into_iter().enumerate() {
+                let (x0, y0) = if side { (k * aout.0, 0) } else { (0, k * aout.1) };
+                for y in 0..ph.min(h - y0) {
+                    let src = &px[y * pw * 3..(y * pw + pw.min(w - x0)) * 3];
+                    let at = ((y0 + y) * w + x0) * 3;
+                    out[at..at + src.len()].copy_from_slice(src);
+                }
+                regions[k] = (x0, y0, pw, ph);
+            }
+            // The seam between them.
+            let half = line_w / 2;
+            if side {
+                for y in 0..h {
+                    for x in aout.0.saturating_sub(half)..(aout.0 + half).min(w) {
+                        out[(y * w + x) * 3..(y * w + x) * 3 + 3].copy_from_slice(&bronze);
+                    }
+                }
+            } else {
+                for y in aout.1.saturating_sub(half)..(aout.1 + half).min(h) {
+                    for x in 0..w {
+                        out[(y * w + x) * 3..(y * w + x) * 3 + 3].copy_from_slice(&bronze);
+                    }
+                }
+            }
+        }
+        shot::Split::Diff => {
+            let lava = palette[235];
+            out.copy_from_slice(a);
+            for (o, (pa, pb)) in out.chunks_exact_mut(3).zip(a.chunks_exact(3).zip(b.chunks_exact(3))) {
+                if pa != pb {
+                    for k in 0..3 {
+                        o[k] = (f32::from(pa[k]) * 0.4 + f32::from(lava[k]) * 0.6) as u8;
+                    }
+                }
+            }
+            regions = [(0, 0, w, h), (w, 0, 0, h)];
+        }
+    }
+    if let Some(g) = glyphs {
+        let scale = (h / 360).max(1);
+        let margin = 8 * scale;
+        for (k, label) in ab.labels.iter().enumerate() {
+            let (Some(label), (rx, ry, rw, rh)) = (label, regions[k]) else { continue };
+            if rw == 0 || rh == 0 {
+                continue;
+            }
+            let (tw, _) = g.measure(label, scale);
+            // A on the left of its region, B on the right of its (a line
+            // split's sides meet in the middle).
+            let x = if k == 0 || ab.split != shot::Split::Line {
+                rx + margin
+            } else {
+                (rx + rw).saturating_sub(tw + margin)
+            };
+            g.draw(&mut out, w, 3, palette, label, (x as i64, (ry + margin) as i64), scale, 1);
+        }
+    }
+    out
 }
 
 /// The pak's `gfx.wad`.
@@ -907,5 +1540,168 @@ mod tests {
         let xray = "map e1m1\nduration 0.1\nfps 20\nsize 320x180\nwarmup 0.1\nxray segments\nwire all\n\
                     camera fixed 480,-352,110 0,90\n";
         assert_eq!(hashes(&pak, xray, 1, "xray"), hashes(&pak, xray, 8, "xray"));
+    }
+}
+
+#[cfg(test)]
+mod v2_tests {
+    use super::*;
+
+    fn pak_path() -> Option<String> {
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../quake-data/ID1/PAK0.PAK");
+        p.exists().then(|| p.to_string_lossy().into_owned())
+    }
+
+    /// A test's render directory, under `target/`, removed when done.
+    struct Dir(std::path::PathBuf);
+
+    impl std::ops::Deref for Dir {
+        type Target = std::path::Path;
+        fn deref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for Dir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Render `shot` into a fresh directory under `target/`; returns it.
+    fn render(pak: &str, shot: &str, tag: &str, extra: &[&str]) -> Dir {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join(format!("target/film-v2-test-{}-{tag}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let shot_path = dir.join("t.shot");
+        std::fs::write(&shot_path, shot).unwrap();
+        let mut args: Vec<String> =
+            [pak, &shot_path.to_string_lossy(), &dir.to_string_lossy(), "--format", "ppm", "--threads", "4"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+        args.extend(extra.iter().map(|s| s.to_string()));
+        cmd_film(&args).expect("the shot renders");
+        Dir(dir)
+    }
+
+    /// `events.json`'s sound events: (film second, sample).
+    fn sounds(dir: &std::path::Path) -> Vec<(f64, String)> {
+        let text = std::fs::read_to_string(dir.join("events.json")).unwrap();
+        text.lines()
+            .filter(|l| l.contains("\"kind\": \"sound\""))
+            .map(|l| {
+                let field = |k: &str| {
+                    let at = l.find(&format!("\"{k}\": ")).unwrap() + k.len() + 4;
+                    l[at..].split([',', '}']).next().unwrap().trim().trim_matches('"').to_string()
+                };
+                (field("t").parse().unwrap(), field("sample"))
+            })
+            .collect()
+    }
+
+    /// The WAV's interleaved samples and rate.
+    fn wav(path: &std::path::Path) -> (Vec<i16>, f64) {
+        let b = std::fs::read(path).unwrap();
+        let rate = u32::from_le_bytes(b[24..28].try_into().unwrap());
+        (b[44..].chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]])).collect(), f64::from(rate))
+    }
+
+    /// The first sample at or after film second `t` (to `t + within`) above
+    /// `level`, as a film second.
+    fn onset(pcm: &[i16], rate: f64, t: f64, within: f64, level: i16) -> Option<f64> {
+        let (a, b) = ((t * rate) as usize, (((t + within) * rate) as usize).min(pcm.len() / 2));
+        (a..b)
+            .find(|&i| pcm[2 * i].unsigned_abs().max(pcm[2 * i + 1].unsigned_abs()) > level as u16)
+            .map(|i| i as f64 / rate)
+    }
+
+    const F13: &str = "map e1m1\nduration 1.2\nfps 30\nsize 320x180\npreset slop\ngun on\n\
+                       player 480,-352,88,90\ncamera player\nimpulse 9\nimpulse 4 at 0.1\nattack on at 0.5\n\
+                       sound on\nevents on\n";
+
+    #[test]
+    fn commands_fire_the_nailgun_and_its_sounds_start_with_their_frames() {
+        let Some(pak) = pak_path() else { return };
+        // impulse 9 (every weapon), impulse 4 (the nailgun), +attack at 0.5 s:
+        // nails every 0.1 s of game time from then on, each sound in the WAV
+        // from the film second of the frame that shows it.
+        let dir = render(&pak, F13, "f13", &[]);
+        let nails: Vec<f64> =
+            sounds(&dir).into_iter().filter(|(_, s)| s == "weapons/rocket1i.wav").map(|(t, _)| t).collect();
+        assert!(nails.len() >= 6, "nails: {nails:?}");
+        assert!(nails[0] >= 0.5 && nails[0] < 0.5 + 1.5 / 30.0, "the first nail with +attack: {}", nails[0]);
+        let (pcm, rate) = wav(&dir.join("sound.wav"));
+        assert_eq!(pcm.len() / 2, (1.2 * rate) as usize, "the film's length");
+        assert_eq!(onset(&pcm, rate, 0.0, nails[0], 200), None, "silent before the first nail");
+        let heard = onset(&pcm, rate, nails[0], 0.01, 200).expect("the first nail is heard at its frame");
+        assert!(heard - nails[0] < 0.002, "{heard} vs {}", nails[0]);
+        let gaps: Vec<f64> = nails.windows(2).map(|w| w[1] - w[0]).collect();
+        assert!(gaps.iter().all(|g| (0.06..0.14).contains(g)), "a nail every 0.1 s: {gaps:?}");
+
+        // Half speed: the nails twice as far apart on the film's clock, each
+        // still heard at its frame; with `sound game`, the sound slowed too.
+        for clock in ["on", "game"] {
+            let dir = render(&pak, F13, &format!("f13-slow-{clock}"), &["--speed", "0.5", "--sound", clock]);
+            let slow: Vec<f64> =
+                sounds(&dir).into_iter().filter(|(_, s)| s == "weapons/rocket1i.wav").map(|(t, _)| t).collect();
+            let gaps: Vec<f64> = slow.windows(2).map(|w| w[1] - w[0]).collect();
+            assert!(slow.len() >= 3 && gaps.iter().all(|g| (0.15..0.25).contains(g)), "{clock}: {gaps:?}");
+            let (pcm, rate) = wav(&dir.join("sound.wav"));
+            assert_eq!(pcm.len() / 2, (1.2 * rate) as usize, "{clock}: the film's length");
+            assert_eq!(onset(&pcm, rate, 0.0, slow[0], 200), None, "{clock}: silent before the first nail");
+            let heard = onset(&pcm, rate, slow[0], 0.02, 200).expect("heard");
+            assert!(heard - slow[0] < 0.004, "{clock}: {heard} vs {}", slow[0]);
+        }
+    }
+
+    #[test]
+    fn fire_wakes_chthon_and_the_log_follows_his_poses() {
+        let Some(pak) = pak_path() else { return };
+        let shot = "map e1m7\nduration 1.5\nfps 10\nsize 320x180\nplayer -600,64,56,0\nfire t4 at 0.5\n\
+                    camera fixed -100,64,200 15,0\nevents on\n";
+        let dir = render(&pak, shot, "chthon", &[]);
+        let s = sounds(&dir);
+        let rise = s.iter().find(|(_, n)| n == "boss1/out1.wav").expect("Chthon rises");
+        assert!((0.5..0.7).contains(&rise.0), "{rise:?}");
+        let log = std::fs::read_to_string(dir.join("events.json")).unwrap();
+        assert!(log.contains("\"class\": \"monster_boss\"") && log.contains("\"name\": \"rise1\""), "his poses");
+    }
+
+    #[test]
+    fn an_ab_split_at_an_edge_is_that_side_alone() {
+        let Some(pak) = pak_path() else { return };
+        let base = "map e1m2\nduration 0.2\nfps 10\nsize 320x180\ncamera fixed 1488,1240,296 0,270\n";
+        let ab = format!("{base}ab preset classic | preset slop;cvar r_torchflicker 2\n");
+        let frame = |dir: &std::path::Path| std::fs::read(dir.join("00001.ppm")).unwrap();
+        let b_alone = frame(&render(&pak, &format!("{base}cvar r_torchflicker 2\n"), "b", &[]));
+        let a_alone = frame(&render(&pak, &format!("{base}preset classic\n"), "a", &[]));
+        assert_eq!(frame(&render(&pak, &format!("{ab}splitat 0 0\n"), "ab0", &[])), b_alone, "all B");
+        assert_eq!(frame(&render(&pak, &format!("{ab}splitat 0 1\n"), "ab1", &[])), a_alone, "all A");
+        let half = frame(&render(&pak, &ab, "ab-half", &[]));
+        assert!(half != a_alone && half != b_alone, "half of each");
+        assert!(Shot::parse(&format!("{base}ab fps 30 | fps 60\n")).is_err(), "the sides share the film's clock");
+    }
+
+    #[test]
+    fn divides_and_pixels_off_draw_over_the_picture() {
+        let Some(pak) = pak_path() else { return };
+        let base = "map e1m6\nduration 0.1\nfps 10\nsize 320x180\ncamera fixed 504,500,242 0,96\ncvar r_perspspan 16\n";
+        let frame = |dir: &std::path::Path| std::fs::read(dir.join("00000.ppm")).unwrap();
+        let plain = frame(&render(&pak, base, "plain", &[]));
+        let marked = frame(&render(&pak, &format!("{base}divides on ff0000 width 1 alpha 1\n"), "div", &[]));
+        let off = frame(&render(&pak, &format!("{base}xray pixelsoff 00ff00 alpha 1\n"), "off", &[]));
+        let count = |img: &[u8], c: [u8; 3]| img[15..].chunks_exact(3).filter(|p| **p == c).count();
+        let pixels = 320 * 180;
+        // A sixteenth of the walls' pixels, or so, is a divide at 16.
+        let red = count(&marked, [255, 0, 0]);
+        assert!(red > pixels / 40 && red < pixels / 4, "divides: {red} of {pixels}");
+        let green = count(&off, [0, 255, 0]);
+        assert!(green > 0 && green < pixels / 2, "pixels off: {green}");
+        assert_eq!(count(&plain, [255, 0, 0]), 0);
+        // Exact: none off.
+        let exact =
+            frame(&render(&pak, &format!("{base}cvar r_perspspan 1\nxray pixelsoff 00ff00 alpha 1\n"), "ex", &[]));
+        assert_eq!(count(&exact, [0, 255, 0]), 0, "exact is exact");
     }
 }

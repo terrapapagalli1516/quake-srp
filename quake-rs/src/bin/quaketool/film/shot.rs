@@ -128,10 +128,12 @@ pub enum XrayBase {
     Leaves,
     Lightmaps,
     Error,
+    PixelsOff,
+    Bands,
 }
 
 impl XrayBase {
-    pub const NAMES: [(&'static str, XrayBase); 13] = [
+    pub const NAMES: [(&'static str, XrayBase); 15] = [
         ("game", XrayBase::Game),
         ("black", XrayBase::Black),
         ("z", XrayBase::Z),
@@ -145,7 +147,124 @@ impl XrayBase {
         ("leaves", XrayBase::Leaves),
         ("lightmaps", XrayBase::Lightmaps),
         ("error", XrayBase::Error),
+        ("pixelsoff", XrayBase::PixelsOff),
+        ("bands", XrayBase::Bands),
     ];
+}
+
+/// A colour on a shot line: `RRGGBB` (hex, no `#`: that starts a comment)
+/// or `pN`, Quake's palette entry N.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Colour {
+    Rgb([u8; 3]),
+    Palette(u8),
+}
+
+impl Colour {
+    pub fn parse(s: &str) -> Option<Colour> {
+        if let Some(n) = s.strip_prefix('p') {
+            return n.parse().ok().map(Colour::Palette);
+        }
+        let v = u32::from_str_radix(s, 16).ok().filter(|_| s.len() == 6)?;
+        Some(Colour::Rgb([(v >> 16) as u8, (v >> 8) as u8, v as u8]))
+    }
+
+    pub fn rgb(self, palette: &[[u8; 3]; 256]) -> [u8; 3] {
+        match self {
+            Colour::Rgb(c) => c,
+            Colour::Palette(i) => palette[usize::from(i)],
+        }
+    }
+}
+
+/// `divides`: a mark at each perspective divide, over the picture.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Divides {
+    pub colour: Colour,
+    /// The mark's width in output pixels (`None`: a 720th of the frame's height).
+    pub width: Option<f64>,
+    pub alpha: f64,
+}
+
+/// `pixelsoff`'s look: the colour the pixels off exact are tinted, and how
+/// much the rest is darkened.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Tint {
+    pub colour: Colour,
+    pub alpha: f64,
+    pub dim: f64,
+}
+
+impl Default for Tint {
+    fn default() -> Tint {
+        Tint { colour: Colour::Rgb([0xff, 0x3d, 0x8b]), alpha: 0.85, dim: 0.0 }
+    }
+}
+
+/// Something the shot does to the game at a film second.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Action {
+    /// `impulse N`: the console's, sent with the next move.
+    Impulse(i32),
+    /// `+attack` (true) or `-attack`.
+    Attack(bool),
+    /// Every entity whose `targetname` is this, used as `SUB_UseTargets`
+    /// uses a target (the player its activator).
+    Fire(String),
+    /// The player's view angles (Quake's: pitch + down, yaw).
+    Look(f32, f32),
+    /// A console command: a held button (`+jump`, `-forward`, ...) or one
+    /// of the game's (`god`, `noclip`, `fly`, `give`, `kill`, `impulse`).
+    Console(Vec<String>),
+}
+
+/// How a shot's game sound meets its picture (`sound on|game`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum SoundClock {
+    /// Each sound starts with the frame that shows its cause and plays at
+    /// its own speed (in slow motion too).
+    #[default]
+    Film,
+    /// The mixer runs on the game's clock and is stretched to the film's:
+    /// slow motion slows the sound and lowers it, a frozen world is silent.
+    Game,
+}
+
+/// How the two renders of an `ab` shot meet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Split {
+    /// One frame cut by a vertical line (`splitat`): A left of it, B right.
+    #[default]
+    Line,
+    /// A in the left half, B in the right, each framed for its half.
+    Side,
+    /// A above, B below, each framed for its half.
+    Stack,
+    /// A, with each pixel that differs from B's tinted.
+    Diff,
+}
+
+/// Whose sound an `ab` shot keeps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum AbSound {
+    A,
+    #[default]
+    B,
+    /// B's as `sound.wav`, and each side's as `sound-a.wav` and `sound-b.wav`.
+    Both,
+}
+
+/// The `ab` lines: one shot rendered twice, with lines that differ.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct Ab {
+    /// Each side's own shot lines, applied after the shot's.
+    pub lines: [Vec<String>; 2],
+    pub labels: [Option<String>; 2],
+    pub split: Split,
+    /// The line's place (0 the left edge, 1 the right) at film seconds,
+    /// keys interpolated (default 0.5).
+    pub at: Vec<(f64, f64)>,
+    pub sound: AbSound,
 }
 
 /// Which polygon edges `wire` draws.
@@ -217,6 +336,22 @@ pub struct Shot {
     pub label: Option<String>,
     pub labelpos: Corner,
     pub sound: bool,
+    pub sound_clock: SoundClock,
+    /// Write `events.json`: the sounds started, muzzle flashes, monsters' poses.
+    pub events: bool,
+    /// What the shot does to the game, at film seconds, in line order.
+    pub actions: Vec<(f64, Action)>,
+    /// `divides`: marks at each perspective divide.
+    pub divides: Option<Divides>,
+    /// `xray pixelsoff`'s look.
+    pub tint: Tint,
+    /// `ab`: the shot rendered twice.
+    pub ab: Option<Ab>,
+    /// `stepping id|uncapped`: how a host frame steps the game, if not the
+    /// clock's (`clock id` steps id's way, `clock free` the uncapped way).
+    pub stepping: Option<bool>,
+    /// `body on`: the player's own model is drawn (for a camera away from it).
+    pub body: bool,
 }
 
 impl Default for Shot {
@@ -251,6 +386,14 @@ impl Default for Shot {
             label: None,
             labelpos: Corner::BottomLeft,
             sound: false,
+            sound_clock: SoundClock::Film,
+            events: false,
+            actions: Vec::new(),
+            divides: None,
+            tint: Tint::default(),
+            ab: None,
+            stepping: None,
+            body: false,
         }
     }
 }
@@ -297,7 +440,38 @@ impl Shot {
         if matches!(self.camera, Some(CameraSpec::Demo)) && !matches!(self.world, World::Demo { .. }) {
             return Err("`camera demo` needs a `demo` world".into());
         }
+        if self.ab.is_some() {
+            self.takes()?;
+        }
         Ok(())
+    }
+
+    /// The renders the shot makes: itself, or with `ab` its two sides — the
+    /// shot with each side's lines applied — which must share the film's
+    /// clock and size.
+    pub fn takes(&self) -> Result<Vec<Shot>, String> {
+        let Some(ab) = &self.ab else { return Ok(vec![self.clone()]) };
+        let mut takes = Vec::new();
+        for (side, lines) in ["a", "b"].iter().zip(&ab.lines) {
+            let mut s = Shot { ab: None, ..self.clone() };
+            for line in lines {
+                s.apply(line).map_err(|e| format!("`ab` side {side}: {e}"))?;
+            }
+            if s.ab.is_some() {
+                return Err("`ab` inside `ab`".into());
+            }
+            if (s.duration, s.fps) != (self.duration, self.fps) {
+                return Err(format!("`ab` side {side} changes the duration or fps: both sides share the film's"));
+            }
+            takes.push(s);
+        }
+        Ok(takes)
+    }
+
+    /// Where an `ab` line split stands at film second `t` (0..1).
+    pub fn split_at(&self, t: f64) -> f64 {
+        let Some(ab) = &self.ab else { return 0.5 };
+        interpolate(&ab.at, t, 0.5)
     }
 
     fn apply(&mut self, line: &str) -> Result<(), String> {
@@ -380,7 +554,113 @@ impl Shot {
             "crosshair" => self.crosshair = num(one()?)? as f32,
             "messages" => self.messages = on_off(one()?)?,
             "notarget" => self.notarget = on_off(one()?)?,
-            "sound" => self.sound = on_off(one()?)?,
+            "sound" => {
+                (self.sound, self.sound_clock) = match one()? {
+                    "game" => (true, SoundClock::Game),
+                    "film" => (true, SoundClock::Film),
+                    v => (on_off(v)?, SoundClock::Film),
+                }
+            }
+            "events" => self.events = on_off(one()?)?,
+            "body" => self.body = on_off(one()?)?,
+            "stepping" => {
+                self.stepping = Some(match one()? {
+                    "uncapped" | "slop" => true,
+                    "id" | "classic" => false,
+                    v => return Err(format!("`stepping id|uncapped`, got {v:?}")),
+                })
+            }
+            "impulse" => {
+                let (w, t) = at_time(&words)?;
+                let [n] = w else { return Err(format!("`impulse N [at T]`, got {rest:?}")) };
+                self.act(t, Action::Impulse(num(n)? as i32));
+            }
+            "attack" => {
+                let (w, t) = at_time(&words)?;
+                let [v] = w else { return Err(format!("`attack on|off [at T]`, got {rest:?}")) };
+                self.act(t, Action::Attack(on_off(v)?));
+            }
+            "fire" => {
+                let (w, t) = at_time(&words)?;
+                let [name] = w else { return Err(format!("`fire TARGETNAME [at T]`, got {rest:?}")) };
+                self.act(t, Action::Fire(name.to_string()));
+            }
+            "look" => {
+                let (w, t) = at_time(&words)?;
+                let v = match w {
+                    [a] => numbers(a)?,
+                    _ => return Err(format!("`look P,Y [at T]`, got {rest:?}")),
+                };
+                let [p, y] = v.as_slice() else { return Err("`look P,Y`: pitch (+ down) and yaw".into()) };
+                self.act(t, Action::Look(*p as f32, *y as f32));
+            }
+            "cmd" => {
+                let (w, t) = at_time(&words)?;
+                let argv: Vec<String> = w.iter().map(|s| s.to_string()).collect();
+                check_console(&argv)?;
+                self.act(t, Action::Console(argv));
+            }
+            "divides" => {
+                let mut d = Divides { colour: Colour::Rgb([0x39, 0xc2, 0xff]), width: None, alpha: 0.85 };
+                let mut it = words.iter();
+                match it.next() {
+                    Some(&"off") => {
+                        self.divides = None;
+                        return Ok(());
+                    }
+                    Some(&"on") => {}
+                    _ => return Err(format!("`divides on|off [COLOUR] [width W] [alpha A]`, got {rest:?}")),
+                }
+                while let Some(w) = it.next() {
+                    match *w {
+                        "width" => d.width = Some(num(it.next().ok_or("`width W`")?)?.clamp(0.25, 64.0)),
+                        "alpha" => d.alpha = num(it.next().ok_or("`alpha A`")?)?.clamp(0.0, 1.0),
+                        c => {
+                            d.colour = Colour::parse(c).ok_or_else(|| format!("a colour is RRGGBB or pN, got {c:?}"))?
+                        }
+                    }
+                }
+                self.divides = Some(d);
+            }
+            "ab" => {
+                let (a, b) = rest.split_once('|').ok_or("`ab LINES | LINES` (`;` between a side's lines)")?;
+                let side = |s: &str| -> Vec<String> {
+                    s.split(';').map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect()
+                };
+                let ab = self.ab.get_or_insert_with(Ab::default);
+                ab.lines = [side(a), side(b)];
+            }
+            "ablabels" => {
+                let (a, b) = rest.split_once('|').ok_or("`ablabels TEXT | TEXT`")?;
+                let label = |s: &str| Some(s.trim().to_string()).filter(|l| !l.is_empty());
+                self.ab.get_or_insert_with(Ab::default).labels = [label(a), label(b)];
+            }
+            "split" => {
+                let split = match one()? {
+                    "line" | "wipe" => Split::Line,
+                    "side" => Split::Side,
+                    "stack" => Split::Stack,
+                    "diff" => Split::Diff,
+                    v => return Err(format!("`split line|side|stack|diff`, got {v:?}")),
+                };
+                self.ab.get_or_insert_with(Ab::default).split = split;
+            }
+            "splitat" => {
+                let [t, x] = words.as_slice() else { return Err(format!("`splitat T X`, got {rest:?}")) };
+                let (t, x) = (num(t)?, num(x)?.clamp(0.0, 1.0));
+                let at = &mut self.ab.get_or_insert_with(Ab::default).at;
+                at.retain(|&(k, _)| k != t);
+                at.push((t, x));
+                at.sort_by(|a, b| a.0.total_cmp(&b.0));
+            }
+            "absound" => {
+                self.ab.get_or_insert_with(Ab::default).sound = match one()? {
+                    "a" => AbSound::A,
+                    "b" => AbSound::B,
+                    "both" => AbSound::Both,
+                    v => return Err(format!("`absound a|b|both`, got {v:?}")),
+                }
+            }
             "player" => {
                 self.player = match one()? {
                     "spawn" => Player::Spawn,
@@ -452,12 +732,25 @@ impl Shot {
             }
             "fov" => self.fov = num(one()?)?.clamp(10.0, 170.0),
             "xray" => {
-                let v = one()?;
+                let [v, opts @ ..] = words.as_slice() else { return Err("`xray MODE`".into()) };
                 self.xray = XrayBase::NAMES
                     .iter()
-                    .find(|(n, _)| *n == v)
+                    .find(|(n, _)| n == v)
                     .map(|&(_, b)| b)
                     .ok_or_else(|| format!("`xray` modes: {}", XrayBase::NAMES.map(|(n, _)| n).join(", ")))?;
+                // pixelsoff's look: [COLOUR] [alpha A] [dim D].
+                let mut it = opts.iter();
+                while let Some(w) = it.next() {
+                    match *w {
+                        "alpha" => self.tint.alpha = num(it.next().ok_or("`alpha A`")?)?.clamp(0.0, 1.0),
+                        "dim" => self.tint.dim = num(it.next().ok_or("`dim D`")?)?.clamp(0.0, 1.0),
+                        c if self.xray == XrayBase::PixelsOff => {
+                            self.tint.colour =
+                                Colour::parse(c).ok_or_else(|| format!("a colour is RRGGBB or pN, got {c:?}"))?
+                        }
+                        _ => return Err(format!("`xray {v}` takes no {w:?}")),
+                    }
+                }
             }
             "wire" => {
                 let mut wire = Wire::default();
@@ -559,26 +852,73 @@ impl Shot {
 
     /// The x-ray's strength at film second `t` (linear between `mix` keys).
     pub fn mix_at(&self, t: f64) -> f64 {
-        match self.mix.as_slice() {
-            [] => 1.0,
-            [(_, v)] => *v,
-            keys => {
-                let i = keys.iter().position(|&(at, _)| at > t).unwrap_or(keys.len());
-                if i == 0 {
-                    keys[0].1
-                } else if i == keys.len() {
-                    keys[i - 1].1
-                } else {
-                    let ((t0, a), (t1, b)) = (keys[i - 1], keys[i]);
-                    a + (b - a) * ((t - t0) / (t1 - t0))
-                }
-            }
-        }
+        interpolate(&self.mix, t, 1.0)
+    }
+
+    /// Add `action` at film second `t`, after any earlier at the same time.
+    fn act(&mut self, t: f64, action: Action) {
+        let at = self.actions.partition_point(|&(k, _)| k <= t);
+        self.actions.insert(at, (t, action));
+    }
+
+    /// The actions due in the film frame at `t` (the one after `prev`): those
+    /// at or before `t` and after `prev` — every one at or before `t` on the
+    /// first frame (`first`).
+    pub fn actions_due(&self, prev: f64, t: f64, first: bool) -> impl Iterator<Item = &Action> {
+        self.actions.iter().filter(move |&&(k, _)| k <= t && (k > prev || first)).map(|(_, a)| a)
     }
 
     /// The number of frames.
     pub fn frames(&self) -> usize {
         (self.duration * self.fps).round().max(1.0) as usize
+    }
+}
+
+/// Keys `(t, value)`, sorted, linear between them and held past the ends;
+/// `default` with none.
+fn interpolate(keys: &[(f64, f64)], t: f64, default: f64) -> f64 {
+    match keys {
+        [] => default,
+        [(_, v)] => *v,
+        keys => {
+            let i = keys.iter().position(|&(at, _)| at > t).unwrap_or(keys.len());
+            if i == 0 {
+                keys[0].1
+            } else if i == keys.len() {
+                keys[i - 1].1
+            } else {
+                let ((t0, a), (t1, b)) = (keys[i - 1], keys[i]);
+                a + (b - a) * ((t - t0) / (t1 - t0))
+            }
+        }
+    }
+}
+
+/// A line's words less a trailing `at T`, and `T` (0 without one).
+fn at_time<'a, 'b>(words: &'b [&'a str]) -> Result<(&'b [&'a str], f64), String> {
+    match words {
+        [w @ .., "at", t] => {
+            let t = t.parse::<f64>().ok().filter(|v| v.is_finite()).ok_or_else(|| format!("bad time {t:?}"))?;
+            Ok((w, t))
+        }
+        w => Ok((w, 0.0)),
+    }
+}
+
+/// The held buttons `cmd` takes (`+NAME` / `-NAME`).
+pub const BUTTONS: [&str; 7] = ["attack", "jump", "forward", "back", "moveleft", "moveright", "movedown"];
+
+/// The game's console commands `cmd` takes (`client::host_cmd::run_game_command`'s).
+pub const GAME_COMMANDS: [&str; 6] = ["god", "noclip", "fly", "kill", "impulse", "give"];
+
+/// Whether `cmd` can run `argv`.
+fn check_console(argv: &[String]) -> Result<(), String> {
+    let Some(name) = argv.first() else { return Err("`cmd COMMAND [ARGS] [at T]`".into()) };
+    let button = name.strip_prefix(['+', '-']).is_some_and(|b| BUTTONS.contains(&b));
+    if button || GAME_COMMANDS.contains(&name.as_str()) {
+        Ok(())
+    } else {
+        Err(format!("`cmd` runs +/-{} and {}, not {name:?}", BUTTONS.join(", +/-"), GAME_COMMANDS.join(", ")))
     }
 }
 
@@ -737,6 +1077,53 @@ label Classic: id's 16-pixel spans
         assert_eq!((s.label.as_deref(), s.labelpos), (Some("id's 16"), Corner::TopRight));
         assert!(s.wire.world && s.wire.through && s.wire.culled && !s.wire.entities);
         assert_eq!(s.xray, XrayBase::Luxels);
+    }
+
+    #[test]
+    fn actions_happen_at_their_times_in_line_order() {
+        let s = Shot::parse(
+            "map e1m1\nduration 2\nimpulse 9\nimpulse 4 at 0.1\nattack on at 0.5\nfire t4 at 1.9\n\
+             cmd give s 50 at 0.1\ncmd +jump at 1\nlook 10,45 at 1\nattack off at 1.5\n",
+        )
+        .unwrap();
+        let due = |prev, t, first| s.actions_due(prev, t, first).cloned().collect::<Vec<_>>();
+        assert_eq!(due(-0.1, 0.0, true), vec![Action::Impulse(9)]);
+        assert_eq!(
+            due(0.0, 0.1, false),
+            vec![Action::Impulse(4), Action::Console(vec!["give".into(), "s".into(), "50".into()])],
+            "line order at one time"
+        );
+        assert_eq!(due(0.9, 1.0, false), vec![Action::Console(vec!["+jump".into()]), Action::Look(10.0, 45.0)]);
+        assert_eq!(due(1.8, 1.95, false), vec![Action::Fire("t4".into())]);
+        assert_eq!(due(1.0, 1.4, false), vec![]);
+        assert!(Shot::parse("map e1m1\nduration 2\ncmd quit\n").is_err(), "not every command");
+        assert!(Shot::parse("map e1m1\nduration 2\nattack maybe\n").is_err());
+    }
+
+    #[test]
+    fn divides_pixelsoff_sound_events_and_ab_lines() {
+        let s = Shot::parse(
+            "map e1m6\nduration 3\ndivides on 39c2ff width 2 alpha 0.5\nxray pixelsoff p251 dim 0.3\n\
+             sound game\nevents on\nab cvar r_perspspan 16 | cvar r_perspspan 8; cvar r_torchflicker 0\n\
+             ablabels id's 16 | slop's 8\nsplit line\nsplitat 1 1\nsplitat 3 0\nabsound both\n",
+        )
+        .unwrap();
+        let d = s.divides.unwrap();
+        assert_eq!((d.colour, d.width, d.alpha), (Colour::Rgb([0x39, 0xc2, 0xff]), Some(2.0), 0.5));
+        assert_eq!((s.xray, s.tint.colour, s.tint.dim), (XrayBase::PixelsOff, Colour::Palette(251), 0.3));
+        assert_eq!((s.sound, s.sound_clock, s.events), (true, SoundClock::Game, true));
+        let ab = s.ab.as_ref().unwrap();
+        assert_eq!(ab.lines[1], vec!["cvar r_perspspan 8".to_string(), "cvar r_torchflicker 0".to_string()]);
+        assert_eq!(ab.labels[0].as_deref(), Some("id's 16"));
+        assert_eq!((s.split_at(0.0), s.split_at(2.0), s.split_at(9.0)), (1.0, 0.5, 0.0));
+        let takes = s.takes().unwrap();
+        assert_eq!(takes.len(), 2);
+        assert_eq!(takes[0].cvars.last().unwrap().1, "16");
+        assert_eq!(takes[1].cvars.len(), 2);
+        assert!(takes.iter().all(|t| t.ab.is_none()));
+        assert!(Shot::parse("map e1m1\nduration 2\nab cvar no_such 1 | fps 30\n").is_err());
+        let hashed = Shot::parse("map e1m1\nduration 2\ndivides on #ff0000\n").unwrap();
+        assert_eq!(hashed.divides.unwrap().colour, Colour::Rgb([0x39, 0xc2, 0xff]), "# starts a comment");
     }
 
     #[test]
