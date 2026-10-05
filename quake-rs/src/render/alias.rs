@@ -635,6 +635,13 @@ pub(super) struct AliasDraw<'a> {
 }
 
 impl AliasDraw<'_> {
+    /// EXTRA, debug only: the triangles as the rasteriser gets them, each
+    /// vertex `(x, y, 1/z)` with `1/z` in the z-buffer's units (`>> 16` of
+    /// the finalvert's), for an x-ray capture.
+    pub(super) fn xray_triangles(&self) -> impl Iterator<Item = [[f32; 3]; 3]> + '_ {
+        self.tris.iter().map(|t| t.v.map(|fv| [fv.v[0] as f32, fv.v[1] as f32, fv.v[5] as f32 / 65536.0]))
+    }
+
     /// `D_PolysetDraw` of the model into `fb`'s rows: the points, then the
     /// triangles (those that can reach the rows).
     pub(super) fn draw(&self, fb: &mut PolyFramebuffer) {

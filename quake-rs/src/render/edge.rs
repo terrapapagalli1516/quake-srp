@@ -46,6 +46,7 @@ use super::surf::{
 use super::torch::FaceTorches;
 use super::vis::point_in_leaf;
 use super::world::{self, face_grads};
+use super::xray::{XrayModel, XrayOptions, XrayPaint, XraySpan, XraySurface, XrayView};
 use super::{Frame, Projection, ViewGeom};
 use crate::bsp::MipTex;
 use crate::bsp::{Bsp, CONTENTS_SOLID, DFace, TexInfo};
@@ -312,6 +313,12 @@ pub(super) struct EdgeState {
     bedges: Vec<BEdge>,
     dlight_bits: Vec<u32>,
     poly: Vec<Vec3>,
+    /// EXTRA, debug only: the x-ray options ([`super::xray`]), and what a
+    /// capturing frame keeps of its models: each [`Ent`]'s model, and the
+    /// brush entities' edges.
+    pub(super) xray: XrayOptions,
+    xray_models: Vec<XrayModel>,
+    xray_brush_edges: Vec<[Vec3; 2]>,
 }
 
 impl EdgeState {
@@ -386,6 +393,9 @@ impl EdgeState {
         bedges: Vec::new(),
         dlight_bits: Vec::new(),
         poly: Vec::new(),
+        xray: XrayOptions { capture: false, lightmaps: None, vis_from: None },
+        xray_models: Vec::new(),
+        xray_brush_edges: Vec::new(),
     };
 }
 
@@ -573,6 +583,26 @@ impl EdgeState {
             });
         }
 
+        // EXTRA, debug only: what an x-ray capture keeps of the models.
+        if self.xray.capture {
+            self.xray_models.clear();
+            self.xray_brush_edges.clear();
+            let mut external = 0;
+            for (k, e) in ents.iter().enumerate() {
+                self.xray_models.push(match (k, e.world_bsp) {
+                    (0, _) => XrayModel::World,
+                    (_, true) => XrayModel::Inline(e.model),
+                    (_, false) => {
+                        external += 1;
+                        XrayModel::External(external - 1)
+                    }
+                });
+                if k > 0 {
+                    super::xray::model_edges(e.bsp, e.model, e.origin, &e.rotation, &mut self.xray_brush_edges);
+                }
+            }
+        }
+
         // `R_PushDlights` over the world, and `R_MarkLights` over each inline
         // brush model's own subtree (`R_DrawBEntitiesOnList`); the external
         // boxes are instanced models, which id never marks.
@@ -718,7 +748,8 @@ impl EdgeState {
     /// above it with a new `r_visframecount`, once per view leaf. No PVS (no
     /// vis data, leaf 0, a leaf without vis info) marks every leaf.
     fn mark_leaves(&mut self, bsp: &Bsp) {
-        let viewleaf = point_in_leaf(bsp, self.r_origin).unwrap_or(0);
+        // (An x-ray view may mark another point's PVS: `XrayOptions::vis_from`.)
+        let viewleaf = point_in_leaf(bsp, self.xray.vis_from.unwrap_or(self.r_origin)).unwrap_or(0);
         if self.oldviewleaf == Some(viewleaf) {
             return;
         }
@@ -2109,6 +2140,12 @@ impl EdgeState {
         } else {
             None
         };
+        // EXTRA, debug only (`XrayOptions::lightmaps`): a lit wall as one
+        // grey texel, lit by its lightmap — the light alone.
+        let lightmap = match (self.xray.lightmaps, lightmap) {
+            (Some(grey), Some(lightmap)) if !turbulent => return Paint::Flat { grads, colour: grey, shade, lightmap },
+            (_, lightmap) => lightmap,
+        };
         match tex {
             Some((tex_index, mt)) if !mt.pixels.is_empty() && mt.width > 0 && mt.height > 0 => {
                 if turbulent {
@@ -2162,7 +2199,102 @@ impl EdgeState {
     }
 }
 
+impl EdgeState {
+    /// EXTRA, debug only: the x-ray capture's view of the frame just built
+    /// ([`EdgeState::build`]) — its projection, its surfaces as `world`
+    /// paints them, the leaves the PVS marked and the brush entities' edges —
+    /// into `out` (its spans and z-buffers are added after the bands:
+    /// [`WorldDraw::xray_spans`]).
+    pub(super) fn xray_capture(&self, world: &WorldDraw, out: &mut super::xray::XrayFrame) {
+        out.w = self.w;
+        out.h = self.h;
+        out.view = Some(XrayView {
+            origin: self.r_origin,
+            forward: self.vpn,
+            right: self.vright,
+            up: self.vup,
+            xcenter: self.xcenter,
+            ycenter: self.ycenter,
+            xscale: self.xscale,
+            yscale: self.yscale,
+        });
+        out.persp = world.persp;
+        out.surfaces.clear();
+        for (si, s) in self.surfs.iter().enumerate() {
+            let Some(Some(d)) = world.surfs.get(si) else {
+                out.surfaces.push(None);
+                continue;
+            };
+            let model = if d.background {
+                XrayModel::Background
+            } else {
+                self.xray_models.get(s.ent as usize).copied().unwrap_or(XrayModel::World)
+            };
+            let (paint, mip, block, baked, grads) = match &d.paint {
+                Paint::Fill(_) => (XrayPaint::Fill, None, None, false, None),
+                Paint::Sky(_) => (XrayPaint::Sky, None, None, false, None),
+                Paint::Turb { grads, .. } => (XrayPaint::Liquid, None, None, false, Some(grads.xray(0))),
+                Paint::Cached { grads, block, job, .. } => (
+                    XrayPaint::Cached,
+                    Some(block.mip),
+                    Some((block.bw, block.bh)),
+                    job.is_some(),
+                    Some(grads.xray(block.mip)),
+                ),
+                Paint::Texels { grads, .. } | Paint::Flat { grads, .. } => {
+                    (XrayPaint::PerPixel, None, None, false, Some(grads.xray(0)))
+                }
+            };
+            out.surfaces.push(Some(XraySurface {
+                model,
+                face: s.face as usize,
+                paint,
+                key: s.key,
+                mip,
+                block,
+                baked,
+                grads,
+            }));
+        }
+        out.leaf_visible.clear();
+        out.leaf_visible.extend(self.leaf_visframe.iter().map(|&f| f == self.visframecount));
+        out.brush_edges.clone_from(&self.xray_brush_edges);
+    }
+}
+
 impl WorldDraw<'_> {
+    /// EXTRA, debug only: the frame's spans for an x-ray capture, and the
+    /// `1/z` the world's spans wrote (`D_DrawZSpans`' own arithmetic), row
+    /// after row of the `w x h` view.
+    pub(super) fn xray_spans(&self, h: usize, spans: &mut Vec<XraySpan>, world_z: &mut Vec<i16>) {
+        let w = self.w;
+        spans.clear();
+        world_z.clear();
+        world_z.resize(w * h, 0);
+        for v in 0..h {
+            let (Some(&first), Some(&end)) = (self.rows.get(v), self.rows.get(v + 1)) else { break };
+            for sp in self.spans.get(first as usize..end as usize).unwrap_or(&[]) {
+                let u = sp.u.clamp(0, w as i32) as usize;
+                let n = ((sp.u + sp.count).clamp(0, w as i32) as usize).saturating_sub(u);
+                if n == 0 {
+                    continue;
+                }
+                spans.push(XraySpan { v: v as u32, u: u as u32, count: n as u32, surface: sp.surf });
+                let Some(Some(SurfDraw { zi: [ziorigin, zistepu, zistepv], izistep, .. })) =
+                    self.surfs.get(sp.surf as usize)
+                else {
+                    continue;
+                };
+                let zi = (ziorigin + v as f32 * zistepv + u as f32 * zistepu) as f64;
+                let mut izi = c_ftoi(zi * 32768.0 * 65536.0);
+                for z in &mut world_z[v * w + u..v * w + u + n] {
+                    *z = (izi >> 16) as i16;
+                    izi = izi.wrapping_add(*izistep);
+                }
+            }
+        }
+    }
+
     /// `D_DrawSurfaces` and `D_DrawZSpans` for the rows of `band`: the spans
     /// of those rows, each painted as [`EdgeState::build`] decided for its
     /// surface — a block the frame bakes from `bakes` — and their `1/z`.

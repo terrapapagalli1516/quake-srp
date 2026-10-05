@@ -63,6 +63,7 @@ mod view;
 mod vis;
 mod warp;
 mod world;
+pub mod xray;
 
 // The 2-D layer's names quake-wasm and quaketool reach as `render::X`.
 pub use crate::console::{Console, draw_console, draw_notify};
@@ -996,6 +997,9 @@ pub struct Renderer {
     prof: stats::Profiler,
     /// How many threads draw a frame's bands.
     workers: band::Workers,
+    /// EXTRA, debug only: the x-ray capture of the last frame's main view
+    /// ([`Renderer::set_xray`]); `None` on every normal path.
+    xray: Option<Box<xray::XrayFrame>>,
 }
 
 /// A world's identity for [`Renderer`]'s per-map state: the sizes of what
@@ -1042,7 +1046,29 @@ impl Renderer {
             warp: warp::WarpTables::default(),
             prof: stats::Profiler::default(),
             workers: band::Workers::default(),
+            xray: None,
         }
+    }
+
+    /// EXTRA, debug only: draw the frames from now on with `options`
+    /// ([`xray`]: the lightmaps alone, another point's PVS) and, with
+    /// [`xray::XrayOptions::capture`], keep each frame's main view as
+    /// [`Renderer::xray_frame`] shows it. `None` (the default) is id's
+    /// renderer. The surface cache is emptied, so no block drawn one way is
+    /// reused the other.
+    pub fn set_xray(&mut self, options: Option<xray::XrayOptions>) {
+        let options = options.filter(|o| *o != xray::XrayOptions::default());
+        self.edge.xray = options.unwrap_or_default();
+        self.xray = options.filter(|o| o.capture).map(|_| Box::default());
+        self.map = None;
+    }
+
+    /// The x-ray capture of the last frame's main view (the view, not the
+    /// status bar overlay's windows beside the bar), while
+    /// [`Renderer::set_xray`] asked for one.
+    #[must_use]
+    pub fn xray_frame(&self) -> Option<&xray::XrayFrame> {
+        self.xray.as_deref().filter(|x| x.view.is_some())
     }
 
     /// `R_NewMap` (`r_misc.c`): forget everything kept for the last world and
@@ -1256,6 +1282,13 @@ impl Renderer {
             let Some(world) = self.edge.build(&frame, &mut self.surfaces, &mut jobs, &mut self.prof) else {
                 continue;
             };
+            // EXTRA, debug only: an x-ray capture of the main view.
+            if let Some(x) =
+                self.xray.as_deref_mut().filter(|_| ready.is_empty() && view.scene.options.window.is_none())
+            {
+                self.edge.xray_capture(&world, x);
+                x.spans.clear();
+            }
             let t_entities = self.prof.now();
             let entities = Entities::prepare(&frame, &mut self.prof);
             if let Some(t) = t_entities {
@@ -1294,6 +1327,22 @@ impl Renderer {
         let threads = bands.len() as u64;
         for b in &bands {
             self.prof.absorb(b);
+        }
+        // EXTRA, debug only: the captured view's spans, its z-buffers and its
+        // alias models' triangles, now that its bands are drawn.
+        if let (Some(x), Some((frame, world, entities))) = (self.xray.as_deref_mut(), ready.first()) {
+            if x.view.is_some() && x.spans.is_empty() && frame.scene.options.window.is_none() {
+                world.xray_spans(frame.h, &mut x.spans, &mut x.world_z);
+                x.zbuf.clear();
+                x.zbuf.extend_from_slice(&self.zbuf[..self.zlen]);
+                x.triangles.clear();
+                for (_, m) in &entities.models {
+                    x.triangles.extend(m.xray_triangles().map(|v| xray::XrayTriangle { v, gun: false }));
+                }
+                if let Some(gun) = &entities.gun {
+                    x.triangles.extend(gun.xray_triangles().map(|v| xray::XrayTriangle { v, gun: true }));
+                }
+            }
         }
         self.surfaces.baked(&bakes.finish());
         let drawn = ready.len() as u64;
