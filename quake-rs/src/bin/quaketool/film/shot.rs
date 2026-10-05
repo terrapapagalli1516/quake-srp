@@ -352,6 +352,11 @@ pub struct Shot {
     pub stepping: Option<bool>,
     /// `body on`: the player's own model is drawn (for a camera away from it).
     pub body: bool,
+    /// `cvar NAME VALUE at T` (T past 0): a setting that changes mid-shot,
+    /// `(film second, name, value)`, sorted.
+    pub timed: Vec<(f64, String, String)>,
+    /// `bob on`: a path camera bobs as the game bobs a running player's view.
+    pub bob: bool,
 }
 
 impl Default for Shot {
@@ -394,6 +399,8 @@ impl Default for Shot {
             ab: None,
             stepping: None,
             body: false,
+            timed: Vec::new(),
+            bob: false,
         }
     }
 }
@@ -525,15 +532,21 @@ impl Shot {
                     v => return Err(format!("`preset slop|classic`, got {v:?}")),
                 }
             }
-            "cvar" => match words.as_slice() {
-                [name, value @ ..] if !value.is_empty() => {
+            "cvar" => match at_time(&words)? {
+                ([name, value @ ..], t) if !value.is_empty() => {
                     if quake_rs::cvar::find(name).is_none() {
                         return Err(format!("no cvar {name:?}"));
                     }
-                    self.cvars.push((name.to_string(), value.join(" ")));
+                    if t > 0.0 {
+                        let at = self.timed.partition_point(|(k, ..)| *k <= t);
+                        self.timed.insert(at, (t, name.to_string(), value.join(" ")));
+                    } else {
+                        self.cvars.push((name.to_string(), value.join(" ")));
+                    }
                 }
-                _ => return Err(format!("`cvar NAME VALUE`, got {rest:?}")),
+                _ => return Err(format!("`cvar NAME VALUE [at T]`, got {rest:?}")),
             },
+            "bob" => self.bob = on_off(one()?)?,
             "mode" => self.mode = Some(parse_size(one()?)?),
             "pixel" => self.pixel = (num(one()?)? as usize).clamp(1, 8),
             "display" => {

@@ -206,11 +206,18 @@ pub fn cmd_film(args: &[String]) -> Result<String, String> {
 
 /// The game's settings for the shot's preset and cvars.
 fn shot_cvars(shot: &Shot) -> Cvars {
+    shot_cvars_at(shot, 0.0)
+}
+
+/// [`shot_cvars`] at film second `t`: with the timed `cvar ... at T` lines
+/// due by then.
+fn shot_cvars_at(shot: &Shot, t: f64) -> Cvars {
     let mut c = match shot.preset {
         Preset::Classic => Cvars::classic(),
         Preset::Slop => Cvars::slop(),
     };
-    for (name, value) in &shot.cvars {
+    let timed = shot.timed.iter().filter(|(k, ..)| *k <= t).map(|(_, n, v)| (n, v));
+    for (name, value) in shot.cvars.iter().map(|(n, v)| (n, v)).chain(timed) {
         if let Some(cv) = quake_rs::cvar::find(name) {
             cv.set(&mut c, value);
         }
@@ -729,7 +736,27 @@ impl Take {
         let count = steps.len();
         for (i, (step, tc)) in steps.into_iter().enumerate() {
             let draw = wanted && i + 1 == count;
-            let pose = camera_at(&self.shot, self.path.as_ref(), tc);
+            if !self.shot.timed.is_empty() {
+                // The settings as the timed `cvar` lines have them by now.
+                self.c = shot_cvars_at(&self.shot, tc);
+                (self.vid, self.aspect) = shot_vid(&self.shot, &self.c);
+                quake_rs::draw::set_scaled_2d(self.c.scaled_2d);
+            }
+            let mut pose = camera_at(&self.shot, self.path.as_ref(), tc);
+            if let (true, Some(p)) = (self.shot.bob, pose.as_mut()) {
+                // V_CalcBob from the path's own horizontal speed (game units a
+                // game second), on the game's clock.
+                let h = 0.5 / self.shot.fps;
+                let (a, b) = (
+                    camera_at(&self.shot, self.path.as_ref(), tc - h),
+                    camera_at(&self.shot, self.path.as_ref(), tc + h),
+                );
+                let speed = self.shot.speed_at(tc);
+                if let (Some(a), Some(b), true) = (a, b, speed > 0.0) {
+                    let v = (b.pos[0] - a.pos[0]).hypot(b.pos[1] - a.pos[1]) / (2.0 * h) / speed;
+                    p.pos[2] += f64::from(render::view_bob(v as f32, self.game_time() as f32));
+                }
+            }
             apply_settings(&mut self.game, &self.shot, &self.c, self.stepping);
             self.set_camera(pose);
             let frame = self.game.frame(step, &self.vid, draw);
@@ -1681,6 +1708,28 @@ mod v2_tests {
         let half = frame(&render(&pak, &ab, "ab-half", &[]));
         assert!(half != a_alone && half != b_alone, "half of each");
         assert!(Shot::parse(&format!("{base}ab fps 30 | fps 60\n")).is_err(), "the sides share the film's clock");
+    }
+
+    #[test]
+    fn a_timed_cvar_changes_the_picture_from_its_time_and_bob_moves_the_eye() {
+        let Some(pak) = pak_path() else { return };
+        let base = "map e1m6\nduration 0.3\nfps 10\nsize 320x180\ncamera fixed 504,500,242 0,96\n";
+        let frames = |dir: &std::path::Path| -> Vec<Vec<u8>> {
+            (0..3).map(|n| std::fs::read(dir.join(format!("{n:05}.ppm"))).unwrap()).collect()
+        };
+        let flip =
+            frames(&render(&pak, &format!("{base}cvar r_perspspan 16\ncvar r_perspspan 1 at 0.15\n"), "flip", &[]));
+        let exact = frames(&render(&pak, &format!("{base}cvar r_perspspan 1\n"), "exact1", &[]));
+        assert_ne!(flip[0], exact[0], "16 before 0.15");
+        assert_eq!(flip[2], exact[2], "exact from 0.15");
+        let path = "map e1m1\nduration 0.3\nfps 10\nsize 320x180\ncamera path\nkey 0 480,-352,110 0,90\nkey 0.3 480,-250,110 0,90\n";
+        let (still, bobbed) =
+            (frames(&render(&pak, path, "nobob", &[])), frames(&render(&pak, &format!("{path}bob on\n"), "bob", &[])));
+        assert!(still.iter().zip(&bobbed).skip(1).any(|(a, b)| a != b), "a running eye bobs");
+        let s = Shot::parse(&format!("{base}cvar r_perspspan 16\ncvar r_perspspan 1 at 0.15\n")).unwrap();
+        assert_eq!(s.timed, vec![(0.15, "r_perspspan".to_string(), "1".to_string())]);
+        assert_eq!(shot_cvars_at(&s, 0.1).persp_span, render::PerspSpan::Spans16);
+        assert_eq!(shot_cvars_at(&s, 0.2).persp_span, render::PerspSpan::Exact);
     }
 
     #[test]
