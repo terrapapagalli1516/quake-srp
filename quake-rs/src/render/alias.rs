@@ -36,10 +36,10 @@ use crate::math::{Vec3, dot};
 /// track per-entity skins.
 ///
 /// Group-frame (`ALIAS_GROUP`) and group-skin (`ALIAS_SKIN_GROUP`) animation is
-/// driven by the **scene `time`** ([`Scene::time`](super::Scene::time), not a
-/// per-instance field), so existing callers animate for free as game time
-/// advances. `R_AliasSetupFrame` / `R_AliasSetupSkin` select the sub-frame /
-/// sub-skin whose interval window contains that time.
+/// driven by the **scene `time`** ([`Scene::time`](super::Scene::time)) plus the
+/// entity's `syncbase`, so callers animate for free as game time advances.
+/// `R_AliasSetupFrame` / `R_AliasSetupSkin` select the sub-frame / sub-skin
+/// whose interval window contains that time.
 pub struct ModelInstance<'a> {
     pub mdl: &'a crate::mdl::Mdl,
     pub origin: Vec3,
@@ -69,6 +69,11 @@ pub struct ModelInstance<'a> {
     /// is not tracked). The [`ModelInstance::with_frame`] / [`ModelInstance::new`]
     /// constructors default it to 0.
     pub skinnum: i32,
+    /// `currententity->syncbase`: the entity's phase in its group frames and
+    /// skins, added to `cl.time` (id's client gives an `ST_RAND` model a
+    /// random one, `CL_ParseUpdate`; the port's live clients pass 0, the
+    /// oracle harness id's own, `quaketool view --ents`).
+    pub syncbase: f32,
 }
 
 impl<'a> ModelInstance<'a> {
@@ -81,7 +86,7 @@ impl<'a> ModelInstance<'a> {
         frame: usize,
         color: [u8; 3],
     ) -> ModelInstance<'a> {
-        ModelInstance { mdl, origin, yaw, pitch: 0.0, roll: 0.0, frame, blend: None, color, skinnum: 0 }
+        ModelInstance { mdl, origin, yaw, pitch: 0.0, roll: 0.0, frame, blend: None, color, skinnum: 0, syncbase: 0.0 }
     }
 
     /// Build a [`ModelInstance`] specifying the per-entity `skinnum` (pitch/roll 0).
@@ -93,7 +98,7 @@ impl<'a> ModelInstance<'a> {
         color: [u8; 3],
         skinnum: i32,
     ) -> ModelInstance<'a> {
-        ModelInstance { mdl, origin, yaw, pitch: 0.0, roll: 0.0, frame, blend: None, color, skinnum }
+        ModelInstance { mdl, origin, yaw, pitch: 0.0, roll: 0.0, frame, blend: None, color, skinnum, syncbase: 0.0 }
     }
 }
 
@@ -911,7 +916,10 @@ pub(super) fn prepare_alias_model<'a>(
         s.alias_tris += inst.mdl.header.numtris.max(0) as u64;
     });
     let light = alias_entity_light(scene.world, inst.origin, scene.light_styles, frame.torches, scene.dlights, false);
-    alias_prepare(&view, &ent, trivial_accept, light, false, scene.time as f32, scene.colormap)
+    // R_AliasSetupSkin / R_AliasSetupFrame: `time = cl.time + syncbase`, a
+    // double sum stored to a float.
+    let time = (scene.time + f64::from(inst.syncbase)) as f32;
+    alias_prepare(&view, &ent, trivial_accept, light, false, time, scene.colormap)
 }
 
 /// `r_avertexnormals` (anorms.h): the 162 precomputed vertex normals an MDL
@@ -1037,6 +1045,7 @@ pub(super) fn prepare_viewmodel<'a>(frame: &Frame<'_, 'a>, vm: &Viewmodel<'a>) -
         color: nearest_index(scene.palette, [180, 180, 180]),
     };
     let light = alias_entity_light(scene.world, origin, scene.light_styles, frame.torches, scene.dlights, true);
+    // `cl.viewent`'s syncbase is 0.
     alias_prepare(&view, &ent, 0, light, true, scene.time as f32, scene.colormap)
 }
 
@@ -1060,6 +1069,7 @@ mod tests {
 
         let mdl = tiny_mdl();
         let inst = ModelInstance {
+            syncbase: 0.0,
             mdl: &mdl,
             origin: [-80.0, 0.0, 0.0], // between the camera and the centre
             yaw: 0.0,
@@ -1281,6 +1291,7 @@ mod tests {
         // Skinned model.
         let skinned = skinned_mdl();
         let inst_skin = ModelInstance {
+            syncbase: 0.0,
             mdl: &skinned,
             origin: [-80.0, 0.0, 0.0],
             yaw: 0.0,
@@ -1298,6 +1309,7 @@ mod tests {
         let mut flat = skinned_mdl();
         flat.skins.clear();
         let inst_flat = ModelInstance {
+            syncbase: 0.0,
             mdl: &flat,
             origin: [-80.0, 0.0, 0.0],
             yaw: 0.0,
@@ -1332,6 +1344,7 @@ mod tests {
         let mut mdl = tiny_mdl();
         mdl.skins.clear(); // no usable skin -> flat path
         let inst = ModelInstance {
+            syncbase: 0.0,
             mdl: &mdl,
             origin: [-80.0, 0.0, 0.0],
             yaw: 0.0,
@@ -1358,6 +1371,7 @@ mod tests {
         let mdl = two_frame_mdl();
 
         let inst0 = ModelInstance {
+            syncbase: 0.0,
             mdl: &mdl,
             origin: [-80.0, 0.0, 0.0],
             yaw: 0.0,
@@ -1369,6 +1383,7 @@ mod tests {
             skinnum: 0,
         };
         let inst1 = ModelInstance {
+            syncbase: 0.0,
             mdl: &mdl,
             origin: [-80.0, 0.0, 0.0],
             yaw: 0.0,
@@ -1449,6 +1464,7 @@ mod tests {
         let cam = Camera::looking_at([-200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 90.0);
         let mdl = two_frame_mdl();
         let inst = |frame, blend| ModelInstance {
+            syncbase: 0.0,
             mdl: &mdl,
             origin: [-80.0, 0.0, 0.0],
             yaw: 0.0,

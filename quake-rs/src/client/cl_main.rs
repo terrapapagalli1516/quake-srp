@@ -986,6 +986,7 @@ fn client_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid, dra
         .iter()
         .filter_map(|(name, origin, angles, frame, color, skin, blend)| match w.model_cache.get(name) {
             Some(Some(mdl)) => Some(ModelInstance {
+                syncbase: 0.0,
                 mdl,
                 origin: *origin,
                 yaw: angles[1],
@@ -1012,6 +1013,7 @@ fn client_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid, dra
             // cache entry (model absent from the pak) skips the piece.
             if let Some(Some(mdl)) = w.model_cache.get(seg.model.model_name()) {
                 instances.push(ModelInstance {
+                    syncbase: 0.0,
                     mdl,
                     origin: seg.origin,
                     yaw: seg.yaw,
@@ -1047,6 +1049,7 @@ fn client_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid, dra
         .iter()
         .filter_map(|(name, origin, angles, frame, k)| match w.sprite_cache.get(name) {
             Some(Some(spr)) => Some(render::SpriteInstance {
+                syncbase: 0.0,
                 sprite: spr,
                 origin: *origin,
                 angles: *angles,

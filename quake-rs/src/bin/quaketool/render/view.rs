@@ -228,11 +228,11 @@ pub fn cmd_view(args: &[String]) -> CmdResult {
     let mut mdls: HashMap<String, Option<Mdl>> = HashMap::new();
     let mut sprs: HashMap<String, Option<Sprite>> = HashMap::new();
     let mut ext: HashMap<String, Option<Bsp>> = HashMap::new();
-    // (model, origin, angles, frame, skin) per alias entity.
-    type AliasDesc = (String, [f32; 3], [f32; 3], usize, i32);
+    // (model, origin, angles, frame, skin, syncbase) per alias entity.
+    type AliasDesc = (String, [f32; 3], [f32; 3], usize, i32, f32);
     let mut alias_descs: Vec<AliasDesc> = Vec::new();
-    // (model, origin, angles, frame, alias entries before it) per sprite entity.
-    type SpriteDesc = (String, [f32; 3], [f32; 3], usize, usize);
+    // (model, origin, angles, frame, alias entries before it, syncbase) per sprite entity.
+    type SpriteDesc = (String, [f32; 3], [f32; 3], usize, usize, f32);
     let mut sprite_descs: Vec<SpriteDesc> = Vec::new();
     let mut ext_descs: Vec<(String, [f32; 3])> = Vec::new();
     let mut bmodels: Vec<render::BModelInstance> = Vec::new();
@@ -248,6 +248,9 @@ pub fn cmd_view(args: &[String]) -> CmdResult {
                 return Err(format!("{p}: malformed entity line {line:?}").into());
             };
             let (model, org, ang) = (model.to_string(), [ox, oy, oz], [ap, ay, ar]);
+            // `syncbase`, the entity's phase in its group frames (a line
+            // without one: 0).
+            let syncbase = num(9).unwrap_or(0.0);
             if let Some(n) = model.strip_prefix('*') {
                 let model_index = n.parse().map_err(|_| format!("{p}: bad submodel {model:?}"))?;
                 // The `.ents` line carries this entity's angles too (oracle.c
@@ -259,10 +262,10 @@ pub fn cmd_view(args: &[String]) -> CmdResult {
                 ext_descs.push((model, org));
             } else if model.ends_with(".spr") {
                 sprs.entry(model.clone()).or_insert_with(|| read_pak(&model).ok().and_then(|b| Sprite::parse(&b).ok()));
-                sprite_descs.push((model, org, ang, fr as usize, alias_descs.len()));
+                sprite_descs.push((model, org, ang, fr as usize, alias_descs.len(), syncbase));
             } else if model.ends_with(".mdl") {
                 mdls.entry(model.clone()).or_insert_with(|| read_pak(&model).ok().and_then(|b| Mdl::parse(&b).ok()));
-                alias_descs.push((model, org, ang, fr as usize, sk as i32));
+                alias_descs.push((model, org, ang, fr as usize, sk as i32, syncbase));
             } else {
                 skipped += 1;
             }
@@ -270,8 +273,9 @@ pub fn cmd_view(args: &[String]) -> CmdResult {
     }
     let instances: Vec<render::ModelInstance> = alias_descs
         .iter()
-        .filter_map(|(name, org, ang, frame, skin)| match mdls.get(name) {
+        .filter_map(|(name, org, ang, frame, skin, syncbase)| match mdls.get(name) {
             Some(Some(mdl)) => Some(render::ModelInstance {
+                syncbase: *syncbase,
                 mdl,
                 origin: *org,
                 yaw: ang[1],
@@ -302,8 +306,9 @@ pub fn cmd_view(args: &[String]) -> CmdResult {
         .collect();
     let sprites: Vec<render::SpriteInstance> = sprite_descs
         .iter()
-        .filter_map(|(name, org, ang, frame, k)| match sprs.get(name) {
+        .filter_map(|(name, org, ang, frame, k, syncbase)| match sprs.get(name) {
             Some(Some(sprite)) => Some(render::SpriteInstance {
+                syncbase: *syncbase,
                 sprite,
                 origin: *org,
                 angles: *ang,

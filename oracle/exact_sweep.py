@@ -70,8 +70,8 @@ def case_args(ns: argparse.Namespace, res, view, time_, oracle: str) -> argparse
     return argparse.Namespace(
         res=res, view=view, time=time_, settle=0, viewmodel=False, bench=0, viewsize=120,
         spans=ns.spans, exactpersp=ns.spans == 1, perspspan=8 if ns.spans == 8 else None, c_cmd=c_cmd, c_post=[],
-        demo=None, aspect=ns.aspect, oracle_dt=None, id_lightstyles=False, dlights="id", pak=ns.pak,
-        pak1=None, game_dir=[], oracle=oracle_path(oracle), full=False,
+        demo=None, aspect=ns.aspect, oracle_dt=None, id_lightstyles=ns.id_lightstyles, dlights="id", pak=ns.pak,
+        pak1=ns.pak1, game_dir=ns.game_dir, oracle=oracle_path(oracle), full=False,
         fpcw=ORACLES.get(oracle, ("", False))[1],
     )
 
@@ -163,12 +163,18 @@ def main() -> None:
                          "x87cw: the x87 build in id's x86 rendering FPU state (compare.py --fpcw); or NAME=PATH")
     ap.add_argument("--aspect", type=float, help="vid.aspect for both renderers (compare.py --aspect)")
     ap.add_argument("--mip0", action="store_true", help="both renderers at mip 0 (d_mipscale 0)")
+    ap.add_argument("--id-lightstyles", action="store_true",
+                    help="hand the port id's light styles of each frame (compare.py's): for a map whose styles a "
+                         "random number moves (hip2m2's func_counter), which the port's server cannot share")
     ap.add_argument("--spans", type=int, choices=(16, 8, 1), default=16,
                     help="16: id's x86 spans (D_DrawSpans16, Turbulent8), the port's Classic; 8: id's portable C "
                          "D_DrawSpans8 against the port's --perspspan 8; 1: the port's exact perspective extra "
                          "(--exactpersp) against the oracle's transcription of it")
     ap.add_argument("--jobs", type=int, default=max(1, (os.cpu_count() or 2) // 2))
     ap.add_argument("--pak", type=Path, default=compare.DEFAULT_PAK)
+    ap.add_argument("--pak1", type=Path, help="id1's registered pak1.pak (compare.py --pak1): its maps, and the packs'")
+    ap.add_argument("--game-dir", nargs=2, metavar=("NAME", "DIR"), action="append", default=[],
+                    help="a mission pack's game directory, as compare.py's (--game-dir hipnotic DIR)")
     ap.add_argument("--quaketool", help="this quaketool binary instead of building quake-rs")
     ap.add_argument("--keep", type=Path, help="keep every frame here, and diffs.json")
     ap.add_argument("--show", type=int, default=12, help="list at most this many differing cases per oracle")

@@ -447,7 +447,8 @@ struct Knot {
 /// saturates).
 #[inline]
 pub(super) fn c_ftoi(x: f32) -> i32 {
-    c_dtoi(f64::from(x))
+    // -2^31 and 2^31 are floats: the range is the float's own.
+    if (-2_147_483_648.0..2_147_483_648.0).contains(&x) { x as i32 } else { i32::MIN }
 }
 
 /// `(int)x` of a C `double` (`cvttsd2si`): as [`c_ftoi`].
@@ -758,8 +759,8 @@ fn clamp_c(v: i32, lo: i32, hi: i32) -> i32 {
 }
 
 /// The end of each full `N`-pixel segment of a span of `end` pixels from
-/// `acc` (the accumulators at the span's first pixel), clamped by `clamp`:
-/// what the span loops step through, a segment ahead.
+/// `acc` (the accumulators at the span's first pixel), clamped to `[low,
+/// bbextents]`: what the span loops step through, a segment ahead.
 ///
 /// The span loops ask for the end of the segment AFTER the one they are
 /// about to draw. id's routines divide for a segment's end on reaching the
@@ -770,18 +771,30 @@ fn clamp_c(v: i32, lo: i32, hi: i32) -> i32 {
 /// to a fifth faster (PERF_PLAN.md, §15). Once the full segments are done,
 /// [`SegmentEnds::last`] gives the last segment's end from where the
 /// accumulators stopped, the last full segment's end.
-struct SegmentEnds<'g, const N: usize, F> {
+struct SegmentEnds<'g, const N: usize> {
     g: &'g SurfGrads,
     acc: FloatSpan,
-    clamp: F,
+    /// `sdivz16stepu`, `tdivz16stepu`, `zi16stepu` (for `N` 16): `d_*stepu * N`.
+    nstep: [f32; 3],
+    low: i32,
     end: usize,
     /// The first pixel of the segment whose end [`SegmentEnds::next`] gives.
     k0: usize,
 }
 
-impl<'g, const N: usize, F: Fn((i32, i32)) -> (i32, i32)> SegmentEnds<'g, N, F> {
-    fn new(g: &'g SurfGrads, acc: FloatSpan, end: usize, clamp: F) -> Self {
-        SegmentEnds { g, acc, clamp, end, k0: 0 }
+impl<'g, const N: usize> SegmentEnds<'g, N> {
+    #[inline]
+    fn new(g: &'g SurfGrads, acc: FloatSpan, end: usize, low: i32) -> Self {
+        let nf = N as f32;
+        let nstep = [g.sdivz.stepu * nf, g.tdivz.stepu * nf, g.zi.stepu * nf];
+        SegmentEnds { g, acc, nstep, low, end, k0: 0 }
+    }
+
+    /// The position the accumulators give, clamped: `snext`, `tnext`.
+    #[inline]
+    fn clamped(&self) -> (i32, i32) {
+        let (s, t) = self.acc.st(self.g);
+        (clamp_c(s, self.low, self.g.bbextents), clamp_c(t, self.low, self.g.bbextentt))
     }
 
     /// The clamped end of the next full segment (`sdivz += sdivz16stepu`
@@ -794,8 +807,11 @@ impl<'g, const N: usize, F: Fn((i32, i32)) -> (i32, i32)> SegmentEnds<'g, N, F> 
             return None;
         }
         self.k0 += N;
-        self.acc.step(self.g, N as f32);
-        Some((self.clamp)(self.acc.st(self.g)))
+        let FloatSpan { sdivz, tdivz, zi } = &mut self.acc;
+        *sdivz += self.nstep[0];
+        *tdivz += self.nstep[1];
+        *zi += self.nstep[2];
+        Some(self.clamped())
     }
 
     /// The last segment's: its `n` steps (`count - 1`) on from the last full
@@ -805,7 +821,7 @@ impl<'g, const N: usize, F: Fn((i32, i32)) -> (i32, i32)> SegmentEnds<'g, N, F> 
     fn last(mut self) -> Option<(usize, (i32, i32))> {
         let n = self.end.checked_sub(self.k0 + 1).filter(|&n| n > 0)?;
         self.acc.step(self.g, n as f32);
-        Some((n, (self.clamp)(self.acc.st(self.g))))
+        Some((n, self.clamped()))
     }
 }
 
@@ -830,9 +846,7 @@ fn span16_cached(crow: &mut [u8], u: usize, v: usize, g: &SurfGrads, block: &[u8
     let acc = FloatSpan::start(g, u, v);
     let (s0, t0) = acc.st(g);
     let (mut s, mut t) = (clamp_c(s0, 0, g.bbextents), clamp_c(t0, 0, g.bbextentt));
-    let (bbs, bbt) = (g.bbextents, g.bbextentt);
-    let mut ends =
-        SegmentEnds::<16, _>::new(g, acc, crow.len(), |(a, b)| (clamp_c(a, 4096, bbs), clamp_c(b, 4096, bbt)));
+    let mut ends = SegmentEnds::<16>::new(g, acc, crow.len(), 4096);
     // The full segments: exact again at pixel k0 + 16, the positions `16*s +
     // i*ds` with 20 fractional bits. (A loop of a constant 16, which the
     // compiler unrolls.)
@@ -906,8 +920,7 @@ fn span_c_cached<const N: usize>(crow: &mut [u8], u: usize, v: usize, g: &SurfGr
     let acc = FloatSpan::start(g, u, v);
     let (s0, t0) = acc.st(g);
     let (mut s, mut t) = (clamp_c(s0, 0, g.bbextents), clamp_c(t0, 0, g.bbextentt));
-    let (bbs, bbt) = (g.bbextents, g.bbextentt);
-    let mut ends = SegmentEnds::<N, _>::new(g, acc, crow.len(), |(a, b)| (clamp_c(a, low, bbs), clamp_c(b, low, bbt)));
+    let mut ends = SegmentEnds::<N>::new(g, acc, crow.len(), low);
     // The full segments, `N` pixels each: a loop of a constant length, which
     // the compiler unrolls (one of a variable length cost 8 nearly what
     // exact perspective costs). Then the last, `n` pixels.
@@ -1398,8 +1411,7 @@ fn turb_span<const N: usize>(crow: &mut [u8], u: usize, v: usize, g: &SurfGrads,
     let acc = FloatSpan::start(g, u, v);
     let (s0, t0) = acc.st(g);
     let (mut s, mut t) = (clamp_c(s0, 0, g.bbextents), clamp_c(t0, 0, g.bbextentt));
-    let (bbs, bbt) = (g.bbextents, g.bbextentt);
-    let mut ends = SegmentEnds::<N, _>::new(g, acc, crow.len(), |(a, b)| (clamp_c(a, low, bbs), clamp_c(b, low, bbt)));
+    let mut ends = SegmentEnds::<N>::new(g, acc, crow.len(), low);
     let start = |s: i32, t: i32| (s & TURB_COORD_MASK, t & TURB_COORD_MASK);
     // The full segments, a loop of a constant `N` each ([`span_c_cached`]),
     // then the last; each segment in the C's `int`s from its masked start.

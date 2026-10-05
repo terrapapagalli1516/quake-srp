@@ -700,6 +700,7 @@ fn render_demo_frame(
                 None
             };
             owned.push(ModelInstance {
+                syncbase: 0.0,
                 mdl,
                 origin: e.origin,
                 yaw: e.angles[1],
@@ -739,6 +740,7 @@ fn render_demo_frame(
         } else if let Some(Some(spr)) = d.sprites.get(e.modelindex) {
             // Sprite-model entity (the boot demo's s_explod.spr explosion flashes).
             sprite_insts.push(render::SpriteInstance {
+                syncbase: 0.0,
                 sprite: spr,
                 origin: e.origin,
                 angles: e.angles,
@@ -761,6 +763,7 @@ fn render_demo_frame(
             };
             if let Some(Some(mdl)) = d.models.get(idx) {
                 owned.push(ModelInstance {
+                    syncbase: 0.0,
                     mdl,
                     origin: seg.origin,
                     yaw: seg.yaw,

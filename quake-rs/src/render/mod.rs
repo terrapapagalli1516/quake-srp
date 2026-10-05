@@ -1437,7 +1437,11 @@ impl<'a> Entities<'a> {
         let ts = prof.now();
         let view = SpriteView::new(frame);
         let mut sprites: Vec<_> = (scene.sprites.iter())
-            .filter_map(|inst| Some((inst.models_before, SpriteDraw::prepare(&view, inst, scene.time as f32)?)))
+            // R_GetSpriteframe: `time = cl.time + syncbase`, stored to a float.
+            .filter_map(|inst| {
+                let time = (scene.time + f64::from(inst.syncbase)) as f32;
+                Some((inst.models_before, SpriteDraw::prepare(&view, inst, time)?))
+            })
             .collect();
         sprites.sort_by_key(|&(before, _)| before);
         if let Some(t) = ts {
@@ -2035,8 +2039,14 @@ mod tests {
         // at x = 84, it faces the eye in the plane x = 100.
         let models = [ModelInstance::with_frame(&mdl, [84.0, 0.0, 0.0], 90.0, 0, [200, 40, 40])];
         let pixel = |models_before: usize| {
-            let sprites =
-                [SpriteInstance { sprite: &spr, origin: [100.0, 0.0, 0.0], angles: [0.0; 3], frame: 0, models_before }];
+            let sprites = [SpriteInstance {
+                syncbase: 0.0,
+                sprite: &spr,
+                origin: [100.0, 0.0, 0.0],
+                angles: [0.0; 3],
+                frame: 0,
+                models_before,
+            }];
             let scene = Scene { models: &models, sprites: &sprites, ..Scene::new(&world, cam, 160, 120, &pal) };
             // Inside both, below and right of the centre: world (100, -6, -6).
             render_once(&scene).pixels[64 * 160 + 84]
@@ -2062,6 +2072,7 @@ mod tests {
             .map(|i| ([-150.0 + i as f32, (i % 13) as f32 * 9.0 - 60.0, (i % 7) as f32 * 9.0], (i % 250) as u8))
             .collect();
         let sprites = [SpriteInstance {
+            syncbase: 0.0,
             sprite: &spr,
             origin: [-60.0, 20.0, 10.0],
             angles: [0.0; 3],

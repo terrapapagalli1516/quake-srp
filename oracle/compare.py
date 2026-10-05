@@ -85,22 +85,23 @@ def pak_has_file(pak: Path, name: str) -> bool:
 
 
 def pak_for_map(args, mapname: str) -> str:
-    """The `quaketool view` pak argument for `mapname`: `--pak` (plus `--pak1`)
-    alone when it has the map, unchanged from before `--game-dir` existed;
-    otherwise that layered under the first `--game-dir` pack that has it
-    instead (a mission pack's own map, e.g. hip1m1 in hipnotic/pak0.pak),
-    comma-joined the way `quaketool view`'s layered pak list reads (the last
-    one searched first) — the mission pack's own bsp/progs over id1's shared
-    palette."""
+    """The `quaketool view` pak argument for `mapname`, comma-joined the way
+    `quaketool view`'s layered pak list reads (the last one searched first):
+    `--pak` alone when it has the map and no `--game-dir` is given; a map of
+    id1's registered `--pak1`, the two; with `--game-dir`s, every pak of
+    the game's search path as id's `-NAME` builds it — id1's, then each game
+    directory's `pak0.pak` and `pak1.pak` over them — so that a pack's own
+    map, `progs.dat` and models win, its `start.bsp` over id1's included."""
     want = f"maps/{mapname}.bsp"
-    if pak_has_file(args.pak, want):
-        return str(args.pak)
     base = [str(args.pak)] + ([str(args.pak1)] if args.pak1 else [])
-    for _name, path in args.game_dir:
-        pak = Path(path) / "pak0.pak"
-        if pak.exists() and pak_has_file(pak, want):
-            return ",".join(base + [str(pak)])
-    sys.exit(f"{want} not found in --pak, --pak1 or any --game-dir")
+    game = [str(Path(path) / p) for _name, path in args.game_dir for p in ("pak0.pak", "pak1.pak")
+            if (Path(path) / p).exists()]
+    paks = base + game
+    if not game and pak_has_file(args.pak, want):
+        return str(args.pak)
+    if not any(pak_has_file(Path(p), want) for p in paks):
+        sys.exit(f"{want} not found in --pak, --pak1 or any --game-dir")
+    return ",".join(paks)
 
 
 def read_pnm(path: Path) -> np.ndarray:

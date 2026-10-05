@@ -435,6 +435,7 @@ pub fn cmd_playtest(pak_path: &str, map_name: &str, out: Option<&str>) -> CmdRes
         let inst: Vec<render::ModelInstance> = owned
             .iter()
             .map(|(mdl, origin, yaw, color)| render::ModelInstance {
+                syncbase: 0.0,
                 mdl,
                 origin: *origin,
                 yaw: *yaw,
