@@ -2,7 +2,10 @@
 map e1m1                       the map (maps/e1m1.bsp), its game running live
 demo demo1 [from S]            or a recorded demo, from S seconds in (default 0)
 skill N                        0..3 (default 1)
-warmup S                       game seconds run (undrawn) before the first frame (default 1)
+warmup S | until T             game seconds run (undrawn) before the first frame (default 1),
+                               or until the game's clock (cl.time) reaches T
+wake X,Y,Z [at T]              wake the monster nearest the point (its enemy the player, QuakeC's
+                               FoundTarget) at film second T (default 0); a line each
 
 # The film.
 duration S                     seconds of film (required)
@@ -11,43 +14,61 @@ size WxH                       the output frames (default 1920x1080)
 
 # The game's settings.
 preset slop|classic            every setting at once (default slop)
-cvar NAME VALUE                any console variable, after the preset (r_perspspan 16, fov 110, ...)
-mode WxH                       the picture the game draws (default: slop the size over `pixel`;
-                               Classic 720x540, a 4:3 mode exactly 2x into 1440x1080)
+cvar NAME VALUE                any console variable, after the preset (r_perspspan 16, gamma 0.8, ...)
+mode WxH                       the picture the game draws (default: slop the size over `pixel`,
+                               Classic the preset's video mode, 960x600)
 pixel N                        slop's pixel size: mode = size / N, each pixel N x N (default 1)
 display W:H|square             the shape the picture is shown at (default: slop square, Classic 4:3)
-hud on|off                     the status bar at the preset's Screen size, or none: Screen size 120 (default off)
+hud on|off                     the status bar at the preset's Screen size, or none: Screen size 120
+                               (default off)
 gun on|off                     the first-person weapon (default off)
 crosshair 0|1|2                the `crosshair` cvar (default 0)
 messages on|off                centre prints and notify lines (default off)
 notarget on|off                monsters do not see the player (default on)
 player spawn|camera|X,Y,Z[,YAW]  where the player is: the map's start, carried along with the
-                               camera (noclip; the map's exits are shut), or stood there (default spawn)
-clock id|free                  host frames: id's (Host_FilterTime's 72 Hz gate on the game clock,
-                               a frame held until the next tick) or one every film frame (the
-                               default: Classic id, slop free)
-speed S [at T]                 the game's speed from film second T on (default 1 from 0; 0 freezes
-                               the world while the camera goes on; 0.25 is slow motion)
+                               camera (noclip; the map's exits are shut), or stood there
+                               (default spawn)
+clock id|free                  how the game's clock meets the film's: id's 72 Hz ticks of game time,
+                               each picture held until the next (a 60 fps film steps unevenly; slow
+                               motion shows the ticks), or a host frame for every film frame, stepped
+                               as the uncapped page steps (default: Classic id, slop free)
+speed S [at T]                 the game's speed from film second T on (default 1 from 0; 0.25 is slow
+                               motion; 0 freezes the world while the camera goes on)
 
-# The camera.
+# The camera. Angles in degrees, as Quake's (quaketool view --angles): pitch + looks down,
+# yaw 0 along +x and 90 along +y; X,Y,Z is the eye.
 camera player                  the player's own eye (the default for a map)
 camera demo                    the recording's camera, with the client's lerp (the default for a demo)
-camera fixed X,Y,Z P,Y[,R]     still, at pitch P (+ up), yaw Y, roll R (degrees)
+camera fixed X,Y,Z P,Y[,R]     still
 camera fixed X,Y,Z at X,Y,Z    still, looking at a point
-camera path                    keyframes (below): positions through Catmull-Rom (cubic Hermite,
-                               tangents from the neighbours over their times), angles by the
+camera path                    keyframes (below): positions through Catmull-Rom (a cubic Hermite with
+                               each key's tangent from its neighbours over their times), angles by the
                                shortest arc, each segment eased as its first key says
 key T X,Y,Z P,Y[,R] [fov F] [ease linear|in|out|inout]
-key T X,Y,Z at X,Y,Z [fov F] [ease ...]   look at a point (the point is interpolated too)
-fov F                          the field of view (`fov`, 90; Hor+ widens it on a wide picture)
+key T X,Y,Z at X,Y,Z [fov F] [ease ...]      looking at a point (the point is interpolated too)
+fov F                          the field of view (`fov` 90; Hor+ widens it on a wide picture)
 
-# X-ray (debug views of the renderer; `xray.rs` has the list).
-xray MODE                      game|black|z|surfaces|spans|segments|mip|cache|leaves|lightmaps|error
-wire world|entities|all|off [hidden|through] [pvs]   polygon edges over the picture
-vis X,Y,Z                      draw the PVS of this point instead of the camera's
-mix T VALUE                    the x-ray's strength over the game picture at film second T
+# X-ray: the renderer's machinery, drawn from what it decided for the 3-D view.
+xray MODE                      the picture: game (default), black, z (the z-buffer, near light),
+                               surfaces (a colour each, id's r_drawflat), spans (each surface's
+                               spans, a row each), segments (each span's affine runs in rust and
+                               brown, a lava tick at each perspective divide), mip (the mip level:
+                               0 green, 1 yellow, 2 orange, 3 red), cache (each surface-cache block
+                               a tile, darker for coarser mips, black borders), bakes (the blocks
+                               this frame baked, lit), luxels (the lightmap's 16-texel cells),
+                               leaves (the BSP leaf of each visible point), lightmaps (the light
+                               alone), error (the affine texel's distance from the exact one: dark
+                               none, yellow half a texel, red one or more)
+wire world|entities|all|off [hidden|through] [pvs|culled]
+                               polygon edges over the picture: the world's, the entities' (brush
+                               models, alias models' triangles); hidden by what is in front, or
+                               through it; the world's coloured drawn / in the PVS / culled, or
+                               only the culled ones
+vis X,Y,Z                      draw the PVS of this point instead of the camera's (r_lockpvs)
+mix T VALUE                    the x-ray's strength over the game's picture at film second T
                                (keys interpolated; default 1)
 
 # Output.
-label TEXT                     burned into every frame in Quake's font (bottom-left)
+label TEXT                     burned into every frame in Quake's lettering (conchars, bronze)
+labelpos tl|tr|bl|br           its corner (default bl)
 sound on|off                   write sound.wav, the shot's game sound (default off)

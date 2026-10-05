@@ -15,8 +15,9 @@
 
 use super::shot::{Ease, Key, Look};
 
-/// A camera at one moment: the renderer's [`quake_rs::render::Camera`] in
-/// `f64`, angles in degrees (pitch + up).
+/// A camera at one moment, angles in degrees as Quake's are (`viewangles`,
+/// `quaketool view --angles`): pitch + looks down, yaw 0 along +x and 90
+/// along +y.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Pose {
     pub pos: [f64; 3],
@@ -31,19 +32,20 @@ impl Pose {
         quake_rs::render::Camera {
             pos: self.pos.map(|v| v as f32),
             yaw: self.yaw as f32,
-            pitch: self.pitch as f32,
+            // The renderer's pitch is + up.
+            pitch: -self.pitch as f32,
             roll: self.roll as f32,
             fov_deg: self.fov as f32,
         }
     }
 }
 
-/// `(pitch + up, yaw)` in degrees looking from `from` at `to`.
+/// `(pitch, yaw)` in degrees (Quake's: pitch + down) looking from `from` at `to`.
 pub fn look_at(from: [f64; 3], to: [f64; 3]) -> (f64, f64) {
     let d = [to[0] - from[0], to[1] - from[1], to[2] - from[2]];
     let horiz = d[0].hypot(d[1]);
     let yaw = if horiz == 0.0 { 0.0 } else { d[1].atan2(d[0]).to_degrees() };
-    (d[2].atan2(horiz).to_degrees(), yaw)
+    (-d[2].atan2(horiz).to_degrees(), yaw)
 }
 
 /// `a` minus `b`, the shortest way round: in [-180, 180).
@@ -225,7 +227,8 @@ mod tests {
         let p = path.at(0.0);
         assert!((p.yaw, p.pitch) == (0.0, 0.0), "{p:?}");
         let p = path.at(1.0);
-        assert!((p.yaw - 90.0).abs() < 1e-9 && (p.pitch - 45.0).abs() < 1e-9, "{p:?}");
-        assert_eq!(look_at([0.0; 3], [0.0, 0.0, 10.0]), (90.0, 0.0));
+        assert!((p.yaw - 90.0).abs() < 1e-9 && (p.pitch + 45.0).abs() < 1e-9, "up is pitch -45: {p:?}");
+        assert_eq!(look_at([0.0; 3], [0.0, 0.0, -10.0]), (90.0, 0.0), "straight down is pitch 90");
+        assert_eq!(p.camera().pitch, 45.0, "the renderer's pitch is + up");
     }
 }

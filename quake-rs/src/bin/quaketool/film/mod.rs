@@ -15,11 +15,11 @@
 //!   stepped by the film frame's share of game time ([`Stepping::Uncapped`],
 //!   the uncapped page's) — monsters glide, lights glide, as the slop preset
 //!   draws at any refresh rate.
-//! - `clock id` (Classic's): id's `Host_FilterTime` on the game's clock — no
-//!   host frame until 1/72 s of game time has passed; a film frame between
-//!   two ticks holds the last picture, as id's renderer only drew on a host
-//!   frame. At 60 film frames a second every frame is a tick (1/60 s is more
-//!   than 1/72); in slow motion the ticks show.
+//! - `clock id` (Classic's): id's 72 Hz — a host frame every 1/72 s of game
+//!   time, each picture (the camera's too) held until the next, as id's
+//!   renderer only drew on a host frame. A film frame shows the last tick at
+//!   or before it: at 60 a second, one tick in six is never seen and the
+//!   motion steps unevenly; in slow motion every tick shows, held.
 //!
 //! `speed` slows the game (the film's seconds stay seconds) and 0 freezes it
 //! while the camera goes on: a frozen frame is a paused one (the server
@@ -49,7 +49,6 @@ use std::io::Write as _;
 use std::rc::Rc;
 use std::time::Instant;
 
-use quake_rs::client::host::host_filter_time;
 use quake_rs::client::{ClientFrame, DemoPlay, SoundCall, Vid, Walk, cl_demo, cl_main, host_cmd};
 use quake_rs::console::ConNotify;
 use quake_rs::cvar::Cvars;
@@ -67,7 +66,7 @@ pub mod shot;
 pub mod text;
 pub mod xray;
 
-use shot::{CameraSpec, Clock, Player, Preset, Shot, World, XrayBase};
+use shot::{CameraSpec, Clock, Corner, Player, Preset, Shot, Warmup, World, XrayBase};
 
 /// QuakeC's `flags` bits (defs.qc).
 const FL_GODMODE: f32 = 64.0;
@@ -214,7 +213,7 @@ fn shot_vid(shot: &Shot, c: &Cvars) -> (Vid, f64) {
     let (w, h) = shot.mode.unwrap_or(if native {
         (shot.size.0 / shot.pixel.max(1), shot.size.1 / shot.pixel.max(1))
     } else {
-        (720, 540)
+        (usize::from(c.vid_resolution.0), usize::from(c.vid_resolution.1))
     });
     let (w, h) = video.clamp_to_max(w.max(1), h.max(1));
     let display = shot.display.unwrap_or(if native { None } else { Some(4.0 / 3.0) });
@@ -238,6 +237,55 @@ fn set_origin(w: &mut Walk, org: [f32; 3]) {
     vm.set_gv(OFS_PARM0 + 3, org);
     let _ = vm.call_builtin(2, 2);
     vm.ent_set_vector(p, "velocity", [0.0; 3]);
+}
+
+/// QuakeC's `FL_MONSTER`.
+const FL_MONSTER: i32 = 32;
+
+/// Wake the living monster nearest `at`: its enemy the player, and
+/// QuakeC's `FoundTarget` (what `FindTarget` calls when it sees one).
+fn wake_monster(w: &mut Walk, at: [f32; 3]) {
+    let vm = &mut w.server.vm;
+    let dist = |o: [f32; 3]| (0..3).map(|k| (o[k] - at[k]).powi(2)).sum::<f32>();
+    let monster = (1..vm.num_edicts() as i32)
+        .filter(|&e| !vm.is_free_edict(e))
+        .filter(|&e| vm.ent_get_float(e, "flags") as i32 & FL_MONSTER != 0 && vm.ent_get_float(e, "health") > 0.0)
+        .min_by(|&a, &b| dist(vm.ent_get_vector(a, "origin")).total_cmp(&dist(vm.ent_get_vector(b, "origin"))));
+    let (Some(m), Some(f)) = (monster, vm.progs().find_function("FoundTarget")) else { return };
+    let p = w.player;
+    vm.ent_set_int(m, "enemy", p);
+    let t = vm.sv_time() as f32;
+    vm.gset_int("self", m);
+    vm.gset_int("other", 0);
+    vm.gset_int("activator", p);
+    vm.gset_float("time", t);
+    if vm.execute(f).is_err() {
+        vm.reset_execution();
+    }
+}
+
+/// A label in the frame's `corner`, in Quake's lettering, a font pixel to
+/// each 360th of the frame's height (3x at 1080p).
+fn draw_label(
+    g: &text::Glyphs,
+    out: &mut [u8],
+    (w, h): (usize, usize),
+    palette: &[[u8; 3]; 256],
+    label: &str,
+    corner: Corner,
+) {
+    let scale = (h / 360).max(1);
+    let (tw, th) = g.measure(label, scale);
+    let margin = 8 * scale as i64;
+    let x = match corner {
+        Corner::TopLeft | Corner::BottomLeft => margin,
+        Corner::TopRight | Corner::BottomRight => w as i64 - tw as i64 - margin,
+    };
+    let y = match corner {
+        Corner::TopLeft | Corner::TopRight => margin,
+        Corner::BottomLeft | Corner::BottomRight => h as i64 - th as i64 - margin,
+    };
+    g.draw(out, w, 3, palette, label, (x, y), scale, 1);
 }
 
 /// Set or clear `flag` in the player's `flags`.
@@ -340,18 +388,24 @@ fn present(frame: &ClientFrame, palette: &[[u8; 3]; 256], gamma: &[u8; 256]) -> 
     rgb
 }
 
-/// `src` (`sw x sh` RGB, shown at `aspect`) into a `w x h` frame: as large
-/// as fits at that shape, centred, each output pixel the source pixel under
-/// it (nearest, never smoothed), black around.
-pub fn fit(src: &[u8], sw: usize, sh: usize, aspect: f64, w: usize, h: usize) -> Vec<u8> {
-    let mut out = vec![0u8; w * h * 3];
+/// Where [`fit`] puts a picture shown at `aspect` in a `w x h` frame: `(x0,
+/// y0, width, height)`.
+pub fn fit_rect(aspect: f64, w: usize, h: usize) -> (usize, usize, usize, usize) {
     let (rw, rh) = if (w as f64) / (h as f64) > aspect {
         (((h as f64) * aspect).round() as usize, h)
     } else {
         (w, ((w as f64) / aspect).round() as usize)
     };
     let (rw, rh) = (rw.clamp(1, w), rh.clamp(1, h));
-    let (x0, y0) = ((w - rw) / 2, (h - rh) / 2);
+    ((w - rw) / 2, (h - rh) / 2, rw, rh)
+}
+
+/// `src` (`sw x sh` RGB, shown at `aspect`) into a `w x h` frame: as large
+/// as fits at that shape, centred, each output pixel the source pixel under
+/// it (nearest, never smoothed), black around.
+pub fn fit(src: &[u8], sw: usize, sh: usize, aspect: f64, w: usize, h: usize) -> Vec<u8> {
+    let mut out = vec![0u8; w * h * 3];
+    let (x0, y0, rw, rh) = fit_rect(aspect, w, h);
     let cols: Vec<usize> = (0..rw).map(|x| (x * sw / rw).min(sw - 1)).collect();
     for y in 0..rh {
         let sy = (y * sh / rh).min(sh - 1);
@@ -459,6 +513,7 @@ fn run(
         _ => None,
     };
     let wants_xray = shot.xray != XrayBase::Game || shot.wire.world || shot.wire.entities;
+    let wants_base = shot.xray != XrayBase::Game;
     let xray_options = XrayOptions {
         capture: wants_xray,
         lightmaps: (shot.xray == XrayBase::Lightmaps).then_some(XRAY_GREY),
@@ -480,19 +535,20 @@ fn run(
 
     // Warm up (undrawn): the map's monsters settle, or the demo reaches `from`.
     apply_settings(&mut game, shot, &c, Stepping::Classic);
-    let warm = match &shot.world {
-        World::Map(_) => shot.warmup,
-        World::Demo { from, .. } => *from,
-    };
     let mut warmed = 0.0;
-    while warmed + 1e-9 < warm {
+    let warm_done = |game: &Game, warmed: f64| match (&shot.world, shot.warmup, game) {
+        (World::Demo { from, .. }, ..) => warmed + 1e-9 >= *from,
+        (World::Map(_), Warmup::For(s), _) => warmed + 1e-9 >= s,
+        (World::Map(_), Warmup::Until(t), Game::Walk(w)) => f64::from(w.clock) + 1e-6 >= t || warmed > 600.0,
+        (World::Map(_), Warmup::Until(_), Game::Demo(_)) => true,
+    };
+    while !warm_done(&game, warmed) {
         if let Game::Walk(w) = &mut game {
             if let (Player::Camera, Some(pose)) = (shot.player, camera_at(shot, path.as_ref(), 0.0)) {
                 set_origin(w, [pose.pos[0], pose.pos[1], pose.pos[2] - VIEWHEIGHT].map(|v| v as f32));
             }
         }
-        // The last tick is drawn (and dropped), so the surface cache is warm.
-        let frame = game.frame(TICK, &vid, warmed + TICK + 1e-9 >= warm);
+        let frame = game.frame(TICK, &vid, false);
         warmed += TICK;
         if let Some(m) = mixer.as_mut() {
             // Mixed and dropped: the warm-up's sound is not the shot's.
@@ -501,70 +557,105 @@ fn run(
         }
         render::recycle_image(frame.image);
     }
+    // One paused frame from the first camera, drawn and dropped: the surface
+    // cache is warm at frame 0, as a running game's is.
+    if let Game::Walk(w) = &mut game {
+        w.camera = camera_at(shot, path.as_ref(), 0.0).map(|p| p.camera());
+    } else if let Game::Demo(d) = &mut game {
+        d.camera = camera_at(shot, path.as_ref(), 0.0).map(|p| p.camera());
+    }
+    let frame = game.frame(0.0, &vid, true);
+    render::recycle_image(frame.image);
     let sound_start = mixer.as_ref().map_or(0, |m| m.painted_time());
+    let clock_at_start = match &game {
+        Game::Walk(w) => f64::from(w.clock),
+        Game::Demo(d) => d.time,
+    };
 
     let frames = shot.frames();
     let (first, end) = range.map_or((0, frames), |(a, b)| (a.min(frames), b.min(frames)));
     let (ow, oh) = shot.size;
     let mut last: Option<Vec<u8>> = None;
-    let (mut realtime, mut oldrealtime) = (0.0f64, 0.0f64);
+    // clock id: the 1/72 s ticks of game time run since film second 0.
+    let mut ticks = 0u64;
     let mut stdout = std::io::stdout().lock();
     // Frames waiting for their files, encoded a batch at a time on the threads.
     let mut pending: Vec<(usize, Vec<u8>)> = Vec::new();
     let mut drawn = 0usize;
     let mut held = 0usize;
     let label_glyphs = match (&shot.label, wad(&pak)) {
-        (Some(_), Some(w)) => Some(text::Glyphs::new(&w, text::Font::White)?),
+        (Some(_), Some(w)) => Some(text::Glyphs::new(&w, text::Font::Gold)?),
         _ => None,
     };
     let t_frames = Instant::now();
     for n in 0..end {
         let t = n as f64 / shot.fps;
-        let dt = shot.game_time(t) - shot.game_time(t - 1.0 / shot.fps);
-        let pose = camera_at(shot, path.as_ref(), t);
-        apply_settings(&mut game, shot, &c, stepping);
-        if let Game::Walk(w) = &mut game {
-            w.camera = pose.map(|p| p.camera());
-            if let (Player::Camera, Some(p)) = (shot.player, pose) {
-                set_origin(w, [p.pos[0], p.pos[1], p.pos[2] - VIEWHEIGHT].map(|v| v as f32));
-            }
-        } else if let Game::Demo(d) = &mut game {
-            d.camera = pose.map(|p| p.camera());
-        }
+        let prev = t - 1.0 / shot.fps;
+        let dt = shot.game_time(t) - shot.game_time(prev);
         let wanted = n >= first;
-        // The host frame: one per film frame (free), or id's gate on the game's
-        // clock (id); a frozen world is redrawn paused from the moving camera.
-        let step = match clock {
-            Clock::Free => Some(dt.min(0.1)),
-            Clock::Id if dt <= 0.0 => Some(0.0),
-            Clock::Id => {
-                realtime += dt;
-                host_filter_time(realtime, &mut oldrealtime).or(last.is_none().then_some(0.0))
+        // The monsters to wake by now.
+        if let Game::Walk(w) = &mut game {
+            for &(at, when) in &shot.wake {
+                if when <= t && (when > prev || n == 0) {
+                    wake_monster(w, at);
+                }
             }
-        };
-        if let Some(step) = step {
-            let frame = game.frame(step, &vid, wanted);
+        }
+        // This film frame's host frames, each with the film second its camera
+        // is at: one per film frame (free); or id's ticks of game time up to
+        // now (id), the last drawn and none if no tick is due, the picture
+        // held; a frozen world is one paused frame, redrawn from the camera.
+        let mut steps: Vec<(f64, f64)> = Vec::new();
+        match clock {
+            Clock::Free => steps.push((dt.min(0.1), t)),
+            Clock::Id if dt <= 0.0 => steps.push((0.0, t)),
+            Clock::Id => {
+                let g = shot.game_time(t);
+                while (ticks + 1) as f64 * TICK <= g + 1e-9 {
+                    ticks += 1;
+                    steps.push((TICK, shot.film_time(ticks as f64 * TICK)));
+                }
+                if steps.is_empty() && last.is_none() {
+                    steps.push((0.0, t));
+                }
+            }
+        }
+        if steps.is_empty() {
+            held += 1;
+        }
+        let count = steps.len();
+        for (i, (step, tc)) in steps.into_iter().enumerate() {
+            let draw = wanted && i + 1 == count;
+            let pose = camera_at(shot, path.as_ref(), tc);
+            apply_settings(&mut game, shot, &c, stepping);
+            if let Game::Walk(w) = &mut game {
+                w.camera = pose.map(|p| p.camera());
+                if let (Player::Camera, Some(p)) = (shot.player, pose) {
+                    set_origin(w, [p.pos[0], p.pos[1], p.pos[2] - VIEWHEIGHT].map(|v| v as f32));
+                }
+            } else if let Game::Demo(d) = &mut game {
+                d.camera = pose.map(|p| p.camera());
+            }
+            let frame = game.frame(step, &vid, draw);
             if let Some(m) = mixer.as_mut() {
                 m.run(&pak, &frame.sound);
             }
-            if wanted {
+            if draw {
                 let mut rgb = present(&frame, &palette, &gamma);
-                if wants_xray {
-                    composite_xray(&mut game, shot, &vid, &c, &palette, &mut rgb, t);
+                if wants_base {
+                    composite_xray(&mut game, shot, &vid, &c, &palette, &mut rgb, tc);
                 }
                 let mut out = fit(&rgb, frame.image.w, frame.image.h, aspect, ow, oh);
+                if shot.wire.world || shot.wire.entities {
+                    wire_xray(&game, shot, &vid, &c, &palette, &mut out, (frame.image.w, frame.image.h), aspect, tc);
+                }
                 if let (Some(g), Some(label)) = (&label_glyphs, &shot.label) {
-                    let scale = (oh / 270).max(1);
-                    let (_, th) = g.measure(label, scale);
-                    let at = (8 * scale as i64, oh as i64 - th as i64 - 8 * scale as i64);
-                    g.draw(&mut out, ow, 3, &palette, label, at, scale, 1);
+                    draw_label(g, &mut out, (ow, oh), &palette, label, shot.labelpos);
                 }
                 last = Some(out);
                 drawn += 1;
             }
             render::recycle_image(frame.image);
-        } else {
-            held += 1;
         }
         if let Some(m) = mixer.as_mut() {
             // Mixed to this frame's end: sample `k` is heard at film second `k / rate`.
@@ -596,7 +687,7 @@ fn run(
     let _ = stdout.flush();
     let frames_s = t_frames.elapsed().as_secs_f64();
     let mut report = format!(
-        "film: {} frames ({}..{} of {frames}) at {}x{} ({}x{} drawn, {}, clock {}), {drawn} drawn, {held} held; {:.1} s ({:.0} ms a frame), {:.1} s in all",
+        "film: {} frames ({}..{} of {frames}) at {}x{} ({}x{} drawn, {}, clock {}), {drawn} drawn, {held} held, cl.time {clock_at_start:.3} at frame 0; {:.1} s ({:.0} ms a frame), {:.1} s in all",
         end - first,
         first,
         end,
@@ -647,7 +738,41 @@ fn composite_xray(
     };
     let Some(x) = x else { return };
     let mut screen = xray::Rgb { w: vid.width, h: vid.height, px: rgb };
-    xray::composite(&mut screen, (v.x, v.y), x, bsp, palette, shot.xray, shot.wire, strength);
+    xray::composite(&mut screen, (v.x, v.y), x, bsp, palette, shot.xray, strength);
+}
+
+/// The shot's wireframe over the output frame `out` (the screen `sw x sh`
+/// fitted into it at `aspect`).
+#[allow(clippy::too_many_arguments)]
+fn wire_xray(
+    game: &Game,
+    shot: &Shot,
+    vid: &Vid,
+    c: &Cvars,
+    palette: &[[u8; 3]; 256],
+    out: &mut [u8],
+    (sw, sh): (usize, usize),
+    aspect: f64,
+    t: f64,
+) {
+    let viewsize = if shot.hud { c.viewsize } else { 120.0 };
+    let v = render::calc_refdef(vid.width, vid.height, viewsize, false, c.sbar_layout).vrect;
+    let (bsp, x) = match game {
+        Game::Walk(w) => (&w.bsp, w.renderer.xray_frame()),
+        Game::Demo(d) => (&d.bsp, d.renderer.xray_frame()),
+    };
+    let Some(x) = x else { return };
+    let (ow, oh) = shot.size;
+    let (x0, y0, rw, rh) = fit_rect(aspect, ow, oh);
+    let place = xray::Place {
+        vx: v.x as f32,
+        vy: v.y as f32,
+        x0: x0 as f32,
+        y0: y0 as f32,
+        kx: rw as f32 / sw as f32,
+        ky: rh as f32 / sh as f32,
+    };
+    xray::wire_over(out, (ow, oh), place, x, bsp, palette, shot.wire, shot.mix_at(t));
 }
 
 /// The pak's `gfx.wad`.

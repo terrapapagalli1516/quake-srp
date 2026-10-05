@@ -11,9 +11,11 @@
 //! | `z` | its 16-bit `1/z`, the z-buffer the entities test, as grey: near is light |
 //! | `surfaces` | one palette colour per surface, as id's `r_drawflat` painted them |
 //! | `spans` | one colour per span: the rows the edge scan cut each surface into |
-//! | `segments` | the game's picture, each span's affine segments shaded in turn and the pixel of each perspective divide marked: id's 16, slop's 8, or none at exact |
+//! | `segments` | each span's affine runs in rust and brown in turn over the picture's grey, and a lava-orange tick at each perspective divide: every 16 pixels (id's), 8 (slop's), none at exact |
 //! | `mip` | the mip level each wall was drawn at: 0 green, 1 yellow, 2 orange, 3 red, over the picture's grey |
-//! | `cache` | the surface-cache block each wall was drawn from, a colour each, its lightmap's 16-texel cells outlined; a block the frame baked (new, or its light changed) shines |
+//! | `cache` | the surface-cache block each wall was drawn from, a tile each, darker for a coarser mip, with black borders |
+//! | `bakes` | the blocks this frame baked (new, or their light changed: a flickering light rebakes what it lights), lit |
+//! | `luxels` | the picture with each wall's lightmap cells outlined: a light sample every 16 texels |
 //! | `leaves` | the BSP leaf the visible point is in, a colour each |
 //! | `lightmaps` | the walls' light alone (the renderer draws it: `XrayOptions::lightmaps`) |
 //! | `error` | how far the affine spans' texel is from the exact one, in texels: none dark, half a texel yellow, one or more red |
@@ -27,7 +29,8 @@
 //! each tested against the z-buffer (`hidden`) or not (`through`); with
 //! `pvs`, the world's edges are coloured by what the renderer did with their
 //! face — drawn (has a span), in the PVS but not drawn (hidden or outside
-//! the view), or outside the PVS.
+//! the view), or outside the PVS; with `culled`, only the last. The colours
+//! are Quake palette entries.
 
 use quake_rs::bsp::Bsp;
 use quake_rs::render::xray::{XrayFrame, XrayGrads, XrayModel, XrayPaint, XraySurface, XrayView, ZBUF_SCALE};
@@ -41,6 +44,16 @@ pub struct Rgb<'a> {
     pub h: usize,
     pub px: &'a mut [u8],
 }
+
+/// The film's colours, as Quake palette indices (the director's).
+const RUST: usize = 105;
+const BROWN: usize = 26;
+const LIGHT_BROWN: usize = 31;
+const LAVA: usize = 235;
+const DEEP_LAVA: usize = 233;
+const FLAME: usize = 238;
+const LIGHT_SLATE: usize = 40;
+const BLUE: usize = 244;
 
 /// A palette colour for `key` from Quake's palette, avoiding the darkest
 /// and the fullbright rows: rows 1..14 of 16, each row's brighter half.
@@ -70,9 +83,10 @@ fn texel_scale(s: &XraySurface) -> f64 {
     f64::from(1u32 << s.mip.unwrap_or(0).min(3))
 }
 
-/// Redraw the 3-D view at `(vx, vy)` of `screen` as `base` and `wire` say,
-/// blended over the game's picture by `strength` (0: the game's alone).
-#[allow(clippy::too_many_arguments)]
+/// Redraw the 3-D view at `(vx, vy)` of `screen` (the game's picture, at
+/// the mode's size) as `base` says, blended over the game's picture by
+/// `strength` (0: the game's alone). The wireframe is drawn later, over the
+/// output frame ([`wire_over`]).
 pub fn composite(
     screen: &mut Rgb,
     (vx, vy): (usize, usize),
@@ -80,7 +94,6 @@ pub fn composite(
     bsp: &Bsp,
     palette: &[[u8; 3]; 256],
     base: XrayBase,
-    wire: Wire,
     strength: f64,
 ) {
     let Some(view) = x.view else { return };
@@ -96,10 +109,10 @@ pub fn composite(
             game[y * w + xx] = [screen.px[at], screen.px[at + 1], screen.px[at + 2]];
         }
     }
-    let mut out = base_picture(x, bsp, palette, base, &view, &game);
-    if wire.world || wire.entities {
-        wireframe(&mut out, x, bsp, &view, wire);
+    if base == XrayBase::Game {
+        return;
     }
+    let out = base_picture(x, bsp, palette, base, &view, &game);
     let t = strength.clamp(0.0, 1.0) as f32;
     for y in 0..h {
         for xx in 0..w {
@@ -139,6 +152,12 @@ fn base_picture(
     }
     let mut out = game.to_vec();
     let entity = |i: usize| x.zbuf.get(i) != x.world_z.get(i);
+    // Where a pixel's surface differs from its right or lower neighbour's.
+    let surfaces = if base == XrayBase::Cache { x.surface_map() } else { Vec::new() };
+    let surface_edge = |i: usize| {
+        let s = surfaces[i];
+        (i % w + 1 < w && surfaces[i + 1] != s) || (i + w < surfaces.len() && surfaces[i + w] != s)
+    };
     let span_px = x.persp.pixels().max(1) as usize;
     for (si, sp) in x.spans.iter().enumerate() {
         let Some(Some(s)) = x.surfaces.get(sp.surface as usize) else { continue };
@@ -172,15 +191,18 @@ fn base_picture(
                     if (sp.v + si as u32) % 2 == 1 { mix(c, [0, 0, 0], 0.45) } else { c }
                 }
                 XrayBase::Segments => {
-                    if !matches!(s.paint, XrayPaint::Cached | XrayPaint::PerPixel | XrayPaint::Liquid) || span_px == 1 {
-                        g
+                    if !matches!(s.paint, XrayPaint::Cached | XrayPaint::PerPixel | XrayPaint::Liquid) {
+                        grey(luma(g) * 0.6)
+                    } else if span_px == 1 {
+                        // Exact: every pixel its own divide.
+                        palette[if k % 2 == 0 { LAVA } else { DEEP_LAVA }]
                     } else if k % span_px == 0 {
                         // The perspective divide: this pixel's texel is exact.
-                        [255, 220, 64]
-                    } else if (k / span_px) % 2 == 1 {
-                        mix(g, [0, 0, 0], 0.45)
+                        palette[LAVA]
                     } else {
-                        g
+                        // The affine run, rust and brown in turn over the picture.
+                        let c = palette[if (k / span_px) % 2 == 0 { RUST } else { BROWN }];
+                        mix(grey(luma(g)), c, 0.6)
                     }
                 }
                 XrayBase::Mip => match (s.paint, s.mip) {
@@ -190,14 +212,25 @@ fn base_picture(
                     }
                     _ => grey(luma(g) * 0.5),
                 },
-                XrayBase::Cache => match (s.paint, s.grads) {
-                    (XrayPaint::Cached, Some(gr)) => {
-                        let c = palette_colour(palette, surf_key << 2 | u64::from(s.mip.unwrap_or(0)));
-                        let base = mix(grey(luma(g)), c, 0.55);
-                        let base = if s.baked { mix(base, [255, 200, 90], 0.5) } else { base };
-                        if on_grid(&gr, px, py, 16.0) { mix(base, [255, 255, 255], 0.8) } else { base }
+                XrayBase::Cache => match (s.paint, s.mip) {
+                    // A tile a block, darker for a coarser mip, black where
+                    // the block meets another.
+                    (XrayPaint::Cached, Some(m)) => {
+                        let c = palette_colour(palette, surf_key);
+                        let c = mix(c, [0, 0, 0], 0.2 * m.min(3) as f32);
+                        if surface_edge(i) { [0, 0, 0] } else { c }
                     }
-                    _ => grey(luma(g) * 0.4),
+                    _ => grey(luma(g) * 0.3),
+                },
+                XrayBase::Bakes => match s.paint {
+                    XrayPaint::Cached if s.baked => mix(grey(luma(g)), palette[FLAME], 0.6),
+                    _ => grey(luma(g) * 0.5),
+                },
+                XrayBase::Luxels => match (s.paint, s.grads) {
+                    (XrayPaint::Cached | XrayPaint::PerPixel, Some(gr)) if on_grid(&gr, px, py, 16.0) => {
+                        mix(g, palette[FLAME], 0.7)
+                    }
+                    _ => g,
                 },
                 XrayBase::Leaves => match (s.paint, s.grads) {
                     (XrayPaint::Sky | XrayPaint::Fill, _) | (_, None) => grey(luma(g) * 0.3),
@@ -310,18 +343,33 @@ fn world_faces(x: &XrayFrame, bsp: &Bsp) -> (Vec<bool>, Vec<bool>) {
     (drawn, in_pvs)
 }
 
-/// The colours of the wireframe.
-const WIRE_WORLD: [u8; 3] = [255, 170, 60];
-const WIRE_ENTITY: [u8; 3] = [140, 255, 120];
-const WIRE_GUN: [u8; 3] = [120, 200, 255];
-const WIRE_PVS: [u8; 3] = [150, 95, 50];
-const WIRE_CULLED: [u8; 3] = [150, 40, 40];
-
-/// Draw the wireframe over `out`.
-fn wireframe(out: &mut [[u8; 3]], x: &XrayFrame, bsp: &Bsp, view: &XrayView, wire: Wire) {
-    let mut lines = Lines { out, w: x.w, h: x.h, zbuf: &x.zbuf, through: wire.through };
+/// Draw the wireframe: the world's edges in lava orange (with
+/// `pvs`, light brown for a face in the PVS but not drawn, light slate for
+/// one outside it), the entities' in pale flame, the gun's in blue.
+/// at the output frame's resolution, crisp whatever the mode's: `out` is the
+/// `ow x oh` RGB output frame, `place` where the view lies on it, and
+/// `strength` the x-ray's (`mix`).
+#[allow(clippy::too_many_arguments)]
+pub fn wire_over(
+    out: &mut [u8],
+    (ow, oh): (usize, usize),
+    place: Place,
+    x: &XrayFrame,
+    bsp: &Bsp,
+    palette: &[[u8; 3]; 256],
+    wire: Wire,
+    strength: f64,
+) {
+    let Some(view) = x.view else { return };
+    let view = &view;
+    if strength <= 0.0 || !(wire.world || wire.entities) {
+        return;
+    }
+    let mut lines =
+        Lines { out, ow, oh, place, vw: x.w, vh: x.h, zbuf: &x.zbuf, through: wire.through, strength: strength as f32 };
+    let classes = wire.pvs || wire.culled;
     if wire.world {
-        let (drawn, in_pvs) = if wire.pvs { world_faces(x, bsp) } else { (Vec::new(), Vec::new()) };
+        let (drawn, in_pvs) = if classes { world_faces(x, bsp) } else { (Vec::new(), Vec::new()) };
         // Each edge once, in the colour of the most-drawn face it bounds.
         let mut best: Vec<u8> = vec![0; bsp.edges.len()];
         let model = bsp.models.first();
@@ -331,7 +379,7 @@ fn wireframe(out: &mut [[u8; 3]], x: &XrayFrame, bsp: &Bsp, view: &XrayView, wir
         });
         for fi in faces {
             let face = &bsp.faces[fi];
-            let rank = match (wire.pvs, drawn.get(fi), in_pvs.get(fi)) {
+            let rank = match (classes, drawn.get(fi), in_pvs.get(fi)) {
                 (false, ..) | (_, Some(true), _) => 3,
                 (_, _, Some(true)) => 2,
                 _ => 1,
@@ -345,7 +393,7 @@ fn wireframe(out: &mut [[u8; 3]], x: &XrayFrame, bsp: &Bsp, view: &XrayView, wir
             }
         }
         for (ei, &rank) in best.iter().enumerate() {
-            if rank == 0 || (rank == 1 && !wire.through) {
+            if rank == 0 || (rank == 1 && !wire.through) || (wire.culled && rank != 1) {
                 continue;
             }
             let e = &bsp.edges[ei];
@@ -353,19 +401,19 @@ fn wireframe(out: &mut [[u8; 3]], x: &XrayFrame, bsp: &Bsp, view: &XrayView, wir
                 continue;
             };
             let (colour, strength) = match rank {
-                3 => (WIRE_WORLD, 1.0),
-                2 => (WIRE_PVS, 0.8),
-                _ => (WIRE_CULLED, 0.6),
+                3 => (palette[LAVA], 1.0),
+                2 => (palette[LIGHT_BROWN], 0.8),
+                _ => (palette[LIGHT_SLATE], 0.8),
             };
             lines.world(view, a.point, b.point, colour, strength);
         }
     }
     if wire.entities {
         for e in &x.brush_edges {
-            lines.world(view, e[0], e[1], WIRE_ENTITY, 1.0);
+            lines.world(view, e[0], e[1], palette[FLAME], 1.0);
         }
         for t in &x.triangles {
-            let colour = if t.gun { WIRE_GUN } else { WIRE_ENTITY };
+            let colour = if t.gun { palette[BLUE] } else { palette[FLAME] };
             for k in 0..3 {
                 let (a, b) = (t.v[k], t.v[(k + 1) % 3]);
                 lines.screen(a, b, colour, 0.9);
@@ -374,13 +422,45 @@ fn wireframe(out: &mut [[u8; 3]], x: &XrayFrame, bsp: &Bsp, view: &XrayView, wir
     }
 }
 
-/// Lines into a view-sized picture, tested against its z-buffer.
+/// Where the view's pixels land on the output frame: the view's pixel `(x,
+/// y)` (centres on the integers) is the screen's `(x + vx, y + vy)`, and the
+/// screen's pixel `(sx, sy)` covers the output's `x0 + sx * kx ..` and `y0 +
+/// sy * ky ..` (the fit's nearest scaling).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Place {
+    pub vx: f32,
+    pub vy: f32,
+    pub x0: f32,
+    pub y0: f32,
+    pub kx: f32,
+    pub ky: f32,
+}
+
+impl Place {
+    /// A view point (pixel centres on the integers) on the output.
+    fn on_output(&self, x: f32, y: f32) -> (f32, f32) {
+        (self.x0 + (x + self.vx + 0.5) * self.kx - 0.5, self.y0 + (y + self.vy + 0.5) * self.ky - 0.5)
+    }
+
+    /// The view's pixel under the output's pixel `(x, y)`, if any.
+    fn view_pixel(&self, x: usize, y: usize, vw: usize, vh: usize) -> Option<usize> {
+        let px = ((x as f32 - self.x0 + 0.5) / self.kx).floor() - self.vx;
+        let py = ((y as f32 - self.y0 + 0.5) / self.ky).floor() - self.vy;
+        (px >= 0.0 && py >= 0.0 && (px as usize) < vw && (py as usize) < vh).then(|| py as usize * vw + px as usize)
+    }
+}
+
+/// Lines onto the output frame, tested against the view's z-buffer.
 struct Lines<'a> {
-    out: &'a mut [[u8; 3]],
-    w: usize,
-    h: usize,
+    out: &'a mut [u8],
+    ow: usize,
+    oh: usize,
+    place: Place,
+    vw: usize,
+    vh: usize,
     zbuf: &'a [i16],
     through: bool,
+    strength: f32,
 }
 
 impl Lines<'_> {
@@ -406,6 +486,8 @@ impl Lines<'_> {
     /// A screen-space segment `(x, y, 1/z)`, anti-aliased (Xiaolin Wu's),
     /// each pixel tested against the z-buffer unless `through`.
     fn screen(&mut self, a: [f32; 3], b: [f32; 3], colour: [u8; 3], strength: f32) {
+        let ((ax, ay), (bx, by)) = (self.place.on_output(a[0], a[1]), self.place.on_output(b[0], b[1]));
+        let (a, b) = ([ax, ay, a[2]], [bx, by, b[2]]);
         let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
         let len = dx.abs().max(dy.abs());
         if !len.is_finite() || len > 1e5 {
@@ -432,19 +514,29 @@ impl Lines<'_> {
             return;
         }
         let (x, y) = (x as usize, y as usize);
-        if x >= self.w || y >= self.h {
+        if x >= self.ow || y >= self.oh {
             return;
         }
-        let i = y * self.w + x;
+        let Some(v) = self.place.view_pixel(x, y, self.vw, self.vh) else { return };
         if !self.through {
-            // Behind what the frame drew there: hidden (a little slack for the
-            // 16-bit buffer and an edge on the boundary of what it bounds).
-            let zb = f32::from(self.zbuf.get(i).copied().unwrap_or(0));
-            if zi * 1.03 + 1.5 < zb {
+            // Behind what the frame drew there: hidden. With slack for the
+            // 16-bit buffer, and against the farthest of the pixel and its
+            // neighbours, so an edge on the boundary of what it bounds is
+            // not lost to a coarse mode's pixels either side of it.
+            let (vx, vy) = (v % self.vw, v / self.vw);
+            let mut zb = i16::MAX;
+            for ny in vy.saturating_sub(1)..(vy + 2).min(self.vh) {
+                for nx in vx.saturating_sub(1)..(vx + 2).min(self.vw) {
+                    zb = zb.min(self.zbuf.get(ny * self.vw + nx).copied().unwrap_or(0));
+                }
+            }
+            if zi * 1.03 + 1.5 < f32::from(zb) {
                 return;
             }
         }
-        self.out[i] = mix(self.out[i], colour, cover);
+        let at = (y * self.ow + x) * 3;
+        let c = mix([self.out[at], self.out[at + 1], self.out[at + 2]], colour, cover * self.strength);
+        self.out[at..at + 3].copy_from_slice(&c);
     }
 }
 

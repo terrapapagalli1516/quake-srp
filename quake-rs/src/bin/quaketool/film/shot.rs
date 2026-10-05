@@ -85,7 +85,8 @@ impl Ease {
     }
 }
 
-/// Where a key looks: angles (pitch + up, yaw, roll, degrees) or a point.
+/// Where a key looks: angles (degrees, Quake's: pitch + down, yaw, roll) or
+/// a point.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Look {
     Angles([f64; 3]),
@@ -122,13 +123,15 @@ pub enum XrayBase {
     Segments,
     Mip,
     Cache,
+    Bakes,
+    Luxels,
     Leaves,
     Lightmaps,
     Error,
 }
 
 impl XrayBase {
-    pub const NAMES: [(&'static str, XrayBase); 11] = [
+    pub const NAMES: [(&'static str, XrayBase); 13] = [
         ("game", XrayBase::Game),
         ("black", XrayBase::Black),
         ("z", XrayBase::Z),
@@ -137,6 +140,8 @@ impl XrayBase {
         ("segments", XrayBase::Segments),
         ("mip", XrayBase::Mip),
         ("cache", XrayBase::Cache),
+        ("bakes", XrayBase::Bakes),
+        ("luxels", XrayBase::Luxels),
         ("leaves", XrayBase::Leaves),
         ("lightmaps", XrayBase::Lightmaps),
         ("error", XrayBase::Error),
@@ -152,6 +157,27 @@ pub struct Wire {
     pub through: bool,
     /// The world's edges coloured by the PVS: drawn, in the PVS, culled.
     pub pvs: bool,
+    /// Only the world's edges outside the PVS.
+    pub culled: bool,
+}
+
+/// Where a label goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Corner {
+    TopLeft,
+    TopRight,
+    #[default]
+    BottomLeft,
+    BottomRight,
+}
+
+/// How long the warm-up runs.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Warmup {
+    /// Game seconds.
+    For(f64),
+    /// Until the game's clock (`cl.time`) reaches this.
+    Until(f64),
 }
 
 /// A whole shot.
@@ -159,7 +185,9 @@ pub struct Wire {
 pub struct Shot {
     pub world: World,
     pub skill: u32,
-    pub warmup: f64,
+    pub warmup: Warmup,
+    /// Monsters to wake: `(the point the nearest is to, film second)`.
+    pub wake: Vec<([f32; 3], f64)>,
     pub duration: f64,
     pub fps: f64,
     pub size: (usize, usize),
@@ -187,6 +215,7 @@ pub struct Shot {
     /// `(film second, strength)`, sorted.
     pub mix: Vec<(f64, f64)>,
     pub label: Option<String>,
+    pub labelpos: Corner,
     pub sound: bool,
 }
 
@@ -195,7 +224,8 @@ impl Default for Shot {
         Shot {
             world: World::Map(String::new()),
             skill: 1,
-            warmup: 1.0,
+            warmup: Warmup::For(1.0),
+            wake: Vec::new(),
             duration: 0.0,
             fps: 60.0,
             size: (1920, 1080),
@@ -219,6 +249,7 @@ impl Default for Shot {
             vis: None,
             mix: Vec::new(),
             label: None,
+            labelpos: Corner::BottomLeft,
             sound: false,
         }
     }
@@ -293,7 +324,23 @@ impl Shot {
                 }
             }
             "skill" => self.skill = num(one()?)?.clamp(0.0, 3.0) as u32,
-            "warmup" => self.warmup = num(one()?)?.max(0.0),
+            "warmup" => {
+                self.warmup = match words.as_slice() {
+                    [s] => Warmup::For(num(s)?.max(0.0)),
+                    ["until", t] => Warmup::Until(num(t)?),
+                    _ => return Err(format!("`warmup S | until T`, got {rest:?}")),
+                }
+            }
+            "wake" => {
+                let (p, t) = match words.as_slice() {
+                    [p] => (p, 0.0),
+                    [p, "at", t] => (p, num(t)?),
+                    _ => return Err(format!("`wake X,Y,Z [at T]`, got {rest:?}")),
+                };
+                let v = numbers(p)?;
+                let [x, y, z] = v.as_slice() else { return Err("`wake X,Y,Z`".into()) };
+                self.wake.push(([*x as f32, *y as f32, *z as f32], t));
+            }
             "duration" => self.duration = num(one()?)?,
             "fps" => self.fps = num(one()?)?,
             "size" => self.size = parse_size(one()?)?,
@@ -423,7 +470,12 @@ impl Shot {
                         "hidden" => wire.through = false,
                         "through" => wire.through = true,
                         "pvs" => wire.pvs = true,
-                        _ => return Err(format!("`wire world|entities|all|off [hidden|through] [pvs]`, got {w:?}")),
+                        "culled" => wire.culled = true,
+                        _ => {
+                            return Err(format!(
+                                "`wire world|entities|all|off [hidden|through] [pvs|culled]`, got {w:?}"
+                            ));
+                        }
                     }
                 }
                 self.wire = wire;
@@ -441,6 +493,15 @@ impl Shot {
                 self.mix.sort_by(|a, b| a.0.total_cmp(&b.0));
             }
             "label" => self.label = (!rest.is_empty()).then(|| rest.to_string()),
+            "labelpos" => {
+                self.labelpos = match one()? {
+                    "tl" => Corner::TopLeft,
+                    "tr" => Corner::TopRight,
+                    "bl" => Corner::BottomLeft,
+                    "br" => Corner::BottomRight,
+                    v => return Err(format!("`labelpos tl|tr|bl|br`, got {v:?}")),
+                }
+            }
             _ => return Err(format!("unknown setting {key:?}")),
         }
         Ok(())
@@ -476,6 +537,24 @@ impl Shot {
             (from, s) = (at, next);
         }
         g + (t - from) * s
+    }
+
+    /// The first film second at which [`Shot::game_time`] reaches `g` (the
+    /// game time is never falling: a frozen stretch gives its start).
+    pub fn film_time(&self, g: f64) -> f64 {
+        let (mut lo, mut hi) = (-1.0, self.duration + 1.0);
+        if self.game_time(hi) < g {
+            return hi;
+        }
+        for _ in 0..64 {
+            let mid = 0.5 * (lo + hi);
+            if self.game_time(mid) >= g {
+                hi = mid;
+            } else {
+                lo = mid;
+            }
+        }
+        hi
     }
 
     /// The x-ray's strength at film second `t` (linear between `mix` keys).
@@ -608,6 +687,10 @@ label Classic: id's 16-pixel spans
         assert!((s.game_time(4.0) - 3.0).abs() < 1e-12);
         assert!((s.game_time(8.0) - 4.0).abs() < 1e-12, "frozen from 6: {}", s.game_time(8.0));
         assert!((s.game_time(-0.5) + 0.5).abs() < 1e-12);
+        // And back: the film second a game time is reached at.
+        assert!((s.film_time(3.0) - 4.0).abs() < 1e-9);
+        assert!((s.film_time(1.0) - 1.0).abs() < 1e-9);
+        assert!((s.film_time(4.0) - 6.0).abs() < 1e-9, "the frozen stretch's start");
     }
 
     #[test]
@@ -640,6 +723,20 @@ label Classic: id's 16-pixel spans
         s.set("key 0 0,0,0 0,90").unwrap();
         s.set("fps 30").unwrap();
         assert_eq!(s.check(), Ok(()));
+    }
+
+    #[test]
+    fn warmup_wake_and_labels() {
+        let s = Shot::parse(
+            "map e1m7\nduration 2\nwarmup until 1.6\nwake 0,576,24\nwake 10,20,30 at 1.5\n\
+             label id's 16\nlabelpos tr\nwire world through culled\nxray luxels\n",
+        )
+        .unwrap();
+        assert_eq!(s.warmup, Warmup::Until(1.6));
+        assert_eq!(s.wake, vec![([0.0, 576.0, 24.0], 0.0), ([10.0, 20.0, 30.0], 1.5)]);
+        assert_eq!((s.label.as_deref(), s.labelpos), (Some("id's 16"), Corner::TopRight));
+        assert!(s.wire.world && s.wire.through && s.wire.culled && !s.wire.entities);
+        assert_eq!(s.xray, XrayBase::Luxels);
     }
 
     #[test]
