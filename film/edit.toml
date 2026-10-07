@@ -5,7 +5,7 @@
 #
 # timeline.py lays this over the narration (paths.lines: each voice clip and its word times; script.md for each
 # line's section) and the media under FILM_ROOT (each footage file's length and sidecar), and writes
-# edit/v7/timeline.json, the edit decision list build.py renders. Paths are FILM_ROOT's, except paths.script,
+# edit/timeline.json, the edit decision list build.py renders. Paths are FILM_ROOT's, except paths.script,
 # which is beside this file.
 #
 # It is the production's edit configs resolved into one file: a base config, four layers of settings for
@@ -22,8 +22,8 @@
 [paths]
 format = "v3"
 script = "script.md"
-lines = "voice/v7-lines.json"
-out = "edit/v7"
+lines = "voice/voice.json"
+out = "edit"
 move = { section = "4.10", after = "HERO" }
 
 [clock]
@@ -109,15 +109,15 @@ V7-16 = 0.8
 
 [music]
 scores = [
-  { path = "music/score-v10.wav", clock = "edit/v7/clock-score.json" },
+  { path = "music/score.wav", clock = "edit/clock-score.json" },
 ]
 conform_xfade = 0.25
 reference = { section = "4.12", lufs = -15.0 }
 soft_stops = ["LAB9@in", "LAB10h@in", "S60@in"]
 
 [sfx]
-glob = "sound/sfx-v*.wav"
-clock_must_match = "edit/v7/timeline.json"
+glob = "sound/sfx.wav"
+clock_must_match = "edit/timeline.json"
 
 [events]
 blast_quake = "S02~quake"

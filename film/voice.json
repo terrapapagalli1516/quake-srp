@@ -1,0 +1,4389 @@
+{
+ "about": "The narration's map: every line of the cut in order, its clip (relative to the voice folder, `make.py --voice`), length, text, pauses and each word's time in the clip (Scribe). Written by film/pipeline/voice/voice_map.py; the clips are not in the repository.",
+ "natural_sentence_gap_s": 0.53,
+ "lines": [
+  {
+   "id": "V3-01",
+   "kind": "TAKE",
+   "clip": "01-1-1",
+   "file": "clips/01-1-1.wav",
+   "duration_s": 3.64,
+   "text": "In nineteen ninety-six, id Software released Quake.",
+   "pause_after_s": null,
+   "clip_pause_after_s": 1.0,
+   "clip_paragraph_end": true,
+   "speech_start_s": 0.08,
+   "speech_end_s": 3.36,
+   "words": [
+    {
+     "text": "In",
+     "start": 0.08,
+     "end": 0.18
+    },
+    {
+     "text": "1996,",
+     "start": 0.22,
+     "end": 1.36
+    },
+    {
+     "text": "id",
+     "start": 1.7,
+     "end": 1.82
+    },
+    {
+     "text": "Software",
+     "start": 1.94,
+     "end": 2.38
+    },
+    {
+     "text": "released",
+     "start": 2.48,
+     "end": 2.82
+    },
+    {
+     "text": "Quake",
+     "start": 2.96,
+     "end": 3.36
+    }
+   ]
+  },
+  {
+   "id": "V3-02",
+   "kind": "TAKE",
+   "clip": "02-1-2",
+   "file": "clips/02-1-2.wav",
+   "duration_s": 3.62,
+   "text": "It changed how a generation saw three-dimensional space.",
+   "pause_after_s": null,
+   "clip_pause_after_s": 0.0,
+   "clip_paragraph_end": false,
+   "speech_start_s": 0.06,
+   "speech_end_s": 3.4,
+   "words": [
+    {
+     "text": "It",
+     "start": 0.06,
+     "end": 0.18
+    },
+    {
+     "text": "changed",
+     "start": 0.26,
+     "end": 0.68
+    },
+    {
+     "text": "how",
+     "start": 0.72,
+     "end": 0.82
+    },
+    {
+     "text": "a",
+     "start": 0.88,
+     "end": 1.0
+    },
+    {
+     "text": "generation",
+     "start": 1.08,
+     "end": 1.72
+    },
+    {
+     "text": "saw",
+     "start": 1.86,
+     "end": 2.0
+    },
+    {
+     "text": "three-dimensional",
+     "start": 2.14,
+     "end": 2.84
+    },
+    {
+     "text": "space",
+     "start": 3.02,
+     "end": 3.4
+    }
+   ]
+  },
+  {
+   "id": "V3-03",
+   "kind": "TAKE",
+   "clip": "03-1-3",
+   "file": "clips/03-1-3.wav",
+   "duration_s": 5.3,
+   "text": "It went online. People rebuilt it, raced through it, and competed in it.",
+   "pause_after_s": null,
+   "clip_pause_after_s": 0.8,
+   "clip_paragraph_end": true,
+   "speech_start_s": 0.06,
+   "speech_end_s": 5.14,
+   "words": [
+    {
+     "text": "It",
+     "start": 0.06,
+     "end": 0.2
+    },
+    {
+     "text": "went",
+     "start": 0.24,
+     "end": 0.46
+    },
+    {
+     "text": "online.",
+     "start": 0.52,
+     "end": 1.12
+    },
+    {
+     "text": "People",
+     "start": 1.64,
+     "end": 1.88
+    },
+    {
+     "text": "rebuilt",
+     "start": 2.04,
+     "end": 2.5
+    },
+    {
+     "text": "it,",
+     "start": 2.58,
+     "end": 2.72
+    },
+    {
+     "text": "raced",
+     "start": 3.16,
+     "end": 3.48
+    },
+    {
+     "text": "through",
+     "start": 3.5,
+     "end": 3.72
+    },
+    {
+     "text": "it,",
+     "start": 3.76,
+     "end": 3.9
+    },
+    {
+     "text": "and",
+     "start": 4.14,
+     "end": 4.24
+    },
+    {
+     "text": "competed",
+     "start": 4.28,
+     "end": 4.8
+    },
+    {
+     "text": "in",
+     "start": 4.86,
+     "end": 4.94
+    },
+    {
+     "text": "it",
+     "start": 5.0,
+     "end": 5.14
+    }
+   ]
+  },
+  {
+   "id": "V3-04",
+   "kind": "TAKE",
+   "clip": "04-1-4",
+   "file": "clips/04-1-4.wav",
+   "duration_s": 3.31,
+   "text": "Underneath ran a monument of applied mathematics.",
+   "pause_after_s": null,
+   "clip_pause_after_s": 0.0,
+   "clip_paragraph_end": false,
+   "speech_start_s": 0.06,
+   "speech_end_s": 3.08,
+   "words": [
+    {
+     "text": "Underneath",
+     "start": 0.06,
+     "end": 0.66
+    },
+    {
+     "text": "ran",
+     "start": 0.84,
+     "end": 0.96
+    },
+    {
+     "text": "a",
+     "start": 1.0,
+     "end": 1.04
+    },
+    {
+     "text": "monument",
+     "start": 1.18,
+     "end": 1.66
+    },
+    {
+     "text": "of",
+     "start": 1.72,
+     "end": 1.78
+    },
+    {
+     "text": "applied",
+     "start": 1.82,
+     "end": 2.3
+    },
+    {
+     "text": "mathematics",
+     "start": 2.34,
+     "end": 3.08
+    }
+   ]
+  },
+  {
+   "id": "V3-05",
+   "kind": "TAKE",
+   "clip": "05-1-5",
+   "file": "clips/05-1-5.wav",
+   "duration_s": 7.84,
+   "text": "A software renderer: binary space partitions, a potentially visible set, a surface cache, fixed point.",
+   "pause_after_s": null,
+   "clip_pause_after_s": 0.5,
+   "clip_paragraph_end": true,
+   "speech_start_s": 0.06,
+   "speech_end_s": 7.68,
+   "words": [
+    {
+     "text": "A",
+     "start": 0.06,
+     "end": 0.16
+    },
+    {
+     "text": "software",
+     "start": 0.24,
+     "end": 0.66
+    },
+    {
+     "text": "renderer.",
+     "start": 0.76,
+     "end": 1.16
+    },
+    {
+     "text": "Binary",
+     "start": 1.72,
+     "end": 2.06
+    },
+    {
+     "text": "space",
+     "start": 2.26,
+     "end": 2.46
+    },
+    {
+     "text": "partitions.",
+     "start": 2.54,
+     "end": 3.24
+    },
+    {
+     "text": "A",
+     "start": 3.6,
+     "end": 3.66
+    },
+    {
+     "text": "potentially",
+     "start": 3.68,
+     "end": 4.28
+    },
+    {
+     "text": "visible",
+     "start": 4.34,
+     "end": 4.66
+    },
+    {
+     "text": "set.",
+     "start": 4.84,
+     "end": 5.14
+    },
+    {
+     "text": "A",
+     "start": 5.58,
+     "end": 5.66
+    },
+    {
+     "text": "surface",
+     "start": 5.74,
+     "end": 6.08
+    },
+    {
+     "text": "cache.",
+     "start": 6.18,
+     "end": 6.54
+    },
+    {
+     "text": "Fixed",
+     "start": 7.02,
+     "end": 7.26
+    },
+    {
+     "text": "point",
+     "start": 7.36,
+     "end": 7.68
+    }
+   ]
+  },
+  {
+   "id": "V3-06",
+   "kind": "TAKE",
+   "clip": "06-1-6",
+   "file": "clips/06-1-6.wav",
+   "duration_s": 3.73,
+   "text": "Every pixel, one of two hundred and fifty-six colours.",
+   "pause_after_s": null,
+   "clip_pause_after_s": 0.6,
+   "clip_paragraph_end": true,
+   "speech_start_s": 0.08,
+   "speech_end_s": 3.5,
+   "words": [
+    {
+     "text": "Every",
+     "start": 0.08,
+     "end": 0.3
+    },
+    {
+     "text": "pixel,",
+     "start": 0.42,
+     "end": 0.84
+    },
+    {
+     "text": "one",
+     "start": 1.32,
+     "end": 1.42
+    },
+    {
+     "text": "of",
+     "start": 1.46,
+     "end": 1.58
+    },
+    {
+     "text": "256",
+     "start": 1.76,
+     "end": 3.02
+    },
+    {
+     "text": "colors",
+     "start": 3.08,
+     "end": 3.5
+    }
+   ]
+  },
+  {
+   "id": "V3-07",
+   "kind": "TAKE",
+   "clip": "07-1-7",
+   "file": "clips/07-1-7.wav",
+   "duration_s": 2.36,
+   "text": "And one division, rationed.",
+   "pause_after_s": null,
+   "clip_pause_after_s": 1.0,
+   "clip_paragraph_end": true,
+   "speech_start_s": 0.08,
+   "speech_end_s": 2.22,
+   "words": [
+    {
+     "text": "And",
+     "start": 0.08,
+     "end": 0.18
+    },
+    {
+     "text": "one",
+     "start": 0.34,
+     "end": 0.48
+    },
+    {
+     "text": "division",
+     "start": 0.56,
+     "end": 1.06
+    },
+    {
+     "text": "rationed",
+     "start": 1.7,
+     "end": 2.22
+    }
+   ]
+  },
+  {
+   "id": "V3-08",
+   "kind": "TAKE",
+   "clip": "08-2-1",
+   "file": "clips/08-2-1.wav",
+   "duration_s": 7.9,
+   "text": "This is quake-srp: the slop rust port. Quake, ported to Rust by AI agents.",
+   "pause_after_s": null,
+   "clip_pause_after_s": 0.6,
+   "clip_paragraph_end": true,
+   "speech_start_s": 0.08,
+   "speech_end_s": 7.64,
+   "words": [
+    {
+     "text": "This",
+     "start": 0.08,
+     "end": 0.18
+    },
+    {
+     "text": "is",
+     "start": 0.24,
+     "end": 0.38
+    },
+    {
+     "text": "Quake",
+     "start": 0.48,
+     "end": 0.84
+    },
+    {
+     "text": "SRP,",
+     "start": 1.46,
+     "end": 2.14
+    },
+    {
+     "text": "the",
+     "start": 2.7,
+     "end": 2.82
+    },
+    {
+     "text": "Slop",
+     "start": 2.96,
+     "end": 3.22
+    },
+    {
+     "text": "Rust",
+     "start": 3.34,
+     "end": 3.56
+    },
+    {
+     "text": "Port.",
+     "start": 3.68,
+     "end": 3.98
+    },
+    {
+     "text": "Quake",
+     "start": 4.74,
+     "end": 5.08
+    },
+    {
+     "text": "ported",
+     "start": 5.54,
+     "end": 5.84
+    },
+    {
+     "text": "to",
+     "start": 5.88,
+     "end": 6.0
+    },
+    {
+     "text": "Rust",
+     "start": 6.06,
+     "end": 6.38
+    },
+    {
+     "text": "by",
+     "start": 6.44,
+     "end": 6.64
+    },
+    {
+     "text": "AI",
+     "start": 6.74,
+     "end": 7.08
+    },
+    {
+     "text": "agents",
+     "start": 7.16,
+     "end": 7.64
+    }
+   ]
+  },
+  {
+   "id": "V3-09",
+   "kind": "TAKE",
+   "clip": "11-2-4",
+   "file": "clips/11-2-4.wav",
+   "duration_s": 4.48,
+   "text": "By default, it is the same renderer, given a twenty twenty-six machine.",
+   "pause_after_s": null,
+   "clip_pause_after_s": 0.5,
+   "clip_paragraph_end": true,
+   "speech_start_s": 0.06,
+   "speech_end_s": 4.3,
+   "words": [
+    {
+     "text": "By",
+     "start": 0.06,
+     "end": 0.22
+    },
+    {
+     "text": "default,",
+     "start": 0.28,
+     "end": 0.78
+    },
+    {
+     "text": "it",
+     "start": 1.06,
+     "end": 1.12
+    },
+    {
+     "text": "is",
+     "start": 1.16,
+     "end": 1.26
+    },
+    {
+     "text": "the",
+     "start": 1.3,
+     "end": 1.42
+    },
+    {
+     "text": "same",
+     "start": 1.5,
+     "end": 1.72
+    },
+    {
+     "text": "renderer",
+     "start": 1.84,
+     "end": 2.28
+    },
+    {
+     "text": "given",
+     "start": 2.54,
+     "end": 2.72
+    },
+    {
+     "text": "a",
+     "start": 2.76,
+     "end": 2.84
+    },
+    {
+     "text": "2026",
+     "start": 3.0,
+     "end": 3.84
+    },
+    {
+     "text": "machine",
+     "start": 3.88,
+     "end": 4.3
+    }
+   ]
+  },
+  {
+   "id": "V3-10",
+   "kind": "TAKE",
+   "clip": "12-2-5",
+   "file": "clips/12-2-5.wav",
+   "duration_s": 4.24,
+   "text": "Each departure from id is a named setting: a slop option.",
+   "pause_after_s": null,
+   "clip_pause_after_s": 1.0,
+   "clip_paragraph_end": true,
+   "speech_start_s": 0.06,
+   "speech_end_s": 4.059,
+   "words": [
+    {
+     "text": "Each",
+     "start": 0.06,
+     "end": 0.24
+    },
+    {
+     "text": "departure",
+     "start": 0.32,
+     "end": 0.84
+    },
+    {
+     "text": "from",
+     "start": 0.88,
+     "end": 1.1
+    },
+    {
+     "text": "id",
+     "start": 1.22,
+     "end": 1.4
+    },
+    {
+     "text": "is",
+     "start": 1.56,
+     "end": 1.64
+    },
+    {
+     "text": "a",
+     "start": 1.7,
+     "end": 1.8
+    },
+    {
+     "text": "named",
+     "start": 1.88,
+     "end": 2.26
+    },
+    {
+     "text": "setting,",
+     "start": 2.32,
+     "end": 2.74
+    },
+    {
+     "text": "a",
+     "start": 3.14,
+     "end": 3.26
+    },
+    {
+     "text": "slop",
+     "start": 3.36,
+     "end": 3.62
+    },
+    {
+     "text": "option",
+     "start": 3.68,
+     "end": 4.059
+    }
+   ]
+  },
+  {
+   "id": "V4-11",
+   "kind": "RECORD",
+   "clip": "V4-11",
+   "file": "clips-v4/V4-11.wav",
+   "duration_s": 3.61,
+   "text": "Switch them all off, and you get Classic: id's game.",
+   "pause_after_s": null,
+   "replaces": "V3-11",
+   "clip_pause_after_s": null,
+   "clip_paragraph_end": true,
+   "speech_start_s": 0.12,
+   "speech_end_s": 3.44,
+   "words": [
+    {
+     "text": "Switch",
+     "start": 0.12,
+     "end": 0.36
+    },
+    {
+     "text": "them",
+     "start": 0.4,
+     "end": 0.58
+    },
+    {
+     "text": "all",
+     "start": 0.68,
+     "end": 0.82
+    },
+    {
+     "text": "off",
+     "start": 0.9,
+     "end": 1.16
+    },
+    {
+     "text": "and",
+     "start": 1.32,
+     "end": 1.42
+    },
+    {
+     "text": "you",
+     "start": 1.46,
+     "end": 1.52
+    },
+    {
+     "text": "get",
+     "start": 1.56,
+     "end": 1.76
+    },
+    {
+     "text": "classic",
+     "start": 1.82,
+     "end": 2.34
+    },
+    {
+     "text": "id's",
+     "start": 2.86,
+     "end": 3.08
+    },
+    {
+     "text": "game",
+     "start": 3.14,
+     "end": 3.44
+    }
+   ]
+  },
+  {
+   "id": "V3-12",
+   "kind": "TAKE",
+   "clip": "13-3-1",
+   "file": "clips/13-3-1.wav",
+   "duration_s": 2.33,
+   "text": "How do you prove a port is faithful?",
+   "pause_after_s": null,
+   "clip_pause_after_s": 0.6,
+   "clip_paragraph_end": true,
+   "speech_start_s": 0.1,
+   "speech_end_s": 2.18,
+   "words": [
+    {
+     "text": "How",
+     "start": 0.1,
+     "end": 0.2
+    },
+    {
+     "text": "do",
+     "start": 0.26,
+     "end": 0.32
+    },
+    {
+     "text": "you",
+     "start": 0.38,
+     "end": 0.5
+    },
+    {
+     "text": "prove",
+     "start": 0.56,
+     "end": 0.86
+    },
+    {
+     "text": "a",
+     "start": 0.92,
+     "end": 1.0
+    },
+    {
+     "text": "port",
+     "start": 1.08,
+     "end": 1.38
+    },
+    {
+     "text": "is",
+     "start": 1.42,
+     "end": 1.62
+    },
+    {
+     "text": "faithful?",
+     "start": 1.68,
+     "end": 2.18
+    }
+   ]
+  },
+  {
+   "id": "V3-13",
+   "kind": "TAKE",
+   "clip": "14-3-2",
+   "file": "clips/14-3-2.wav",
+   "duration_s": 4.47,
+   "text": "Build id's own C to run without a screen: the oracle.",
+   "pause_after_s": null,
+   "clip_pause_after_s": 0.4,
+   "clip_paragraph_end": true,
+   "speech_start_s": 0.1,
+   "speech_end_s": 4.3,
+   "words": [
+    {
+     "text": "Build",
+     "start": 0.1,
+     "end": 0.34
+    },
+    {
+     "text": "id's",
+     "start": 0.52,
+     "end": 0.8
+    },
+    {
+     "text": "own",
+     "start": 0.86,
+     "end": 1.06
+    },
+    {
+     "text": "C",
+     "start": 1.24,
+     "end": 1.46
+    },
+    {
+     "text": "to",
+     "start": 1.58,
+     "end": 1.66
+    },
+    {
+     "text": "run",
+     "start": 1.78,
+     "end": 2.02
+    },
+    {
+     "text": "without",
+     "start": 2.06,
+     "end": 2.36
+    },
+    {
+     "text": "a",
+     "start": 2.42,
+     "end": 2.5
+    },
+    {
+     "text": "screen,",
+     "start": 2.6,
+     "end": 2.98
+    },
+    {
+     "text": "the",
+     "start": 3.62,
+     "end": 3.78
+    },
+    {
+     "text": "Oracle",
+     "start": 3.84,
+     "end": 4.3
+    }
+   ]
+  },
+  {
+   "id": "V3-14",
+   "kind": "TAKE",
+   "clip": "15-3-3",
+   "file": "clips/15-3-3.wav",
+   "duration_s": 6.91,
+   "text": "Give both the same camera, the same clock, the same monsters, and compare the frames, pixel by pixel.",
+   "pause_after_s": null,
+   "clip_pause_after_s": 0.8,
+   "clip_paragraph_end": true,
+   "speech_start_s": 0.06,
+   "speech_end_s": 6.74,
+   "words": [
+    {
+     "text": "Give",
+     "start": 0.06,
+     "end": 0.2
+    },
+    {
+     "text": "both",
+     "start": 0.3,
+     "end": 0.48
+    },
+    {
+     "text": "the",
+     "start": 0.52,
+     "end": 0.66
+    },
+    {
+     "text": "same",
+     "start": 0.74,
+     "end": 0.94
+    },
+    {
+     "text": "camera,",
+     "start": 1.06,
+     "end": 1.44
+    },
+    {
+     "text": "the",
+     "start": 1.72,
+     "end": 1.84
+    },
+    {
+     "text": "same",
+     "start": 1.92,
+     "end": 2.12
+    },
+    {
+     "text": "clock,",
+     "start": 2.22,
+     "end": 2.54
+    },
+    {
+     "text": "the",
+     "start": 2.84,
+     "end": 2.96
+    },
+    {
+     "text": "same",
+     "start": 3.06,
+     "end": 3.28
+    },
+    {
+     "text": "monsters,",
+     "start": 3.34,
+     "end": 3.86
+    },
+    {
+     "text": "and",
+     "start": 4.22,
+     "end": 4.34
+    },
+    {
+     "text": "compare",
+     "start": 4.36,
+     "end": 4.76
+    },
+    {
+     "text": "the",
+     "start": 4.8,
+     "end": 4.92
+    },
+    {
+     "text": "frames",
+     "start": 4.96,
+     "end": 5.42
+    },
+    {
+     "text": "pixel",
+     "start": 5.68,
+     "end": 6.12
+    },
+    {
+     "text": "by",
+     "start": 6.14,
+     "end": 6.3
+    },
+    {
+     "text": "pixel",
+     "start": 6.36,
+     "end": 6.74
+    }
+   ]
+  },
+  {
+   "id": "V3-15",
+   "kind": "RECORD",
+   "clip": "V3-15",
+   "file": "clips-v3/V3-15.wav",
+   "duration_s": 3.88,
+   "text": "Subtract one frame from the other, and this is what's left.",
+   "pause_after_s": null,
+   "clip_pause_after_s": null,
+   "clip_paragraph_end": true,
+   "speech_start_s": 0.12,
+   "speech_end_s": 3.72,
+   "words": [
+    {
+     "text": "Subtract",
+     "start": 0.12,
+     "end": 0.58
+    },
+    {
+     "text": "one",
+     "start": 0.8,
+     "end": 0.92
+    },
+    {
+     "text": "frame",
+     "start": 1.08,
+     "end": 1.34
+    },
+    {
+     "text": "from",
+     "start": 1.4,
+     "end": 1.52
+    },
+    {
+     "text": "the",
+     "start": 1.56,
+     "end": 1.64
+    },
+    {
+     "text": "other,",
+     "start": 1.72,
+     "end": 1.96
+    },
+    {
+     "text": "and",
+     "start": 2.3,
+     "end": 2.46
+    },
+    {
+     "text": "this",
+     "start": 2.54,
+     "end": 2.86
+    },
+    {
+     "text": "is",
+     "start": 2.92,
+     "end": 3.02
+    },
+    {
+     "text": "what's",
+     "start": 3.06,
+     "end": 3.3
+    },
+    {
+     "text": "left",
+     "start": 3.36,
+     "end": 3.72
+    }
+   ]
+  },
+  {
+   "id": "V7-16",
+   "kind": "RECORD",
+   "clip": "V7-16",
+   "file": "clips-v7/V7-16.wav",
+   "duration_s": 7.99,
+   "text": "No, your video hasn't frozen. That's the difference: on these views, monsters and all, every pixel matches.",
+   "pause_after_s": null,
+   "replaces": "V3-16",
+   "speech_start_s": 0.18,
+   "speech_end_s": 7.8,
+   "words": [
+    {
+     "text": "No,",
+     "start": 0.18,
+     "end": 0.4
+    },
+    {
+     "text": "your",
+     "start": 0.72,
+     "end": 0.84
+    },
+    {
+     "text": "video",
+     "start": 0.9,
+     "end": 1.16
+    },
+    {
+     "text": "hasn't",
+     "start": 1.34,
+     "end": 1.68
+    },
+    {
+     "text": "frozen.",
+     "start": 1.72,
+     "end": 2.14
+    },
+    {
+     "text": "That's",
+     "start": 2.72,
+     "end": 2.94
+    },
+    {
+     "text": "the",
+     "start": 2.98,
+     "end": 3.06
+    },
+    {
+     "text": "difference.",
+     "start": 3.1,
+     "end": 3.58
+    },
+    {
+     "text": "On",
+     "start": 4.059,
+     "end": 4.18
+    },
+    {
+     "text": "these",
+     "start": 4.24,
+     "end": 4.48
+    },
+    {
+     "text": "views,",
+     "start": 4.52,
+     "end": 4.88
+    },
+    {
+     "text": "monsters",
+     "start": 5.22,
+     "end": 5.6
+    },
+    {
+     "text": "and",
+     "start": 5.62,
+     "end": 5.72
+    },
+    {
+     "text": "all,",
+     "start": 5.8,
+     "end": 5.98
+    },
+    {
+     "text": "every",
+     "start": 6.38,
+     "end": 6.68
+    },
+    {
+     "text": "pixel",
+     "start": 6.82,
+     "end": 7.16
+    },
+    {
+     "text": "matches",
+     "start": 7.32,
+     "end": 7.8
+    }
+   ]
+  },
+  {
+   "id": "V3-17a",
+   "kind": "TAKE",
+   "clip": "19-3-7",
+   "file": "clips/19-3-7.wav",
+   "duration_s": 3.16,
+   "text": "The mixer matches id's, sample for sample.",
+   "pause_after_s": null,
+   "clip_pause_after_s": 0.0,
+   "clip_paragraph_end": false,
+   "speech_start_s": 0.1,
+   "speech_end_s": 2.98,
+   "words": [
+    {
+     "text": "The",
+     "start": 0.1,
+     "end": 0.18
+    },
+    {
+     "text": "mixer",
+     "start": 0.24,
+     "end": 0.54
+    },
+    {
+     "text": "matches",
+     "start": 0.66,
+     "end": 1.14
+    },
+    {
+     "text": "id's",
+     "start": 1.22,
+     "end": 1.52
+    },
+    {
+     "text": "sample",
+     "start": 1.88,
+     "end": 2.22
+    },
+    {
+     "text": "for",
+     "start": 2.3,
+     "end": 2.38
+    },
+    {
+     "text": "sample",
+     "start": 2.54,
+     "end": 2.98
+    }
+   ]
+  },
+  {
+   "id": "V3-17b",
+   "kind": "TAKE",
+   "clip": "20-3-8",
+   "file": "clips/20-3-8.wav",
+   "duration_s": 6.25,
+   "text": "Demo playback matches frame by frame: the camera, every entity, every dynamic light.",
+   "pause_after_s": null,
+   "clip_pause_after_s": 0.5,
+   "clip_paragraph_end": true,
+   "speech_start_s": 0.06,
+   "speech_end_s": 6.06,
+   "words": [
+    {
+     "text": "Demo",
+     "start": 0.06,
+     "end": 0.3
+    },
+    {
+     "text": "playback",
+     "start": 0.4,
+     "end": 0.84
+    },
+    {
+     "text": "matches",
+     "start": 0.96,
+     "end": 1.28
+    },
+    {
+     "text": "frame",
+     "start": 1.48,
+     "end": 1.7
+    },
+    {
+     "text": "by",
+     "start": 1.78,
+     "end": 1.9
+    },
+    {
+     "text": "frame",
+     "start": 2.06,
+     "end": 2.44
+    },
+    {
+     "text": "the",
+     "start": 2.94,
+     "end": 3.02
+    },
+    {
+     "text": "camera,",
+     "start": 3.1,
+     "end": 3.46
+    },
+    {
+     "text": "every",
+     "start": 3.84,
+     "end": 4.08
+    },
+    {
+     "text": "entity,",
+     "start": 4.14,
+     "end": 4.56
+    },
+    {
+     "text": "every",
+     "start": 4.9,
+     "end": 5.16
+    },
+    {
+     "text": "dynamic",
+     "start": 5.24,
+     "end": 5.68
+    },
+    {
+     "text": "light",
+     "start": 5.78,
+     "end": 6.06
+    }
+   ]
+  },
+  {
+   "id": "V6-18",
+   "kind": "RECORD",
+   "clip": "V6-18",
+   "file": "clips-v6/V6-18.wav",
+   "duration_s": 6.38,
+   "text": "One command runs ten checks, six of them against id's own C. All ten pass.",
+   "pause_after_s": null,
+   "replaces": "V3-18",
+   "speech_start_s": 0.1,
+   "speech_end_s": 6.18,
+   "words": [
+    {
+     "text": "One",
+     "start": 0.1,
+     "end": 0.22
+    },
+    {
+     "text": "command",
+     "start": 0.3,
+     "end": 0.72
+    },
+    {
+     "text": "runs",
+     "start": 0.82,
+     "end": 1.1
+    },
+    {
+     "text": "10",
+     "start": 1.16,
+     "end": 1.4
+    },
+    {
+     "text": "checks,",
+     "start": 1.54,
+     "end": 1.94
+    },
+    {
+     "text": "six",
+     "start": 2.5,
+     "end": 2.7
+    },
+    {
+     "text": "of",
+     "start": 2.74,
+     "end": 2.82
+    },
+    {
+     "text": "them",
+     "start": 2.86,
+     "end": 2.98
+    },
+    {
+     "text": "against",
+     "start": 3.04,
+     "end": 3.38
+    },
+    {
+     "text": "id's",
+     "start": 3.46,
+     "end": 3.72
+    },
+    {
+     "text": "own",
+     "start": 3.78,
+     "end": 4.04
+    },
+    {
+     "text": "C.",
+     "start": 4.12,
+     "end": 4.42
+    },
+    {
+     "text": "All",
+     "start": 5.1,
+     "end": 5.28
+    },
+    {
+     "text": "10",
+     "start": 5.34,
+     "end": 5.62
+    },
+    {
+     "text": "pass",
+     "start": 5.76,
+     "end": 6.18
+    }
+   ]
+  },
+  {
+   "id": "V3-19",
+   "kind": "RECORD",
+   "clip": "V3-19",
+   "file": "clips-v3/V3-19.wav",
+   "duration_s": 5.92,
+   "text": "Now, the slop. We start from Classic, and switch it on one setting at a time.",
+   "pause_after_s": null,
+   "clip_pause_after_s": null,
+   "clip_paragraph_end": true,
+   "speech_start_s": 0.12,
+   "speech_end_s": 5.38,
+   "words": [
+    {
+     "text": "Now,",
+     "start": 0.12,
+     "end": 0.36
+    },
+    {
+     "text": "the",
+     "start": 0.66,
+     "end": 0.78
+    },
+    {
+     "text": "slop.",
+     "start": 0.88,
+     "end": 1.22
+    },
+    {
+     "text": "We",
+     "start": 1.9,
+     "end": 2.0
+    },
+    {
+     "text": "start",
+     "start": 2.08,
+     "end": 2.28
+    },
+    {
+     "text": "from",
+     "start": 2.32,
+     "end": 2.46
+    },
+    {
+     "text": "classic",
+     "start": 2.54,
+     "end": 3.22
+    },
+    {
+     "text": "and",
+     "start": 3.28,
+     "end": 3.4
+    },
+    {
+     "text": "switch",
+     "start": 3.48,
+     "end": 3.68
+    },
+    {
+     "text": "it",
+     "start": 3.72,
+     "end": 3.78
+    },
+    {
+     "text": "on",
+     "start": 3.86,
+     "end": 4.059
+    },
+    {
+     "text": "one",
+     "start": 4.18,
+     "end": 4.36
+    },
+    {
+     "text": "setting",
+     "start": 4.44,
+     "end": 4.72
+    },
+    {
+     "text": "at",
+     "start": 4.76,
+     "end": 4.84
+    },
+    {
+     "text": "a",
+     "start": 4.9,
+     "end": 4.94
+    },
+    {
+     "text": "time",
+     "start": 5.02,
+     "end": 5.38
+    }
+   ]
+  },
+  {
+   "id": "V3-20",
+   "kind": "RECORD",
+   "clip": "V3-20",
+   "file": "clips-v3/V3-20.wav",
+   "duration_s": 1.78,
+   "text": "First: torches.",
+   "pause_after_s": 0.6,
+   "clip_pause_after_s": 0.6,
+   "clip_paragraph_end": true,
+   "speech_start_s": 0.12,
+   "speech_end_s": 1.58,
+   "words": [
+    {
+     "text": "First,",
+     "start": 0.12,
+     "end": 0.56
+    },
+    {
+     "text": "torches",
+     "start": 1.0,
+     "end": 1.58
+    }
+   ]
+  },
+  {
+   "id": "V3-21",
+   "kind": "RECORD",
+   "clip": "V3-21",
+   "file": "clips-v3/V3-21.wav",
+   "duration_s": 8.22,
+   "text": "id's mappers baked most of them into the walls, perfectly still: a hundred and forty-three, from the second map to the seventh.",
+   "pause_after_s": null,
+   "clip_pause_after_s": null,
+   "clip_paragraph_end": true,
+   "speech_start_s": 0.1,
+   "speech_end_s": 8.16,
+   "words": [
+    {
+     "text": "Id's",
+     "start": 0.1,
+     "end": 0.34
+    },
+    {
+     "text": "mappers",
+     "start": 0.4,
+     "end": 0.8
+    },
+    {
+     "text": "baked",
+     "start": 0.9,
+     "end": 1.1
+    },
+    {
+     "text": "most",
+     "start": 1.26,
+     "end": 1.5
+    },
+    {
+     "text": "of",
+     "start": 1.56,
+     "end": 1.62
+    },
+    {
+     "text": "them",
+     "start": 1.66,
+     "end": 1.76
+    },
+    {
+     "text": "into",
+     "start": 1.8,
+     "end": 1.98
+    },
+    {
+     "text": "the",
+     "start": 2.02,
+     "end": 2.12
+    },
+    {
+     "text": "walls,",
+     "start": 2.18,
+     "end": 2.62
+    },
+    {
+     "text": "perfectly",
+     "start": 3.08,
+     "end": 3.64
+    },
+    {
+     "text": "still.",
+     "start": 3.74,
+     "end": 4.04
+    },
+    {
+     "text": "A",
+     "start": 4.7,
+     "end": 4.76
+    },
+    {
+     "text": "hundred",
+     "start": 4.82,
+     "end": 5.1
+    },
+    {
+     "text": "and",
+     "start": 5.12,
+     "end": 5.18
+    },
+    {
+     "text": "forty-three",
+     "start": 5.34,
+     "end": 6.06
+    },
+    {
+     "text": "from",
+     "start": 6.42,
+     "end": 6.54
+    },
+    {
+     "text": "the",
+     "start": 6.58,
+     "end": 6.66
+    },
+    {
+     "text": "second",
+     "start": 6.74,
+     "end": 7.02
+    },
+    {
+     "text": "map",
+     "start": 7.06,
+     "end": 7.3
+    },
+    {
+     "text": "to",
+     "start": 7.5,
+     "end": 7.56
+    },
+    {
+     "text": "the",
+     "start": 7.6,
+     "end": 7.72
+    },
+    {
+     "text": "seventh",
+     "start": 7.78,
+     "end": 8.16
+    }
+   ]
+  },
+  {
+   "id": "V3-22",
+   "kind": "TAKE",
+   "clip": "48-4.4-4",
+   "file": "clips/48-4.4-4.wav",
+   "duration_s": 6.31,
+   "text": "The port finds each one with the light tool's own code, and lets it flicker, averaging to id's light.",
+   "pause_after_s": null,
+   "clip_pause_after_s": 0.4,
+   "clip_paragraph_end": true,
+   "speech_start_s": 0.08,
+   "speech_end_s": 6.14,
+   "words": [
+    {
+     "text": "The",
+     "start": 0.08,
+     "end": 0.18
+    },
+    {
+     "text": "port",
+     "start": 0.24,
+     "end": 0.46
+    },
+    {
+     "text": "finds",
+     "start": 0.58,
+     "end": 0.92
+    },
+    {
+     "text": "each",
+     "start": 0.98,
+     "end": 1.16
+    },
+    {
+     "text": "one",
+     "start": 1.3,
+     "end": 1.52
+    },
+    {
+     "text": "with",
+     "start": 1.6,
+     "end": 1.7
+    },
+    {
+     "text": "the",
+     "start": 1.74,
+     "end": 1.82
+    },
+    {
+     "text": "light",
+     "start": 1.88,
+     "end": 2.1
+    },
+    {
+     "text": "tool's",
+     "start": 2.16,
+     "end": 2.56
+    },
+    {
+     "text": "own",
+     "start": 2.62,
+     "end": 2.84
+    },
+    {
+     "text": "code",
+     "start": 2.92,
+     "end": 3.3
+    },
+    {
+     "text": "and",
+     "start": 3.56,
+     "end": 3.64
+    },
+    {
+     "text": "lets",
+     "start": 3.7,
+     "end": 3.86
+    },
+    {
+     "text": "it",
+     "start": 3.9,
+     "end": 3.96
+    },
+    {
+     "text": "flicker,",
+     "start": 4.14,
+     "end": 4.5
+    },
+    {
+     "text": "averaging",
+     "start": 4.9,
+     "end": 5.36
+    },
+    {
+     "text": "to",
+     "start": 5.4,
+     "end": 5.54
+    },
+    {
+     "text": "id's",
+     "start": 5.6,
+     "end": 5.82
+    },
+    {
+     "text": "light",
+     "start": 5.88,
+     "end": 6.14
+    }
+   ]
+  },
+  {
+   "id": "V3-24",
+   "kind": "TAKE",
+   "clip": "49-4.4-5",
+   "file": "clips/49-4.4-5.wav",
+   "duration_s": 3.13,
+   "text": "The user asked for that: a warm feeling.",
+   "pause_after_s": 0.8,
+   "clip_pause_after_s": 1.0,
+   "clip_paragraph_end": true,
+   "speech_start_s": 0.06,
+   "speech_end_s": 2.96,
+   "words": [
+    {
+     "text": "The",
+     "start": 0.06,
+     "end": 0.14
+    },
+    {
+     "text": "user",
+     "start": 0.24,
+     "end": 0.54
+    },
+    {
+     "text": "asked",
+     "start": 0.66,
+     "end": 0.96
+    },
+    {
+     "text": "for",
+     "start": 0.98,
+     "end": 1.08
+    },
+    {
+     "text": "that,",
+     "start": 1.14,
+     "end": 1.38
+    },
+    {
+     "text": "a",
+     "start": 1.92,
+     "end": 2.06
+    },
+    {
+     "text": "warm",
+     "start": 2.14,
+     "end": 2.42
+    },
+    {
+     "text": "feeling",
+     "start": 2.58,
+     "end": 2.96
+    }
+   ]
+  },
+  {
+   "id": "V3-26",
+   "kind": "RECORD",
+   "clip": "V3-26",
+   "file": "clips-v3/V3-26.wav",
+   "duration_s": 9.02,
+   "text": "The lights id did animate are strings of letters, from a for dark to zee for bright, a new letter every tenth of a second.",
+   "pause_after_s": null,
+   "clip_pause_after_s": null,
+   "clip_paragraph_end": true,
+   "speech_start_s": 0.08,
+   "speech_end_s": 8.86,
+   "words": [
+    {
+     "text": "The",
+     "start": 0.08,
+     "end": 0.16
+    },
+    {
+     "text": "lights",
+     "start": 0.2,
+     "end": 0.46
+    },
+    {
+     "text": "Id",
+     "start": 0.66,
+     "end": 0.92
+    },
+    {
+     "text": "did",
+     "start": 0.98,
+     "end": 1.14
+    },
+    {
+     "text": "animate",
+     "start": 1.2,
+     "end": 1.72
+    },
+    {
+     "text": "are",
+     "start": 1.76,
+     "end": 1.9
+    },
+    {
+     "text": "strings",
+     "start": 2.04,
+     "end": 2.36
+    },
+    {
+     "text": "of",
+     "start": 2.42,
+     "end": 2.5
+    },
+    {
+     "text": "letters",
+     "start": 2.56,
+     "end": 3.02
+    },
+    {
+     "text": "from",
+     "start": 3.44,
+     "end": 3.68
+    },
+    {
+     "text": "A",
+     "start": 3.82,
+     "end": 4.04
+    },
+    {
+     "text": "for",
+     "start": 4.1,
+     "end": 4.26
+    },
+    {
+     "text": "dark",
+     "start": 4.32,
+     "end": 4.94
+    },
+    {
+     "text": "to",
+     "start": 5.0,
+     "end": 5.14
+    },
+    {
+     "text": "Z",
+     "start": 5.26,
+     "end": 5.58
+    },
+    {
+     "text": "for",
+     "start": 5.64,
+     "end": 5.78
+    },
+    {
+     "text": "bright,",
+     "start": 5.82,
+     "end": 6.18
+    },
+    {
+     "text": "a",
+     "start": 6.78,
+     "end": 6.84
+    },
+    {
+     "text": "new",
+     "start": 6.92,
+     "end": 7.08
+    },
+    {
+     "text": "letter",
+     "start": 7.12,
+     "end": 7.52
+    },
+    {
+     "text": "every",
+     "start": 7.58,
+     "end": 7.84
+    },
+    {
+     "text": "tenth",
+     "start": 7.92,
+     "end": 8.16
+    },
+    {
+     "text": "of",
+     "start": 8.2,
+     "end": 8.26
+    },
+    {
+     "text": "a",
+     "start": 8.32,
+     "end": 8.38
+    },
+    {
+     "text": "second",
+     "start": 8.44,
+     "end": 8.86
+    }
+   ]
+  },
+  {
+   "id": "V7-27",
+   "kind": "RECORD",
+   "clip": "V7-27",
+   "file": "clips-v7/V7-27.wav",
+   "duration_s": 8.26,
+   "text": "On a sharp, fast screen they hold, then jump: a stutter in a smooth picture. Slop glides between the letters.",
+   "pause_after_s": null,
+   "replaces": "V3-27",
+   "speech_start_s": 0.06,
+   "speech_end_s": 8.02,
+   "words": [
+    {
+     "text": "On",
+     "start": 0.06,
+     "end": 0.12
+    },
+    {
+     "text": "a",
+     "start": 0.2,
+     "end": 0.28
+    },
+    {
+     "text": "sharp,",
+     "start": 0.38,
+     "end": 0.7
+    },
+    {
+     "text": "fast",
+     "start": 0.98,
+     "end": 1.36
+    },
+    {
+     "text": "screen",
+     "start": 1.46,
+     "end": 1.76
+    },
+    {
+     "text": "they",
+     "start": 1.82,
+     "end": 1.96
+    },
+    {
+     "text": "hold,",
+     "start": 2.02,
+     "end": 2.32
+    },
+    {
+     "text": "then",
+     "start": 2.64,
+     "end": 2.82
+    },
+    {
+     "text": "jump.",
+     "start": 2.92,
+     "end": 3.22
+    },
+    {
+     "text": "A",
+     "start": 3.68,
+     "end": 3.72
+    },
+    {
+     "text": "stutter",
+     "start": 3.88,
+     "end": 4.3
+    },
+    {
+     "text": "in",
+     "start": 4.36,
+     "end": 4.42
+    },
+    {
+     "text": "a",
+     "start": 4.48,
+     "end": 4.56
+    },
+    {
+     "text": "smooth",
+     "start": 4.68,
+     "end": 4.96
+    },
+    {
+     "text": "picture.",
+     "start": 5.02,
+     "end": 5.42
+    },
+    {
+     "text": "Slop",
+     "start": 6.14,
+     "end": 6.58
+    },
+    {
+     "text": "glides",
+     "start": 6.64,
+     "end": 7.08
+    },
+    {
+     "text": "between",
+     "start": 7.12,
+     "end": 7.46
+    },
+    {
+     "text": "the",
+     "start": 7.48,
+     "end": 7.56
+    },
+    {
+     "text": "letters",
+     "start": 7.6,
+     "end": 8.02
+    }
+   ]
+  },
+  {
+   "id": "V3-28",
+   "kind": "TAKE",
+   "clip": "41-4.3-4",
+   "file": "clips/41-4.3-4.wav",
+   "duration_s": 9.44,
+   "text": "Monsters still think ten times a second. At two hundred and forty hertz, id's grunt stands still for twenty-three frames, then jumps.",
+   "pause_after_s": null,
+   "clip_pause_after_s": 0.4,
+   "clip_paragraph_end": true,
+   "speech_start_s": 0.08,
+   "speech_end_s": 8.9,
+   "words": [
+    {
+     "text": "Monsters",
+     "start": 0.08,
+     "end": 0.54
+    },
+    {
+     "text": "still",
+     "start": 0.66,
+     "end": 0.9
+    },
+    {
+     "text": "think",
+     "start": 0.98,
+     "end": 1.2
+    },
+    {
+     "text": "10",
+     "start": 1.36,
+     "end": 1.56
+    },
+    {
+     "text": "times",
+     "start": 1.66,
+     "end": 1.92
+    },
+    {
+     "text": "a",
+     "start": 1.96,
+     "end": 2.04
+    },
+    {
+     "text": "second.",
+     "start": 2.1,
+     "end": 2.52
+    },
+    {
+     "text": "At",
+     "start": 3.16,
+     "end": 3.28
+    },
+    {
+     "text": "240",
+     "start": 3.5,
+     "end": 4.32
+    },
+    {
+     "text": "hertz,",
+     "start": 4.36,
+     "end": 4.72
+    },
+    {
+     "text": "Id's",
+     "start": 5.12,
+     "end": 5.34
+    },
+    {
+     "text": "grunt",
+     "start": 5.4,
+     "end": 5.68
+    },
+    {
+     "text": "stands",
+     "start": 5.84,
+     "end": 6.16
+    },
+    {
+     "text": "still",
+     "start": 6.28,
+     "end": 6.56
+    },
+    {
+     "text": "for",
+     "start": 6.6,
+     "end": 6.7
+    },
+    {
+     "text": "23",
+     "start": 6.9,
+     "end": 7.36
+    },
+    {
+     "text": "frames,",
+     "start": 7.42,
+     "end": 7.84
+    },
+    {
+     "text": "then",
+     "start": 8.26,
+     "end": 8.4
+    },
+    {
+     "text": "jumps.",
+     "start": 8.52,
+     "end": 8.9
+    }
+   ]
+  },
+  {
+   "id": "V3-29",
+   "kind": "RECORD",
+   "clip": "V3-29",
+   "file": "clips-v3/V3-29.wav",
+   "duration_s": 5.56,
+   "text": "Slop glides him, and blends his poses. Without the blend, he ice-skates.",
+   "pause_after_s": null,
+   "clip_pause_after_s": null,
+   "clip_paragraph_end": true,
+   "speech_start_s": 0.14,
+   "speech_end_s": 5.32,
+   "words": [
+    {
+     "text": "Slop",
+     "start": 0.14,
+     "end": 0.38
+    },
+    {
+     "text": "glides",
+     "start": 0.52,
+     "end": 0.94
+    },
+    {
+     "text": "him",
+     "start": 0.96,
+     "end": 1.2
+    },
+    {
+     "text": "and",
+     "start": 1.4,
+     "end": 1.5
+    },
+    {
+     "text": "blends",
+     "start": 1.64,
+     "end": 2.02
+    },
+    {
+     "text": "his",
+     "start": 2.06,
+     "end": 2.22
+    },
+    {
+     "text": "poses.",
+     "start": 2.28,
+     "end": 2.8
+    },
+    {
+     "text": "Without",
+     "start": 3.36,
+     "end": 3.62
+    },
+    {
+     "text": "the",
+     "start": 3.66,
+     "end": 3.78
+    },
+    {
+     "text": "blend,",
+     "start": 3.82,
+     "end": 4.24
+    },
+    {
+     "text": "he",
+     "start": 4.44,
+     "end": 4.62
+    },
+    {
+     "text": "ice",
+     "start": 4.72,
+     "end": 4.88
+    },
+    {
+     "text": "skates",
+     "start": 4.98,
+     "end": 5.32
+    }
+   ]
+  },
+  {
+   "id": "V3-30",
+   "kind": "TAKE",
+   "clip": "38-4.3-1",
+   "file": "clips/38-4.3-1.wav",
+   "duration_s": 4.05,
+   "text": "id capped the game at seventy-two frames a second, and tuned it there.",
+   "pause_after_s": null,
+   "clip_pause_after_s": 0.4,
+   "clip_paragraph_end": true,
+   "speech_start_s": 0.08,
+   "speech_end_s": 3.88,
+   "words": [
+    {
+     "text": "Id",
+     "start": 0.08,
+     "end": 0.26
+    },
+    {
+     "text": "capped",
+     "start": 0.32,
+     "end": 0.6
+    },
+    {
+     "text": "the",
+     "start": 0.6,
+     "end": 0.72
+    },
+    {
+     "text": "game",
+     "start": 0.76,
+     "end": 0.98
+    },
+    {
+     "text": "at",
+     "start": 1.02,
+     "end": 1.16
+    },
+    {
+     "text": "72",
+     "start": 1.42,
+     "end": 1.84
+    },
+    {
+     "text": "frames",
+     "start": 1.9,
+     "end": 2.14
+    },
+    {
+     "text": "a",
+     "start": 2.2,
+     "end": 2.28
+    },
+    {
+     "text": "second",
+     "start": 2.34,
+     "end": 2.78
+    },
+    {
+     "text": "and",
+     "start": 2.94,
+     "end": 3.08
+    },
+    {
+     "text": "tuned",
+     "start": 3.16,
+     "end": 3.4
+    },
+    {
+     "text": "it",
+     "start": 3.44,
+     "end": 3.54
+    },
+    {
+     "text": "there",
+     "start": 3.6,
+     "end": 3.88
+    }
+   ]
+  },
+  {
+   "id": "V3-31",
+   "kind": "TAKE",
+   "clip": "39-4.3-2",
+   "file": "clips/39-4.3-2.wav",
+   "duration_s": 8.41,
+   "text": "Run id's code faster, and the physics drifts: at four hundred and eighty hertz, jumps peak higher, and grenades land further.",
+   "pause_after_s": null,
+   "clip_pause_after_s": 0.5,
+   "clip_paragraph_end": true,
+   "speech_start_s": 0.12,
+   "speech_end_s": 8.22,
+   "words": [
+    {
+     "text": "Run",
+     "start": 0.12,
+     "end": 0.28
+    },
+    {
+     "text": "id's",
+     "start": 0.42,
+     "end": 0.62
+    },
+    {
+     "text": "code",
+     "start": 0.68,
+     "end": 0.88
+    },
+    {
+     "text": "faster",
+     "start": 1.06,
+     "end": 1.54
+    },
+    {
+     "text": "and",
+     "start": 1.74,
+     "end": 1.82
+    },
+    {
+     "text": "the",
+     "start": 1.86,
+     "end": 1.96
+    },
+    {
+     "text": "physics",
+     "start": 2.02,
+     "end": 2.38
+    },
+    {
+     "text": "drifts.",
+     "start": 2.5,
+     "end": 3.0
+    },
+    {
+     "text": "At",
+     "start": 3.68,
+     "end": 3.82
+    },
+    {
+     "text": "four",
+     "start": 3.88,
+     "end": 4.04
+    },
+    {
+     "text": "hundred",
+     "start": 4.08,
+     "end": 4.32
+    },
+    {
+     "text": "and",
+     "start": 4.36,
+     "end": 4.42
+    },
+    {
+     "text": "eighty",
+     "start": 4.56,
+     "end": 4.78
+    },
+    {
+     "text": "hertz,",
+     "start": 4.88,
+     "end": 5.2
+    },
+    {
+     "text": "jumps",
+     "start": 5.52,
+     "end": 5.88
+    },
+    {
+     "text": "peak",
+     "start": 5.94,
+     "end": 6.14
+    },
+    {
+     "text": "higher",
+     "start": 6.22,
+     "end": 6.58
+    },
+    {
+     "text": "and",
+     "start": 6.82,
+     "end": 6.9
+    },
+    {
+     "text": "grenades",
+     "start": 6.98,
+     "end": 7.5
+    },
+    {
+     "text": "land",
+     "start": 7.56,
+     "end": 7.74
+    },
+    {
+     "text": "further",
+     "start": 7.88,
+     "end": 8.22
+    }
+   ]
+  },
+  {
+   "id": "V3-32a",
+   "kind": "TAKE",
+   "clip": "40-4.3-3",
+   "file": "clips/40-4.3-3.wav",
+   "duration_s": 7.95,
+   "text": "The slop preset draws a frame on every refresh, and steps gravity so that every jump lands on id's seventy-two hertz curve.",
+   "pause_after_s": null,
+   "clip_pause_after_s": 0.5,
+   "clip_paragraph_end": true,
+   "speech_start_s": 0.04,
+   "speech_end_s": 7.86,
+   "words": [
+    {
+     "text": "The",
+     "start": 0.04,
+     "end": 0.16
+    },
+    {
+     "text": "slop",
+     "start": 0.24,
+     "end": 0.48
+    },
+    {
+     "text": "preset",
+     "start": 0.54,
+     "end": 0.94
+    },
+    {
+     "text": "draws",
+     "start": 1.06,
+     "end": 1.28
+    },
+    {
+     "text": "a",
+     "start": 1.32,
+     "end": 1.44
+    },
+    {
+     "text": "frame",
+     "start": 1.5,
+     "end": 1.78
+    },
+    {
+     "text": "on",
+     "start": 1.82,
+     "end": 2.04
+    },
+    {
+     "text": "every",
+     "start": 2.1,
+     "end": 2.34
+    },
+    {
+     "text": "refresh",
+     "start": 2.46,
+     "end": 3.0
+    },
+    {
+     "text": "and",
+     "start": 3.38,
+     "end": 3.52
+    },
+    {
+     "text": "steps",
+     "start": 3.6,
+     "end": 3.86
+    },
+    {
+     "text": "gravity",
+     "start": 3.9,
+     "end": 4.38
+    },
+    {
+     "text": "so",
+     "start": 4.54,
+     "end": 4.64
+    },
+    {
+     "text": "that",
+     "start": 4.68,
+     "end": 4.88
+    },
+    {
+     "text": "every",
+     "start": 4.94,
+     "end": 5.16
+    },
+    {
+     "text": "jump",
+     "start": 5.3,
+     "end": 5.56
+    },
+    {
+     "text": "lands",
+     "start": 5.66,
+     "end": 5.88
+    },
+    {
+     "text": "on",
+     "start": 5.92,
+     "end": 6.08
+    },
+    {
+     "text": "id's",
+     "start": 6.16,
+     "end": 6.38
+    },
+    {
+     "text": "72",
+     "start": 6.62,
+     "end": 7.04
+    },
+    {
+     "text": "hertz",
+     "start": 7.1,
+     "end": 7.36
+    },
+    {
+     "text": "curve",
+     "start": 7.48,
+     "end": 7.86
+    }
+   ]
+  },
+  {
+   "id": "V3-32",
+   "kind": "RECORD",
+   "clip": "V3-32",
+   "file": "clips-v3/V3-32.wav",
+   "duration_s": 4.56,
+   "text": "The clouds used to jump eight times a second. Now they drift.",
+   "pause_after_s": null,
+   "clip_pause_after_s": null,
+   "clip_paragraph_end": true,
+   "speech_start_s": 0.04,
+   "speech_end_s": 4.4,
+   "words": [
+    {
+     "text": "The",
+     "start": 0.04,
+     "end": 0.12
+    },
+    {
+     "text": "clouds",
+     "start": 0.18,
+     "end": 0.66
+    },
+    {
+     "text": "used",
+     "start": 0.78,
+     "end": 0.92
+    },
+    {
+     "text": "to",
+     "start": 0.98,
+     "end": 1.06
+    },
+    {
+     "text": "jump",
+     "start": 1.12,
+     "end": 1.42
+    },
+    {
+     "text": "eight",
+     "start": 1.5,
+     "end": 1.66
+    },
+    {
+     "text": "times",
+     "start": 1.72,
+     "end": 2.0
+    },
+    {
+     "text": "a",
+     "start": 2.04,
+     "end": 2.12
+    },
+    {
+     "text": "second.",
+     "start": 2.2,
+     "end": 2.66
+    },
+    {
+     "text": "Now",
+     "start": 3.3,
+     "end": 3.7
+    },
+    {
+     "text": "they",
+     "start": 3.74,
+     "end": 3.9
+    },
+    {
+     "text": "drift",
+     "start": 3.96,
+     "end": 4.4
+    }
+   ]
+  },
+  {
+   "id": "V3-33",
+   "kind": "RECORD",
+   "clip": "V3-33",
+   "file": "clips-v3/V3-33.wav",
+   "duration_s": 1.51,
+   "text": "Now, the picture.",
+   "pause_after_s": 0.3,
+   "clip_pause_after_s": 0.3,
+   "clip_paragraph_end": true,
+   "speech_start_s": 0.12,
+   "speech_end_s": 1.32,
+   "words": [
+    {
+     "text": "Now",
+     "start": 0.12,
+     "end": 0.4
+    },
+    {
+     "text": "the",
+     "start": 0.74,
+     "end": 0.84
+    },
+    {
+     "text": "picture",
+     "start": 0.9,
+     "end": 1.32
+    }
+   ]
+  },
+  {
+   "id": "V3-34",
+   "kind": "RECORD",
+   "clip": "V3-34",
+   "file": "clips-v3/V3-34.wav",
+   "duration_s": 4.25,
+   "text": "Your screen's own pixels: square, and never smoothed.",
+   "pause_after_s": null,
+   "clip_pause_after_s": null,
+   "clip_paragraph_end": true,
+   "speech_start_s": 0.08,
+   "speech_end_s": 4.08,
+   "words": [
+    {
+     "text": "Your",
+     "start": 0.08,
+     "end": 0.16
+    },
+    {
+     "text": "screen's",
+     "start": 0.32,
+     "end": 0.78
+    },
+    {
+     "text": "own",
+     "start": 0.84,
+     "end": 1.08
+    },
+    {
+     "text": "pixels,",
+     "start": 1.14,
+     "end": 1.7
+    },
+    {
+     "text": "square",
+     "start": 2.34,
+     "end": 2.74
+    },
+    {
+     "text": "and",
+     "start": 3.02,
+     "end": 3.12
+    },
+    {
+     "text": "never",
+     "start": 3.28,
+     "end": 3.54
+    },
+    {
+     "text": "smoothed",
+     "start": 3.6,
+     "end": 4.08
+    }
+   ]
+  },
+  {
+   "id": "V3-35a",
+   "kind": "TAKE",
+   "clip": "34-4.2-1",
+   "file": "clips/34-4.2-1.wav",
+   "duration_s": 7.0,
+   "text": "id spread its ninety degrees across any width. On a wide screen, that cuts off the top and the bottom.",
+   "pause_after_s": null,
+   "clip_pause_after_s": 0.5,
+   "clip_paragraph_end": true,
+   "speech_start_s": 0.08,
+   "speech_end_s": 6.8,
+   "words": [
+    {
+     "text": "ID",
+     "start": 0.08,
+     "end": 0.28
+    },
+    {
+     "text": "spread",
+     "start": 0.74,
+     "end": 0.94
+    },
+    {
+     "text": "its",
+     "start": 0.98,
+     "end": 1.2
+    },
+    {
+     "text": "90",
+     "start": 1.42,
+     "end": 1.58
+    },
+    {
+     "text": "degrees",
+     "start": 1.62,
+     "end": 2.08
+    },
+    {
+     "text": "across",
+     "start": 2.14,
+     "end": 2.56
+    },
+    {
+     "text": "any",
+     "start": 2.64,
+     "end": 2.86
+    },
+    {
+     "text": "width.",
+     "start": 2.9,
+     "end": 3.22
+    },
+    {
+     "text": "On",
+     "start": 3.9,
+     "end": 3.96
+    },
+    {
+     "text": "a",
+     "start": 4.0,
+     "end": 4.08
+    },
+    {
+     "text": "wide",
+     "start": 4.12,
+     "end": 4.36
+    },
+    {
+     "text": "screen,",
+     "start": 4.44,
+     "end": 4.74
+    },
+    {
+     "text": "that",
+     "start": 4.94,
+     "end": 5.08
+    },
+    {
+     "text": "cuts",
+     "start": 5.12,
+     "end": 5.32
+    },
+    {
+     "text": "off",
+     "start": 5.38,
+     "end": 5.48
+    },
+    {
+     "text": "the",
+     "start": 5.52,
+     "end": 5.62
+    },
+    {
+     "text": "top",
+     "start": 5.7,
+     "end": 5.98
+    },
+    {
+     "text": "and",
+     "start": 6.16,
+     "end": 6.3
+    },
+    {
+     "text": "the",
+     "start": 6.34,
+     "end": 6.42
+    },
+    {
+     "text": "bottom",
+     "start": 6.46,
+     "end": 6.8
+    }
+   ]
+  },
+  {
+   "id": "V3-35b",
+   "kind": "RECORD",
+   "clip": "V3-35b",
+   "file": "clips-v3/V3-35b.wav",
+   "duration_s": 4.21,
+   "text": "Horizontal plus keeps the height, and adds world at the sides.",
+   "pause_after_s": null,
+   "clip_pause_after_s": null,
+   "clip_paragraph_end": true,
+   "speech_start_s": 0.06,
+   "speech_end_s": 3.98,
+   "words": [
+    {
+     "text": "Horizontal",
+     "start": 0.06,
+     "end": 0.6
+    },
+    {
+     "text": "plus",
+     "start": 0.76,
+     "end": 1.16
+    },
+    {
+     "text": "keeps",
+     "start": 1.32,
+     "end": 1.56
+    },
+    {
+     "text": "the",
+     "start": 1.6,
+     "end": 1.7
+    },
+    {
+     "text": "height",
+     "start": 1.76,
+     "end": 2.1
+    },
+    {
+     "text": "and",
+     "start": 2.36,
+     "end": 2.48
+    },
+    {
+     "text": "adds",
+     "start": 2.54,
+     "end": 2.8
+    },
+    {
+     "text": "world",
+     "start": 2.86,
+     "end": 3.2
+    },
+    {
+     "text": "at",
+     "start": 3.24,
+     "end": 3.32
+    },
+    {
+     "text": "the",
+     "start": 3.36,
+     "end": 3.46
+    },
+    {
+     "text": "sides",
+     "start": 3.52,
+     "end": 3.98
+    }
+   ]
+  },
+  {
+   "id": "V3-36",
+   "kind": "RECORD",
+   "clip": "V3-36",
+   "file": "clips-v3/V3-36.wav",
+   "duration_s": 5.87,
+   "text": "The status bar scales up in whole pixels, and the brown strips beside it become more world.",
+   "pause_after_s": null,
+   "clip_pause_after_s": null,
+   "clip_paragraph_end": true,
+   "speech_start_s": 0.04,
+   "speech_end_s": 5.72,
+   "words": [
+    {
+     "text": "The",
+     "start": 0.04,
+     "end": 0.14
+    },
+    {
+     "text": "status",
+     "start": 0.22,
+     "end": 0.62
+    },
+    {
+     "text": "bar",
+     "start": 0.66,
+     "end": 0.84
+    },
+    {
+     "text": "scales",
+     "start": 0.98,
+     "end": 1.32
+    },
+    {
+     "text": "up",
+     "start": 1.4,
+     "end": 1.54
+    },
+    {
+     "text": "in",
+     "start": 1.58,
+     "end": 1.72
+    },
+    {
+     "text": "whole",
+     "start": 1.8,
+     "end": 2.0
+    },
+    {
+     "text": "pixels",
+     "start": 2.12,
+     "end": 2.66
+    },
+    {
+     "text": "and",
+     "start": 2.98,
+     "end": 3.06
+    },
+    {
+     "text": "the",
+     "start": 3.1,
+     "end": 3.18
+    },
+    {
+     "text": "brown",
+     "start": 3.22,
+     "end": 3.44
+    },
+    {
+     "text": "strips",
+     "start": 3.56,
+     "end": 3.8
+    },
+    {
+     "text": "beside",
+     "start": 3.84,
+     "end": 4.26
+    },
+    {
+     "text": "it",
+     "start": 4.3,
+     "end": 4.52
+    },
+    {
+     "text": "become",
+     "start": 4.56,
+     "end": 4.92
+    },
+    {
+     "text": "more",
+     "start": 4.98,
+     "end": 5.28
+    },
+    {
+     "text": "world",
+     "start": 5.32,
+     "end": 5.72
+    }
+   ]
+  },
+  {
+   "id": "V3-37",
+   "kind": "TAKE",
+   "clip": "V2-N1",
+   "file": "clips-v2/V2-N1.wav",
+   "duration_s": 8.71,
+   "text": "QuakeC fires each nail six point seven units above the barrel. At ten-eighty, you can tell. So now they leave the barrels.",
+   "pause_after_s": null,
+   "clip_pause_after_s": null,
+   "clip_paragraph_end": true,
+   "speech_start_s": 0.06,
+   "speech_end_s": 8.5,
+   "words": [
+    {
+     "text": "Quake",
+     "start": 0.06,
+     "end": 0.26
+    },
+    {
+     "text": "C",
+     "start": 0.42,
+     "end": 0.62
+    },
+    {
+     "text": "fires",
+     "start": 0.78,
+     "end": 1.12
+    },
+    {
+     "text": "each",
+     "start": 1.18,
+     "end": 1.36
+    },
+    {
+     "text": "nail",
+     "start": 1.46,
+     "end": 1.72
+    },
+    {
+     "text": "6.7",
+     "start": 2.08,
+     "end": 2.8
+    },
+    {
+     "text": "units",
+     "start": 2.9,
+     "end": 3.2
+    },
+    {
+     "text": "above",
+     "start": 3.26,
+     "end": 3.5
+    },
+    {
+     "text": "the",
+     "start": 3.52,
+     "end": 3.64
+    },
+    {
+     "text": "barrel.",
+     "start": 3.66,
+     "end": 4.019
+    },
+    {
+     "text": "At",
+     "start": 4.6,
+     "end": 4.72
+    },
+    {
+     "text": "1080,",
+     "start": 4.8,
+     "end": 5.36
+    },
+    {
+     "text": "you",
+     "start": 5.68,
+     "end": 5.74
+    },
+    {
+     "text": "can",
+     "start": 5.78,
+     "end": 5.92
+    },
+    {
+     "text": "tell.",
+     "start": 6.02,
+     "end": 6.34
+    },
+    {
+     "text": "So",
+     "start": 7.04,
+     "end": 7.16
+    },
+    {
+     "text": "now",
+     "start": 7.22,
+     "end": 7.38
+    },
+    {
+     "text": "they",
+     "start": 7.42,
+     "end": 7.58
+    },
+    {
+     "text": "leave",
+     "start": 7.66,
+     "end": 7.9
+    },
+    {
+     "text": "the",
+     "start": 7.94,
+     "end": 8.02
+    },
+    {
+     "text": "barrels",
+     "start": 8.06,
+     "end": 8.5
+    }
+   ]
+  },
+  {
+   "id": "V3-38",
+   "kind": "TAKE",
+   "clip": "V2-N2",
+   "file": "clips-v2/V2-N2.wav",
+   "duration_s": 6.16,
+   "text": "id's mixer runs at your device's rate now, with four of its bugs fixed. Like that click.",
+   "pause_after_s": null,
+   "clip_pause_after_s": null,
+   "clip_paragraph_end": true,
+   "speech_start_s": 0.06,
+   "speech_end_s": 6.0,
+   "words": [
+    {
+     "text": "Id's",
+     "start": 0.06,
+     "end": 0.28
+    },
+    {
+     "text": "mixer",
+     "start": 0.34,
+     "end": 0.68
+    },
+    {
+     "text": "runs",
+     "start": 0.8,
+     "end": 1.0
+    },
+    {
+     "text": "at",
+     "start": 1.02,
+     "end": 1.16
+    },
+    {
+     "text": "your",
+     "start": 1.24,
+     "end": 1.4
+    },
+    {
+     "text": "device's",
+     "start": 1.44,
+     "end": 1.92
+    },
+    {
+     "text": "rate",
+     "start": 1.98,
+     "end": 2.2
+    },
+    {
+     "text": "now",
+     "start": 2.26,
+     "end": 2.48
+    },
+    {
+     "text": "with",
+     "start": 2.82,
+     "end": 3.06
+    },
+    {
+     "text": "four",
+     "start": 3.12,
+     "end": 3.28
+    },
+    {
+     "text": "of",
+     "start": 3.34,
+     "end": 3.4
+    },
+    {
+     "text": "its",
+     "start": 3.44,
+     "end": 3.6
+    },
+    {
+     "text": "bugs",
+     "start": 3.64,
+     "end": 3.94
+    },
+    {
+     "text": "fixed,",
+     "start": 4.0,
+     "end": 4.36
+    },
+    {
+     "text": "like",
+     "start": 5.06,
+     "end": 5.26
+    },
+    {
+     "text": "that",
+     "start": 5.32,
+     "end": 5.52
+    },
+    {
+     "text": "click",
+     "start": 5.58,
+     "end": 6.0
+    }
+   ]
+  },
+  {
+   "id": "V3-42",
+   "kind": "RECORD",
+   "clip": "V3-42",
+   "file": "clips-v3/V3-42.wav",
+   "duration_s": 2.38,
+   "text": "One last switch, and it's subtle.",
+   "pause_after_s": 0.3,
+   "clip_pause_after_s": 0.3,
+   "clip_paragraph_end": true,
+   "speech_start_s": 0.1,
+   "speech_end_s": 2.12,
+   "words": [
+    {
+     "text": "One",
+     "start": 0.1,
+     "end": 0.22
+    },
+    {
+     "text": "last",
+     "start": 0.3,
+     "end": 0.58
+    },
+    {
+     "text": "switch,",
+     "start": 0.72,
+     "end": 1.08
+    },
+    {
+     "text": "and",
+     "start": 1.4,
+     "end": 1.48
+    },
+    {
+     "text": "it's",
+     "start": 1.54,
+     "end": 1.72
+    },
+    {
+     "text": "subtle",
+     "start": 1.8,
+     "end": 2.12
+    }
+   ]
+  },
+  {
+   "id": "V3-44a",
+   "kind": "TAKE",
+   "clip": "25-4.1-4",
+   "file": "clips/25-4.1-4.wav",
+   "duration_s": 5.45,
+   "text": "id's renderer divided once every sixteen pixels, and drew straight lines in between.",
+   "pause_after_s": null,
+   "clip_pause_after_s": 0.4,
+   "clip_paragraph_end": true,
+   "speech_start_s": 0.1,
+   "speech_end_s": 5.26,
+   "words": [
+    {
+     "text": "Id's",
+     "start": 0.1,
+     "end": 0.32
+    },
+    {
+     "text": "renderer",
+     "start": 0.38,
+     "end": 0.78
+    },
+    {
+     "text": "divided",
+     "start": 0.9,
+     "end": 1.28
+    },
+    {
+     "text": "once",
+     "start": 1.42,
+     "end": 1.72
+    },
+    {
+     "text": "every",
+     "start": 1.78,
+     "end": 1.94
+    },
+    {
+     "text": "sixteen",
+     "start": 2.12,
+     "end": 2.58
+    },
+    {
+     "text": "pixels",
+     "start": 2.7,
+     "end": 3.26
+    },
+    {
+     "text": "and",
+     "start": 3.48,
+     "end": 3.6
+    },
+    {
+     "text": "drew",
+     "start": 3.62,
+     "end": 3.76
+    },
+    {
+     "text": "straight",
+     "start": 3.96,
+     "end": 4.18
+    },
+    {
+     "text": "lines",
+     "start": 4.3,
+     "end": 4.64
+    },
+    {
+     "text": "in",
+     "start": 4.66,
+     "end": 4.76
+    },
+    {
+     "text": "between",
+     "start": 4.78,
+     "end": 5.26
+    }
+   ]
+  },
+  {
+   "id": "V3-44b",
+   "kind": "RECORD",
+   "clip": "V3-44b",
+   "file": "clips-v3/V3-44b.wav",
+   "duration_s": 1.62,
+   "text": "Here is every divide.",
+   "pause_after_s": null,
+   "clip_pause_after_s": null,
+   "clip_paragraph_end": true,
+   "speech_start_s": 0.1,
+   "speech_end_s": 1.48,
+   "words": [
+    {
+     "text": "Here",
+     "start": 0.1,
+     "end": 0.32
+    },
+    {
+     "text": "is",
+     "start": 0.38,
+     "end": 0.58
+    },
+    {
+     "text": "every",
+     "start": 0.66,
+     "end": 0.9
+    },
+    {
+     "text": "divide",
+     "start": 0.98,
+     "end": 1.48
+    }
+   ]
+  },
+  {
+   "id": "V3-45",
+   "kind": "TAKE",
+   "clip": "V2-D1",
+   "file": "clips-v2/V2-D1.wav",
+   "duration_s": 12.57,
+   "text": "The slop preset divides every eight pixels, as id's own portable C did. Why eight? Honestly, it felt right. A tenth more work, a quarter of the error: a good trade.",
+   "pause_after_s": null,
+   "clip_pause_after_s": null,
+   "clip_paragraph_end": true,
+   "speech_start_s": 0.06,
+   "speech_end_s": 12.42,
+   "words": [
+    {
+     "text": "The",
+     "start": 0.06,
+     "end": 0.16
+    },
+    {
+     "text": "slop",
+     "start": 0.24,
+     "end": 0.48
+    },
+    {
+     "text": "preset",
+     "start": 0.62,
+     "end": 1.1
+    },
+    {
+     "text": "divides",
+     "start": 1.24,
+     "end": 1.72
+    },
+    {
+     "text": "every",
+     "start": 1.78,
+     "end": 2.08
+    },
+    {
+     "text": "eight",
+     "start": 2.12,
+     "end": 2.26
+    },
+    {
+     "text": "pixels",
+     "start": 2.38,
+     "end": 2.92
+    },
+    {
+     "text": "as",
+     "start": 3.38,
+     "end": 3.52
+    },
+    {
+     "text": "id's",
+     "start": 3.6,
+     "end": 3.88
+    },
+    {
+     "text": "own",
+     "start": 3.94,
+     "end": 4.2
+    },
+    {
+     "text": "Portable",
+     "start": 4.26,
+     "end": 4.6
+    },
+    {
+     "text": "C",
+     "start": 4.74,
+     "end": 4.9
+    },
+    {
+     "text": "did.",
+     "start": 4.98,
+     "end": 5.2
+    },
+    {
+     "text": "Why",
+     "start": 5.9,
+     "end": 6.14
+    },
+    {
+     "text": "eight?",
+     "start": 6.24,
+     "end": 6.5
+    },
+    {
+     "text": "Honestly,",
+     "start": 7.0,
+     "end": 7.44
+    },
+    {
+     "text": "it",
+     "start": 7.76,
+     "end": 7.86
+    },
+    {
+     "text": "felt",
+     "start": 7.92,
+     "end": 8.1
+    },
+    {
+     "text": "right.",
+     "start": 8.18,
+     "end": 8.46
+    },
+    {
+     "text": "A",
+     "start": 9.0,
+     "end": 9.06
+    },
+    {
+     "text": "tenth",
+     "start": 9.12,
+     "end": 9.34
+    },
+    {
+     "text": "more",
+     "start": 9.44,
+     "end": 9.6
+    },
+    {
+     "text": "work,",
+     "start": 9.66,
+     "end": 9.94
+    },
+    {
+     "text": "a",
+     "start": 10.28,
+     "end": 10.34
+    },
+    {
+     "text": "quarter",
+     "start": 10.44,
+     "end": 10.78
+    },
+    {
+     "text": "of",
+     "start": 10.82,
+     "end": 10.9
+    },
+    {
+     "text": "the",
+     "start": 10.94,
+     "end": 11.02
+    },
+    {
+     "text": "error,",
+     "start": 11.08,
+     "end": 11.32
+    },
+    {
+     "text": "a",
+     "start": 11.78,
+     "end": 11.84
+    },
+    {
+     "text": "good",
+     "start": 11.86,
+     "end": 12.02
+    },
+    {
+     "text": "trade",
+     "start": 12.08,
+     "end": 12.42
+    }
+   ]
+  },
+  {
+   "id": "V4-47",
+   "kind": "RECORD",
+   "clip": "V4-47",
+   "file": "clips-v4/V4-47.wav",
+   "duration_s": 2.74,
+   "text": "And that's the slop preset, switched on.",
+   "pause_after_s": null,
+   "replaces": "V3-47",
+   "clip_pause_after_s": null,
+   "clip_paragraph_end": true,
+   "speech_start_s": 0.04,
+   "speech_end_s": 2.56,
+   "words": [
+    {
+     "text": "And",
+     "start": 0.04,
+     "end": 0.16
+    },
+    {
+     "text": "that's",
+     "start": 0.22,
+     "end": 0.44
+    },
+    {
+     "text": "the",
+     "start": 0.5,
+     "end": 0.6
+    },
+    {
+     "text": "slot",
+     "start": 0.7,
+     "end": 0.94
+    },
+    {
+     "text": "preset",
+     "start": 1.0,
+     "end": 1.5
+    },
+    {
+     "text": "switched",
+     "start": 1.94,
+     "end": 2.26
+    },
+    {
+     "text": "on",
+     "start": 2.34,
+     "end": 2.56
+    }
+   ]
+  },
+  {
+   "id": "V4-39a",
+   "kind": "RECORD",
+   "clip": "V4-39a",
+   "file": "clips-v4/V4-39a.wav",
+   "duration_s": 2.4,
+   "text": "The rest is the same in both presets.",
+   "pause_after_s": null,
+   "clip_pause_after_s": null,
+   "clip_paragraph_end": true,
+   "speech_start_s": 0.1,
+   "speech_end_s": 2.14,
+   "words": [
+    {
+     "text": "The",
+     "start": 0.1,
+     "end": 0.18
+    },
+    {
+     "text": "rest",
+     "start": 0.22,
+     "end": 0.44
+    },
+    {
+     "text": "is",
+     "start": 0.48,
+     "end": 0.58
+    },
+    {
+     "text": "the",
+     "start": 0.62,
+     "end": 0.72
+    },
+    {
+     "text": "same",
+     "start": 0.78,
+     "end": 1.02
+    },
+    {
+     "text": "in",
+     "start": 1.06,
+     "end": 1.22
+    },
+    {
+     "text": "both",
+     "start": 1.26,
+     "end": 1.48
+    },
+    {
+     "text": "presets",
+     "start": 1.58,
+     "end": 2.14
+    }
+   ]
+  },
+  {
+   "id": "V3-39",
+   "kind": "RECORD",
+   "clip": "V3-39",
+   "file": "clips-v6/V3-39.wav",
+   "duration_s": 6.11,
+   "text": "Every core draws its own bands of the frame. One thread or eight, the same pixels.",
+   "pause_after_s": null,
+   "replaces": "clips-v3/V3-39.wav (re-trim, direction/v6.md improvement 8)",
+   "speech_start_s": 0.08,
+   "speech_end_s": 5.92,
+   "words": [
+    {
+     "text": "Every",
+     "start": 0.08,
+     "end": 0.36
+    },
+    {
+     "text": "core",
+     "start": 0.44,
+     "end": 0.78
+    },
+    {
+     "text": "draws",
+     "start": 0.84,
+     "end": 1.04
+    },
+    {
+     "text": "its",
+     "start": 1.1,
+     "end": 1.32
+    },
+    {
+     "text": "own",
+     "start": 1.4,
+     "end": 1.64
+    },
+    {
+     "text": "bands",
+     "start": 1.7,
+     "end": 2.0
+    },
+    {
+     "text": "of",
+     "start": 2.06,
+     "end": 2.12
+    },
+    {
+     "text": "the",
+     "start": 2.16,
+     "end": 2.26
+    },
+    {
+     "text": "frame.",
+     "start": 2.32,
+     "end": 2.72
+    },
+    {
+     "text": "One",
+     "start": 3.24,
+     "end": 3.38
+    },
+    {
+     "text": "thread",
+     "start": 3.5,
+     "end": 3.9
+    },
+    {
+     "text": "or",
+     "start": 3.96,
+     "end": 4.099
+    },
+    {
+     "text": "eight,",
+     "start": 4.2,
+     "end": 4.44
+    },
+    {
+     "text": "the",
+     "start": 4.84,
+     "end": 4.98
+    },
+    {
+     "text": "same",
+     "start": 5.06,
+     "end": 5.34
+    },
+    {
+     "text": "pixels",
+     "start": 5.38,
+     "end": 5.92
+    }
+   ]
+  },
+  {
+   "id": "V3-40",
+   "kind": "RECORD",
+   "clip": "V3-40",
+   "file": "clips-v3/V3-40.wav",
+   "duration_s": 2.47,
+   "text": "It runs in a browser, as WebAssembly.",
+   "pause_after_s": null,
+   "clip_pause_after_s": null,
+   "clip_paragraph_end": true,
+   "speech_start_s": 0.06,
+   "speech_end_s": 2.32,
+   "words": [
+    {
+     "text": "It",
+     "start": 0.06,
+     "end": 0.18
+    },
+    {
+     "text": "runs",
+     "start": 0.22,
+     "end": 0.44
+    },
+    {
+     "text": "in",
+     "start": 0.48,
+     "end": 0.54
+    },
+    {
+     "text": "a",
+     "start": 0.58,
+     "end": 0.66
+    },
+    {
+     "text": "browser",
+     "start": 0.7,
+     "end": 1.18
+    },
+    {
+     "text": "as",
+     "start": 1.46,
+     "end": 1.6
+    },
+    {
+     "text": "WebAssembly",
+     "start": 1.66,
+     "end": 2.32
+    }
+   ]
+  },
+  {
+   "id": "V3-41",
+   "kind": "TAKE",
+   "clip": "V2-Z1",
+   "file": "clips-v2/V2-Z1.wav",
+   "duration_s": 9.28,
+   "text": "It's fast, and it feels fast. Mouse-look, W A S D, a gamepad, a phone: even a zoomer can play it.",
+   "pause_after_s": null,
+   "clip_pause_after_s": null,
+   "clip_paragraph_end": true,
+   "speech_start_s": 0.06,
+   "speech_end_s": 9.08,
+   "words": [
+    {
+     "text": "It's",
+     "start": 0.06,
+     "end": 0.28
+    },
+    {
+     "text": "fast",
+     "start": 0.34,
+     "end": 0.84
+    },
+    {
+     "text": "and",
+     "start": 1.1,
+     "end": 1.18
+    },
+    {
+     "text": "it",
+     "start": 1.2,
+     "end": 1.32
+    },
+    {
+     "text": "feels",
+     "start": 1.48,
+     "end": 1.82
+    },
+    {
+     "text": "fast.",
+     "start": 1.92,
+     "end": 2.34
+    },
+    {
+     "text": "Mouse",
+     "start": 2.96,
+     "end": 3.2
+    },
+    {
+     "text": "look,",
+     "start": 3.28,
+     "end": 3.48
+    },
+    {
+     "text": "W-A-S-D,",
+     "start": 4.0,
+     "end": 5.1
+    },
+    {
+     "text": "a",
+     "start": 5.64,
+     "end": 5.66
+    },
+    {
+     "text": "gamepad,",
+     "start": 5.78,
+     "end": 6.32
+    },
+    {
+     "text": "a",
+     "start": 6.64,
+     "end": 6.66
+    },
+    {
+     "text": "phone,",
+     "start": 6.78,
+     "end": 7.16
+    },
+    {
+     "text": "even",
+     "start": 7.74,
+     "end": 7.92
+    },
+    {
+     "text": "a",
+     "start": 7.98,
+     "end": 8.0
+    },
+    {
+     "text": "zoomer",
+     "start": 8.16,
+     "end": 8.48
+    },
+    {
+     "text": "can",
+     "start": 8.52,
+     "end": 8.62
+    },
+    {
+     "text": "play",
+     "start": 8.72,
+     "end": 8.92
+    },
+    {
+     "text": "it",
+     "start": 8.96,
+     "end": 9.08
+    }
+   ]
+  },
+  {
+   "id": "V3-48",
+   "kind": "TAKE",
+   "clip": "50-5-1",
+   "file": "clips/50-5-1.wav",
+   "duration_s": 7.18,
+   "text": "Claude, Anthropic's model, wrote the code, as fleets of agents, each on its own branch with a written brief.",
+   "pause_after_s": null,
+   "clip_pause_after_s": 0.0,
+   "clip_paragraph_end": false,
+   "speech_start_s": 0.06,
+   "speech_end_s": 7.04,
+   "words": [
+    {
+     "text": "Claude,",
+     "start": 0.06,
+     "end": 0.48
+    },
+    {
+     "text": "Anthropic's",
+     "start": 0.86,
+     "end": 1.46
+    },
+    {
+     "text": "model,",
+     "start": 1.5,
+     "end": 1.76
+    },
+    {
+     "text": "wrote",
+     "start": 2.08,
+     "end": 2.3
+    },
+    {
+     "text": "the",
+     "start": 2.32,
+     "end": 2.42
+    },
+    {
+     "text": "code",
+     "start": 2.48,
+     "end": 2.88
+    },
+    {
+     "text": "as",
+     "start": 3.2,
+     "end": 3.38
+    },
+    {
+     "text": "fleets",
+     "start": 3.46,
+     "end": 3.72
+    },
+    {
+     "text": "of",
+     "start": 3.78,
+     "end": 3.86
+    },
+    {
+     "text": "agents,",
+     "start": 3.92,
+     "end": 4.4
+    },
+    {
+     "text": "each",
+     "start": 4.72,
+     "end": 4.9
+    },
+    {
+     "text": "on",
+     "start": 4.94,
+     "end": 5.02
+    },
+    {
+     "text": "its",
+     "start": 5.06,
+     "end": 5.22
+    },
+    {
+     "text": "own",
+     "start": 5.28,
+     "end": 5.48
+    },
+    {
+     "text": "branch",
+     "start": 5.52,
+     "end": 5.92
+    },
+    {
+     "text": "with",
+     "start": 6.06,
+     "end": 6.16
+    },
+    {
+     "text": "a",
+     "start": 6.22,
+     "end": 6.26
+    },
+    {
+     "text": "written",
+     "start": 6.3,
+     "end": 6.58
+    },
+    {
+     "text": "brief",
+     "start": 6.68,
+     "end": 7.04
+    }
+   ]
+  },
+  {
+   "id": "V3-49",
+   "kind": "TAKE",
+   "clip": "51-5-2",
+   "file": "clips/51-5-2.wav",
+   "duration_s": 3.78,
+   "text": "A chair merged a branch only when every check passed.",
+   "pause_after_s": null,
+   "clip_pause_after_s": 0.4,
+   "clip_paragraph_end": true,
+   "speech_start_s": 0.08,
+   "speech_end_s": 3.62,
+   "words": [
+    {
+     "text": "A",
+     "start": 0.08,
+     "end": 0.16
+    },
+    {
+     "text": "chair",
+     "start": 0.22,
+     "end": 0.54
+    },
+    {
+     "text": "merged",
+     "start": 0.64,
+     "end": 0.98
+    },
+    {
+     "text": "a",
+     "start": 1.02,
+     "end": 1.1
+    },
+    {
+     "text": "branch",
+     "start": 1.12,
+     "end": 1.5
+    },
+    {
+     "text": "only",
+     "start": 1.76,
+     "end": 2.04
+    },
+    {
+     "text": "when",
+     "start": 2.08,
+     "end": 2.34
+    },
+    {
+     "text": "every",
+     "start": 2.42,
+     "end": 2.66
+    },
+    {
+     "text": "check",
+     "start": 2.78,
+     "end": 3.0
+    },
+    {
+     "text": "passed",
+     "start": 3.14,
+     "end": 3.62
+    }
+   ]
+  },
+  {
+   "id": "V3-50",
+   "kind": "TAKE",
+   "clip": "52-5-3",
+   "file": "clips/52-5-3.wav",
+   "duration_s": 6.18,
+   "text": "The user set the rules: no dependencies, no unsafe code, and Classic proven.",
+   "pause_after_s": null,
+   "clip_pause_after_s": 0.0,
+   "clip_paragraph_end": false,
+   "speech_start_s": 0.08,
+   "speech_end_s": 5.96,
+   "words": [
+    {
+     "text": "The",
+     "start": 0.08,
+     "end": 0.14
+    },
+    {
+     "text": "user",
+     "start": 0.32,
+     "end": 0.58
+    },
+    {
+     "text": "set",
+     "start": 0.74,
+     "end": 0.9
+    },
+    {
+     "text": "the",
+     "start": 0.92,
+     "end": 1.0
+    },
+    {
+     "text": "rules.",
+     "start": 1.1,
+     "end": 1.52
+    },
+    {
+     "text": "No",
+     "start": 2.06,
+     "end": 2.16
+    },
+    {
+     "text": "dependencies,",
+     "start": 2.24,
+     "end": 3.0
+    },
+    {
+     "text": "no",
+     "start": 3.4,
+     "end": 3.54
+    },
+    {
+     "text": "unsafe",
+     "start": 3.6,
+     "end": 4.019
+    },
+    {
+     "text": "code,",
+     "start": 4.08,
+     "end": 4.4
+    },
+    {
+     "text": "and",
+     "start": 4.7,
+     "end": 4.78
+    },
+    {
+     "text": "classic",
+     "start": 4.92,
+     "end": 5.4
+    },
+    {
+     "text": "proven",
+     "start": 5.56,
+     "end": 5.96
+    }
+   ]
+  },
+  {
+   "id": "V3-51",
+   "kind": "TAKE",
+   "clip": "53-5-4",
+   "file": "clips/53-5-4.wav",
+   "duration_s": 2.45,
+   "text": "Then played it, and said what was wrong.",
+   "pause_after_s": null,
+   "clip_pause_after_s": 0.8,
+   "clip_paragraph_end": true,
+   "speech_start_s": 0.1,
+   "speech_end_s": 2.26,
+   "words": [
+    {
+     "text": "then",
+     "start": 0.1,
+     "end": 0.24
+    },
+    {
+     "text": "played",
+     "start": 0.36,
+     "end": 0.62
+    },
+    {
+     "text": "it",
+     "start": 0.68,
+     "end": 0.86
+    },
+    {
+     "text": "and",
+     "start": 1.1,
+     "end": 1.18
+    },
+    {
+     "text": "said",
+     "start": 1.34,
+     "end": 1.52
+    },
+    {
+     "text": "what",
+     "start": 1.62,
+     "end": 1.72
+    },
+    {
+     "text": "was",
+     "start": 1.76,
+     "end": 1.88
+    },
+    {
+     "text": "wrong",
+     "start": 1.94,
+     "end": 2.26
+    }
+   ]
+  },
+  {
+   "id": "V3-52",
+   "kind": "TAKE",
+   "clip": "54-6-1",
+   "file": "clips/54-6-1.wav",
+   "duration_s": 7.07,
+   "text": "id Software released Quake's source under a free licence. This port follows it, file by file.",
+   "pause_after_s": null,
+   "clip_pause_after_s": 0.8,
+   "clip_paragraph_end": true,
+   "speech_start_s": 0.26,
+   "speech_end_s": 6.88,
+   "words": [
+    {
+     "text": "idd",
+     "start": 0.26,
+     "end": 0.4
+    },
+    {
+     "text": "Software",
+     "start": 0.64,
+     "end": 1.16
+    },
+    {
+     "text": "released",
+     "start": 1.2,
+     "end": 1.54
+    },
+    {
+     "text": "Quake's",
+     "start": 1.62,
+     "end": 1.94
+    },
+    {
+     "text": "source",
+     "start": 2.02,
+     "end": 2.42
+    },
+    {
+     "text": "under",
+     "start": 2.46,
+     "end": 2.64
+    },
+    {
+     "text": "a",
+     "start": 2.68,
+     "end": 2.84
+    },
+    {
+     "text": "free",
+     "start": 2.9,
+     "end": 3.12
+    },
+    {
+     "text": "license.",
+     "start": 3.18,
+     "end": 3.72
+    },
+    {
+     "text": "This",
+     "start": 4.36,
+     "end": 4.54
+    },
+    {
+     "text": "port",
+     "start": 4.6,
+     "end": 4.82
+    },
+    {
+     "text": "follows",
+     "start": 4.98,
+     "end": 5.3
+    },
+    {
+     "text": "it",
+     "start": 5.36,
+     "end": 5.48
+    },
+    {
+     "text": "file",
+     "start": 5.88,
+     "end": 6.22
+    },
+    {
+     "text": "by",
+     "start": 6.26,
+     "end": 6.48
+    },
+    {
+     "text": "file",
+     "start": 6.54,
+     "end": 6.88
+    }
+   ]
+  },
+  {
+   "id": "V3-53",
+   "kind": "TAKE",
+   "clip": "55-6-2",
+   "file": "clips/55-6-2.wav",
+   "duration_s": 4.23,
+   "text": "Every change has a name. Every name can be switched off.",
+   "pause_after_s": null,
+   "clip_pause_after_s": 0.6,
+   "clip_paragraph_end": true,
+   "speech_start_s": 0.08,
+   "speech_end_s": 3.98,
+   "words": [
+    {
+     "text": "Every",
+     "start": 0.08,
+     "end": 0.28
+    },
+    {
+     "text": "change",
+     "start": 0.42,
+     "end": 0.84
+    },
+    {
+     "text": "has",
+     "start": 0.9,
+     "end": 1.02
+    },
+    {
+     "text": "a",
+     "start": 1.06,
+     "end": 1.16
+    },
+    {
+     "text": "name.",
+     "start": 1.22,
+     "end": 1.6
+    },
+    {
+     "text": "Every",
+     "start": 2.24,
+     "end": 2.44
+    },
+    {
+     "text": "name",
+     "start": 2.58,
+     "end": 3.0
+    },
+    {
+     "text": "can",
+     "start": 3.04,
+     "end": 3.14
+    },
+    {
+     "text": "be",
+     "start": 3.18,
+     "end": 3.28
+    },
+    {
+     "text": "switched",
+     "start": 3.36,
+     "end": 3.66
+    },
+    {
+     "text": "off",
+     "start": 3.76,
+     "end": 3.98
+    }
+   ]
+  },
+  {
+   "id": "V3-54",
+   "kind": "TAKE",
+   "clip": "56-6-3",
+   "file": "clips/56-6-3.wav",
+   "duration_s": 5.16,
+   "text": "And underneath, pixel for pixel, it is still nineteen ninety-six.",
+   "pause_after_s": 0.8,
+   "clip_pause_after_s": 1.2,
+   "clip_paragraph_end": true,
+   "speech_start_s": 0.04,
+   "speech_end_s": 4.96,
+   "words": [
+    {
+     "text": "And",
+     "start": 0.04,
+     "end": 0.16
+    },
+    {
+     "text": "underneath,",
+     "start": 0.26,
+     "end": 0.88
+    },
+    {
+     "text": "pixel",
+     "start": 1.28,
+     "end": 1.68
+    },
+    {
+     "text": "for",
+     "start": 1.78,
+     "end": 1.86
+    },
+    {
+     "text": "pixel,",
+     "start": 2.0,
+     "end": 2.4
+    },
+    {
+     "text": "it",
+     "start": 2.86,
+     "end": 2.94
+    },
+    {
+     "text": "is",
+     "start": 2.98,
+     "end": 3.12
+    },
+    {
+     "text": "still",
+     "start": 3.28,
+     "end": 3.54
+    },
+    {
+     "text": "1996",
+     "start": 3.76,
+     "end": 4.96
+    }
+   ]
+  }
+ ]
+}

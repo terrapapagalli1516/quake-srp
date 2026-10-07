@@ -67,19 +67,33 @@ def tc(t: float) -> str:
     return f"{int(t // 60)}:{t % 60:05.2f}"
 
 
+SCALE = 1   # the frame's size is SCALE x 1920x1080 (build.py --scale); every card is drawn in 1080 units
+
+
+def set_scale(n: int) -> None:
+    """Draw every card at n x its 1080 geometry: a canvas n times the size, a cairo transform of n, and so
+    Quake's glyphs at n x their scale (nearest neighbour), lines and fills at n x their width."""
+    global SCALE
+    SCALE = int(n)
+
+
 def new(alpha: bool) -> Canvas:
-    if alpha:
-        return Canvas(cairo.ImageSurface(cairo.FORMAT_ARGB32, W, H), transparent=True)
-    return Canvas(cairo.ImageSurface(cairo.FORMAT_RGB24, W, H))
+    surf = cairo.ImageSurface(cairo.FORMAT_ARGB32 if alpha else cairo.FORMAT_RGB24, W * SCALE, H * SCALE)
+    c = Canvas(surf, transparent=alpha)
+    if SCALE != 1:
+        c.ctx.scale(SCALE, SCALE)
+        c.w, c.h = W, H   # the cards' own coordinates stay in 1080 units
+    return c
 
 
 def save(c: Canvas, path: Path) -> None:
     c.surface.flush()
     data, stride = bytes(c.surface.get_data()), c.surface.get_stride()
+    size = (c.surface.get_width(), c.surface.get_height())
     if c.transparent:
-        im = Image.frombuffer("RGBA", (W, H), data, "raw", "BGRa", stride, 1)
+        im = Image.frombuffer("RGBA", size, data, "raw", "BGRa", stride, 1)
     else:
-        im = Image.frombuffer("RGB", (W, H), data, "raw", "BGRX", stride, 1)
+        im = Image.frombuffer("RGB", size, data, "raw", "BGRX", stride, 1)
     im.save(path, compress_level=1)
 
 
@@ -343,7 +357,7 @@ def card_black(c: Canvas, t: float, sh: dict) -> None:
 def card_still_rings(c: Canvas, t: float, sh: dict) -> None:
     """G3, S63b: S23's last frame, the two red rings; on S63b they blink twice on "two"."""
     c.rect(0, 0, W, H, fill="bg_deep")
-    c.image(still(*S23_LAST), 0, 0, 1.0)
+    c.image(still(*S23_LAST), 0, 0, W / still(*S23_LAST).get_width())
     two = sh["cues"].get("two")
     if two is not None:
         for k in range(2):
@@ -364,7 +378,7 @@ def card_push(c: Canvas, t: float, sh: dict) -> None:
     tx = cx + (W / 2 - cx) * u  # the pixel drifts to the centre as the push goes in
     ty = cy + (H / 2 - cy) * u
     with c.moved(tx - cx * z, ty - cy * z, z):
-        c.image(still(*S23_LAST), 0, 0, 1.0)
+        c.image(still(*S23_LAST), 0, 0, W / still(*S23_LAST).get_width())
     grid = sh["cues"].get("texel")
     if grid is not None and t >= grid:
         a = rmp(t, grid, 0.4)
@@ -525,7 +539,7 @@ def _fragment(c: Canvas, k: int, cx: float, cy: float, scale: float, rot: float,
         for i, l in enumerate(_PROOF[:38]):
             c.text(l, 60, 40 + i * 26, 2, BRONZE)
     else:
-        c.image(still(path, t), 0, 0, 1.0)
+        c.image(still(path, t), 0, 0, W / still(path, t).get_width())
     c.rect(0, 0, W, H, stroke="white" if flash > 0 else "rust", lw=10 if flash > 0 else 6, alpha=max(flash, 0.9))
     ctx.restore()
 

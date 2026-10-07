@@ -5,7 +5,7 @@
 # ///
 """S26's check lines: five full-frame transparent PNGs, each line of the proof's checks over demo1.
 
-    uv run film/pipeline/edit/s26_lines.py        # FILM_ROOT/edit/v5/art/S26-line0..4.png (the path film/edit.toml names)
+    uv run film/pipeline/edit/s26_lines.py [--scale 2]   # FILM_ROOT/edit/v5/art/S26-line0..4.png (the path film/edit.toml names)
 
 Each line is in Quake's own lettering, drawn by `quaketool filmtext` (id's conchars from the shareware pak),
 at 3x, in capitals (Quake's lower case is small capitals), on an opaque band at the top right of the 4:3 box.
@@ -67,6 +67,8 @@ def text(s: str) -> list[np.ndarray]:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--out", type=Path, default=FILM / "edit" / "v5" / "art", help="where the PNGs go")
+    ap.add_argument("--scale", type=int, default=1, help="the frame is SCALE x 1920x1080: each line drawn at 1080, "
+                    "then every pixel repeated SCALE x SCALE times (Quake's lettering at SCALE x its size, exactly)")
     a = ap.parse_args()
     if not QUAKETOOL.exists() or not PAK.exists():
         sys.exit(f"s26_lines.py: needs {QUAKETOOL} (cargo build --release --bin quaketool) and {PAK}")
@@ -86,6 +88,8 @@ def main() -> None:
             region[..., :3] = (region[..., :3] * (1 - al) + p[..., :3] * al).astype(np.uint8)
             region[..., 3] = np.maximum(region[..., 3], p[..., 3])
             x += p.shape[1]
+        if a.scale > 1:
+            img = img.repeat(a.scale, 0).repeat(a.scale, 1)
         Image.fromarray(img, "RGBA").save(a.out / f"S26-line{i}.png")
         print(f"S26-line{i}.png", s, x0, y0)
 
