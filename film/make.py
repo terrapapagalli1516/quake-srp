@@ -137,8 +137,8 @@ class Make:
         r = subprocess.CompletedProcess(cmd, rc)
         if r.returncode:
             name = Path(cmd[2] if cmd[:2] == ["uv", "run"] else cmd[0]).name
-            hint = (f" (a process killed with -9 or 137 reached --mem-cap {self.cap}: raise it, or lower --jobs)"
-                    if self.cap else "")
+            hint = (f" (if the log above shows a process killed, -9 or 137, it reached --mem-cap {self.cap}: raise it, "
+                    "or lower --jobs)" if self.cap and rc in (1, -9, 137) else "")
             sys.exit(f"make: {name} failed ({r.returncode}){hint}")
 
     def uv(self, script: Path, *args) -> None:

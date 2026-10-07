@@ -335,7 +335,7 @@ def video_input(src: dict, at: float) -> list[str]:
 def segment_spec(s: dict, prev: dict | None, art: dict, burn_in: bool) -> dict:
     src = s["source"]
     spec = {"v": SEG_VERSION, "scale": S, "codec": segment_codec(), "decode": HW,
-            "checks": vaapi.CHECKS if HW == "vaapi" else None,
+            "checks": [vaapi.CHECKS, "tagged bt709"] if HW == "vaapi" else None,
             "id": s["id"], "frames": s["frames"], "fade_in": s["fade_in"], "fade_out": s["fade_out"],
             "dim": s["dim"], "burn_in": burn_in, "slate_len": s["len"] if src["type"] == "slate" else None}
     if src["type"] == "burst":
@@ -551,8 +551,8 @@ def segment_cmd(s: dict, prev: dict | None, prev_art: dict | None, art: dict, ou
         tail.append(f"fade=t=out:st={length - s['fade_out']:.4f}:d={s['fade_out']:.3f}")
     tail += [f"trim=end_frame={n}", "setpts=PTS-STARTPTS",
              "scale=out_color_matrix=bt709:out_range=tv:flags=accurate_rnd+full_chroma_int", "format=yuv420p"]
-    if HW == "vaapi":
-        tail += ["format=nv12", "hwupload"]
+    if HW == "vaapi":  # every segment's frames tagged alike, so the master's concat never meets a change mid-stream
+        tail += ["setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv", "format=nv12", "hwupload"]
     graph.append(f"[{cur}]" + ",".join(tail) + "[vout]")
     for k, a in enumerate(inputs):  # an input decoded on the GPU comes down to the CPU's filters first
         if "-hwaccel" in a:
@@ -1412,12 +1412,16 @@ def encode_video(paths: list[Path], out: Path, burn_in: bool, tmpdir: Path, heig
     tags = ["-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709", "-color_range", "tv"]
     if HW == "vaapi":
         dec = ["-vaapi_device", VAAPI_DEVICE, "-hwaccel", "vaapi", "-hwaccel_output_format", "vaapi"]
+        # (the segments must be alike, tags included: a concat that meets a change mid-stream reinitialises its
+        # filters, and frames on the GPU cannot take the software conversion that adds; segment_cmd tags them all)
         if height:
             cmd = ["ffmpeg", "-y", "-loglevel", "error", "-nostdin", *dec, *cat, "-vf",
                    (f"hwdownload,format=nv12,{drawtext},scale=-2:{height}:flags=area,format=nv12,hwupload" if burn_in
                     else f"scale_vaapi=w=-2:h={height}:mode=hq:format=nv12"),
                    "-fps_mode", "cfr", "-r", "60", "-c:v", "h264_vaapi", "-rc_mode", "CQP", "-qp", str(MASTER_QP),
-                   "-profile:v", "high", "-bsf:v", f"h264_metadata={VUI_709}", *tags, "-an", str(out)]
+                   "-profile:v", "high", "-bsf:v", f"h264_metadata={VUI_709}", "-an", str(out)]
+            # (no -color_* options here: asking the encoder for tags the GPU frames do not carry makes ffmpeg insert
+            # a software conversion it cannot link to them; the bitstream filter writes the tags)
             vaapi.encode(cmd, out, log=log)
         elif burn_in:
             cmd = ["ffmpeg", "-y", "-loglevel", "error", "-nostdin", *dec, *cat, "-vf",
