@@ -299,33 +299,33 @@ def encoder_args(hw: str, qp: int) -> tuple[list[str], list[str]]:
     if hw == "vaapi":
         return (["-vaapi_device", VAAPI_DEVICE],
                 ["-vf", f"{TO_YUV},format=nv12,hwupload", "-c:v", "hevc_vaapi", "-rc_mode", "CQP", "-qp", str(qp),
-                 "-profile:v", "main"])     # never tagged hvc1: see vaapi.py
+                 "-profile:v", "main"])     # hev1, never hvc1: see vaapi.py
     return ([], ["-vf", f"{TO_YUV},format=yuv420p", "-c:v", "libx264", "-preset", "slow", "-crf", "16", "-pix_fmt", "yuv420p"])
 
 
-def decodes_clean(mp4: Path, frames: int) -> str:
-    """'' when all of `mp4` decodes clean in software (vaapi.decodes_clean) and it has `frames`
-    frames; else what went wrong."""
-    bad = vaapi.decodes_clean(mp4)
-    if bad:
-        return bad.splitlines()[0]
-    n = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-count_frames", "-show_entries",
-                        "stream=nb_read_frames", "-of", "csv=p=0", str(mp4)], capture_output=True, text=True).stdout.strip()
-    return "" if n == str(frames) else f"{n} frames decoded, {frames} written"
+def frame_count(mp4: Path) -> str:
+    return subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-count_frames", "-show_entries",
+                           "stream=nb_read_frames", "-of", "csv=p=0", str(mp4)], capture_output=True, text=True).stdout.strip()
 
 
 class BadEncode(RuntimeError):
-    """A clip whose encode does not decode clean."""
+    """A clip whose encode does not decode clean (chance: the same frames encoded again may be
+    fine)."""
+
+
+class WrongEncode(RuntimeError):
+    """A clip whose encode is wrong by construction (its header, its tag): no retry mends it."""
 
 
 class Clip:
     """One output clip: frames (PIL RGB images of the clip's size) piped into ffmpeg as raw
     RGB, a log of events by frame, and an optional copy of every frame as a PNG.
 
-    The finished clip is decoded in full, in software, before it is kept (vaapi.py says why: a
-    VAAPI encode can look right to the GPU's decoder and be garbage to everyone else's). A clip
-    that does not decode clean raises BadEncode and is not kept; the frames are gone by then, so
-    the caller captures the shot again."""
+    A VAAPI clip's header is built from the stream's own parameter sets (vaapi.consistent), and
+    every finished clip passes vaapi.py's checks before it is kept: HEVC tagged hev1, the
+    header's parameter sets the stream's, all of it decoding clean in software, and every frame
+    there. A clip that does not decode clean raises BadEncode (the frames are gone by then, so
+    the caller captures the shot again); one that fails the structural checks raises WrongEncode."""
 
     def __init__(self, path: Path, size: tuple[int, int], hw: str, qp: int, keep: Path | None = None):
         self.path, self.size = path, size
@@ -340,6 +340,8 @@ class Clip:
         cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", *pre,
                "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{size[0]}x{size[1]}", "-framerate", str(FPS), "-i", "-",
                *codec, *TAGS, "-movflags", "+faststart", str(self.tmp)]
+        if hw == "vaapi":
+            cmd = vaapi.consistent(cmd)      # the file's header from the stream's own parameter sets
         self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
 
     def add(self, im):
@@ -359,10 +361,16 @@ class Clip:
         self.proc.stdin.close()
         if self.proc.wait() != 0:
             raise RuntimeError(f"ffmpeg failed on {self.path.name}")
-        bad = decodes_clean(self.tmp, self.n)
+        wrong = vaapi.structure(self.tmp)
+        if wrong:
+            self.tmp.unlink()
+            raise WrongEncode(f"{self.path.name}: {wrong}")
+        bad = vaapi.decodes_clean(self.tmp)
+        if not bad and frame_count(self.tmp) != str(self.n):
+            bad = f"{frame_count(self.tmp)} frames decoded, {self.n} written"
         if bad:
             self.tmp.unlink()
-            raise BadEncode(f"{self.path.name}: the {self.encoder} encode does not decode clean: {bad}")
+            raise BadEncode(f"{self.path.name}: the {self.encoder} encode does not decode clean: {bad.splitlines()[0]}")
         self.tmp.replace(self.path)
 
     def abort(self):

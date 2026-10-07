@@ -49,10 +49,11 @@ makes it again.
 6. **Encodes** each frame as it is drawn, piped into ffmpeg (no frame files): `--hw vaapi`
    is HEVC on the GPU (VAAPI) at a constant QP (`--qp`), `--hw none` is software H.264 at CRF
    16, the encode v7's clips had; `auto` (the default) takes VAAPI when a test encode works.
-   Every clip is decoded in full, in software, before it is kept
-   ([`vaapi.py`](../vaapi.py) says why: a VAAPI encode can pass the GPU's own decoder and be
-   garbage to everyone else's). A clip that does not decode clean is captured again (a run
-   gives the same frames each time), and a second bad one stops the command with an error.
+   A VAAPI clip's header is built from the stream's own parameter sets, and every clip passes
+   [`vaapi.py`](../vaapi.py)'s checks before it is kept: HEVC tagged hev1, the header's
+   parameter sets the stream's, and all of it decoding clean in software (vaapi.py says why).
+   A clip that does not decode clean is captured again (a run gives the same frames each time),
+   and a second bad one, or a header that disagrees, stops the command with an error.
 
 The whole command runs inside a systemd user scope with a memory cap (`--mem-max`, default
 `FILM_MEM_MAX` or 6G, no swap), the browser and the encoder included, where `systemd-run`

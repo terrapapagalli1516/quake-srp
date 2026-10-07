@@ -125,7 +125,7 @@ def main() -> int:
         made = []
         for m in shots:
             stamp = {"shot": m.NAME, "scale": a.scale, "hw": hw, "qp": a.qp if hw == "vaapi" else None,
-                     "page": page, "code": code}
+                     "checks": webcap.vaapi.CHECKS if hw == "vaapi" else None, "page": page, "code": code}
             sfile = stamps / f"{m.NAME}.json"
             mp4 = out / f"{m.NAME}.mp4"
             if not a.force and mp4.exists() and sfile.exists() and json.loads(sfile.read_text()) == stamp:
@@ -137,6 +137,8 @@ def main() -> int:
                 try:
                     res = m.run(job)
                     break
+                except webcap.WrongEncode as e:
+                    raise SystemExit(f"{m.NAME}: {e}")
                 except webcap.BadEncode as e:
                     # The capture is deterministic, so a second one gives the same frames.
                     webcap.log(f"{m.NAME}: {e}" + ("; capturing it again" if attempt == 1 else ""))
