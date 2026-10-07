@@ -26,6 +26,7 @@ from PIL import Image, ImageDraw
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # film/pipeline: filmroot
 import filmroot  # noqa: E402
+import vaapi  # noqa: E402  (the check every VAAPI file passes)
 
 REPO = filmroot.REPO
 SHOTS = REPO / "film" / "shots"
@@ -41,7 +42,7 @@ DEEP_LAVA = (0xC3, 0x4B, 0x1B)  # 233
 PALE = (0xEF, 0xBF, 0x77)  # 238
 WHITE = (0xFF, 0xFF, 0xFF)  # 254
 
-VAAPI_DEVICE = "/dev/dri/renderD128"
+VAAPI_DEVICE = vaapi.DEVICE
 VAAPI_QP = 16  # hevc_vaapi, constant QP: at 4K within 0.3 dB of a lossless 4:2:0 encode on Classic's pixels
 
 
@@ -281,7 +282,9 @@ class Stream:
 def encoder_cmd(hw: str, w: int, h: int, out: Path) -> list[str]:
     """ffmpeg reading raw RGB24 frames on stdin. Both paths convert to 4:2:0 in BT.709 (tv range)
     the same way; `none` is v7's H.264 (libx264, CRF 16, medium), `vaapi` HEVC on the GPU at a
-    low constant QP."""
+    low constant QP. Not `-tag:v hvc1`: hevc_vaapi's global-header PPS gives another initial QP
+    than the in-band one its slices use, and an hvc1 file keeps only the global one, so every
+    slice decodes at the wrong QP (CABAC errors, then garbage); hev1, the default, keeps both."""
     vf = "scale=out_color_matrix=bt709:out_range=tv"
     head = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
     raw = ["-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{w}x{h}", "-r", str(FPS), "-i", "-"]
@@ -289,9 +292,17 @@ def encoder_cmd(hw: str, w: int, h: int, out: Path) -> list[str]:
     if hw == "vaapi":
         return (head + ["-vaapi_device", VAAPI_DEVICE] + raw
                 + ["-vf", vf + ",format=nv12,hwupload", "-c:v", "hevc_vaapi", "-rc_mode", "CQP", "-qp", str(VAAPI_QP),
-                   "-profile:v", "main", "-tag:v", "hvc1"] + tags + ["-movflags", "+faststart", str(out)])
+                   "-profile:v", "main"] + tags + ["-movflags", "+faststart", str(out)])
     return (head + raw + ["-vf", vf + ",format=yuv420p", "-c:v", "libx264", "-preset", "medium", "-crf", "16",
                           "-pix_fmt", "yuv420p"] + tags + ["-movflags", "+faststart", str(out)])
+
+
+DECODE_FAILED = "does not decode cleanly"
+
+
+def decode_errors(path: Path) -> str | None:
+    """None if all of `path` decodes clean in software (film/pipeline/vaapi.py), else the first errors."""
+    return vaapi.decodes_clean(path)
 
 
 def encoder_id(hw: str) -> str:
@@ -302,7 +313,7 @@ class Writer:
     """An mp4 written through a part file, renamed into place when it closes cleanly."""
 
     def __init__(self, ctx: Ctx, out: Path, w: int, h: int):
-        self.out, self.w, self.h = out, w, h
+        self.out, self.w, self.h, self.hw = out, w, h, ctx.hw
         self.part = out.with_name(out.stem + ".part.mp4")
         self.n = 0
         self.proc = subprocess.Popen(encoder_cmd(ctx.hw, w, h, self.part), stdin=subprocess.PIPE)
@@ -316,6 +327,8 @@ class Writer:
         self.proc.stdin.close()
         if self.proc.wait() != 0:
             raise RuntimeError(f"ffmpeg failed for {self.out.name}")
+        if self.hw == "vaapi" and (err := decode_errors(self.part)):
+            raise RuntimeError(f"{self.out.name} {DECODE_FAILED}: {err}")
         os.replace(self.part, self.out)
         return self.n
 
@@ -504,12 +517,6 @@ def tint_text(rgba: np.ndarray, color) -> np.ndarray:
     lum = out[..., :3].max(axis=2) > 40
     out[lum, :3] = color
     return out
-
-
-def changes(frames: list[np.ndarray], thresh=0.5) -> list[int]:
-    """Indices i where frame i differs from frame i-1 (mean absolute difference)."""
-    return [i for i in range(1, len(frames))
-            if np.abs(frames[i - 1].astype(np.int16) - frames[i].astype(np.int16)).mean() > thresh]
 
 
 def draw_pad(img: Image.Image, x: float, y: float, w: float, color, s: int) -> None:

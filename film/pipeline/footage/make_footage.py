@@ -109,17 +109,22 @@ def stamp_inputs(job: str, s: int, qt_sha: str, hw: str, proof_dir: Path) -> dic
         return {"job": job, "quaketool": qt_sha, "views": P.views_json(),
                 "oracle": {p.name: K.sha256(p) for p in P.compare_sources()}}
     if job == S21M:
-        return {"job": job, "scale": s, "quaketool": qt_sha, "encoder": K.encoder_id(hw),
+        return {"job": job, "scale": s, "quaketool": qt_sha, "encoder": encoder_key(hw),
                 "frames": {p.name: K.sha256(p) for p in P.inputs(proof_dir)},
                 "sidecar": K.sha256(K.SIDECARS / "S21m.json"),
                 "code": hashlib.sha256((_src(P.s21m)).encode()).hexdigest()}
     r = R.RECIPES[job]
     free = job in R.SIZE_FREE
     return {"job": job, "scale": None if free else s, "quaketool": qt_sha,
-            "encoder": None if free else K.encoder_id(hw),
+            "encoder": None if free else encoder_key(hw),
             "shots": {n: K.sha256(K.shot_path(n)) for n in r.shots},
             "sidecars": {n: K.sha256(K.SIDECARS / f"{n}.json") for n in r.sidecars},
             "code": hashlib.sha256(r.source().encode()).hexdigest()}
+
+
+def encoder_key(hw: str) -> str:
+    """The encoder's whole command but the frame size and the file: a change to any flag counts."""
+    return " ".join(K.encoder_cmd(hw, 0, 0, Path("OUT")))
 
 
 def _src(fn) -> str:
@@ -304,6 +309,7 @@ def main() -> int:
             failed.append(S21M)
     queue = [(j, p) for j in rest if (p := plan(j))]
     running: dict[str, tuple[Child, tuple]] = {}
+    retried: set[str] = set()
     while queue or running:
         while queue and len(running) < max(1, a.jobs):
             job, p = queue.pop(0)
@@ -311,7 +317,13 @@ def main() -> int:
         for job, (child, p) in list(running.items()):
             if child.proc.poll() is not None:
                 del running[job]
-                finish(job, *child.result(), *p)
+                seconds, err = child.result()
+                if err and K.DECODE_FAILED in err and job not in retried:  # an encode that broke: once more
+                    retried.add(job)
+                    print(f"  {job}: its video {K.DECODE_FAILED}; making it again", flush=True)
+                    queue.insert(0, (job, p))
+                    continue
+                finish(job, seconds, err, *p)
         if running:
             time.sleep(0.5)
     if failed:
