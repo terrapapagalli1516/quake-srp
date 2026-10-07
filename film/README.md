@@ -123,7 +123,11 @@ shot.
 uv run film/pipeline/diagrams/render_v7.py            # every diagram the cut uses (this takes minutes)
 uv run film/pipeline/diagrams/render_v7.py D01 ladder # some, by name
 uv run film/pipeline/diagrams/render_v7.py --list     # the commands, without running them
+uv run film/pipeline/diagrams/render_all.py --scale 2 --clock OUT/edit --out OUT/diagrams   # at 3840x2160
 ```
+
+[`pipeline/diagrams/README.md`](pipeline/diagrams/README.md) has the outputs, the codecs and
+the scale.
 
 The diagrams are drawn with [`qkit`](pipeline/diagrams/qkit/), a small kit on cairo that
 draws in id's palette and lettering, read from the pak (palette, conchars, gfx.wad): the

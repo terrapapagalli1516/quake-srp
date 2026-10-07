@@ -69,7 +69,7 @@ import cairo  # noqa: E402
 from qkit import look, render  # noqa: E402
 from qkit.quake import filmroot  # noqa: E402
 from qkit.anim import EASE, clamp01, lerp  # noqa: E402
-from qkit.canvas import Canvas, new_canvas  # noqa: E402
+from qkit.canvas import Canvas, canvas_image, new_canvas  # noqa: E402
 
 ITEMS = ["TORCH FLICKER", "GLIDING LIGHTS", "SMOOTH MONSTERS", "SMOOTH ANIMATIONS", "FRAME RATE CAP: NONE",
          "FLUID SKY", "NATIVE PIXELS", "WIDESCREEN FOV", "SCALED 2-D LAYER", "STATUS BAR OVERLAY", "CROSSHAIR",
@@ -316,11 +316,7 @@ def _render(job):
     if preview:
         cv = new_canvas(look.W, look.H)
         _preview_frame(cv, t)
-        cv.surface.flush()
-        from PIL import Image
-
-        Image.frombuffer("RGB", (look.W, look.H), bytes(cv.surface.get_data()), "raw", "BGRX",
-                         cv.surface.get_stride(), 1).save(path, compress_level=1)
+        canvas_image(cv).save(path, compress_level=1)
     else:
         render.render_frame(t).save(path, compress_level=1)
     return i
@@ -354,7 +350,10 @@ def main() -> None:
     ap.add_argument("--out", default=str(filmroot.FILM / "diagrams"), help="the folder for the movies")
     ap.add_argument("--jobs", type=int, default=min(8, os.cpu_count() or 4))
     ap.add_argument("--keep-frames", action="store_true", help="keep each span's PNG frames (FILM_SCRATCH)")
+    ap.add_argument("--scale", type=int, default=1,
+                    help="draw at this whole multiple of 1920x1080 (2: 3840x2160), the geometry the same")
     a = ap.parse_args()
+    look.set_scale(a.scale)
     scratch = filmroot.scratch("diagrams") / "frames" / "ladder"
     spec = json.loads(Path(a.events).read_text())
     if a.overrides:
