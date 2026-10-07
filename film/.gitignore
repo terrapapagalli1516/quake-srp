@@ -1,1 +1,9 @@
+# The film's media, which the pipeline renders under film/ by default (README.md, "The
+# media"): footage, voice takes, diagrams, score, sound effects, cuts.
 out/
+/footage/
+/voice/
+/diagrams/
+/music/
+/sound/
+/edit/
