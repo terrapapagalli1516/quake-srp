@@ -50,6 +50,12 @@ ffmpeg with libx264 (and hevc_vaapi for the GPU path), `uv`, and docker for the 
   the gamepad and keycaps are drawn with their line widths times the scale.
 - **The proof's frames** are id's 320x200, the same at any size; S21m enlarges them with nearest
   neighbour into its panels.
+- **The perspective section is rendered at 1080 so the span error stays visible:** PER1 to PER6
+  (N2a, N2b, N2c, PER4, S34 and N2e.clean) are made at 1920x1080 and enlarged with nearest
+  neighbour into a larger film. At 4K the 16-pixel span's error is a quarter the size on the
+  screen, and the section explains the error at the size where it shows. A recipe says so with
+  `render_res` (and `upscale = "nearest"`, the only way it enlarges); its sidecar records both
+  sizes.
 - A pass that only measures (S46a's track of the grunt) runs at its own size whatever the
   film's, so a crop follows the same path at every size.
 

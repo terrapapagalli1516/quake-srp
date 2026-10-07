@@ -117,7 +117,7 @@ def shot_info(path: Path, extra: list[str] = ()) -> ShotInfo:
 class Ctx:
     """One recipe's run: the scale, the tool, the encoder, where it writes."""
 
-    s: int  # the film's scale: 1 = 1920x1080, 2 = 3840x2160
+    s: int  # the scale it renders and lays out at: 1 = 1920x1080, 2 = 3840x2160
     quaketool: Path
     pak: Path
     hw: str  # "vaapi" or "none"
@@ -126,6 +126,7 @@ class Ctx:
     texts: Path  # the lettering cache
     streams: list = field(default_factory=list)
     writers: list = field(default_factory=list)
+    k: int = 1  # the film's scale over `s`: frames are enlarged k times, nearest neighbour, as they are encoded
 
     @property
     def W(self) -> int:
@@ -279,12 +280,14 @@ class Stream:
         return p
 
 
-def encoder_cmd(hw: str, w: int, h: int, out: Path) -> list[str]:
+def encoder_cmd(hw: str, w: int, h: int, out: Path, k: int = 1) -> list[str]:
     """ffmpeg reading raw RGB24 frames on stdin. Both paths convert to 4:2:0 in BT.709 (tv range)
     the same way; `none` is v7's H.264 (libx264, CRF 16, medium), `vaapi` HEVC on the GPU at a
     low constant QP, tagged hev1 and with the file's header built from the stream's own parameter
     sets: radeonsi's in-band sets are not the ones FFmpeg would write in the header (vaapi.py)."""
     vf = "scale=out_color_matrix=bt709:out_range=tv"
+    if k > 1:  # a recipe rendered at a smaller size: its pixels enlarged k times, nearest neighbour
+        vf = f"scale={w * k}:{h * k}:flags=neighbor," + vf
     head = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
     raw = ["-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{w}x{h}", "-r", str(FPS), "-i", "-"]
     tags = ["-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709", "-color_range", "tv"]
@@ -311,7 +314,7 @@ class Writer:
         self.out, self.w, self.h, self.hw = out, w, h, ctx.hw
         self.part = out.with_name(out.stem + ".part.mp4")
         self.n = 0
-        self.proc = subprocess.Popen(encoder_cmd(ctx.hw, w, h, self.part), stdin=subprocess.PIPE)
+        self.proc = subprocess.Popen(encoder_cmd(ctx.hw, w, h, self.part, ctx.k), stdin=subprocess.PIPE)
 
     def write(self, frame: np.ndarray) -> None:
         assert frame.shape == (self.h, self.w, 3), (self.out.name, frame.shape)
@@ -433,7 +436,9 @@ def sidecar(ctx: Ctx, name: str, frames: int, src: str | None = None) -> None:
     want = side.get("frames")
     if want is not None and want != frames:
         raise RuntimeError(f"{name}: {frames} frames written, the cut's file has {want}")
-    side["render"] = {"size": [ctx.W, ctx.H], "scale": ctx.s, "quaketool_sha256": sha_tool(ctx.quaketool)[:16],
+    side["render"] = {"size": [ctx.W * ctx.k, ctx.H * ctx.k], "scale": ctx.s * ctx.k,
+                      **({"rendered_at": [ctx.W, ctx.H], "enlarged": f"{ctx.k}x, nearest"} if ctx.k > 1 else {}),
+                      "quaketool_sha256": sha_tool(ctx.quaketool)[:16],
                       "encoder": encoder_id(ctx.hw)}
     write_json(ctx.game / f"{name}.json", side)
 

@@ -115,7 +115,8 @@ def stamp_inputs(job: str, s: int, qt_sha: str, hw: str, proof_dir: Path) -> dic
                 "code": hashlib.sha256((_src(P.s21m)).encode()).hexdigest()}
     r = R.RECIPES[job]
     free = job in R.SIZE_FREE
-    return {"job": job, "scale": None if free else s, "quaketool": qt_sha,
+    return {"job": job, "scale": None if free else s, "render_scale": None if free else r.render_scale(s),
+            "quaketool": qt_sha,
             "encoder": None if free else encoder_key(hw),
             "shots": {n: K.sha256(K.shot_path(n)) for n in r.shots},
             "sidecars": {n: K.sha256(K.SIDECARS / f"{n}.json") for n in r.sidecars},
@@ -161,8 +162,9 @@ def run_job(job: str, cfg: dict) -> str | None:
     """One job, in this process: None, or what went wrong."""
     out = Path(cfg["out"])
     work = Path(tempfile.mkdtemp(prefix=f"{job}-", dir=cfg["scratch"]))
-    ctx = K.Ctx(s=cfg["scale"], quaketool=Path(cfg["quaketool"]), pak=Path(cfg["pak"]), hw=cfg["hw"],
-                game=out / "game", work=work, texts=Path(cfg["scratch"]) / "text")
+    s = R.RECIPES[job].render_scale(cfg["scale"]) if job in R.RECIPES else cfg["scale"]
+    ctx = K.Ctx(s=s, quaketool=Path(cfg["quaketool"]), pak=Path(cfg["pak"]), hw=cfg["hw"],
+                game=out / "game", work=work, texts=Path(cfg["scratch"]) / "text", k=cfg["scale"] // s)
     try:
         if job == PROOF:
             P.frames(out / "proof" / "post-fix-ents", ctx.quaketool, work)
@@ -240,7 +242,8 @@ def main() -> int:
         print(f"{PROOF:<14} proof/post-fix-ents/: oracle/compare.py --sse, {', '.join(P.MAPS)} (docker)")
         for r in R.RECIPES.values():
             what = ", ".join(r.shots) if r.shots else r.note
-            print(f"{r.name:<14} {' '.join(r.outputs)}\n{'':<14}   from {what}")
+            at = f"; made at {r.render_res}, enlarged ({r.upscale})" if r.render_res else ""
+            print(f"{r.name:<14} {' '.join(r.outputs)}\n{'':<14}   from {what}{at}")
         print(f"{S21M:<14} S21m.mp4 S21m.json\n{'':<14}   from the proof's frames")
         return 0
     if a.res is None or a.out is None:

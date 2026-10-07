@@ -34,6 +34,21 @@ class Recipe:
     note: str = ""
     uses: list[Callable] = field(default_factory=list)  # the layout helpers it shares with other recipes
     spec: str = ""  # a plain recipe's row
+    render_res: str | None = None  # render and lay out at this size whatever the film's ("1920x1080"),
+    upscale: str = "nearest"  # then enlarged to the film's size this way
+
+    def render_scale(self, film_scale: int) -> int:
+        """The scale it is made at: the film's, or its own `render_res`'s if smaller (which must divide it)."""
+        if not self.render_res:
+            return film_scale
+        w, h = (int(v) for v in self.render_res.split("x"))
+        own = w // 1920
+        assert w == 1920 * own and h == 1080 * own and self.upscale == "nearest", (self.name, self.render_res)
+        if own >= film_scale:
+            return film_scale
+        if film_scale % own:
+            raise ValueError(f"{self.name}: its {self.render_res} does not divide the film's size")
+        return own
 
     def source(self) -> str:
         """What decides its bytes besides its inputs and the tool: its own code and the helpers'."""
@@ -51,6 +66,12 @@ def add(r: Recipe) -> None:
 # ---------------------------------------------------------------------------
 # one render, straight to the file
 # ---------------------------------------------------------------------------
+
+# The perspective section (PER1-PER6) is made at 1920x1080 and enlarged 2x, nearest neighbour, into
+# a 4K film: at 4K the 16-pixel span's error is a quarter the size on the screen, and the section
+# explains the error at the size where it shows.
+PERSPECTIVE_RES = "1920x1080"
+PERSPECTIVE = {"N2a", "N2b", "N2c", "PER4", "N2e.clean", "S34"}
 
 # name: (shot file, keeps its game sound, how its events are timed, the sidecar's name)
 #   events: "map"   mp4 frame = floor((film frame - first) * 60 / fps) (the shots of S42 on);
@@ -128,7 +149,8 @@ for _name, (_shot, _sound, _events, _side) in PLAIN.items():
     _base = _side or _name
     add(Recipe(_name, [f"{_name}.mp4"] + ([f"{_base}.wav"] if _sound else [])
                + ([f"{_base}.events.json"] if _events else []) + ([f"{_base}.json"] if _side else []),
-               [_shot], plain(_name), [_side] if _side else [], spec=repr((_name, PLAIN[_name]))))
+               [_shot], plain(_name), [_side] if _side else [], spec=repr((_name, PLAIN[_name])),
+               render_res=PERSPECTIVE_RES if _name in PERSPECTIVE else None))
 
 
 # ---------------------------------------------------------------------------
@@ -530,7 +552,7 @@ def s34(c: Ctx) -> None:
 
 
 add(Recipe("S34", ["S34.mp4", "S34.json"], ["S33-S34-64", "S33-S34-16", "S33-S34-8", "S33-S34-exact"], s34,
-           ["S34"]))
+           ["S34"], render_res=PERSPECTIVE_RES))
 
 
 # ---------------------------------------------------------------------------
