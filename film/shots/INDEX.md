@@ -3,14 +3,17 @@
 Every shot of the film, in cut order, and what makes it. A shot file's header says what it
 shows, the narration it plays under and, where the film lays several renders together, how.
 `uv run film/render.py NAME` renders `NAME.shot` as `NAME.mp4`, the name the edit reads,
-wherever one render is one footage file. Labels, captions, counters, diagrams and the options
-ladder over the shots are the edit's, not the shot files'.
+wherever one render is one footage file.
+[`film/pipeline/footage/make_footage.py`](../pipeline/footage/README.md) makes every footage
+file the cut reads at any size, the ones laid together from several renders and the proof's
+frames included, with their sound, events and sidecars. Labels, captions, counters, diagrams
+and the options ladder over the shots are the edit's, not the shot files'.
 
 [`sidecars/`](sidecars/) holds what the edit and the sound effects read beside each footage
 file `NAME.mp4`: `NAME.json`, with its handles (`head_s`, `tail_s`), its length (`shot_s`),
 its game sound, its events log, and the times of what happens in it, in shot seconds
 (`*_shot_s`: a grunt's steps, a light's letter changes, a nail's sounds). Copy them beside
-the renders.
+the renders (make_footage.py does).
 
 | Cut | Made from | What it shows |
 |---|---|---|
@@ -140,6 +143,6 @@ pixels at texel edges and on liquids (at most 0.13% of a shot's pixels in those 
 the merge: the pixel-exact work), and their x-rays line up as filmed.
 
 **S13** was rendered by the first version of the film tool. Its `segments` x-ray has changed
-since, so `S13-segments` rendered today differs from the film's S13 once the sweep begins; the
-film keeps its own file. **LAB10a2**'s band colours follow the thread scheduler, so they come
+since, so `S13-segments` rendered today differs from the film's S13 once the sweep begins: a
+cut made at another size lays today's sweep, as make_footage.py does. **LAB10a2**'s band colours follow the thread scheduler, so they come
 out in another order on every run; the pixels under them do not change.
