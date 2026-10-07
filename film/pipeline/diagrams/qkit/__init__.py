@@ -19,13 +19,13 @@ from . import look
 from . import look as Q
 from . import quake, text
 from .anim import Cues, EASE, clamp01, fade, keys, lerp, lerp_log, ramp, stagger, typed
-from .canvas import Canvas, load_image, new_canvas, surface_from_array
+from .canvas import Canvas, canvas_image, load_image, new_canvas, surface_from_array
 from .graph import Axes, nice_ticks
-from .look import FPS, H, W, color, mix, shade
+from .look import FPS, H, W, color, mix, set_scale, shade
 from .render import contact_sheet, duration_arg, encode, render_frame, run
 
 __all__ = [
     "Q", "look", "quake", "text", "Cues", "EASE", "clamp01", "fade", "keys", "lerp", "lerp_log", "ramp", "stagger",
-    "typed", "Canvas", "load_image", "new_canvas", "surface_from_array", "Axes", "nice_ticks", "FPS", "H", "W",
-    "color", "mix", "shade", "contact_sheet", "duration_arg", "encode", "render_frame", "run",
+    "typed", "Canvas", "canvas_image", "load_image", "new_canvas", "surface_from_array", "Axes", "nice_ticks", "FPS", "H", "W",
+    "color", "mix", "set_scale", "shade", "contact_sheet", "duration_arg", "encode", "render_frame", "run",
 ]

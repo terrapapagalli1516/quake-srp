@@ -11,6 +11,22 @@ from .quake import pal
 
 W, H, FPS = 1920, 1080, 60
 
+# The output's scale: a whole number that multiplies the frame (1: 1920x1080, 2: 3840x2160).
+# Everything is drawn in W x H's coordinates; a canvas made by new_canvas() carries the scale
+# in its cairo transform, so lines and Inter are drawn at the scale's resolution and id's
+# glyphs at their scale times it, nearest neighbour. Set it with set_scale() (or a script's
+# --scale) before the first canvas is made.
+SCALE = 1
+
+
+def set_scale(n: int) -> int:
+    """Draw every canvas new_canvas() makes n times larger (a whole number, 1 or more)."""
+    global SCALE
+    if int(n) != n or n < 1:
+        raise ValueError(f"the scale is a whole number, 1 or more: {n!r}")
+    SCALE = int(n)
+    return SCALE
+
 # Palette indices (rows of 16: greys 0-15, browns 16-31, slate 32-47,
 # olive 48-63, reds 64-79, ochre 80-95, rust and gold 96-111, flesh
 # 112-127, ... grey-green 176-191, yellows 192-207, blues 208-223,

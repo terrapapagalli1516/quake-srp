@@ -23,8 +23,8 @@ strength 1 (slop's).
 
 Schematic: the luxel's baked value (120) and the flame's share of it (80); the shape of the
 line is the flame's. Cue `cl0` is cl.time at the shot's first frame (3.4 for ST1c: the film
-tool's warm-up of 2.4 s plus the 1.0 s handle). `--scale S` scales the panel about its bottom
-right corner, (1664, 1064), so it stays in the box.
+tool's warm-up of 2.4 s plus the 1.0 s handle). `--enlarge S` scales the panel about its bottom
+right corner, (1664, 1064), so it stays in the box (the kit's `--scale` multiplies the whole frame).
 """
 
 import math
@@ -37,9 +37,9 @@ from common import *  # noqa: F403
 
 import numpy as np  # noqa: E402
 
-SCALE = 1.0
-if "--scale" in sys.argv:
-    i = sys.argv.index("--scale")
+SCALE = 1.0  # the panel's enlargement about its corner (--enlarge)
+if "--enlarge" in sys.argv:
+    i = sys.argv.index("--enlarge")
     SCALE = float(sys.argv[i + 1])
     del sys.argv[i : i + 2]
 

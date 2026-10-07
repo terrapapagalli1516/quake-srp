@@ -17,7 +17,7 @@ The string is world.qc's FLICKER (first variety, light style 1), read from the r
 torch.rs as checked out; each letter runs it at a light style's rate, ten letters a second,
 gliding between letters as slop's torches do (GLIDE_STEP 2, as the D12b strip computes it),
 three letters further on per character so they flicker apart. The letters are id's
-conchars, scale 10 (`--scale N`), centred on a 55% dark band; typed on in 6 frames, faded
+conchars, scale 10 (`--letters N`), centred on a 55% dark band; typed on in 6 frames, faded
 out over the last 0.3 s.
 """
 
@@ -37,9 +37,9 @@ _src = (quake.REPO / "quake-rs/src/render/torch.rs").read_text()
 FLICKER = re.search(r'const FLICKER_1: &\[u8\] = b"([a-z]+)";', _src).group(1)
 assert FLICKER == "mmnmmommommnonmmonqnmmo"
 TEXT = "TORCHES!"
-SCALE = 10
-if "--scale" in sys.argv:
-    i = sys.argv.index("--scale")
+SCALE = 10  # the letters' conchars scale (--letters); the kit's --scale multiplies the whole frame
+if "--letters" in sys.argv:
+    i = sys.argv.index("--letters")
     SCALE = int(sys.argv[i + 1])
     del sys.argv[i : i + 2]
 
