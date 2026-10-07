@@ -1807,9 +1807,16 @@ def build_range(a, cfg: dict, tl: dict, out: Path, tmp: Path, t0: float) -> None
     master(stems, cfg["levels"], cfg["levels"]["limiter_ceiling"], tmp, rep, tl)
     y, _ = sf.read(str(tmp / "master.wav"), dtype="float64")
     sf.write(str(tmp / "range.wav"), y[int(lo_s * SR):int(hi_s * SR)], SR, subtype="PCM_24")
-    sh(["ffmpeg", "-y", "-loglevel", "error", "-ss", f"{lo_s - f0:.4f}", "-t", f"{hi_s - lo_s:.4f}", "-i", str(video),
-        "-i", str(tmp / "range.wav"), "-map", "0:v", "-map", "1:a", "-c:v", "libx264", "-preset", "slow", "-crf", "17",
-        "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "320k", "-shortest", "-movflags", "+faststart", str(out / "range.mp4")])
+    if HW == "vaapi":  # cut frame-exact, so encoded again: on the GPU, as the master
+        vcodec = ["-vf", "format=nv12,hwupload", "-c:v", "hevc_vaapi", "-rc_mode", "CQP", "-qp", str(MASTER_QP),
+                  "-profile:v", "main", "-tag:v", "hvc1"]
+        dev = ["-vaapi_device", VAAPI_DEVICE]
+    else:
+        vcodec = ["-c:v", "libx264", "-preset", "slow", "-crf", "17", "-pix_fmt", "yuv420p"]
+        dev = []
+    sh(["ffmpeg", "-y", "-loglevel", "error", *dev, "-ss", f"{lo_s - f0:.4f}", "-t", f"{hi_s - lo_s:.4f}", "-i", str(video),
+        "-i", str(tmp / "range.wav"), "-map", "0:v", "-map", "1:a", *vcodec,
+        "-c:a", "aac", "-b:a", "320k", "-shortest", "-movflags", "+faststart", str(out / "range.mp4")])
     (out / "mix.json").write_text(json.dumps(rep, indent=1))
     log(f"done in {time.time() - t0:.0f} s: {out / 'range.mp4'}")
 

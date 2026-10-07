@@ -26,7 +26,7 @@ sys.path.insert(0, str(EDIT.parent))
 from filmroot import FILM, PIPELINE, REPO, scratch  # noqa: E402
 
 sys.path.insert(0, str(PIPELINE / "diagrams"))
-from qkit import Canvas, fade, ramp  # noqa: E402
+from qkit import Canvas, canvas_image, fade, new_canvas, ramp  # noqa: E402
 from qkit import look  # noqa: E402
 from qkit import text as qtext  # noqa: E402
 
@@ -78,23 +78,13 @@ def set_scale(n: int) -> None:
 
 
 def new(alpha: bool) -> Canvas:
-    surf = cairo.ImageSurface(cairo.FORMAT_ARGB32 if alpha else cairo.FORMAT_RGB24, W * SCALE, H * SCALE)
-    c = Canvas(surf, transparent=alpha)
-    if SCALE != 1:
-        c.ctx.scale(SCALE, SCALE)
-        c.w, c.h = W, H   # the cards' own coordinates stay in 1080 units
-    return c
+    """A frame in 1080's coordinates, its surface SCALE times that (qkit's transform: lines and Inter drawn at
+    the full resolution, id's glyphs nearest-neighbour at SCALE times their size)."""
+    return new_canvas(W, H, alpha=alpha, scale=SCALE)
 
 
 def save(c: Canvas, path: Path) -> None:
-    c.surface.flush()
-    data, stride = bytes(c.surface.get_data()), c.surface.get_stride()
-    size = (c.surface.get_width(), c.surface.get_height())
-    if c.transparent:
-        im = Image.frombuffer("RGBA", size, data, "raw", "BGRa", stride, 1)
-    else:
-        im = Image.frombuffer("RGB", size, data, "raw", "BGRX", stride, 1)
-    im.save(path, compress_level=1)
+    canvas_image(c).save(path, compress_level=1)
 
 
 # ------------------------------------------------------------------ slate ----

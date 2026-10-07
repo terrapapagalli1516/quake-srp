@@ -17,6 +17,7 @@ line in on its word (film/edit.toml, [event_lists] s26_lines). Needs quaketool b
 from __future__ import annotations
 
 import argparse
+import io
 import subprocess
 import sys
 import tempfile
@@ -90,7 +91,11 @@ def main() -> None:
             x += p.shape[1]
         if a.scale > 1:
             img = img.repeat(a.scale, 0).repeat(a.scale, 1)
-        Image.fromarray(img, "RGBA").save(a.out / f"S26-line{i}.png")
+        buf = io.BytesIO()
+        Image.fromarray(img, "RGBA").save(buf, "PNG")
+        dst = a.out / f"S26-line{i}.png"
+        if not dst.exists() or dst.read_bytes() != buf.getvalue():  # unchanged files keep their time: the edit's
+            dst.write_bytes(buf.getvalue())                         # segment cache goes by it
         print(f"S26-line{i}.png", s, x0, y0)
 
 

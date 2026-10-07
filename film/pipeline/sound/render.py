@@ -5,7 +5,7 @@
 # ///
 """Render the film's sound-design layer: a cue list on the film's timeline -> one stem.
 
-    uv run film/pipeline/sound/render.py            # cues-v7.md on edit/v7 -> FILM_ROOT/sound/sfx-v7.wav
+    uv run film/pipeline/sound/render.py            # cues-v7.md on edit/ -> FILM_ROOT/sound/sfx.wav
     uv run film/pipeline/sound/render.py [CUES.md ...] [-o OUT.wav] [--timeline TIMELINE.json]
         [--master DB | --lufs L] [--ceiling -1] [--list] [--preview FILM-AUDIO]
 
@@ -824,10 +824,10 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("cues", nargs="*", type=Path, default=[HERE / "cues-v7.md"],
                     help="cue lists (default: cues-v7.md beside this file)")
-    ap.add_argument("-o", "--out", type=Path, default=FILM / "sound" / "sfx-v7.wav",
-                    help="the stem (default FILM_ROOT/sound/sfx-v7.wav); its .json goes beside it")
-    ap.add_argument("--timeline", type=Path, default=FILM / "edit" / "v7" / "timeline.json",
-                    help="the edit's timeline (default FILM_ROOT/edit/v7/timeline.json); its clock.json "
+    ap.add_argument("-o", "--out", type=Path, default=FILM / "sound" / "sfx.wav",
+                    help="the stem (default FILM_ROOT/sound/sfx.wav, which edit.toml reads); its .json goes beside it")
+    ap.add_argument("--timeline", type=Path, default=FILM / "edit" / "timeline.json",
+                    help="the edit's timeline (default FILM_ROOT/edit/timeline.json); its clock.json "
                          "and ladder-events.json are read from beside it")
     ap.add_argument("--master", type=float, default=None,
                     help=f"a fixed master gain in dB (default {MASTER_DB}, the film's: about -20 LUFS)")

@@ -38,8 +38,9 @@ times come from the narration and edit.toml alone, so they are the same at any r
   --range A-B       the edit renders only this stretch (film seconds), as OUT/range.mp4: a quick look
   --burn-in         a review build: the timecode and the shot ids burned in
   --quaketool BIN   use this quaketool (default: build quake-rs's, as oracle/classic_check.py does)
+  --jobs N          the edit's segments rendered at once (default: build.py's)
 
-Caches and intermediates go to FILM_SCRATCH (default OUT/scratch; the 4K edit's segments need some 10 GB). Needs
+Caches and intermediates go to FILM_SCRATCH (default OUT/scratch: at 4K the edit's segments are large). Needs
 what film/README.md lists (Rust, ffmpeg, uv, cairo, fonts), and VAAPI for --hw vaapi. Python only through uv.
 """
 
@@ -78,6 +79,7 @@ class Make:
         self.hw = a.hw
         self.range = a.range
         self.burn_in = a.burn_in
+        self.jobs = a.jobs
         self.force = set(filter(None, (a.force or "").split(",")))
         self.media = {}
         for m in a.media or []:
@@ -88,6 +90,8 @@ class Make:
         self.quaketool = Path(a.quaketool).resolve() if a.quaketool else None
         self.env = dict(os.environ, FILM_ROOT=str(self.out),
                         FILM_SCRATCH=os.environ.get("FILM_SCRATCH") or str(self.out / "scratch"))
+        if self.quaketool:
+            self.env["QUAKETOOL"] = str(self.quaketool)  # filmroot.py's, for every stage
         (self.out / ".make").mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------ running ----
@@ -149,16 +153,14 @@ class Make:
         return out
 
     def clock_times(self) -> list:
-        """The clock as times only (the shots' frames, the lines' starts, the named moments): what the diagrams,
-        the score and the effects are made from, whatever else timeline.json says about the media."""
-        c = self.out / "edit" / "clock.json"
-        if not c.exists():
-            return []
-        j = json.loads(c.read_text())
-        lad = self.out / "edit" / "ladder-events.json"
-        return [j.get("cuts"), [[v["id"], v["at"]] for v in j.get("voice", [])], j.get("events"),
-                j.get("edit_hits"), j.get("picture_events"),
-                json.loads(lad.read_text()) if lad.exists() else None]
+        """The clock (its shots, lines, words and named moments, but not when it was written) and the ladder's
+        events: what the diagrams, the score and the effects are made from."""
+        out = []
+        for name in ("clock.json", "ladder-events.json"):
+            c = self.out / "edit" / name
+            j = json.loads(c.read_text()) if c.exists() else None
+            out.append({k: v for k, v in j.items() if k != "film"} if isinstance(j, dict) else j)
+        return out
 
     @staticmethod
     def sig(*parts) -> str:
@@ -172,6 +174,7 @@ class Make:
         log("quaketool: cargo build --release")
         self.run("cargo", "build", "--release", "--quiet", "--bin", "quaketool", cwd=REPO / "quake-rs")
         self.quaketool = REPO / "quake-rs" / "target" / "release" / "quaketool"
+        self.env["QUAKETOOL"] = str(self.quaketool)
         return self.quaketool
 
     def stage_voice(self) -> None:
@@ -303,6 +306,8 @@ class Make:
                 if src.with_suffix(".json").exists():
                     self.copy_in(src.with_suffix(".json"), wav.with_suffix(".json"))
                 self.done("score", sig, t0)
+            else:
+                log(f"score: media from {src}, up to date")
             return
         music = PIPE / "music"
         sig = self.sig(self.code(music, PIPE / "filmroot.py"), self.clock_times())
@@ -338,6 +343,8 @@ class Make:
                 meta.update(wav="sfx.wav", timeline="edit/timeline.json", clock="edit/clock.json")  # this clock's
                 wav.with_suffix(".json").write_text(json.dumps(meta, indent=1))
                 self.done("sfx", sig, t0)
+            else:
+                log(f"sfx: media from {src}, up to date")
             return
         snd = PIPE / "sound"
         sig = self.sig(self.code(snd, PIPE / "filmroot.py"), self.clock_times(),
@@ -368,6 +375,8 @@ class Make:
         self.tool()  # S26's lines are drawn in Quake's lettering by quaketool filmtext
         self.uv(PIPE / "edit" / "s26_lines.py", "--scale", self.scale, "--out", self.out / "edit" / "v5" / "art")
         args = ["--config", FILM / "edit.toml", "--root", self.out, "--scale", self.scale, "--hw", self.hw]
+        if self.jobs:
+            args += ["--jobs", self.jobs]
         if not self.burn_in:
             args.append("--no-burn-in")
         if self.range:
@@ -407,6 +416,7 @@ def main() -> None:
     ap.add_argument("--range", help="the edit renders only this stretch, A-B in film seconds, as OUT/range.mp4")
     ap.add_argument("--burn-in", action="store_true", help="a review build: timecode and shot ids burned in")
     ap.add_argument("--quaketool", help="use this quaketool binary instead of building quake-rs's")
+    ap.add_argument("--jobs", type=int, help="the edit's segments rendered at once (build.py's default otherwise)")
     a = ap.parse_args()
     m = Make(a)
     only = set(filter(None, (a.stages or "").split(",")))

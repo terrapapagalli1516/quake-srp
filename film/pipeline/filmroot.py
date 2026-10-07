@@ -11,7 +11,8 @@ first), so the whole pipeline moves with two environment variables:
 - FILM_SCRATCH: caches and intermediate files, which can be large (the edit's lossless
   segments run to gigabytes). Default: `quake-srp-film/` in the system's temp folder.
 
-The repository's own paths (id's pak, the quaketool binary) are found from this file.
+The repository's own paths (id's pak, the quaketool binary) are found from this file; QUAKETOOL
+names another quaketool binary.
 """
 
 from __future__ import annotations
@@ -25,7 +26,7 @@ REPO = PIPELINE.parents[1]
 FILM = Path(os.environ.get("FILM_ROOT") or PIPELINE.parent).resolve()
 SCRATCH = Path(os.environ.get("FILM_SCRATCH") or Path(tempfile.gettempdir()) / "quake-srp-film").resolve()
 PAK = REPO / "quake-data" / "ID1" / "PAK0.PAK"
-QUAKETOOL = REPO / "quake-rs" / "target" / "release" / "quaketool"
+QUAKETOOL = Path(os.environ.get("QUAKETOOL") or REPO / "quake-rs" / "target" / "release" / "quaketool").resolve()
 
 
 def scratch(part: str) -> Path:
