@@ -290,7 +290,7 @@ Beyond Classic:
 | `web/` | the page, the WASI host (`wasi.js`), touch controls, the service worker, the browser checks |
 | `oracle/` | id's WinQuake built headless from the C, and the scripts that compare it with the port |
 | `census/` | helpers for the gameplay census ([CENSUS.md](CENSUS.md)) |
-| [`film/`](film/README.md) | how the port's explainer film was made: its game footage as shot files for `quaketool film` (a camera inside the engine, with x-rays of the renderer's machinery), and the command that renders them |
+| [`film/`](film/README.md) | how the port's explainer film is made: its narration, its game footage as shot files for `quaketool film` (a camera inside the engine, with x-rays of the renderer's machinery), the edit's decisions, and the pipeline that renders and cuts it |
 | `screenshots/` | the two renders at the top of this README |
 | `ci/`, `.github/workflows/` | the checks CI runs (`ci/local.sh` runs them here), and the shareware pak's fetch |
 

@@ -72,13 +72,14 @@ cp film/shots/sidecars/*.json film/footage/game/             # what the edit rea
 Each shot file goes through `quaketool film` and ffmpeg into `NAME.mp4` (H.264, CRF 16, at
 the shot's own size and frame rate), with its game sound `NAME.wav` and its events
 `NAME.events.json` where the shot asks for them. A shot renders the same frames on every run
-and on any number of threads, and the shot files reproduce the cut's shots, with one known
-difference: since the pixel-exact work, a camera that is the game's own eye (`camera walk`,
+and on any number of threads, and the shot files reproduce the cut's shots, with two known
+differences, both from the pixel-exact work. A camera that is the game's own eye (`camera walk`,
 `camera player`, a demo's camera) draws id's eye nudged 1/32 unit, as id's V_CalcRefdef
-does, so those shots render slightly differently from the cut (about 5.5% of the pixels in
-HERO7 and the walks). Shots with the film's own cameras (`path`, `fixed`, `follow`, `orbit`)
-are unchanged. [`shots/INDEX.md`](shots/INDEX.md) lists the shots this touches and the other
-exceptions. Beside each file the edit reads a sidecar,
+does, so those shots render slightly differently from the cut: their edges shift by a
+fraction of a pixel. Shots with the film's own cameras (`path`, `fixed`, `follow`, `orbit`)
+differ from the cut only in single pixels at texel edges and on liquids, and their x-rays
+and marks line up as filmed. [`shots/INDEX.md`](shots/INDEX.md) lists
+the shots the eye touches and the other exceptions. Beside each file the edit reads a sidecar,
 [`shots/sidecars/NAME.json`](shots/sidecars/): its handles, its sound, and the times of what
 happens in it, which the clock, the score and the sound effects are cued on.
 

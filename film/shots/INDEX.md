@@ -135,7 +135,9 @@ demo's camera draw id's eye nudged 1/32 unit, as id's V_CalcRefdef does. The cut
 before that, so these shot files reproduce their shots with slightly different frames (about
 5.5% of the pixels in HERO7 and the walks): F06, F13-barrels, F13-id, HERO7, LAB10d, N1b,
 N3w-box, N4-box, N8a, N8b, S02, S04, S05, S15c, S15s, S26, ST3.g065 and ST7. Shots with the
-film's own cameras (`path`, `fixed`, `follow`, `orbit`) render as the cut has them.
+film's own cameras (`path`, `fixed`, `follow`, `orbit`) differ from the cut only in single
+pixels at texel edges and on liquids (at most 0.13% of a shot's pixels in those checked at
+the merge: the pixel-exact work), and their x-rays line up as filmed.
 
 **S13** was rendered by the first version of the film tool. Its `segments` x-ray has changed
 since, so `S13-segments` rendered today differs from the film's S13 once the sweep begins; the

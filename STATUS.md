@@ -127,8 +127,11 @@ Merged together (the details are in the branches' commits, and for the pixels in
   `display HZ`; settings that change mid-shot; a map made for the film (`mapgen`); a
   walking player that fights (`aim monsters`). Its hooks in the engine are idle unless a
   film turns them on. A film's own camera is drawn where its shot puts it (no bob, no
-  nudge); its views of the player get id's eye. `film/` holds the shots and the command
-  that renders them.
+  nudge); its views of the player get id's eye.
+- **The film's own source** (`fleet/film-source`). `film/` holds the narration
+  (`script.md`), the cut's shots as shot files with an index, the edit's decisions
+  (`edit.toml`) and the pipeline (`film/pipeline/`: edit, music, sound, diagrams, the
+  viewing kit); the media (footage, voice takes, score) is not in the repo.
 - **The docs say "the user"** (`fleet/filmdocs`), and segments ahead is id's own x86 FDIV
   overlap (PERF_PLAN §15).
 
