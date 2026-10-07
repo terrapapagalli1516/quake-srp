@@ -830,7 +830,8 @@ impl Drive {
     fn input(&mut self, w: &mut Walk, g: f64) {
         let c = match self {
             Drive::Plan { walker, plan } => {
-                let c = walker.step(g, &walk_body(w));
+                let seen = if walker.aims() { monsters_seen(w) } else { Vec::new() };
+                let c = walker.step(g, &walk_body(w), &seen);
                 plan.moves.push((g, c));
                 c
             }
@@ -840,6 +841,9 @@ impl Drive {
         // angles, and the speeds and the jump as `CL_BaseMove` makes them.
         (w.pitch, w.yaw) = (c.pitch as f32, c.yaw as f32);
         w.key_move = KeyMove { fwd: c.fwd as f32, side: c.side as f32, jump: c.jump, ..KeyMove::default() };
+        if let Some(attack) = c.attack {
+            w.in_attack = attack;
+        }
     }
 
     /// The host frame ending at game second `g` has moved the player.
@@ -867,6 +871,32 @@ fn walk_body(w: &Walk) -> walk::Body {
         onground: vm.flags(w.player).contains(EntFlags::ONGROUND),
         roll: f64::from(vm.ent_get_vector(w.player, "angles")[2]),
     }
+}
+
+/// How far a walking player who aims sees a monster to fight (units):
+/// QuakeC's `range` calls farther than 1000 `RANGE_FAR`, too far to wake.
+const AIM_RANGE: f32 = 1000.0;
+
+/// The living monsters a walking player sees (`aim monsters`): each one's
+/// number and the middle of its box, where nothing of the world stands
+/// between it and the player's eye. Monsters that can be hurt and are not
+/// dead (`takedamage`, `health`): a corpse or a zombie lying down is not one.
+fn monsters_seen(w: &Walk) -> Vec<(i32, [f64; 3])> {
+    let vm = &w.server.vm;
+    let o = vm.ent_get_vector(w.player, "origin");
+    let eye = [o[0], o[1], o[2] + VIEWHEIGHT as f32];
+    (1..vm.num_edicts() as i32)
+        .filter(|&e| !vm.is_free_edict(e) && vm.flags(e).contains(EntFlags::MONSTER))
+        .filter(|&e| vm.ent_get_float(e, "health") > 0.0 && vm.ent_get_float(e, "takedamage") > 0.0)
+        .filter_map(|e| {
+            let (org, mins, maxs) =
+                (vm.ent_get_vector(e, "origin"), vm.ent_get_vector(e, "mins"), vm.ent_get_vector(e, "maxs"));
+            let mid = [0, 1, 2].map(|k| org[k] + (mins[k] + maxs[k]) / 2.0);
+            let far = (0..3).map(|k| (mid[k] - eye[k]).powi(2)).sum::<f32>().sqrt() > AIM_RANGE;
+            let tr = quake_rs::world::trace_world(&w.bsp, eye, mid, [0.0; 3], [0.0; 3]);
+            (!far && tr.fraction >= 1.0).then(|| (e, mid.map(f64::from)))
+        })
+        .collect()
 }
 
 /// Where the client's last frame put the player's eye (`V_CalcRefdef`, as

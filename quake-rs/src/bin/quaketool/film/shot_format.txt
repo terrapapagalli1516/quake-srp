@@ -118,6 +118,17 @@ key T X,Y,Z [P,Y | at X,Y,Z | look P,Y] [jump] [ease E]
                                this one's over the way, as far as the player has come (a key with none
                                looks along the route ahead); `jump`: the player jumps as it leaves the key;
                                a key at the place of the one before is a pause until its T
+aim monsters [offset X,Y,Z] [from T] [to T] [fire R]
+                               (after `camera walk`) the player aims at what it fights: from film second
+                               T (default 0) to T (default the end), its view turns to the nearest living
+                               monster it sees (nothing of the world between) within 50 degrees of where it
+                               looks, and keeps to it while it lives and stays within 80; with none, to the
+                               keys' looks. The same damped hand turns it (a leaping fiend is followed a
+                               little late); `attack` lines fire where it looks. `offset`: from the middle
+                               of the monster's box to the point aimed at. `fire R`: the player holds the
+                               attack button while its view is within 4 degrees of the monster it aims at
+                               and that is more than R units away (a rocket's blast nearer hurts the player
+                               too, and flashes the screen red); no `attack` lines then
 fov F                          the field of view of the film's cameras (90; Hor+ widens it on a wide
                                picture); `camera player` and `camera demo` see id's 90, and refuse it
 

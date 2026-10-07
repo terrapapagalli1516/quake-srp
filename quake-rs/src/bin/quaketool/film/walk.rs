@@ -33,6 +33,15 @@
 //!   mouse, never a snap. The forward and side speeds are what move the
 //!   player along the route whatever the view: turning a corner it strafes a
 //!   little, as a player does.
+//! - **Aiming** (`aim monsters`): a player in a fight looks at what it
+//!   fights. From the aim's first second to its last, the view turns to
+//!   the nearest living monster the player sees within [`AIM_CONE`] of
+//!   where it looks, and keeps to it while it lives and stays in sight
+//!   (within [`AIM_KEEP`]); with none, to the keys' looks. The turn is the
+//!   same damped hand, so a leaping fiend is followed a little late, as a
+//!   player follows it; the gun fires where the view is, and the game's own
+//!   aim (`PF_aim`'s pitch) does the rest. Only the rehearsal reads the
+//!   monsters: every take replays the view it planned.
 //! - **A stuck player** (no progress toward the next key for
 //!   [`STUCK_AFTER`] game seconds while it means to move: a wall, a ledge
 //!   higher than a step, a key off the floor) ends the walk with an error,
@@ -49,7 +58,7 @@
 //! same route each by its own physics. The report says how far apart.
 
 use super::camera::{Track, look_at};
-use super::shot::{Ease, Look, Walk};
+use super::shot::{Ease, Look, Walk, WalkAim};
 
 /// The run: `sv_maxspeed`, what the always-run player reaches.
 pub const RUN: f64 = 320.0;
@@ -78,6 +87,17 @@ const PROGRESS: f64 = 2.0;
 /// right angle's turn peaks near 330 degrees a second and is done in half a
 /// second.
 pub const TURN_RATE: f64 = 10.0;
+/// How far either side of the view (degrees of yaw) an aiming player picks
+/// a monster to turn to: inside the 16:9 picture's 53, so that it turns to
+/// what is on the screen, never round to what is behind it.
+pub const AIM_CONE: f64 = 50.0;
+/// How far either side of the view a monster aimed at may go and still be
+/// followed (a fiend leaping past is let go).
+pub const AIM_KEEP: f64 = 80.0;
+/// How near the view must be to the monster aimed at (degrees, across) for
+/// an aim that fires (`fire R`) to hold the attack button: a fiend's
+/// half-width at 400 units.
+pub const FIRE_CONE: f64 = 4.0;
 /// The jump button is held at least this long (game seconds), so that a take
 /// on a coarser clock than the plan's still sees it, and let go once the
 /// player is off the ground (or after [`JUMP_MAX`]): QuakeC jumps once a
@@ -92,7 +112,8 @@ const SHARP_TURN: f64 = 100.0;
 
 /// What a player sends a host frame (`UserCmd`): the view's angles (Quake's:
 /// pitch + down), the forward and side speeds (units a second, side + right),
-/// the jump button.
+/// the jump button, and the attack button when the walk holds it (`aim
+/// monsters ... fire R`; `None`: the shot's `attack` lines hold it).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Command {
     pub pitch: f64,
@@ -100,6 +121,7 @@ pub struct Command {
     pub fwd: f64,
     pub side: f64,
     pub jump: bool,
+    pub attack: Option<bool>,
 }
 
 /// What the walker reads of the player before a host frame.
@@ -167,6 +189,12 @@ pub struct Walker {
     /// When the jump button went down.
     jump: Option<f64>,
     stuck: Option<Stuck>,
+    /// `aim monsters`, its seconds on the game's clock.
+    aim: Option<WalkAim>,
+    /// The monster aimed at (an entity's number).
+    aimed: Option<i32>,
+    /// Where it is (the point aimed at).
+    aimed_at: Option<[f64; 3]>,
 }
 
 /// Units across from `a` to `b`.
@@ -219,6 +247,12 @@ impl Walker {
             since: f64::NEG_INFINITY,
             jump: None,
             stuck: None,
+            aim: walk.aim.map(|a| {
+                let to = if a.to.is_finite() { game_time(a.to) } else { f64::INFINITY };
+                WalkAim { from: game_time(a.from), to, ..a }
+            }),
+            aimed: None,
+            aimed_at: None,
         };
         w.look = w.look_of(0, w.keys[0].pos);
         w
@@ -242,6 +276,48 @@ impl Walker {
     /// The game second each key was reached at.
     pub fn reached(&self) -> &[Option<f64>] {
         &self.reached
+    }
+
+    /// Whether the player aims at monsters (`aim monsters`): the step wants
+    /// to be told the ones it sees.
+    pub fn aims(&self) -> bool {
+        self.aim.is_some()
+    }
+
+    /// The point to look at, if the aim is on at game second `g` and a
+    /// monster is there to aim at: the one aimed at while it is `seen`
+    /// within [`AIM_KEEP`], else the nearest seen within [`AIM_CONE`].
+    fn aim_at(&mut self, g: f64, eye: [f64; 3], seen: &[(i32, [f64; 3])]) -> Option<[f64; 3]> {
+        let aim = self.aim.filter(|a| g >= a.from && g < a.to);
+        let Some(aim) = aim else {
+            self.aimed = None;
+            return None;
+        };
+        let off = |p: [f64; 3]| [0, 1, 2].map(|k| p[k] + aim.offset[k]);
+        let ahead = |p: &[f64; 3], cone: f64| {
+            arc((p[1] - eye[1]).atan2(p[0] - eye[0]).to_degrees(), self.look[1]).abs() <= cone
+        };
+        let kept = self.aimed.and_then(|n| seen.iter().find(|(m, p)| *m == n && ahead(p, AIM_KEEP)));
+        let dist = |p: &[f64; 3]| (0..3).map(|k| (p[k] - eye[k]).powi(2)).sum::<f64>();
+        let target = kept.or_else(|| {
+            seen.iter().filter(|(_, p)| ahead(p, AIM_CONE)).min_by(|(_, a), (_, b)| dist(a).total_cmp(&dist(b)))
+        });
+        self.aimed = target.map(|(n, _)| *n);
+        self.aimed_at = target.map(|(_, p)| off(*p));
+        self.aimed_at
+    }
+
+    /// The attack button, for an aim that fires (`fire R`): held while the
+    /// view is within [`FIRE_CONE`] of the monster aimed at, and that is more
+    /// than R units from the eye (a rocket's blast nearer hurts the player
+    /// too, and flashes its screen red).
+    fn trigger(&self, eye: [f64; 3]) -> Option<bool> {
+        let range = self.aim?.fire?;
+        let Some(p) = self.aimed_at else { return Some(false) };
+        let d = [0, 1, 2].map(|k| p[k] - eye[k]);
+        let across = d[0].hypot(d[1]);
+        let off = arc(d[1].atan2(d[0]).to_degrees(), self.look[1]).abs();
+        Some(off <= FIRE_CONE && across.hypot(d[2]) > range)
     }
 
     /// The key walked to (the number of keys: none, the walk is over).
@@ -336,8 +412,9 @@ impl Walker {
     }
 
     /// The command for the host frame that starts at game second `g`, the
-    /// player as `body` has it.
-    pub fn step(&mut self, g: f64, body: &Body) -> Command {
+    /// player as `body` has it; `seen`, the living monsters it sees (each
+    /// entity's number and the middle of its box), for an aim.
+    pub fn step(&mut self, g: f64, body: &Body, seen: &[(i32, [f64; 3])]) -> Command {
         let dt = self.last.map_or(0.0, |l| (g - l).max(0.0));
         self.last = Some(g);
         let eye = body.eye();
@@ -394,12 +471,17 @@ impl Walker {
                     Some(Stuck { key: self.target, since: self.since, eye, across: d, dz: key.pos[2] - eye[2] });
             }
         }
-        // The look: from the key left to the key neared, as far as the
-        // player has come, then the hand's damped turn.
-        let want = match self.target {
-            0 => self.look_of(0, eye),
-            t if t >= self.keys.len() => self.look_of(t - 1, eye),
-            t => {
+        // The look: at the monster aimed at, or from the key left to the key
+        // neared, as far as the player has come; then the hand's damped turn.
+        let aimed = self.aim_at(g, eye, seen).map(|p| {
+            let (pitch, yaw) = look_at(eye, p);
+            [pitch, yaw]
+        });
+        let want = match (aimed, self.target) {
+            (Some(at), _) => at,
+            (None, 0) => self.look_of(0, eye),
+            (None, t) if t >= self.keys.len() => self.look_of(t - 1, eye),
+            (None, t) => {
                 let u = self.keys[t - 1].ease.apply(progress);
                 let (a, b) = (self.look_of(t - 1, eye), self.look_of(t, eye));
                 [a[0] + (b[0] - a[0]) * u, a[1] + arc(b[1], a[1]) * u]
@@ -443,7 +525,7 @@ impl Walker {
         } else {
             (0.0, 0.0)
         };
-        Command { pitch: self.look[0], yaw: self.look[1], fwd, side, jump }
+        Command { pitch: self.look[0], yaw: self.look[1], fwd, side, jump, attack: self.trigger(eye) }
     }
 }
 
@@ -463,7 +545,8 @@ impl Plan {
     /// The command for a host frame starting at game second `g`: the one
     /// recorded there, or between two recorded ones (angles the shortest way,
     /// speeds straight; the jump button as the earlier has it); before the
-    /// first, the first; after the last, its angles, standing.
+    /// first, the first; after the last, its angles, standing (the attack
+    /// button, if the walk holds it, let go).
     pub fn command(&self, g: f64) -> Command {
         let m = &self.moves;
         let Some(&(first, c0)) = m.first() else { return Command::default() };
@@ -473,7 +556,7 @@ impl Plan {
         let i = m.partition_point(|&(k, _)| k <= g);
         if i >= m.len() {
             let last = m[m.len() - 1].1;
-            return Command { fwd: 0.0, side: 0.0, jump: false, ..last };
+            return Command { fwd: 0.0, side: 0.0, jump: false, attack: last.attack.map(|_| false), ..last };
         }
         let ((g0, a), (g1, b)) = (m[i - 1], m[i]);
         let f = (g - g0) / (g1 - g0);
@@ -483,6 +566,7 @@ impl Plan {
             fwd: a.fwd + (b.fwd - a.fwd) * f,
             side: a.side + (b.side - a.side) * f,
             jump: a.jump,
+            attack: a.attack,
         }
     }
 }
@@ -559,7 +643,7 @@ mod tests {
         let dt = 1.0 / hz;
         let mut g = 0.0;
         while g < secs && walker.stuck().is_none() {
-            let c = walker.step(g, &toy.body);
+            let c = walker.step(g, &toy.body, &[]);
             plan.moves.push((g, c));
             toy.step(&c, dt);
             g += dt;
@@ -674,6 +758,64 @@ mod tests {
         let last = plan.command(99.0);
         assert_eq!((last.fwd, last.side, last.jump), (0.0, 0.0, false), "after the plan, standing");
         assert!(eyes.len() > 100);
+    }
+
+    #[test]
+    fn an_aiming_player_turns_to_the_nearest_monster_ahead_and_keeps_to_it() {
+        let w = walk("camera walk\nkey 0 0,0,46 0,0\nkey 9 0,0,46 0,0\naim monsters from 0.5 to 4\n");
+        let mut walker = Walker::new(&w, |t| t);
+        assert!(walker.aims());
+        let body = Toy::at([0.0, 0.0, 46.0]).body;
+        let dt = 1.0 / 72.0;
+        let mut look_at = |from: f64, to: f64, seen: &[(i32, [f64; 3])]| {
+            let mut g = from;
+            let mut c = Command::default();
+            while g < to {
+                c = walker.step(g, &body, seen);
+                g += dt;
+            }
+            c.yaw
+        };
+        // Before the aim's first second, the key's look, whatever is seen.
+        let near = (7, [300.0, 100.0, 46.0]);
+        let behind = (9, [-200.0, 0.0, 46.0]);
+        assert!(look_at(0.0, 0.5, &[near, behind]).abs() < 0.5);
+        // Then the nearest ahead (the one behind is nearer, and never turned to).
+        let yaw = 100f64.atan2(300.0).to_degrees();
+        assert!((look_at(0.5, 1.5, &[near, behind]) - yaw).abs() < 0.5);
+        // A nearer one ahead does not take the view off the one aimed at.
+        let nearer = (8, [150.0, -40.0, 46.0]);
+        assert!((look_at(1.5, 2.0, &[near, nearer]) - yaw).abs() < 0.5);
+        // Gone (dead, or out of sight): the nearest ahead.
+        assert!((look_at(2.0, 3.0, &[nearer]) - (-40f64).atan2(150.0).to_degrees()).abs() < 0.5);
+        // None: the keys' look; and after the aim's last second, too.
+        assert!(look_at(3.0, 3.9, &[]).abs() < 0.5);
+        assert!(look_at(4.0, 5.0, &[near]).abs() < 0.5);
+    }
+
+    #[test]
+    fn an_aim_that_fires_holds_the_button_on_a_monster_far_enough() {
+        let w = walk("camera walk\nkey 0 0,0,46 0,0\nkey 9 0,0,46 0,0\naim monsters fire 160\n");
+        let mut walker = Walker::new(&w, |t| t);
+        let body = Toy::at([0.0, 0.0, 46.0]).body;
+        let mut g = 0.0;
+        let mut run = |secs: f64, seen: &[(i32, [f64; 3])]| {
+            let mut held = Vec::new();
+            let end = g + secs;
+            while g < end {
+                held.push(walker.step(g, &body, seen).attack);
+                g += 1.0 / 72.0;
+            }
+            held
+        };
+        let far = [(7, [300.0, 150.0, 46.0])];
+        let held = run(1.0, &far);
+        assert_eq!(held[0], Some(false), "not while the view turns to it");
+        assert_eq!(held.last(), Some(&Some(true)), "on it");
+        assert!(run(0.5, &[(7, [100.0, 50.0, 46.0])]).iter().all(|a| *a == Some(false)), "too near");
+        assert_eq!(run(0.1, &[]).last(), Some(&Some(false)), "nothing to fire at");
+        let w = walk("camera walk\nkey 0 0,0,46\naim monsters\n");
+        assert_eq!(Walker::new(&w, |t| t).step(0.0, &body, &far).attack, None, "the shot's lines hold it");
     }
 
     #[test]

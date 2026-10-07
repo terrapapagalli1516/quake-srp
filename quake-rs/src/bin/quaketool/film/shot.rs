@@ -210,6 +210,24 @@ pub struct Walk {
     /// How near a key the player passes, across (units).
     pub within: f64,
     pub keys: Vec<WalkKey>,
+    /// `aim monsters`: the player's view on the monsters it fights.
+    pub aim: Option<WalkAim>,
+}
+
+/// `aim monsters [offset X,Y,Z] [from T] [to T]` after `camera walk`: from
+/// film second `from` to `to`, the walking player's view turns to the
+/// nearest living monster it sees ahead and keeps to it while it lives and
+/// stays in sight, as a player fighting does (`walk.rs`); with none, the
+/// keys' looks.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WalkAim {
+    /// From the middle of the monster's box to the point aimed at.
+    pub offset: [f64; 3],
+    pub from: f64,
+    pub to: f64,
+    /// `fire R`: the player holds the attack button while its view is on
+    /// the monster it aims at, and that is more than R units away.
+    pub fire: Option<f64>,
 }
 
 /// The camera.
@@ -668,6 +686,14 @@ impl Shot {
             }
             _ => false,
         };
+        let fires = |a: &Action| match a {
+            Action::Attack(_) => true,
+            Action::Console(argv) => argv[0] == "+attack" || argv[0] == "-attack",
+            _ => false,
+        };
+        if walk.aim.is_some_and(|a| a.fire.is_some()) && self.actions.iter().any(|(_, a)| fires(a)) {
+            return Err("`aim monsters ... fire R` holds the attack button: no `attack` or `cmd +attack` lines".into());
+        }
         if self.actions.iter().any(|(_, a)| steers(a)) {
             return Err("`camera walk` moves and turns the player: no `look` or `cmd +forward/+back/+moveleft/\
                         +moveright` lines (jumps and the rest are the shot's)"
@@ -1018,6 +1044,10 @@ impl Shot {
                 })
             }
             "aim" => {
+                if let Some(CameraSpec::Walk(walk)) = &mut self.camera {
+                    walk.aim = Some(parse_walk_aim(&words)?);
+                    return Ok(());
+                }
                 let [target, opts @ ..] = words.as_slice() else {
                     return Err("`aim ENTITY [offset X,Y,Z] [lag S] [lookahead S]`".into());
                 };
@@ -1378,7 +1408,7 @@ fn parse_orbit(centre: &str, opts: &[&str]) -> Result<Orbit, String> {
 
 /// `camera walk [run|walk|SPEED] [within R]`.
 fn parse_walk(opts: &[&str]) -> Result<Walk, String> {
-    let mut walk = Walk { top: super::walk::RUN, within: super::walk::WITHIN, keys: Vec::new() };
+    let mut walk = Walk { top: super::walk::RUN, within: super::walk::WITHIN, keys: Vec::new(), aim: None };
     let mut it = opts.iter();
     while let Some(w) = it.next() {
         match *w {
@@ -1406,6 +1436,28 @@ fn parse_walk(opts: &[&str]) -> Result<Walk, String> {
         }
     }
     Ok(walk)
+}
+
+/// A walk's `aim monsters [offset X,Y,Z] [from T] [to T]`.
+fn parse_walk_aim(words: &[&str]) -> Result<WalkAim, String> {
+    let usage = "`aim monsters [offset X,Y,Z] [from T] [to T] [fire R]` (a walking player aims at what it fights)";
+    let ["monsters", opts @ ..] = words else { return Err(usage.into()) };
+    let mut aim = WalkAim { offset: [0.0; 3], from: 0.0, to: f64::INFINITY, fire: None };
+    let mut it = opts.iter();
+    while let Some(w) = it.next() {
+        let v = it.next().ok_or_else(|| format!("{usage}: `{w}` needs a value"))?;
+        match *w {
+            "offset" => aim.offset = xyz(v)?,
+            "from" => aim.from = seconds(v)?,
+            "to" => aim.to = seconds(v)?,
+            "fire" => aim.fire = Some(seconds(v)?),
+            _ => return Err(format!("{usage}: got {w:?}")),
+        }
+    }
+    if aim.to <= aim.from {
+        return Err(format!("{usage}: `to` after `from`"));
+    }
+    Ok(aim)
 }
 
 /// A walk's `key T X,Y,Z [P,Y[,R] | at X,Y,Z | look P,Y] [jump] [ease E]`.
@@ -1728,7 +1780,15 @@ label Classic: id's 16-pixel spans
         assert!(bad("camera walk\nkey 0 0,0,0\ncmd +forward at 1\n").contains("moves and turns"));
         assert!(bad("camera walk\nkey 0 0,0,0\nlook 0,90\n").contains("moves and turns"));
         assert!(bad("camera walk\nkey 0 0,0,0\nfov 100\n").contains("fov"));
-        assert!(bad("camera walk\nkey 0 0,0,0\naim 87\n").contains("aim"));
+        assert!(bad("camera walk\nkey 0 0,0,0\naim 87\n").contains("aim monsters"), "a walk aims at what it fights");
+        assert!(bad("camera walk\nkey 0 0,0,0\naim monsters from 2 to 1\n").contains("after"));
+        assert_eq!(walk("camera walk\nkey 0 0,0,0\n").aim, None);
+        assert_eq!(
+            walk("camera walk\nkey 0 0,0,0\naim monsters offset 0,0,8 from 0.5\n").aim,
+            Some(WalkAim { offset: [0.0, 0.0, 8.0], from: 0.5, to: f64::INFINITY, fire: None })
+        );
+        assert_eq!(walk("camera walk\nkey 0 0,0,0\naim monsters fire 160\n").aim.and_then(|a| a.fire), Some(160.0));
+        assert!(bad("camera walk\nkey 0 0,0,0\naim monsters fire 160\nattack on at 1\n").contains("fire"));
         assert!(Shot::parse("demo demo1\nduration 2\ncamera walk\nkey 0 0,0,0\n").unwrap_err().message.contains("map"));
         assert!(
             Shot::parse("map e1m1\nduration 2\ncamera walk\nkey 0 0,0,0\ncmd +jump at 1\n").is_ok(),
