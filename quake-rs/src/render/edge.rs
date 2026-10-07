@@ -2062,6 +2062,7 @@ impl EdgeState {
             spans: std::mem::take(&mut self.spans),
             rows: std::mem::take(&mut self.row_spans),
             w: self.w,
+            zplace: opts.zbuffer_place(&frame.geom),
             sky,
             persp: opts.persp_span,
         }
@@ -2288,14 +2289,50 @@ impl WorldDraw<'_> {
                 // store (the compiler cannot tell the z row from it), and
                 // the loop is not vectorized (the browser builds' SIMD).
                 let zi = (ziorigin + v as f32 * zistepv + u as f32 * zistepu) as f64;
-                let (mut izi, izistep) = (c_ftoi(zi * 32768.0 * 65536.0), *izistep);
-                for z in zrow {
-                    *z = (izi >> 16) as i16;
-                    izi = izi.wrapping_add(izistep);
-                }
+                let (zwidth, zx, zy) = self.zplace;
+                let odd_start = (zwidth * (v + zy) + u + zx) & 1 == 1;
+                draw_zspan(zrow, c_ftoi(zi * 32768.0 * 65536.0), *izistep, odd_start);
             }
         }
         drawn
+    }
+}
+
+/// `D_DrawZSpans` (d_scan.c) over one span's z row: `izi` the 1/z at its
+/// first pixel (times 2^31), stepped by `izistep`, each pixel `izi >> 16`.
+///
+/// The C stores two pixels at a time, as one `int` at an even address: a span
+/// that starts on an odd one (`odd_start`: `d_zwidth * v + u` odd) stores its
+/// first pixel alone, then pairs, then a last one alone. A pair's store is
+/// `ltemp = izi >> 16; izi += izistep; ltemp |= izi & 0xFFFF0000`: when the
+/// first `izi` is negative its shift fills the high half with the sign, and
+/// the second pixel reads -1 whatever its own `izi` was. `izi` is negative
+/// on the background (`d_ziorigin` -0.9) and where `zi * 2^31` passes an
+/// `int`, a plane within a unit of the eye: x86's conversion gives
+/// `INT_MIN`, and the steps wrap. A wrapped `izi` can read as the nearest
+/// 1/z there is, which a model in front then fails against where id's -1
+/// lets it through: e1m6, an armour at the screen's left edge before a door
+/// whose plane passes the eye there; e1m5, a fiend's edge pixel over a face
+/// whose plane the eye nearly touches (1/z from 0.05 to 4 along the row).
+fn draw_zspan(zrow: &mut [i16], izi: i32, izistep: i32, odd_start: bool) {
+    let mut step = izi;
+    let mut sign = 0;
+    for z in zrow.iter_mut() {
+        *z = (step >> 16) as i16;
+        sign |= step;
+        step = step.wrapping_add(izistep);
+    }
+    if sign >= 0 {
+        return; // no pair's first `izi` was negative
+    }
+    // The second pixel of each pair (an odd address, after the span's first
+    // pixel) whose first was negative.
+    let mut prev = izi;
+    for (k, z) in zrow.iter_mut().enumerate().skip(1) {
+        if (k + usize::from(odd_start)) & 1 == 1 && prev < 0 {
+            *z = -1;
+        }
+        prev = prev.wrapping_add(izistep);
     }
 }
 
@@ -2342,6 +2379,10 @@ pub(super) struct WorldDraw<'a> {
     rows: Vec<u32>,
     /// The view's width.
     w: usize,
+    /// Where the view's pixels sit in id's z-buffer: `d_zwidth` and the
+    /// view's corner ([`RenderOptions::zbuffer_place`](super::RenderOptions)),
+    /// which [`draw_zspan`]'s pair stores go by.
+    zplace: (usize, usize, usize),
     sky: SkyView,
     persp: super::raster::PerspSpan,
 }
@@ -2405,12 +2446,13 @@ mod tests {
     #[test]
     fn the_background_is_r_clearcolor_at_infinity() {
         // Outside the room looking away from it: one background span per row,
-        // palette[2], and D_DrawZSpans' -0.9 "at infinity" 1/z.
+        // palette[2], and D_DrawZSpans' -0.9 "at infinity" 1/z — stored in
+        // pairs, whose second pixel reads the negative first's sign, -1.
         let cam = Camera::looking_at([-400.0, 0.0, 0.0], [-800.0, 0.0, 0.0], 90.0);
         let (img, z) = render_z(&cam, 64, 40);
         assert!(img.pixels.iter().all(|&p| p == R_CLEARCOLOR));
         let bg = ((-0.9f32 as f64 * 32768.0 * 65536.0) as i32 >> 16) as i16;
-        assert!(z.iter().all(|&v| v == bg));
+        assert!(z.iter().enumerate().all(|(i, &v)| v == if i % 2 == 0 { bg } else { -1 }));
     }
 
     #[test]
@@ -2609,6 +2651,35 @@ mod tests {
         assert_eq!(c_ftoi(3.0e9), i32::MIN);
         assert_eq!(c_ftoi(-3.0e9), i32::MIN);
         assert_eq!(c_ftoi(f64::NAN), i32::MIN);
+    }
+
+    #[test]
+    fn z_spans_store_in_pairs_as_d_drawzspans() {
+        let zspan = |izi: i32, step: i32, n: usize, odd: bool| {
+            let mut z = vec![0i16; n];
+            draw_zspan(&mut z, izi, step, odd);
+            z
+        };
+        // A positive 1/z: every pixel its own `izi >> 16`, either parity.
+        let (izi, step) = (0x1234_5678, 0x0001_0000);
+        let each: Vec<i16> = (0..5).map(|k| ((izi + k * step) >> 16) as i16).collect();
+        assert_eq!(zspan(izi, step, 5, false), each);
+        assert_eq!(zspan(izi, step, 5, true), each);
+        // The background, -0.9 * 2^31: a pair's second pixel is the first's
+        // sign, -1; a span starting on an odd address stores its first alone.
+        let bg = (c_ftoi(-0.9 * 2_147_483_648.0) >> 16) as i16;
+        assert_eq!(zspan(c_ftoi(-0.9 * 2_147_483_648.0), 0, 5, false), [bg, -1, bg, -1, bg]);
+        assert_eq!(zspan(c_ftoi(-0.9 * 2_147_483_648.0), 0, 5, true), [bg, bg, -1, bg, -1]);
+        // e1m6's door at the screen's left edge: 1/z past 1 there, INT_MIN,
+        // stepped down and wrapped to the nearest depth. id's pair stores -1
+        // in the second pixel, which the armour in front passes.
+        let step = -13_558_098;
+        let wrapped = (i32::MIN.wrapping_add(step) >> 16) as i16;
+        assert_eq!(wrapped, 32561, "the nearest depth there is");
+        let z = zspan(i32::MIN, step, 4, false);
+        assert_eq!(z[..2], [i16::MIN, -1]);
+        assert_eq!(z[2], (i32::MIN.wrapping_add(2 * step) >> 16) as i16);
+        assert_eq!(zspan(i32::MIN, step, 2, true), [i16::MIN, wrapped], "the pair starts after it");
     }
 }
 

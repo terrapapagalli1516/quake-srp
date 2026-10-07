@@ -485,6 +485,18 @@ impl RenderOptions {
         }
     }
 
+    /// Where a view's pixels sit in `d_pzbuffer`: its row length `d_zwidth`
+    /// (`vid.width`, the warp buffer's too) and the view's corner,
+    /// `r_refdef.vrect.x/y` — `D_DrawZSpans` stores by the address's parity.
+    /// Without a place on a screen the view is the screen (a window's is the
+    /// view it opens onto).
+    fn zbuffer_place(&self, geom: &ViewGeom) -> (usize, usize, usize) {
+        match self.screen {
+            Some(p) => (p.vid_w, p.x, p.y),
+            None => (geom.proj_w, geom.ox, geom.oy),
+        }
+    }
+
     /// [`RenderOptions::pixel_aspect`], with a non-finite or non-positive value
     /// read as square pixels.
     pub(crate) fn aspect(&self) -> f32 {
