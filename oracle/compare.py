@@ -31,7 +31,8 @@ player's spawn, cl.time at that frame) unless --view/--time pin it; the port is
 then handed exactly that vieworg/viewangles/cl.time. In `ents` mode the port
 draws the entity list id's frame drew (the .ents file), so both renderers get the
 same inputs and the diff measures rendering alone, not the simulation. In either
-mode it draws the particles id's frame drew (the .parts file).
+mode it draws the particles id's frame drew (the .parts file), lit by id's dynamic
+lights and id's light-style strings (the game's state; the port animates them).
 """
 
 from __future__ import annotations
@@ -258,11 +259,16 @@ def run_port(args, qt: Path, case: str, mapname: str, meta: dict, ents: bool, ou
     # (muzzle flashes, explosions: e.g. --c-cmd +attack) by default.
     for dl in frame_dlights(args, qt, meta):
         cmd += ["--dlight", ",".join(repr(float(v)) for v in dl)]
-    # id's light styles of the frame (`d_lightstylevalue`), not the ones the port
-    # derives from the clock: a demo's styles are the recording's, which the map's own
-    # animation does not know (a frame's `cl.time` also reaches R_AnimateLight a tenth earlier)
+    # The light styles. By default id's light-style strings of the frame
+    # (`cl_lightstyle[].map`): the game's state, as the entity list is — QuakeC's
+    # lightstyle() calls, lights a trigger switched off or on since the spawn,
+    # which the port's `view` (the map spawned, never run) cannot know — animated
+    # by the port's R_AnimateLight at id's clock. With --id-lightstyles id's
+    # values themselves (`d_lightstylevalue`), R_AnimateLight's output.
     if args.id_lightstyles:
         cmd += ["--style-values", ",".join(str(int(v)) for v in meta["lightstyles"])]
+    elif "lightstyle_maps" in meta:
+        cmd += ["--style-maps", ",".join(meta["lightstyle_maps"])]
     if args.viewmodel and meta["viewmodel"]["model"]:
         vm = meta["viewmodel"]
         cmd += ["--viewmodel", f'{vm["model"]}:{vm["frame"]}',
@@ -391,9 +397,8 @@ def main() -> None:
                     help="id's host frame step in seconds (-oracle_dt; default the oracle's 0.1). "
                          "0.01388888899236917 is the port's 1/72 s, the step `quaketool play` runs at")
     ap.add_argument("--id-lightstyles", action="store_true",
-                    help="hand the port id's light styles of the frame (d_lightstylevalue, from its json) "
-                         "instead of the ones it derives from the clock; for demo frames, whose styles are the "
-                         "recording's")
+                    help="hand the port id's light-style values of the frame (d_lightstylevalue, from its json) "
+                         "instead of id's light-style strings, which the port animates at id's clock (the default)")
     ap.add_argument("--dlights", default="id",
                     help="the dynamic lights the port's frame is lit with: id (id's own cl_dlights of the "
                          "frame, default), none, or demoN (the lights the port's playback of demo N makes "

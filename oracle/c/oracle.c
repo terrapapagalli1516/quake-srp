@@ -39,7 +39,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 //                                      and when a timedemo finishes
 //   oracle_shot path                   queue a shot: writes path.pgm (raw palette
 //                                      indices), path.ppm (RGB), path.json (the view,
-//                                      clock, vrect, light styles, ...), path.ents
+//                                      clock, vrect, light styles and their strings, ...), path.ents
 //                                      (the entities the frame drew, one per line)
 //                                      and path.parts (the particles it drew)
 //   oracle_spans 8|16|1                 (a cvar) the textured-span routine: 8 = id's portable
@@ -684,6 +684,23 @@ static void Oracle_Dump (oracle_shot_t *s, int stage)
 	fprintf (f, "  \"lightstyles\": [");
 	for (i=0 ; i<MAX_LIGHTSTYLES ; i++)
 		fprintf (f, "%s%d", i ? ", " : "", d_lightstylevalue[i]);
+	fprintf (f, "],\n");
+	// the strings R_AnimateLight animates (svc_lightstyle's, the game's state:
+	// QuakeC's lightstyle() calls), any byte outside a-z escaped
+	fprintf (f, "  \"lightstyle_maps\": [");
+	for (i=0 ; i<MAX_LIGHTSTYLES ; i++)
+	{
+		char	*c;
+		fprintf (f, "%s\"", i ? ", " : "");
+		for (c = cl_lightstyle[i].map ; *c ; c++)
+		{
+			if (*c >= 'a' && *c <= 'z')
+				fputc (*c, f);
+			else
+				fprintf (f, "\\u%04x", (unsigned char)*c);
+		}
+		fprintf (f, "\"");
+	}
 	fprintf (f, "]\n}\n");
 	fclose (f);
 

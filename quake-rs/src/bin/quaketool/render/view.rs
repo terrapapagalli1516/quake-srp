@@ -28,6 +28,11 @@
 //! --viewent x,y,z,p,y,r  the weapon's origin and angles, `cl.viewent` (default:
 //!                    V_CalcRefdef's for a still player at viewsize 120)
 //! --bench N          then render the same view N more times, report warm ms/frame
+//! --style-maps S0,S1,...  the light-style strings (`cl_lightstyle[].map`, up to 64,
+//!                    empty ones too): the game's state at the frame, animated at
+//!                    --time (default: the strings the map's spawn sets)
+//! --style-values V0,V1,...  the styles' values themselves, `d_lightstylevalue[]` (the
+//!                    .json's `lightstyles`), over any strings
 //! --particles FILE   draw these particles: the oracle's `.parts` list, one per line,
 //!                    `x y z color`, in id's draw order (without it: none)
 //! --dlight x,y,z,radius[,minlight]  a live dynamic light (repeatable; the oracle
@@ -92,6 +97,7 @@ pub fn cmd_view(args: &[String]) -> CmdResult {
     let mut dlights: Vec<quake_rs::dlight::DynamicLight> = Vec::new();
     let mut particles: Vec<([f32; 3], u8)> = Vec::new();
     let mut style_values: Option<Vec<f32>> = None;
+    let mut style_maps: Option<Vec<String>> = None;
     let mut video = VideoArgs::default();
     let mut res: Option<&str> = None;
     let mut i = 3;
@@ -152,6 +158,16 @@ pub fn cmd_view(args: &[String]) -> CmdResult {
                     .collect::<Result<_, _>>()
                     .map_err(|_| format!("--style-values: expected comma-separated integers, got {val:?}"))?;
                 style_values = Some(v);
+            }
+            "--style-maps" => {
+                // id's light-style strings of the frame (`cl_lightstyle[].map`, the .json's
+                // `lightstyle_maps`): the game's state, in place of the map's spawn; the port's
+                // R_AnimateLight animates them at --time.
+                let maps: Vec<String> = val.split(',').map(str::to_owned).collect();
+                if maps.len() > quake_rs::server::MAX_LIGHTSTYLES {
+                    return Err(format!("--style-maps: {} strings, at most 64", maps.len()).into());
+                }
+                style_maps = Some(maps);
             }
             "--viewmodel" => viewmodel_arg = Some(val.as_str()),
             "--viewent" => {
@@ -218,7 +234,10 @@ pub fn cmd_view(args: &[String]) -> CmdResult {
     let angles = angles.unwrap_or([0.0, start.map_or(0.0, |(_, a)| a), 0.0]);
     let cam = Camera { pos: origin, yaw: angles[1], pitch: -angles[0], roll: angles[2], fov_deg: fov };
     let time: f64 = time.unwrap_or_else(|| f64::from(server.time()));
-    let mut light_styles = server.lightstyle_scales(time, video.cvars.lightstyles);
+    let mut light_styles = match &style_maps {
+        Some(maps) => quake_rs::server::lightstyle_scales_at(maps, time, video.cvars.lightstyles),
+        None => server.lightstyle_scales(time, video.cvars.lightstyles),
+    };
     // `R_BuildLightMap` multiplies a luxel by `d_lightstylevalue[style]` against a white point of 256.
     for (scale, value) in light_styles.iter_mut().zip(style_values.iter().flatten()) {
         *scale = value / 256.0;
