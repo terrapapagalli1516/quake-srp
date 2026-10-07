@@ -1,6 +1,6 @@
 # Quake-RS — status and hand-off
 
-Last updated 2026-10-02, after the polish round's third wave (`main` @ 1dd1b69). The first section is
+Last updated 2026-10-07, after the merge of Classic's every pixel, the monsters and the film tool. The first section is
 where things stand. Then the rounds, newest first, branch by branch; how to work here; and
 the older history, kept as evidence, with superseded items marked.
 
@@ -45,20 +45,21 @@ the older history, kept as evidence, with superseded items marked.
   - install to the home screen and play offline;
   - a player's own `pak1.pak` and CD tracks;
   - QuakeC errors end the game as id's `Host_Error` does.
-- **Measured** (on `244bcd5` plus this branch's docs):
+- **Measured** (2026-10-07, at the merge of `fleet/pixel-ents`, `fleet/film-hero` and `fleet/filmdocs`):
   - **Classic** (since `fleet/pixelexact`, 2026-10-05): `uv run oracle/classic_check.py`
     prints ALL PASS, ten checks. They cover the goldens `790c53d3` / `3684efc6` /
     `e18bb516`, 42 play hashes and tallies, the timedemo counts, the census and id's
-    edicts on nine maps, the eight 3-D oracle rows at 100.0000% and 414 swept views with
-    not one pixel off (both against id's C built with SSE2 floats, the port's target:
-    AUDIT, "Bit for bit"), 146 2-D shots at their recorded match, demo playback against
+    edicts on nine maps, the eight 3-D oracle rows at 100.0000% and the `exact` sweep's
+    676 frames with not one pixel off, 262 of them with the player among each map's
+    monsters, awake (both against id's C built with SSE2 floats, the port's target:
+    AUDIT, "Bit for bit" and "Every view tried, with monsters"), 146 2-D shots at their recorded match, demo playback against
     id's client over 17,500 frames, and the mixer against id's C in 28 of 28 cases.
-  - **Tests:** `cargo test --release` gives 781 in quake-rs (plus a few ignored ones that
-    need the mission packs' data, `QUAKE_*_DIR`/`QUAKE_HIP1M1_PAK`) and 198 in quake-wasm (1
+  - **Tests:** `cargo test --release` gives 975 in quake-rs (plus a few ignored ones that
+    need the mission packs' data, `QUAKE_*_DIR`/`QUAKE_HIP1M1_PAK`) and 224 in quake-wasm (1
     ignored: the 2-D oracle's harness).
   - **Clippy:** 0 warnings in both crates.
-  - **Browser checks:** the 18 `web/verify_*.py` checks pass in headless Chromium
-    (2026-10-02). `verify_threads` builds its own program and
+  - **Browser checks:** the `web/verify_*.py` checks pass in headless Chromium
+    (2026-10-07). `verify_threads` builds its own program and
     `verify_audio_resilience` needs a `--features bench` build; the rest run on a
     deploy dir of either build. Earlier branches also ran most checks in headless
     Firefox.
@@ -66,8 +67,8 @@ the older history, kept as evidence, with superseded items marked.
     60–480 Hz against 72.
   - **Speed:** `timedemo demo1` in Classic natively is 1.35–1.44x id's portable C. In
     2026 video on 8 threads it runs 689 / 455 / 210 fps at 1080p / 1440p / 4K. In the
-    browser a 1440p frame takes 3.3 ms on the threads build on the GPU (`README.md`,
-    "Numbers"; `PERF_PLAN.md` §11).
+    browser a 1440p frame takes 3.3 ms on the threads build on the GPU (`PERF_PLAN.md`
+    §11; these predate `fleet/opt-pixels`, §15).
 - **Not verified:**
   - a real browser on a real display: every browser check ran headless, on a
     desktop GPU at best;
@@ -102,6 +103,34 @@ the older history, kept as evidence, with superseded items marked.
   W0a/W0b, R1, R6, R8, R9, R11, and the engine-owned `Host` session (§7).
 
 ---
+
+## 2026-10-05 to 2026-10-07: every pixel, the monsters, and the film tool
+
+Merged together (the details are in the branches' commits, and for the pixels in AUDIT):
+
+- **Classic is id's C to the pixel** (`fleet/pixelexact`, `fleet/pixeldocs`). Classic's
+  renderer computes in id's C types (`AngleVectors`, `R_ViewChanged`, `D_CalcGradients`, the
+  spans' float accumulators, the alias models, sky and warp; `R_AnimateLight`'s clock in
+  double), and matches id's C built with SSE2 floats on every pixel of every view tried.
+  The goldens moved to `790c53d3` / `3684efc6` / `e18bb516` (texel-edge pixels); the
+  x87 build and 1996's FPU mode are not the target (AUDIT, "Bit for bit").
+- **With the monsters awake** (`fleet/pixel-ents`). 18 views of 1,967 searched among the
+  monsters differed; all are id's now: the view leaf is `Mod_PointInLeaf`'s at
+  `V_CalcRefdef`'s eye, nudged 1/32 off node lines; `D_DrawZSpans` stores in pairs as id's
+  C does (the C, not the 1996 asm: the user's call); `compare.py` hands the port id's
+  light-style strings. `exact_sweep.py`'s `monsters` and `cases` views are in
+  `classic_check` (AUDIT, "Every view tried, with monsters").
+- **`quaketool film`** (`fleet/filmtool` to `fleet/film-hero`, merged as one stack). A
+  camera inside the engine for the port's explainer film, driven by shot files: fixed,
+  path, follow, orbit and walking cameras; x-rays of the renderer (spans, surface cache,
+  lightmaps, segments, threads' bands, the exact pass); marks that stick to the world;
+  `display HZ`; settings that change mid-shot; a map made for the film (`mapgen`); a
+  walking player that fights (`aim monsters`). Its hooks in the engine are idle unless a
+  film turns them on. A film's own camera is drawn where its shot puts it (no bob, no
+  nudge); its views of the player get id's eye. `film/` holds the shots and the command
+  that renders them.
+- **The docs say "the user"** (`fleet/filmdocs`), and segments ahead is id's own x86 FDIV
+  overlap (PERF_PLAN §15).
 
 ## 2026-10-02, later: what the user found playing, and the packs' own paths
 
@@ -382,7 +411,7 @@ From the repository's root:
 (cd quake-rs && cargo test --release && cargo clippy --release --all-targets)
 (cd quake-wasm && cargo test --release && cargo clippy --release --all-targets)
 
-# Classic's proof, ten checks (goldens, play hashes, timedemo, census; and id's C: edicts, 3-D, the 414-view sweep, 2-D, demos, sound)
+# Classic's proof, ten checks (goldens, play hashes, timedemo, census; and id's C: edicts, 3-D, the exact sweep with the monsters awake, 2-D, demos, sound)
 uv run oracle/classic_check.py
 
 # the uncapped game against 72 Hz

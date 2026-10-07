@@ -379,7 +379,8 @@ marked *(2026-06)* were not re-checked since. Struck items were closed on 2026-0
 - `D_DrawZSpans` is id's C, whose pair store writes -1 after a negative `izi`; id's x86
   asm (`d_draw.s`, `shrl`) does not, so the binaries players ran drew as the port did
   before (22 pixels in two views of the monster search; "Every view tried, with
-  monsters", pixel-ents). The C is the target, as everywhere but the spans.
+  monsters", pixel-ents). The C is the target, as everywhere but the spans (the user's
+  call, 2026-10-07).
 - The live clients' eye is V_CalcRefdef's since pixel-ents (the 1/32 nudge), but no
   check compares it with id's `r_refdef.vieworg` frame by frame (`demo_lerp.py`
   compares the view entity's origin); id's stair smoothing starts from `static oldz =

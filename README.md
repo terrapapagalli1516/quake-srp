@@ -245,7 +245,7 @@ recorded from a tree known to be right. Six run id's C next to the port:
 | `census` | a headless playthrough of all nine maps | recorded |
 | `edicts` | the entities' fields against id's server on all nine maps (the known differences, such as the player's edict number and random numbers, are recorded) | id's C |
 | `oracle` | the 3-D view, pixel by pixel, in four maps' first frames, with and without the entities | id's C |
-| `exact` | the 3-D view in 676 frames: each of the nine maps' first frames, turned, tilted and rolled, at two sizes; and the player moved among each map's monsters, awake, with every view once found differing, at id's 16- and 8-pixel spans; not one pixel may differ | id's C |
+| `exact` | the 3-D view in hundreds of frames: each of the nine maps' first frames, turned, tilted and rolled, at two sizes; and the player moved among each map's monsters, awake, with every view once found differing, at id's 16- and 8-pixel spans; not one pixel may differ | id's C |
 | `screen2d` | the status bar, menus and console | id's C |
 | `demolerp` | demo playback, frame by frame | id's C |
 | `sound` | the mixer, sample by sample | id's C |
@@ -290,6 +290,7 @@ Beyond Classic:
 | `web/` | the page, the WASI host (`wasi.js`), touch controls, the service worker, the browser checks |
 | `oracle/` | id's WinQuake built headless from the C, and the scripts that compare it with the port |
 | `census/` | helpers for the gameplay census ([CENSUS.md](CENSUS.md)) |
+| [`film/`](film/README.md) | how the port's explainer film was made: its game footage as shot files for `quaketool film` (a camera inside the engine, with x-rays of the renderer's machinery), and the command that renders them |
 | `screenshots/` | the two renders at the top of this README |
 | `ci/`, `.github/workflows/` | the checks CI runs (`ci/local.sh` runs them here), and the shareware pak's fetch |
 

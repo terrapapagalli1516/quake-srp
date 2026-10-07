@@ -228,6 +228,9 @@ The tests build their own maps, models, paks and QuakeC programs in Rust (for ex
   - `timedemo`: id's benchmark;
   - `sound`, `sndscript`: the mixer to WAV;
   - `framerate --check`: gameplay at high frame rates, compared with 72 Hz.
+- **Films:** `film`, a camera inside the engine from a shot file (a live map or a demo,
+  x-rays of the renderer's machinery, marks, sound and an events log), with `filmtext`
+  and `mapgen` beside it ([`../film/`](../film/README.md)).
 
 ## Not here
 
