@@ -14,10 +14,6 @@ text he was given, id is spelled "Idd", so that it is said as a word, not as two
 Line ids carry the script version that wrote them: `V3-` lines are the third script's;
 the `V4-`, `V6-` and `V7-` lines were rewritten or added in later versions.
 
-Two lines state what the pixel-exact work proves (the branches `fleet/pixelexact` and
-`fleet/pixel-ents`): V7-16's "every pixel matches" and V6-18's ten checks. Without them,
-[README.md](../README.md#proof) counts nine checks and two pixels that differ on e1m7.
-
 ## 1. Cold open
 
 *(no voice: e1m1's first corridor, as 1996 drew it, with NARRATED BY AI at the foot of the screen)*
@@ -73,7 +69,7 @@ Two lines state what the pixel-exact work proves (the branches `fleet/pixelexact
 *(silence: the screen is black, and so is the sound)*
 
 **V7-16** · No, your video hasn't frozen. That's the difference: on these views, monsters and all, every pixel matches.
-<!-- oracle/README.md: compare.py's `ents` mode, the port drawing id's entity list. The proof frames under this line are four such views at 320x200 (e1m1, e1m2, e1m3, e1m5), with their monsters, made with the pixel-exact fixes: 0 pixels differ. -->
+<!-- README.md: "every pixel of the 3-D view in every view tried, monsters awake". oracle/README.md: compare.py's `ents` mode, the port drawing id's entity list. The proof frames under this line are four such views at 320x200 (e1m1, e1m2, e1m3, e1m5), with their monsters: 0 pixels differ. -->
 
 **V3-17a** · The mixer matches id's, sample for sample.
 <!-- README.md: "the mixer's output, sample for sample" -->
@@ -82,7 +78,7 @@ Two lines state what the pixel-exact work proves (the branches `fleet/pixelexact
 <!-- oracle/README.md, "Demo playback" -->
 
 **V6-18** · One command runs ten checks, six of them against id's own C. All ten pass.
-<!-- oracle/classic_check.py's CHECKS: goldens, play, timedemo, census, edicts, oracle, screen2d, demolerp, sound; the pixel-exact work adds `exact`, "against id's C", after oracle. README.md, "Proof": "Four compare the port with values recorded from a tree known to be right. Five run id's C next to the port". So ten, six of them against id's C. -->
+<!-- oracle/classic_check.py's CHECKS: goldens, play, timedemo, census, edicts, oracle, exact, screen2d, demolerp, sound. README.md, "Proof": "This runs the Classic preset through ten checks. Four compare the port with values recorded from a tree known to be right. Six run id's C next to the port". -->
 <!-- Not "and prints: all pass": a program printing a verdict is not evidence; the count is. -->
 
 ## 4. The slop, switched on
