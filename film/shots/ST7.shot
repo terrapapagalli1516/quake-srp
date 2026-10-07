@@ -1,0 +1,27 @@
+# ST7: demo2 from 50.0 s, the ogres' fight and the blast near 56 s, native 1920x1080 in
+# the slop preset with the options not yet shown held at id's ("The status bar scales").
+# The status bar changes in the render: scaled at file second 3.0, the world beside it at
+# 5.0, the crosshair at 7.5. Brightness 0.8. The state labels over it are the edit's.
+
+demo demo2 from 49.0
+
+duration 10.6
+fps 60
+size 1920x1080
+
+preset slop
+hud on
+gun on
+crosshair 0
+cvar r_perspspan 16
+cvar wasm_scaled2d 0
+cvar scr_sbaroverlay 0
+cvar r_nailbarrels 0
+cvar snd_modern 0
+cvar gamma 0.8
+cvar wasm_scaled2d 1 at 3.0
+cvar scr_sbaroverlay 1 at 5.0
+cvar crosshair 1 at 7.5
+
+sound on
+events on

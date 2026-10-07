@@ -1,0 +1,27 @@
+# LAB10a: e1m1's start, slop with the status bar and the gun, in the `bands` x-ray: each
+# of the renderer's 8 threads' bands of rows in a colour ("Every core draws"), held, then
+# mixed out to the picture over file seconds 3.4 to 4.0. Which thread takes which band is
+# the scheduler's, so the colours' order changes from run to run; the pixels beneath do
+# not.
+
+map e1m1
+
+duration 5.6
+fps 60
+size 1920x1080
+threads 8
+
+preset slop
+hud on
+gun on
+cvar gamma 0.8
+
+camera fixed 480,-352,110 0,90
+
+xray bands
+mix 0 1
+mix 3.4 1
+mix 4.0 0
+
+sound off
+events on

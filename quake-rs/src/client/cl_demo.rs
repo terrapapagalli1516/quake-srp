@@ -602,6 +602,11 @@ fn cl_relink_entities(d: &mut DemoPlay, frac: f32, first_read: usize, lerpmove: 
         }
         v.entities.push(drawn);
     }
+    // EXTRA, not id (`DemoPlay::draw_player`): the recorded player's model,
+    // where the view entity was relinked above.
+    if let (true, Some(e)) = (d.draw_player, f.view_entity) {
+        v.entities.push(EntSnapshot { origin: v.view_entity_origin, angles: v.view_entity_angles, ..e });
+    }
     if smooth {
         d.glides.end_frame();
     } else {
@@ -853,6 +858,9 @@ fn render_demo_frame(
             fov_deg: 90.0,
         }
     };
+    // EXTRA, not id: the host's own camera (`DemoPlay::camera`), as given;
+    // the recorded view above still ran (its smoothing and kick go on).
+    let cam = d.camera.unwrap_or(cam);
     // Sound listener pose + the per-leaf ambient channels follow the demo
     // camera (the C's S_Update runs in demo playback too — the recorded e1m3
     // run drifts past water and open sky, and its placed torch loops pan with
@@ -860,7 +868,14 @@ fn render_demo_frame(
     {
         let yaw_rad = (v.view_angles[1] as f64).to_radians();
         let (sy, cy) = (yaw_rad.sin() as f32, yaw_rad.cos() as f32);
-        let listener = Listener { pos: v.view_origin, forward: [cy, sy, 0.0], right: [sy, -cy, 0.0] };
+        let listener = match d.camera {
+            None => Listener { pos: v.view_origin, forward: [cy, sy, 0.0], right: [sy, -cy, 0.0] },
+            Some(c) => {
+                let yaw = (c.yaw as f64).to_radians();
+                let (sy, cy) = (yaw.sin() as f32, yaw.cos() as f32);
+                Listener { pos: c.pos, forward: [cy, sy, 0.0], right: [sy, -cy, 0.0] }
+            }
+        };
         sound.push(s_update(&d.bsp, listener, dt));
     }
     // The recorded server time animates the demo's liquids/sky too. The live
@@ -905,7 +920,8 @@ fn render_demo_frame(
     // SU_WEAPONFRAME its animation frame. Hidden exactly like R_DrawViewModel
     // (r_main.c ~606): invisible POV (Ring of Shadows), dead POV, or an
     // intermission (V_CalcIntermissionRefdef sets `view->model = NULL`).
-    let hide_gun = f.intermission != 0 || client.health <= 0 || client.items & IT_INVISIBILITY != 0;
+    let hide_gun =
+        f.intermission != 0 || !d.draw_viewmodel || client.health <= 0 || client.items & IT_INVISIBILITY != 0;
     let viewmodel = if hide_gun {
         None
     } else {
@@ -1555,6 +1571,32 @@ mod tests {
         d.models = Vec::new();
         cl_relink_entities(&mut d, 1.0, 0, LerpMove::Classic);
         assert_eq!(d.view.entities[0].angles[1], 30.0, "no EF_ROTATE: the recorded yaw");
+    }
+
+    /// id's client never draws the recorded player; `draw_player` (a host's
+    /// camera outside it) draws its model where the view entity is relinked.
+    #[test]
+    fn the_recorded_player_is_drawn_only_when_asked() {
+        let player = EntSnapshot { num: 1, modelindex: 3, frame: 6, skin: 0, ..Default::default() };
+        let mut d = playback(vec![DemoFrame {
+            time: 1.5,
+            prev_time: 1.4,
+            view_entity_origin: [10.0, 20.0, 30.0],
+            view_prev_origin: [0.0, 20.0, 30.0],
+            view_entity_angles: [0.0, 90.0, 0.0],
+            view_prev_entity_angles: [0.0, 90.0, 0.0],
+            view_entity: Some(player),
+            entities: vec![EntSnapshot { num: 2, modelindex: 1, ..Default::default() }],
+            ..Default::default()
+        }]);
+        cl_relink_entities(&mut d, 0.5, 0, LerpMove::Classic);
+        assert!(d.view.entities.iter().all(|e| e.num != 1), "id's: not drawn");
+        d.draw_player = true;
+        cl_relink_entities(&mut d, 0.5, 1, LerpMove::Classic);
+        let drawn = d.view.entities.iter().find(|e| e.num == 1).expect("drawn");
+        assert_eq!((drawn.modelindex, drawn.frame), (3, 6));
+        assert_eq!(drawn.origin, d.view.view_entity_origin, "where the view entity is relinked");
+        assert_eq!(drawn.origin, [5.0, 20.0, 30.0], "halfway from the message before");
     }
 
     // ----- Dynamic lights in playback (CL_RelinkEntities, CL_ParseTEnt) -----

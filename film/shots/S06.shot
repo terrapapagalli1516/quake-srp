@@ -1,0 +1,20 @@
+# S06: e1m1's Quad Damage turning in its secret corridor (the item at 544,2480,-88).
+# Classic at 320x200, no status bar; Classic steps the turn on id's 72 Hz ticks. The move
+# is eased over file seconds 1 to 3.2; the handles hold.
+
+map e1m1
+
+duration 4.2
+fps 60
+size 1920x1080
+
+preset classic
+mode 320x200
+hud off
+cvar gamma 0.8
+
+camera path
+key 1    544,2380,-66  5,90  ease inout
+key 3.2  520,2390,-66  5,80
+
+events on

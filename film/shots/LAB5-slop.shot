@@ -1,0 +1,21 @@
+# LAB5-slop: LAB5-id with slop's fluid sky (`r_fluidsky 1`): the clouds glide.
+#
+# Assembly (LAB5): the 470x520 crops at (700,40) of LAB5-id and LAB5-slop, enlarged 2x
+# (nearest), side by side at (13,20) and (967,20) of a black 1920x1080 frame, labelled
+# "id's" and "slop".
+
+map e1m1
+
+duration 7
+fps 60
+size 1920x1080
+
+preset slop
+hud off
+cvar gamma 0.8
+cvar r_fluidsky 1
+
+camera fixed -112,704,56 -30,45
+
+sound off
+events on

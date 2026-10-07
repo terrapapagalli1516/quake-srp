@@ -1,0 +1,31 @@
+# F13-id: e1m1's start, the player's own eye, god mode, slop with the crosshair and the
+# status bar; `impulse 9`, `impulse 4`, the trigger held from film second 0.5 ("So now
+# they leave the barrels"). id's nails.
+#
+# Assembly (F13): the 470x520 crops at (725,450), from the cross down to the gun, of
+# F13-id and F13-barrels, enlarged 2x (nearest), side by side at (13,20) and (967,20) of a
+# black 1920x1080 frame, labelled "nails: id's" and "nails: from the barrels". The sound
+# is F13-barrels'.
+
+map e1m1
+
+duration 4
+fps 60
+size 1920x1080
+
+preset slop
+hud on
+gun on
+crosshair 1
+player 480,-352,88,90
+cvar gamma 0.8
+cvar r_nailbarrels 0
+
+impulse 9 at 0
+impulse 4 at 0.1
+attack on at 0.5
+
+camera player
+
+sound off
+events on

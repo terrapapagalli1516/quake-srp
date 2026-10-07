@@ -1,0 +1,17 @@
+# S05: demo3 (e1m6) from 17.6 s: the rocket launcher picked up, then its first blast.
+# Classic at 320x200, the status bar and the gun, id's recorded camera and its sound.
+
+demo demo3 from 16.6
+
+duration 3.8
+fps 60
+size 1920x1080
+
+preset classic
+mode 320x200
+hud on
+gun on
+cvar gamma 0.8
+
+sound on
+events on

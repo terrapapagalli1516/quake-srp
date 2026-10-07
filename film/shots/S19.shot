@@ -1,0 +1,22 @@
+# S19: e1m7 frozen at cl.time 1.6, the oracle's clock ("How do you prove a port is
+# faithful?"). Classic at 320x200. The camera eases in and stops at file second 4.5 on the
+# oracle's own e1m7 view (vieworg -447.96875,64.03125,66.03125, angles 0,0,0).
+
+map e1m7
+warmup until 1.6
+
+duration 5.7
+fps 60
+size 1920x1080
+
+preset classic
+mode 320x200
+speed 0
+hud off
+cvar gamma 0.7
+
+camera path
+key 1    -520,64.03125,66.03125      0,0  ease inout
+key 4.5  -447.96875,64.03125,66.03125  0,0
+
+events on

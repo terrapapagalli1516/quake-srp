@@ -1,0 +1,23 @@
+# ST3: demo1 from 44.0 s, the zombies close, in the Classic box (960x600 shown 4:3) with
+# the torches' flicker, gliding lights and smooth motion on, and still id's 72 Hz ticks
+# (`clock id`).
+
+demo demo1 from 43.0
+
+duration 4.6
+fps 60
+size 1920x1080
+
+preset classic
+mode 960x600
+display 4:3
+clock id
+hud off
+cvar gamma 0.8
+cvar r_torchflicker 1
+cvar r_lerplightstyles 1
+cvar r_lerpmove 1
+cvar r_lerpmodels 1
+
+sound on
+events on

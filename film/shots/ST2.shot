@@ -1,0 +1,19 @@
+# ST2: e1m1's fluorescent corridor in real time, light style 10 flickering ("The lights id
+# did animate"). Classic, 960x600 in its 4:3 box, id's 72 Hz ticks; cl.time 3.0 at file
+# second 1. Brightness 0.7.
+
+map e1m1
+warmup until 2.0
+
+duration 13.5
+fps 60
+size 1920x1080
+
+preset classic
+hud off
+cvar gamma 0.7
+
+camera fixed 600,140,110 0,300
+
+sound on
+events on

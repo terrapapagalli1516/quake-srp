@@ -1,0 +1,25 @@
+# S60: e1m8's Shambler, woken at film second 2.2; the player stands facing it, god mode,
+# slop with the status bar and the gun; the camera stands 24 units behind the eye and 24
+# above it ("Then played it, and said what was wrong"). On its patrol it comes close,
+# claws, then casts its lightning. The window, frames 53 to 430, puts the first bolt at
+# its 3.2 s. Brightness 0.7.
+
+map e1m8
+warmup 0.1
+wake 608,-424,280 at 2.2
+
+duration 9
+fps 60
+size 1920x1080
+frames 53..431
+
+preset slop
+hud on
+gun on
+player 608,-620,280,90
+cvar gamma 0.7
+
+camera fixed 608,-644,326 6,90
+
+sound on
+events on

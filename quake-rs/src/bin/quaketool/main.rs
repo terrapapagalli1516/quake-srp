@@ -36,6 +36,7 @@ use quake_rs::render::VideoCvars;
 mod assets;
 mod census;
 mod entities;
+mod film;
 mod framerate;
 mod play;
 mod render;
@@ -263,6 +264,28 @@ const COMMANDS: &[Command] = &[
         about: "play scripted scenarios at 72 Hz and each rate; how each quantity differs (FRAMERATE.md)",
         run: |a| Ok(Out::Text(framerate::cmd_framerate(&a[0], &a[1..])?)),
     },
+    // film/
+    Command {
+        name: "film",
+        usage: "<pak> <shot-file> <out-dir> [--threads N] [--format png|ppm] [--raw] [--frames A..B] [--sound] \
+                [--KEY VALUE: a shot-file line]",
+        about: "render a shot (a camera through a live map or a demo, x-ray views) to frames and sound; \
+                the shot file's format is `quaketool film --help`",
+        run: |a| Ok(Out::Text(film::cmd_film(a)?)),
+    },
+    Command {
+        name: "filmtext",
+        usage: "<pak> <out.png> <text> [--font white|gold|num|anum] [--scale N] [--shadow N] [--size WxH] [--at X,Y]",
+        about: "text in Quake's lettering (conchars, the status bar's numerals) on a transparent PNG",
+        run: |a| Ok(Out::Text(film::cmd_filmtext(a)?)),
+    },
+    Command {
+        name: "mapgen",
+        usage: "<pak> <name> <out.bsp|out.pak> [--pak1]",
+        about: "write a map made for the film (`map gen:NAME` in a shot: grazing), its textures id's from <pak>; \
+                a .pak holds maps/gen_NAME.bsp for `view`'s pak list, --pak1 makes it id's engine's registered pak1",
+        run: |a| Ok(Out::Text(film::mapgen::cmd_mapgen(a)?)),
+    },
 ];
 
 /// The column `--help` starts each command's `about` at: past the usage of
@@ -291,6 +314,9 @@ fn main() {
 /// Run the command called `name` on `args`, the arguments after its name.
 fn run(name: &str, args: &[String]) -> CmdResult {
     let cmd = COMMANDS.iter().find(|c| c.name == name).ok_or_else(|| format!("unknown command {name:?}"))?;
+    if name == "film" && args.first().is_some_and(|a| a == "--help") {
+        return Ok(Out::Text(format!("quaketool film {}\n\nTHE SHOT FILE:\n{}", cmd.usage, film::shot::FORMAT)));
+    }
     let n = cmd.required_args();
     if args.len() < n {
         return Err(format!("`{name}` needs {n} argument(s)").into());
@@ -429,6 +455,9 @@ mod tests {
             ("sndscript", 3),
             ("sndwalk", 4),
             ("framerate", 1),
+            ("film", 3),
+            ("filmtext", 3),
+            ("mapgen", 3),
         ];
         assert_eq!(COMMANDS.len(), expected.len());
         for (name, n) in expected {

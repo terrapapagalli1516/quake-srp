@@ -1,0 +1,233 @@
+# The world: a map, or a recorded demo.
+map e1m1                       the map (maps/e1m1.bsp), its game running live
+map gen:grazing                or a map made for the film, generated as the shot starts (mapgen.rs:
+                               `grazing`, a long hall of id's base for the perspective span)
+demo demo1 [from S]            or a recorded demo, from S seconds in (default 0)
+skill N                        0..3 (default 1)
+warmup S | until T             game seconds run (undrawn) before the first frame (default 1),
+                               or until the game's clock (cl.time) reaches T
+wake X,Y,Z [at T]              wake the monster nearest the point (its enemy the player, QuakeC's
+                               FoundTarget) at film second T (default 0); a line each
+
+# What the player does, at film seconds (each line `[at T]`, default 0; in line order at one time).
+impulse N [at T]               the console's `impulse N` (9: every weapon, 1..8: choose one)
+attack on|off [at T]           `+attack` / `-attack`
+fire NAME [at T]               every entity whose targetname is NAME used, as a trigger's
+                               SUB_UseTargets uses it, the player its activator (e1m7's `t4`: Chthon)
+look P,Y [at T]                the player's view angles (pitch + down, yaw), for `camera player`
+cmd COMMAND [ARGS] [at T]      a console command: +/-attack, +/-jump, +/-forward, +/-back,
+                               +/-moveleft, +/-moveright, +/-movedown, or god, noclip, fly, kill,
+                               impulse N, give ITEM [N]
+
+# The film.
+duration S                     seconds of film (required)
+fps N                          frames a second of film (default 60)
+size WxH                       the output frames (default 1920x1080)
+frames A..B                    only film frames A to B-1 written (the game still runs from frame 0,
+                               undrawn before A): a window of a longer shot, its clock unchanged
+threads N                      the renderer's threads (default every core); the pixels are the same
+                               on any number, but for `xray bands`, which shows them
+
+# The game's settings.
+preset slop|classic            every setting at once (default slop)
+cvar NAME VALUE [at T]         any console variable, after the preset (r_perspspan 16, gamma 0.8, ...);
+                               with `at T`, from film second T on (a span flipping 64, 32, 16, 8, a
+                               torch's flicker stepping up); the sound's mixer stays the shot's first
+                               (`snd_modern` cannot change mid-shot; `volume` can). The film reads
+                               its own lines, not these: `host_maxfps` (`clock`, `stepping`),
+                               `vid_pixelsize` (`pixel`), `r_threads` (`threads`), and
+                               `sv_max_edicts` is the map's from its start
+mode WxH                       the picture the game draws (default: slop the size over `pixel`,
+                               Classic the preset's video mode, 960x600)
+pixel N                        slop's pixel size: mode = size / N, each pixel N x N (default 1)
+display W:H|square             the shape the picture is shown at (default: slop square, Classic 4:3)
+display HZ                     the screen the film watches (10 to 1000 Hz): on each of its refreshes
+                               the game's own gate decides, as the page's does, whether a host frame
+                               runs (`clock id`: id's 72 fps cap passes every refresh at 60 Hz, every
+                               4th at 240; `clock free`: every refresh), and a film frame shows the
+                               last picture drawn. The screen's seconds are the game's: `display 240`
+                               with `speed 0.25` at fps 60 is a 240 Hz screen at quarter speed, a
+                               refresh a film frame. One line can say both: `display 4:3 240`.
+                               Default: no screen, the film is one (see `clock`)
+hud on|off [at T]              the status bar at the `viewsize` cvar's Screen size (the preset's, or a
+                               `cvar viewsize` line's), or none: Screen size 120, whatever `viewsize`
+                               says (default off)
+gun on|off [at T]              the first-person weapon (default off)
+crosshair 0|1|2|on|off [at T]  the `crosshair` cvar, as a `cvar crosshair` line (default 0, the slop
+                               preset's cross too)
+messages on|off [at T]         centre prints and notify lines (default off)
+                               (These five, `cvar` and `body` take `at T`: from film second T on.)
+notarget on|off                monsters do not see the player (default on)
+player spawn|camera|X,Y,Z[,YAW]  where the player is: the map's start, carried along with the
+                               camera (noclip; the map's exits are shut), or stood there
+                               (default spawn)
+clock id|free                  the game's frame gate: id's (`Host_FilterTime`: at most 72 host frames
+                               a second) or the uncapped page's (a host frame every refresh, stepped
+                               as the uncapped page steps) (default: Classic id, slop free). With
+                               `display`, it runs on the screen's refreshes. Without, the film is the
+                               screen: `free` is a host frame every film frame, `id` id's ticks, a
+                               host frame every 1/72 s of game time, each picture held to the film
+                               frames after it (slow motion shows the ticks; at 60 fps one tick in six
+                               never shows, a judder no 60 Hz screen has: `display 60` shows what one
+                               does)
+speed S [at T]                 the game's speed from film second T on (default 1 from 0; 0.25 is slow
+                               motion; 0 freezes the world while the camera goes on); with `clock
+                               free` and no `display` the game runs at fps / S host frames a second:
+                               fps 60 and speed 0.25 is the game at 240 Hz
+stepping id|uncapped           how a host frame steps the game, if not as its clock does (id: id's
+                               per-frame code, which drifts away from 72 Hz; uncapped: slop's, which
+                               lands on id's 72 Hz results at any rate): `clock free`, `speed 0.125`
+                               and `stepping id` is id's code at 480 Hz
+bob on|off                     a path camera bobs as the game bobs a running player's eye (V_CalcBob,
+                               from the path's own speed on the game's clock); default off
+body on|off [at T]             the player's own model drawn (default off: id's client never draws
+                               it), for a camera that looks at the player (a demo's recorded one too)
+
+# The camera. Angles in degrees, as Quake's (quaketool view --angles): pitch + looks down,
+# yaw 0 along +x and 90 along +y; X,Y,Z is the eye.
+camera player                  the player's own eye (the default for a map)
+camera demo                    the recording's camera, with the client's lerp (the default for a demo)
+camera fixed X,Y,Z P,Y[,R]     still
+camera fixed X,Y,Z at X,Y,Z    still, looking at a point
+camera path                    keyframes (below): positions through Catmull-Rom (a cubic Hermite with
+                               each key's tangent from its neighbours over their times), angles by the
+                               shortest arc, each segment eased as its first key says
+key T X,Y,Z P,Y[,R] [fov F] [ease linear|in|out|inout]
+key T X,Y,Z at X,Y,Z [fov F] [ease ...]      looking at a point (the point is interpolated too)
+camera walk [run|walk|SPEED] [within R]
+                               the player walks the keys' route as a player does, and the camera is its
+                               own eye (walk.rs): each host frame the film sends what a player at the keys
+                               and mouse sends (the view's angles, the forward and side speeds, the jump
+                               button) and the game's own movement moves it, so the steps, slopes, walls,
+                               the bob and the stair smoothing are the game's (the gun too, `gun on`). It
+                               starts standing at the first key and walks at most SPEED units a second
+                               (run: 320, sv_maxspeed, the default; walk: 200), reaching each key within R
+                               units across (default 16) and 40 up or down. A stuck player (no nearer the
+                               next key for a game second) is an error, before a frame is drawn. The report
+                               gives the film second each key was reached at against its T, and the walk's
+                               length against the shot's; walk.csv has a row a picture: the player's origin,
+                               the eye drawn (bob and stair smoothing in it), the view, the speed. The walk
+                               is planned once and its moves replayed by game second, so both sides of an
+                               `ab` send the same commands (the report says how near each side's player
+                               kept). The `player` line does not apply, nor `bob` (the eye bobs as the
+                               game's does); `look` and `cmd +forward` lines are refused
+key T X,Y,Z [P,Y | at X,Y,Z | look P,Y] [jump] [ease E]
+                               (after `camera walk`) a waypoint: the eye's place (the player's origin + 22)
+                               to reach at film second T, at the pace that gets there then (a stand, if it
+                               would be slower than 50); the view turns from the look of the key before to
+                               this one's over the way, as far as the player has come (a key with none
+                               looks along the route ahead); `jump`: the player jumps as it leaves the key;
+                               a key at the place of the one before is a pause until its T
+aim monsters [offset X,Y,Z] [from T] [to T] [fire R]
+                               (after `camera walk`) the player aims at what it fights: from film second
+                               T (default 0) to T (default the end), its view turns to the nearest living
+                               monster it sees (nothing of the world between) within 50 degrees of where it
+                               looks, and keeps to it while it lives and stays within 80; with none, to the
+                               keys' looks. The same damped hand turns it (a leaping fiend is followed a
+                               little late); `attack` lines fire where it looks. `offset`: from the middle
+                               of the monster's box to the point aimed at. `fire R`: the player holds the
+                               attack button while its view is within 4 degrees of the monster it aims at
+                               and that is more than R units away (a rocket's blast nearer hurts the player
+                               too, and flashes the screen red); no `attack` lines then
+fov F                          the field of view of the film's cameras (90; Hor+ widens it on a wide
+                               picture); `camera player` and `camera demo` see id's 90, and refuse it
+
+# Cameras that follow the game. ENTITY is `player` (a demo's: its recorded player, at the eye), an
+# entity's number (an edict; `events.json`'s pose events name them), or CLASS[#N]: the Nth (from 0) of
+# a class to appear in the shot (those there at its start in entity order, then each as it appears: a
+# nail fired later is a later one), CLASS a classname (monster_army, spike), a model or its short
+# name (soldier; a demo knows id1's classnames by their models). e1m1's first grunt is monster_army#1
+# (at skill 1: a skill's monsters are its own).
+# Before it renders, the shot's game is run once, undrawn (a rehearsal), to learn where the
+# entity goes: the camera knows the future. It follows the entity's place as the game has it (the
+# middle of its box; a demo's: its origin), not the model as drawn, which is the preset's business
+# (Classic steps it, slop glides it): so an `ab` of the two has one camera. That place is smoothed
+# over a box as long as a monster's step (0.1 s) and a Gaussian of half that: id's 10 Hz steps
+# become a motion whose speed changes smoothly. Lags and lookaheads are in game seconds.
+camera follow ENTITY [offset X,Y,Z] [lag S] [lookahead S]
+                               the eye rides with the entity at the offset (world axes; default 0),
+                               looking at it: `lag`, the eye trails it by S seconds, eased in and out
+                               (a critically damped spring); `lookahead`, it aims at where the entity
+                               will be S seconds on. `key` lines after it are a path about the
+                               entity: each key's X,Y,Z the eye's offset, `at X,Y,Z` a point from the
+                               one aimed at (`at 0,0,0`: the entity), angles as given
+camera orbit X,Y,Z|ENTITY [radius R] [height H] [speed DEG/S] [from YAW] [lag S]
+                               the eye circles the point or the entity at R (default 128), H above it,
+                               DEG/S (default 20, + anticlockwise from above) from bearing YAW at film
+                               second 0, looking at it
+aim ENTITY [offset X,Y,Z] [lag S] [lookahead S]
+                               a path, fixed or orbit camera looks at the entity (plus the offset),
+                               its keys' angles ignored: a fixed camera pans, a dolly keeps it in frame
+                               A camera fastened to an entity or an orbit keeps out of the walls: where
+                               the world comes between it and what it follows it is pulled in, 8 units
+                               short of the wall, easing in before and out after. `player camera`
+                               cannot ride a camera that follows the game (the player would move it).
+
+# Marks: points followed onto the picture, for an edit's callouts (marks.rs).
+mark NAME X,Y,Z [radius R]     a point of the world
+mark NAME entity ENTITY [offset X,Y,Z] [radius R]
+                               an entity's place as this frame draws it (a gliding monster where it
+                               glides), plus the offset
+                               Each frame, events.json's `marks` gets the mark's place on the output
+                               frame (`screen`, in front of the camera, also off the picture), whether
+                               it is `in_view` and `visible` (in the view, and nothing the frame drew
+                               there, by its z-buffer, is nearer than the point less R: default 8 for
+                               a point, 16 for an entity's middle) and its `dist`ance from the eye
+markdraw NAME [on|off]         draw the mark's tag on the frames (after its `mark` line), for previews:
+                               corner ticks and its name, flame when seen, slate when hidden
+
+# Colours on these lines are RRGGBB (hex, no `#`, which starts a comment) or pN, Quake's palette entry N.
+# X-ray: the renderer's machinery, drawn from what it decided for the 3-D view.
+xray MODE                      the picture: game (default), black, z (the z-buffer, near light),
+                               surfaces (a colour each, id's r_drawflat), spans (each surface's
+                               spans, a row each), segments (each span's affine runs in rust and
+                               brown, a lava tick at each perspective divide), mip (the mip level:
+                               0 green, 1 yellow, 2 orange, 3 red), cache (each surface-cache block
+                               a tile, darker for coarser mips, black borders), bakes (the blocks
+                               this frame baked, lit), luxels (the lightmap's 16-texel cells),
+                               leaves (the BSP leaf of each visible point), lightmaps (the light
+                               alone), error (the affine texel's distance from the exact one: dark
+                               none, yellow half a texel, red one or more), pixelsoff [COLOUR]
+                               [alpha A] [dim D] (the pixels the perspective span puts off the exact
+                               texel, tinted ff3d8b over the picture; the rest dimmed by D, default 0),
+                               bands (each renderer thread's bands of rows, a colour a thread: which
+                               thread takes which band is the scheduler's, the pixels the same)
+divides on|off [COLOUR] [width W] [alpha A]
+                               a thin mark at each perspective divide (where the walls' and liquids'
+                               texel is found exactly: every 16 pixels in id's spans, 8 in slop's,
+                               every pixel at exact) over the picture: colour 39c2ff, W output pixels
+                               wide (default a 720th of the frame's height), alpha 0.85
+wire world|entities|all|off [hidden|through] [pvs|culled]
+                               polygon edges over the picture: the world's, the entities' (brush
+                               models, alias models' triangles); hidden by what is in front, or
+                               through it; the world's coloured drawn / in the PVS / culled, or
+                               only the culled ones
+vis X,Y,Z                      draw the PVS of this point instead of the camera's (r_lockpvs)
+mix T VALUE                    the x-ray's strength over the game's picture at film second T
+                               (keys interpolated; default 1); on `xray lightmaps`, between 0 and 1,
+                               each frame is drawn twice, the game's and the light alone (redrawn
+                               paused), and cross-faded
+
+# On and off in one pass: the shot rendered twice, A and B, stepped side by side.
+ab LINES | LINES               each side's own lines, after the shot's (`;` between a side's lines):
+                               `ab cvar r_torchflicker 0 | cvar r_torchflicker 1`
+ablabels TEXT | TEXT           each side's label (conchars, bronze)
+split line|side|stack|diff     one frame cut by a vertical line (A left, B right; default), the
+                               halves side by side or stacked (each framed for its half), or A with
+                               each pixel B draws otherwise tinted lava orange
+splitat T X                    the line's place at film second T, 0 the left edge to 1 the right
+                               (keys interpolated, default 0.5): `splitat 1 1` + `splitat 3 0` wipes
+                               B in from the right over two seconds
+absound a|b|both               whose sound: A's, B's (default), or B's in sound.wav and each side's
+                               in sound-a.wav and sound-b.wav
+
+# Output.
+label TEXT                     burned into every frame in Quake's lettering (conchars, bronze)
+labelpos tl|tr|bl|br           its corner (default bl)
+sound on|game|off              write sound.wav, the shot's game sound (default off): `on`, each sound
+                               starts with the frame that shows its cause and plays at its own speed,
+                               in slow motion too; `game`, the mixer on the game's clock, stretched to
+                               the film's (slow motion slows and lowers it; a frozen world is silent)
+events on|off                  write events.json: each sound started, muzzle flash and monster pose
+                               change on screen, with its film second, frame and place (events.rs);
+                               a shot with marks writes it too, with them

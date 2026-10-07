@@ -1,0 +1,27 @@
+# LAB1-on-light: LAB1-off-light with slop's torch flicker: the light swings.
+#
+# Assembly (LAB1): halves as ST1b's: off on the left, on on the right, the lightmaps
+# renders held to file second 5.5, then cross-faded (smoothstep) to the textured renders
+# by 6.1. The sound is LAB1-on's. (`mix` on `xray lightmaps` now does such a cross-fade in
+# one render, with linear keys.)
+
+map e1m2
+
+duration 9.1
+fps 60
+size 1440x1080
+
+preset classic
+mode 960x600
+display 4:3
+hud off
+cvar gamma 0.8
+cvar r_torchflicker 1
+
+camera fixed 1496,1600,318 0,270
+fov 60
+
+xray lightmaps
+
+sound on
+events on

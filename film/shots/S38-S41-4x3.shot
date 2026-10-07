@@ -1,0 +1,29 @@
+# S38-S41-4x3: e1m5's hall, one slow linear dolly, no status bar: the 4:3 picture, fov 90
+# across it, rendered at 1920x1440 so the widening only ever shrinks it.
+#
+# Assembly: S38 ("id spread its") is S38-S41-4x3 shown 1440x1080 (area-averaged) in the
+# frame's centre to file second 4.5; from 3.0, rust lines mark where id's 16:9 cuts it (it
+# keeps the central three quarters of the rows) and the rows beyond dim; over 4.5 to 6.0
+# (smoothstep) the picture grows to 1920x1440, cut to the frame, so the lines ride out to
+# its edges; late in that growth it settles onto S38-S41-id (the same picture). S39
+# ("Horizontal plus keeps") cross-fades S38-S41-id to S38-S41-horplus between film seconds
+# 9.3 and 10.3 (smoothstep), then a bronze outline of the 4:3 box fades in from 10.6. S38
+# is the master's frames 0 to 617, S39 498 to 965.
+
+map e1m5
+
+duration 24
+fps 60
+size 1920x1440
+frames 0..618
+
+preset slop
+hud off
+cvar gamma 0.8
+cvar fov_adapt 1
+
+camera path
+key 0   -1536,1423.91,200  0,90  ease linear
+key 24  -1536,1618.09,200  0,90
+
+events on

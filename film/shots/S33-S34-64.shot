@@ -1,0 +1,22 @@
+# S33-S34-64: e1m6's corridor turning, the perspective found exactly every 64 pixels. A
+# linear turn from yaw 101.3 down at 1.3 degrees a second, slop at 1920x1080, no status
+# bar ("A tenth more work").
+#
+# Assembly (S34, the master's frames 384 to 1043): a 2x2 grid of 470x260 crops at
+# (420,120), enlarged 2x (nearest): 64 and id's 16 above, 8 (slop, outlined in rust) and
+# exact below, each labelled; from film second 11.7, each pixel that differs from the
+# exact render's is tinted lava orange, and from 12.6 a caption sits under 8.
+
+map e1m6
+
+duration 17.4
+fps 60
+size 1920x1080
+
+preset slop
+hud off
+cvar r_perspspan 64
+
+camera path
+key 0     504,500,242  0,101.2987  ease linear
+key 17.4  504,500,242  0,78.7013

@@ -1,0 +1,26 @@
+# ST1b-off: e1m2's arch and its two wall torches, a still camera at fov 60, steady as id
+# baked them ("a hundred and forty-three"). The Classic box at 1440x1080.
+#
+# Assembly (ST1b): side by side in the 4:3 box at x 240 of a black 1920x1080 frame: the
+# central 720 columns of ST1b-off on the left, of ST1b-on on the right (both torches are
+# in each), a 4-pixel bronze seam between, labelled "ID'S: BAKED, STILL" and "SLOP:
+# FLICKERING" at the top. The sound is ST1b-on's.
+
+map e1m2
+
+duration 6.4
+fps 60
+size 1440x1080
+
+preset classic
+mode 960x600
+display 4:3
+hud off
+cvar gamma 0.8
+cvar r_torchflicker 0
+
+camera fixed 1496,1600,318 0,270
+fov 60
+
+sound on
+events on

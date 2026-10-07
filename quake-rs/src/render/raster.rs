@@ -297,6 +297,20 @@ impl PolyGrads {
         Some(PolyGrads { zi, sz, tz, st_eye })
     }
 
+    /// EXTRA, debug only: these gradients for an x-ray capture
+    /// ([`super::xray::XrayGrads`]), back in mip level 0's texels from level
+    /// `mip`'s (exact: a power of two).
+    pub(super) fn xray(&self, mip: u32) -> super::xray::XrayGrads {
+        let k = f64::from(1u32 << mip.min(3));
+        let l = |l: Linear, k: f64| [l.o * k, l.dx * k, l.dy * k];
+        super::xray::XrayGrads {
+            zi: l(self.zi, 1.0),
+            sz: l(self.sz, k),
+            tz: l(self.tz, k),
+            st_eye: [self.st_eye[0] * k, self.st_eye[1] * k],
+        }
+    }
+
     /// The same gradients recovered from synthetic vertices (their `vz`, and
     /// `s`/`t` taken as absolute: `st_eye` is zero) — the unit tests' polygons,
     /// which have no plane. Solved on the vertex triple of LARGEST area, the

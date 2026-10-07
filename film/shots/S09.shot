@@ -1,0 +1,24 @@
+# S09: e1m1 from above, outside the world: the potentially visible set of the player's
+# start (480,-352,110) drawn textured, every culled polygon as a slate wireframe. The
+# camera cranes up and back over file seconds 1 to 3, until the whole map's culled
+# wireframe surrounds the small textured set. Classic at 320x200.
+
+map e1m1
+
+duration 4
+fps 60
+size 1920x1080
+
+preset classic
+mode 320x200
+hud off
+cvar gamma 0.8
+
+camera path
+key 1  480,-150,800   72,90  ease inout
+key 3  520,60,1350    60,90
+
+vis 480,-352,110
+wire world through culled
+
+events on

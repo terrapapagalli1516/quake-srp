@@ -1,0 +1,26 @@
+# S45-slop: S45-id with slop's motion: the grunt glides between its steps and blends its
+# poses.
+#
+# Assembly (S45): the 940x1040 crops at (350,20) of S45-id and of S45-slop, side by side
+# at (13,20) and (967,20) of a black 1920x1080 frame, each film frame shown twice (1/8
+# speed at 60 fps), labelled "id's" and "slop".
+
+map e1m1
+wake 0,576,24 at 0
+
+duration 13.1
+fps 30
+size 1920x1080
+frames 66..393
+
+preset slop
+speed 0.125
+hud off
+player 224,616,24,190
+cvar gamma 0.8
+
+camera fixed 224,616,46 2,200
+fov 64
+
+sound off
+events on

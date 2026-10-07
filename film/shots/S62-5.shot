@@ -1,0 +1,33 @@
+# S62-5: e1m1's start, smooth monsters off too. e1m1's start, a still camera, the status
+# bar and the gun ("Every change has a name. Every name can be switched off"). S62-0 is
+# the slop preset; each next render switches one more option off (1 Hor+, 2 the scaled 2-D
+# layer, 3 the status bar overlay, 4 the perspective span back to 16, 5 smooth monsters, 6
+# gliding lights, 7 the torch flicker); S62-8 is the Classic preset (960x600 in its 4:3
+# box, id's 72 Hz ticks).
+#
+# Assembly (S62): S62-0 until file second 1.4; from then, every 0.4 s, a 0.2 s dissolve
+# (smoothstep) to the next render, ending on S62-8 at 4.2. At the right, on a dark band, a
+# column names the options in turn ("no 72 cap" last), each struck through in lava as its
+# render takes over.
+
+map e1m1
+
+duration 6.8
+fps 60
+size 1920x1080
+
+preset slop
+hud on
+gun on
+cvar gamma 0.8
+cvar fov_adapt 0
+cvar wasm_scaled2d 0
+cvar scr_sbaroverlay 0
+cvar r_perspspan 16
+cvar r_lerpmove 0
+cvar r_lerpmodels 0
+
+camera fixed 480,-352,110 0,90
+
+sound off
+events on

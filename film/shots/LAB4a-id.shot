@@ -1,0 +1,292 @@
+# LAB4a-id: id's clock: a 72 Hz tick, each picture held until the next, on a 60 fps film.
+# e1m1's first corridor at a run, in the Classic box at 1440x1080 with the torches'
+# flicker, gliding lights and smooth motion on, the status bar and the gun ("id capped the
+# game"). The run (x 480 from y -352, about 137 units a second, 0.25 s ramps, id's bob)
+# lasts all of the film's 6.5 s, swaying 8 degrees either way every 2.6 s, so the picture
+# slides sideways and a dropped tick shows. The camera's keys are dense (every 1/30 s):
+# the run's speed is integrated, its sway a sine.
+#
+# Assembly (LAB4a): halves as ST1b's: the central 720 columns of LAB4a-id on the left
+# ("ID'S 72 FPS CAP") and of LAB4a-uncapped on the right ("A FRAME EVERY REFRESH"). The
+# sound is LAB4a-uncapped's.
+
+map e1m1
+
+duration 8.5
+fps 60
+size 1440x1080
+
+preset classic
+mode 960x600
+display 4:3
+clock id
+hud on
+gun on
+bob on
+player camera
+cvar gamma 0.8
+cvar r_torchflicker 1
+cvar r_lerplightstyles 1
+cvar r_lerpmove 1
+cvar r_lerpmodels 1
+
+camera path
+key 0.0000  480,-352.000,110  0,90.000  ease linear
+key 0.0333  480,-352.000,110  0,90.000  ease linear
+key 0.0667  480,-352.000,110  0,90.000  ease linear
+key 0.1000  480,-352.000,110  0,90.000  ease linear
+key 0.1333  480,-352.000,110  0,90.000  ease linear
+key 0.1667  480,-352.000,110  0,90.000  ease linear
+key 0.2000  480,-352.000,110  0,90.000  ease linear
+key 0.2333  480,-352.000,110  0,90.000  ease linear
+key 0.2667  480,-352.000,110  0,90.000  ease linear
+key 0.3000  480,-352.000,110  0,90.000  ease linear
+key 0.3333  480,-352.000,110  0,90.000  ease linear
+key 0.3667  480,-352.000,110  0,90.000  ease linear
+key 0.4000  480,-352.000,110  0,90.000  ease linear
+key 0.4333  480,-352.000,110  0,90.000  ease linear
+key 0.4667  480,-352.000,110  0,90.000  ease linear
+key 0.5000  480,-352.000,110  0,90.000  ease linear
+key 0.5333  480,-352.000,110  0,90.000  ease linear
+key 0.5667  480,-352.000,110  0,90.000  ease linear
+key 0.6000  480,-352.000,110  0,90.000  ease linear
+key 0.6333  480,-352.000,110  0,90.000  ease linear
+key 0.6667  480,-352.000,110  0,90.000  ease linear
+key 0.7000  480,-352.000,110  0,90.000  ease linear
+key 0.7333  480,-352.000,110  0,90.000  ease linear
+key 0.7667  480,-352.000,110  0,90.000  ease linear
+key 0.8000  480,-352.000,110  0,90.000  ease linear
+key 0.8333  480,-352.000,110  0,90.000  ease linear
+key 0.8667  480,-352.000,110  0,90.000  ease linear
+key 0.9000  480,-352.000,110  0,90.000  ease linear
+key 0.9333  480,-352.000,110  0,90.000  ease linear
+key 0.9667  480,-352.000,110  0,90.000  ease linear
+key 1.0000  480,-352.000,110  0,90.000  ease linear
+key 1.0333  480,-351.924,110  0,90.004  ease linear
+key 1.0667  480,-351.436,110  0,90.028  ease linear
+key 1.1000  480,-350.243,110  0,90.092  ease linear
+key 1.1333  480,-348.183,110  0,90.209  ease linear
+key 1.1667  480,-345.222,110  0,90.390  ease linear
+key 1.2000  480,-341.458,110  0,90.640  ease linear
+key 1.2333  480,-337.120,110  0,90.963  ease linear
+key 1.2667  480,-332.555,110  0,91.355  ease linear
+key 1.3000  480,-327.980,110  0,91.813  ease linear
+key 1.3333  480,-323.404,110  0,92.331  ease linear
+key 1.3667  480,-318.829,110  0,92.898  ease linear
+key 1.4000  480,-314.253,110  0,93.504  ease linear
+key 1.4333  480,-309.678,110  0,94.134  ease linear
+key 1.4667  480,-305.103,110  0,94.772  ease linear
+key 1.5000  480,-300.527,110  0,95.403  ease linear
+key 1.5333  480,-295.952,110  0,96.007  ease linear
+key 1.5667  480,-291.377,110  0,96.567  ease linear
+key 1.6000  480,-286.801,110  0,97.067  ease linear
+key 1.6333  480,-282.226,110  0,97.489  ease linear
+key 1.6667  480,-277.651,110  0,97.819  ease linear
+key 1.7000  480,-273.075,110  0,98.044  ease linear
+key 1.7333  480,-268.500,110  0,98.153  ease linear
+key 1.7667  480,-263.925,110  0,98.140  ease linear
+key 1.8000  480,-259.349,110  0,98.001  ease linear
+key 1.8333  480,-254.774,110  0,97.774  ease linear
+key 1.8667  480,-250.199,110  0,97.500  ease linear
+key 1.9000  480,-245.623,110  0,97.181  ease linear
+key 1.9333  480,-241.048,110  0,96.820  ease linear
+key 1.9667  480,-236.473,110  0,96.419  ease linear
+key 2.0000  480,-231.897,110  0,95.980  ease linear
+key 2.0333  480,-227.322,110  0,95.506  ease linear
+key 2.0667  480,-222.747,110  0,95.002  ease linear
+key 2.1000  480,-218.171,110  0,94.470  ease linear
+key 2.1333  480,-213.596,110  0,93.913  ease linear
+key 2.1667  480,-209.021,110  0,93.337  ease linear
+key 2.2000  480,-204.445,110  0,92.743  ease linear
+key 2.2333  480,-199.870,110  0,92.138  ease linear
+key 2.2667  480,-195.295,110  0,91.524  ease linear
+key 2.3000  480,-190.719,110  0,90.906  ease linear
+key 2.3333  480,-186.144,110  0,90.288  ease linear
+key 2.3667  480,-181.569,110  0,89.674  ease linear
+key 2.4000  480,-176.993,110  0,89.069  ease linear
+key 2.4333  480,-172.418,110  0,88.476  ease linear
+key 2.4667  480,-167.843,110  0,87.899  ease linear
+key 2.5000  480,-163.267,110  0,87.343  ease linear
+key 2.5333  480,-158.692,110  0,86.810  ease linear
+key 2.5667  480,-154.117,110  0,86.306  ease linear
+key 2.6000  480,-149.541,110  0,85.832  ease linear
+key 2.6333  480,-144.966,110  0,85.393  ease linear
+key 2.6667  480,-140.391,110  0,84.992  ease linear
+key 2.7000  480,-135.815,110  0,84.631  ease linear
+key 2.7333  480,-131.240,110  0,84.312  ease linear
+key 2.7667  480,-126.665,110  0,84.038  ease linear
+key 2.8000  480,-122.089,110  0,83.812  ease linear
+key 2.8333  480,-117.514,110  0,83.633  ease linear
+key 2.8667  480,-112.939,110  0,83.505  ease linear
+key 2.9000  480,-108.363,110  0,83.427  ease linear
+key 2.9333  480,-103.788,110  0,83.401  ease linear
+key 2.9667  480,-99.213,110  0,83.427  ease linear
+key 3.0000  480,-94.637,110  0,83.504  ease linear
+key 3.0333  480,-90.062,110  0,83.633  ease linear
+key 3.0667  480,-85.487,110  0,83.813  ease linear
+key 3.1000  480,-80.911,110  0,84.043  ease linear
+key 3.1333  480,-76.336,110  0,84.321  ease linear
+key 3.1667  480,-71.761,110  0,84.646  ease linear
+key 3.2000  480,-67.185,110  0,85.016  ease linear
+key 3.2333  480,-62.610,110  0,85.429  ease linear
+key 3.2667  480,-58.035,110  0,85.882  ease linear
+key 3.3000  480,-53.459,110  0,86.372  ease linear
+key 3.3333  480,-48.884,110  0,86.897  ease linear
+key 3.3667  480,-44.309,110  0,87.453  ease linear
+key 3.4000  480,-39.733,110  0,88.037  ease linear
+key 3.4333  480,-35.158,110  0,88.644  ease linear
+key 3.4667  480,-30.583,110  0,89.272  ease linear
+key 3.5000  480,-26.007,110  0,89.917  ease linear
+key 3.5333  480,-21.432,110  0,90.574  ease linear
+key 3.5667  480,-16.857,110  0,91.239  ease linear
+key 3.6000  480,-12.281,110  0,91.909  ease linear
+key 3.6333  480,-7.706,110  0,92.578  ease linear
+key 3.6667  480,-3.131,110  0,93.243  ease linear
+key 3.7000  480,1.445,110  0,93.900  ease linear
+key 3.7333  480,6.020,110  0,94.545  ease linear
+key 3.7667  480,10.595,110  0,95.173  ease linear
+key 3.8000  480,15.171,110  0,95.781  ease linear
+key 3.8333  480,19.746,110  0,96.364  ease linear
+key 3.8667  480,24.321,110  0,96.920  ease linear
+key 3.9000  480,28.897,110  0,97.445  ease linear
+key 3.9333  480,33.472,110  0,97.935  ease linear
+key 3.9667  480,38.047,110  0,98.388  ease linear
+key 4.0000  480,42.623,110  0,98.801  ease linear
+key 4.0333  480,47.198,110  0,99.171  ease linear
+key 4.0667  480,51.773,110  0,99.496  ease linear
+key 4.1000  480,56.349,110  0,99.774  ease linear
+key 4.1333  480,60.924,110  0,100.004  ease linear
+key 4.1667  480,65.499,110  0,100.184  ease linear
+key 4.2000  480,70.075,110  0,100.313  ease linear
+key 4.2333  480,74.650,110  0,100.390  ease linear
+key 4.2667  480,79.225,110  0,100.416  ease linear
+key 4.3000  480,83.801,110  0,100.390  ease linear
+key 4.3333  480,88.376,110  0,100.312  ease linear
+key 4.3667  480,92.951,110  0,100.184  ease linear
+key 4.4000  480,97.527,110  0,100.006  ease linear
+key 4.4333  480,102.102,110  0,99.779  ease linear
+key 4.4667  480,106.677,110  0,99.505  ease linear
+key 4.5000  480,111.253,110  0,99.186  ease linear
+key 4.5333  480,115.828,110  0,98.825  ease linear
+key 4.5667  480,120.403,110  0,98.424  ease linear
+key 4.6000  480,124.979,110  0,97.985  ease linear
+key 4.6333  480,129.554,110  0,97.511  ease linear
+key 4.6667  480,134.129,110  0,97.007  ease linear
+key 4.7000  480,138.705,110  0,96.475  ease linear
+key 4.7333  480,143.280,110  0,95.918  ease linear
+key 4.7667  480,147.855,110  0,95.342  ease linear
+key 4.8000  480,152.431,110  0,94.748  ease linear
+key 4.8333  480,157.006,110  0,94.143  ease linear
+key 4.8667  480,161.581,110  0,93.529  ease linear
+key 4.9000  480,166.157,110  0,92.911  ease linear
+key 4.9333  480,170.732,110  0,92.293  ease linear
+key 4.9667  480,175.307,110  0,91.679  ease linear
+key 5.0000  480,179.883,110  0,91.074  ease linear
+key 5.0333  480,184.458,110  0,90.480  ease linear
+key 5.0667  480,189.033,110  0,89.904  ease linear
+key 5.1000  480,193.609,110  0,89.347  ease linear
+key 5.1333  480,198.184,110  0,88.815  ease linear
+key 5.1667  480,202.759,110  0,88.311  ease linear
+key 5.2000  480,207.335,110  0,87.837  ease linear
+key 5.2333  480,211.910,110  0,87.398  ease linear
+key 5.2667  480,216.485,110  0,86.997  ease linear
+key 5.3000  480,221.061,110  0,86.636  ease linear
+key 5.3333  480,225.636,110  0,86.317  ease linear
+key 5.3667  480,230.211,110  0,86.043  ease linear
+key 5.4000  480,234.787,110  0,85.816  ease linear
+key 5.4333  480,239.362,110  0,85.638  ease linear
+key 5.4667  480,243.937,110  0,85.510  ease linear
+key 5.5000  480,248.513,110  0,85.432  ease linear
+key 5.5333  480,253.088,110  0,85.406  ease linear
+key 5.5667  480,257.663,110  0,85.432  ease linear
+key 5.6000  480,262.239,110  0,85.509  ease linear
+key 5.6333  480,266.814,110  0,85.638  ease linear
+key 5.6667  480,271.389,110  0,85.818  ease linear
+key 5.7000  480,275.965,110  0,86.048  ease linear
+key 5.7333  480,280.540,110  0,86.326  ease linear
+key 5.7667  480,285.115,110  0,86.651  ease linear
+key 5.8000  480,289.691,110  0,87.021  ease linear
+key 5.8333  480,294.266,110  0,87.434  ease linear
+key 5.8667  480,298.841,110  0,87.887  ease linear
+key 5.9000  480,303.417,110  0,88.377  ease linear
+key 5.9333  480,307.992,110  0,88.902  ease linear
+key 5.9667  480,312.567,110  0,89.458  ease linear
+key 6.0000  480,317.143,110  0,90.041  ease linear
+key 6.0333  480,321.718,110  0,90.649  ease linear
+key 6.0667  480,326.293,110  0,91.277  ease linear
+key 6.1000  480,330.869,110  0,91.922  ease linear
+key 6.1333  480,335.444,110  0,92.579  ease linear
+key 6.1667  480,340.019,110  0,93.244  ease linear
+key 6.2000  480,344.595,110  0,93.913  ease linear
+key 6.2333  480,349.170,110  0,94.583  ease linear
+key 6.2667  480,353.745,110  0,95.248  ease linear
+key 6.3000  480,358.321,110  0,95.905  ease linear
+key 6.3333  480,362.896,110  0,96.550  ease linear
+key 6.3667  480,367.471,110  0,97.178  ease linear
+key 6.4000  480,372.047,110  0,97.785  ease linear
+key 6.4333  480,376.622,110  0,98.369  ease linear
+key 6.4667  480,381.197,110  0,98.925  ease linear
+key 6.5000  480,385.773,110  0,99.450  ease linear
+key 6.5333  480,390.348,110  0,99.940  ease linear
+key 6.5667  480,394.923,110  0,100.393  ease linear
+key 6.6000  480,399.499,110  0,100.806  ease linear
+key 6.6333  480,404.074,110  0,101.176  ease linear
+key 6.6667  480,408.649,110  0,101.501  ease linear
+key 6.7000  480,413.225,110  0,101.779  ease linear
+key 6.7333  480,417.800,110  0,102.009  ease linear
+key 6.7667  480,422.375,110  0,102.189  ease linear
+key 6.8000  480,426.951,110  0,102.318  ease linear
+key 6.8333  480,431.526,110  0,102.395  ease linear
+key 6.8667  480,436.101,110  0,102.421  ease linear
+key 6.9000  480,440.677,110  0,102.395  ease linear
+key 6.9333  480,445.252,110  0,102.317  ease linear
+key 6.9667  480,449.827,110  0,102.189  ease linear
+key 7.0000  480,454.403,110  0,102.010  ease linear
+key 7.0333  480,458.978,110  0,101.784  ease linear
+key 7.0667  480,463.553,110  0,101.510  ease linear
+key 7.1000  480,468.129,110  0,101.191  ease linear
+key 7.1333  480,472.704,110  0,100.830  ease linear
+key 7.1667  480,477.279,110  0,100.428  ease linear
+key 7.2000  480,481.855,110  0,99.990  ease linear
+key 7.2333  480,486.430,110  0,99.516  ease linear
+key 7.2667  480,491.005,110  0,99.012  ease linear
+key 7.3000  480,495.581,110  0,98.479  ease linear
+key 7.3333  480,500.156,110  0,97.923  ease linear
+key 7.3667  480,504.731,110  0,97.346  ease linear
+key 7.4000  480,509.307,110  0,96.753  ease linear
+key 7.4333  480,513.882,110  0,96.148  ease linear
+key 7.4667  480,518.457,110  0,95.534  ease linear
+key 7.5000  480,523.033,110  0,94.916  ease linear
+key 7.5333  480,527.532,110  0,94.301  ease linear
+key 7.5667  480,531.619,110  0,93.706  ease linear
+key 7.6000  480,535.002,110  0,93.151  ease linear
+key 7.6333  480,537.516,110  0,92.652  ease linear
+key 7.6667  480,539.131,110  0,92.216  ease linear
+key 7.7000  480,539.943,110  0,91.863  ease linear
+key 7.7333  480,540.180,110  0,91.603  ease linear
+key 7.7667  480,540.190,110  0,91.440  ease linear
+key 7.8000  480,540.190,110  0,91.374  ease linear
+key 7.8333  480,540.190,110  0,91.401  ease linear
+key 7.8667  480,540.190,110  0,91.515  ease linear
+key 7.9000  480,540.190,110  0,91.708  ease linear
+key 7.9333  480,540.190,110  0,91.968  ease linear
+key 7.9667  480,540.190,110  0,92.281  ease linear
+key 8.0000  480,540.190,110  0,92.633  ease linear
+key 8.0333  480,540.190,110  0,93.008  ease linear
+key 8.0667  480,540.190,110  0,93.389  ease linear
+key 8.1000  480,540.190,110  0,93.759  ease linear
+key 8.1333  480,540.190,110  0,94.104  ease linear
+key 8.1667  480,540.190,110  0,94.408  ease linear
+key 8.2000  480,540.190,110  0,94.659  ease linear
+key 8.2333  480,540.190,110  0,94.846  ease linear
+key 8.2667  480,540.190,110  0,94.961  ease linear
+key 8.3000  480,540.190,110  0,95.000  ease linear
+key 8.3333  480,540.190,110  0,95.000  ease linear
+key 8.3667  480,540.190,110  0,95.000  ease linear
+key 8.4000  480,540.190,110  0,95.000  ease linear
+key 8.4333  480,540.190,110  0,95.000  ease linear
+key 8.4667  480,540.190,110  0,95.000  ease linear
+key 8.5000  480,540.190,110  0,95.000  ease linear
+
+sound on
+events on

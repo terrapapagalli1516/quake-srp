@@ -63,6 +63,7 @@ mod view;
 mod vis;
 mod warp;
 mod world;
+pub mod xray;
 
 // The 2-D layer's names quake-wasm and quaketool reach as `render::X`.
 pub use crate::console::{Console, draw_console, draw_notify};
@@ -998,6 +999,9 @@ pub struct Renderer {
     prof: stats::Profiler,
     /// How many threads draw a frame's bands.
     workers: band::Workers,
+    /// EXTRA, debug only: the x-ray capture of the last frame's main view
+    /// ([`Renderer::set_xray`]); `None` on every normal path.
+    xray: Option<Box<xray::XrayFrame>>,
 }
 
 /// A world's identity for [`Renderer`]'s per-map state: the sizes of what
@@ -1044,7 +1048,36 @@ impl Renderer {
             warp: warp::WarpTables::default(),
             prof: stats::Profiler::default(),
             workers: band::Workers::default(),
+            xray: None,
         }
+    }
+
+    /// EXTRA, debug only: draw the frames from now on with `options`
+    /// ([`xray`]: the lightmaps alone, another point's PVS) and, with
+    /// [`xray::XrayOptions::capture`], keep each frame's main view as
+    /// [`Renderer::xray_frame`] shows it. `None` (the default) is id's
+    /// renderer. The surface cache is emptied, so no block drawn one way is
+    /// reused the other.
+    pub fn set_xray(&mut self, options: Option<xray::XrayOptions>) {
+        let options = options.filter(|o| *o != xray::XrayOptions::default());
+        self.edge.xray = options.unwrap_or_default();
+        self.xray = options.filter(|o| o.capture).map(|_| Box::default());
+        self.map = None;
+    }
+
+    /// EXTRA, debug only: the point the x-ray marks the PVS from in place of
+    /// the eye ([`xray::XrayOptions::vis_from`]), if one is set.
+    #[must_use]
+    pub fn vis_from(&self) -> Option<Vec3> {
+        self.edge.xray.vis_from
+    }
+
+    /// The x-ray capture of the last frame's main view (the view, not the
+    /// status bar overlay's windows beside the bar), while
+    /// [`Renderer::set_xray`] asked for one.
+    #[must_use]
+    pub fn xray_frame(&self) -> Option<&xray::XrayFrame> {
+        self.xray.as_deref().filter(|x| x.view.is_some())
     }
 
     /// `R_NewMap` (`r_misc.c`): forget everything kept for the last world and
@@ -1258,6 +1291,13 @@ impl Renderer {
             let Some(world) = self.edge.build(&frame, &mut self.surfaces, &mut jobs, &mut self.prof) else {
                 continue;
             };
+            // EXTRA, debug only: an x-ray capture of the main view.
+            if let Some(x) =
+                self.xray.as_deref_mut().filter(|_| ready.is_empty() && view.scene.options.window.is_none())
+            {
+                self.edge.xray_capture(&world, x);
+                x.spans.clear();
+            }
             let t_entities = self.prof.now();
             let entities = Entities::prepare(&frame, &mut self.prof);
             if let Some(t) = t_entities {
@@ -1270,6 +1310,10 @@ impl Renderer {
         let bakes = surf::Bakes::new(jobs);
         let t = self.prof.now();
         let (prof, workers) = (&self.prof, self.workers);
+        // EXTRA, debug only: with an x-ray capture, which thread drew which
+        // rows of the main view (each thread numbered as it starts).
+        let capture_bands = self.xray.is_some();
+        let (ordinals, band_log) = (std::sync::atomic::AtomicU32::new(0), std::sync::Mutex::new(Vec::new()));
         let start = || {
             let (t, mut prof) = (prof.now(), prof.for_band());
             bakes.work();
@@ -1277,9 +1321,18 @@ impl Renderer {
                 let ns = t.elapsed().as_nanos() as u64;
                 prof.add(|s| s.surf_bake_ns += ns);
             }
-            prof
+            let ordinal = if capture_bands { ordinals.fetch_add(1, std::sync::atomic::Ordering::Relaxed) } else { 0 };
+            (prof, ordinal)
         };
-        let bands = workers.run(rows, stride, targets, start, |view, band, prof| {
+        let bands = workers.run(rows, stride, targets, start, |view, band, (prof, ordinal)| {
+            if capture_bands && view == 0 {
+                let r = band.rows();
+                band_log.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push((
+                    r.start as u32,
+                    r.end as u32,
+                    *ordinal,
+                ));
+            }
             let (frame, world, entities) = &ready[view];
             let tw = prof.now();
             let drawn = world.draw_band(band, frame, &bakes);
@@ -1294,12 +1347,46 @@ impl Renderer {
             entities.draw(band, prof);
         });
         let threads = bands.len() as u64;
-        for b in &bands {
+        for (b, _) in &bands {
             self.prof.absorb(b);
         }
         if self.edge.stages.is_some() {
             for (frame, world, _) in &ready {
                 self.edge.stage_grads(world, &bakes, frame.scene.time);
+            }
+        }
+        // EXTRA, debug only: the captured view's spans, its z-buffers and its
+        // alias models' triangles, now that its bands are drawn.
+        if let (Some(x), Some((frame, world, entities))) = (self.xray.as_deref_mut(), ready.first()) {
+            if x.view.is_some() && x.spans.is_empty() && frame.scene.options.window.is_none() {
+                world.xray_spans(frame.h, &mut x.spans, &mut x.world_z);
+                x.bands = band_log.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner);
+                x.bands.sort_unstable();
+                x.threads = threads as u32;
+                x.zbuf.clear();
+                x.zbuf.extend_from_slice(&self.zbuf[..self.zlen]);
+                x.triangles.clear();
+                for (_, m) in &entities.models {
+                    x.triangles.extend(m.xray_triangles().map(|v| xray::XrayTriangle { v, gun: false }));
+                }
+                if let Some(gun) = &entities.gun {
+                    x.triangles.extend(gun.xray_triangles().map(|v| xray::XrayTriangle { v, gun: true }));
+                }
+                // The view as drawn, and its world again with exact perspective.
+                let (w, h) = (frame.w, frame.h);
+                let main = views.first().filter(|v| v.size() == (w, h) && (v.y + h) * stride <= rows.len());
+                if let (true, Some(v)) = (self.edge.xray.exact, main) {
+                    x.drawn.clear();
+                    for y in 0..h {
+                        let at = (v.y + y) * stride + v.x;
+                        x.drawn.extend_from_slice(&rows[at..at + w]);
+                    }
+                    x.exact.clear();
+                    x.exact.resize(w * h, 0);
+                    let mut z = vec![0i16; w * h];
+                    let mut band = band::Band::whole(w, &mut x.exact, &mut z);
+                    world.draw_band_with(&mut band, frame, &bakes, PerspSpan::Exact);
+                }
             }
         }
         self.surfaces.baked(&bakes.finish());

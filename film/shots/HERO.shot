@@ -1,0 +1,18 @@
+# HERO: demo3 from 16.0 s in full slop: native 16:9, horizontal plus, the status bar
+# scaled and overlaid, the crosshair ("And that's all of it"): the chainsaw's hit, the
+# rocket launcher, the first rockets. Brightness 0.8.
+
+demo demo3 from 15.0
+
+duration 11
+fps 60
+size 1920x1080
+
+preset slop
+hud on
+gun on
+crosshair 1
+cvar gamma 0.8
+
+sound on
+events on
