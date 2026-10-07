@@ -1,0 +1,1529 @@
+# The edit: every decision that turns the shots, the narration, the score and the sound into the film.
+#
+#   uv run film/pipeline/edit/timeline.py --dry                    # the clock: where every shot and line falls
+#   uv run film/pipeline/edit/build.py --publish cut               # the film (this takes minutes)
+#
+# timeline.py lays this over the narration (paths.lines: each voice clip and its word times; script.md for each
+# line's section) and the media under FILM_ROOT (each footage file's length and sidecar), and writes
+# edit/v7/timeline.json, the edit decision list build.py renders. Paths are FILM_ROOT's, except paths.script,
+# which is beside this file.
+#
+# It is the production's edit configs resolved into one file: a base config, four layers of settings for
+# shots reused from earlier cuts, and a chain of versions each overriding the one before. Times are seconds,
+# on the film's clock (60 fps, 48 kHz). A reference such as "S27~all#1" is a word in a shot's narration (the
+# first "all"); "TQ1@in+0.3" is 0.3 s after a shot's cut; "word$" is a word's end.
+#
+# [[shotlist_sections]] and [[shotlist]] are the shot list, in the order it was planned (section 4.10 moves after HERO:
+# paths.move). planned_start and planned_len are the plan's; the narration's clock rules. [shots.ID] is each
+# shot's settings: `over` (the narration line it is cut on), `source` and `in` (its footage and in-point),
+# `overlays` (cards, labels, captions, diagrams), `switches` (a cut within the shot), sound levels, dips and
+# mutes, and `len` for a shot without narration.
+
+[paths]
+format = "v3"
+script = "script.md"
+lines = "voice/v7-lines.json"
+out = "edit/v7"
+move = { section = "4.10", after = "HERO" }
+
+[clock]
+fps = 60
+sample_rate = 48000
+lead_max = 0.3
+voice_after_silent = 0.2
+voice_head = 0.04
+voice_tail = 0.15
+
+[levels]
+voice_clip_lufs = -16.0
+voice_plr = 15.0
+music_db = -2.0
+balance_lu = 12.0
+duck_min_db = 4.0
+duck_max_db = 20.0
+duck_attack = 0.12
+duck_release = 0.4
+duck_hold = 0.7
+duck_bridge = 1.2
+duck_hit_window = 0.6
+duck_ride = 1.0
+voice_presence_db = 2.0
+voice_level_range_db = 3.0
+game_lufs = -30.0
+game_duck_db = 6.0
+sfx_db = -8.0
+sfx_duck_db = 6.0
+master_lufs = -14.0
+master_tp = -1.0
+limiter_ceiling = -1.6
+aac_kbps = 320
+sfx_switch_lights_only = true
+sfx_free = ["HERO@in"]
+
+[footage]
+globs = [
+  "footage/game/{id}.mp4",
+  "footage/game/{id}.v1.mp4",
+  "footage/{id}.mp4",
+  "footage/**/{id}.mp4",
+  "footage/**/{id}-*.mp4",
+  "footage/**/{id}.mov",
+]
+diagram_glob = "diagrams/final/{d}-*.mp4"
+head_by_dir = { "footage/game" = 1.0, "edit/v4/art" = 1.0 }
+
+[voice]
+split = { V3-38 = { at = 4.7 } }
+gain = { V4-47 = -3.5 }
+
+[pauses]
+V3-01 = 0.8
+V3-03 = 0.5
+V3-05 = 0.4
+V3-06 = 0.4
+V3-07 = 0.7
+V4-11 = 0.52
+V3-14 = 0.6
+V3-15 = 0.2
+V3-19 = 0.3
+V3-21 = 0.5
+V3-24 = 1.6
+V3-29 = 0.3
+V3-32a = 1.5
+V3-32 = 1.1
+V3-33 = 2.0
+V3-36 = 2.9
+V3-37 = 0.6
+V3-38a = 2.93
+V3-38b = 1.9
+V4-39a = 0.35
+V3-41 = 0.3
+V3-45 = 1.0
+V3-51 = 0.8
+V3-54 = 1.15
+V3-50 = 2.1
+V3-08 = 0.87
+V6-18 = 1.6
+V7-27 = 1.5
+V7-16 = 0.8
+
+[music]
+scores = [
+  { path = "music/score-v10.wav", clock = "edit/v7/clock-score.json" },
+]
+conform_xfade = 0.25
+reference = { section = "4.12", lufs = -15.0 }
+soft_stops = ["LAB9@in", "LAB10h@in", "S60@in"]
+
+[sfx]
+glob = "sound/sfx-v*.wav"
+clock_must_match = "edit/v7/timeline.json"
+
+[events]
+blast_quake = "S02~quake"
+diff_black = "BD2@in"
+video_not_frozen = "BD3~no"
+standard_views = "BD3~on#1"
+all_pass = "S27~all#1"
+all_pass_end = "S27~pass$"
+classic_start = "ST0@in"
+torches_hit = "TQ1@in"
+torches_flicker_on = "TQ1@in+0.3"
+gliding_lights = "LAB2~letters$+0.25"
+smooth_monsters = "ST3@in+0.25"
+smooth_animations = "ST3@in+0.85"
+frame_rate_cap = "LAB4c~curve$+0.3"
+fluid_sky = "LAB5~drift$+0.1"
+burst = "BURST@burst"
+lab9_bed_in = "LAB9@in"
+lab9_id_hum = "LAB9~fixed$+0.15"
+first_click = "LAB9~fixed$+1.55"
+clean_mixer = "LAB9~click$"
+full_rate_sound = "LAB9~click$+0.3"
+rest_same = "LAB10m@in"
+wasd_gag = "LAB10h@in"
+span8 = "PER3@in"
+felt_right = "PER4~felt"
+all_on = "HERO@in"
+hero_action = "HERO@in+2.90"
+all_on_out = "HERO@out"
+shambler_wrong = "S60~wrong"
+chthon = "S61@in+1.0"
+end_card = "S64@in"
+lab9_score_out = "LAB9@in"
+wasd_silence = "LAB10h@in"
+shambler_cutout = "S60@in"
+rule3_classic = "S59~classic"
+every_core = "LAB10a@in"
+against_c = "S27~against"
+s15_switch = "S15~agents$+0.15"
+six_end = "S63~six$"
+question = "S16~how"
+oracle_cut = "S20@in"
+
+[event_lists]
+d15_merges = { shot = "S58", base = "S57", at = [8.4, 8.7, 9.0, 9.3, 9.6, 9.9, 10.2, 10.5, 10.8, 11.1, 11.4] }
+rules = { shot = "S59", at = ["no#1", "no#2", "classic"] }
+first_click = { shot = "LAB9", at = ["fixed$+1.55"] }
+s26_lines = { shot = "S26", at = ["sample#1", "frame#1", "camera", "entity", "dynamic"] }
+s27_against = { shot = "S27", at = ["against"] }
+hero_kills = { shot = "HERO", at = [0.53, 2.9, 3.83, 7.13] }
+
+[ladder]
+items = [
+  "TORCH FLICKER",
+  "GLIDING LIGHTS",
+  "SMOOTH MONSTERS",
+  "SMOOTH ANIMATIONS",
+  "FRAME RATE CAP: NONE",
+  "FLUID SKY",
+  "NATIVE PIXELS",
+  "WIDESCREEN FOV",
+  "SCALED 2-D LAYER",
+  "STATUS BAR OVERLAY",
+  "CROSSHAIR",
+  "NAILS FROM BARRELS",
+  "FULL-RATE SOUND",
+  "PERSPECTIVE SPAN: 8",
+]
+appear = "ST0@in+0.9"
+panel_at = "BURST@burst"
+panel_dur = 0.5
+all_flash = "HERO@in"
+all_fade_by = "HERO@in+4.2"
+stage = ["ST0", "TQ1", "ST1a", "ST1b", "ST1c", "ST2", "ST3", "BURST", "ST7", "HERO", "S62"]
+movs = "diagrams/v7/ladder_{id}.mov"
+nudge = { LAB2 = [0, -80], LAB4c = [-1672, 0], LAB8c = [50, 0] }
+on = { "TORCH FLICKER" = "TQ1@in+0.3", "GLIDING LIGHTS" = "LAB2~letters$+0.25", "SMOOTH MONSTERS" = "ST3@in+0.25", "SMOOTH ANIMATIONS" = "ST3@in+0.85", "FRAME RATE CAP: NONE" = "LAB4c~curve$+0.3", "FLUID SKY" = "LAB5~drift$+0.1", "NATIVE PIXELS" = "BURST@burst", "WIDESCREEN FOV" = "BURST@burst+0.5", "SCALED 2-D LAYER" = "ST7@in+2.0", "STATUS BAR OVERLAY" = "ST7@in+4.0", CROSSHAIR = "ST7@in+6.5", "NAILS FROM BARRELS" = "LAB8c@in+0.2", "FULL-RATE SOUND" = "LAB9~click$+0.3", "PERSPECTIVE SPAN: 8" = "PER3@in" }
+reverse_at = { "FULL-RATE SOUND" = "S62@in+0.2", "WIDESCREEN FOV" = "S62@in+0.5", "NAILS FROM BARRELS" = "S62@in+0.65", "SCALED 2-D LAYER" = "S62@in+0.9", CROSSHAIR = "S62@in+1.05", "STATUS BAR OVERLAY" = "S62@in+1.3", "FLUID SKY" = "S62@in+1.45", "PERSPECTIVE SPAN: 8" = "S62@in+1.7", "SMOOTH MONSTERS" = "S62@in+2.1", "SMOOTH ANIMATIONS" = "S62@in+2.1", "GLIDING LIGHTS" = "S62@in+2.5", "TORCH FLICKER" = "S62@in+2.9", "NATIVE PIXELS" = "S62@in+3.3", "FRAME RATE CAP: NONE" = "S62@in+3.3" }
+
+[diagram_parts]
+
+[[shotlist_sections]]
+id = "1"
+title = "Cold open"
+planned_start = 0.0
+planned_end = 40.4
+
+[[shotlist_sections]]
+id = "2"
+title = "The idea"
+planned_start = 40.4
+planned_end = 62.4
+
+[[shotlist_sections]]
+id = "3"
+title = "The proof"
+planned_start = 62.4
+planned_end = 104.4
+
+[[shotlist_sections]]
+id = "4"
+title = "The slop, switched on"
+planned_start = 104.4
+planned_end = 294.8
+
+[[shotlist_sections]]
+id = "4.0"
+title = "From Classic"
+planned_start = 104.4
+planned_end = 110.9
+
+[[shotlist_sections]]
+id = "4.1"
+title = "TORCHES"
+planned_start = 110.9
+planned_end = 136.9
+
+[[shotlist_sections]]
+id = "4.2"
+title = "Gliding lights"
+planned_start = 136.9
+planned_end = 152.5
+
+[[shotlist_sections]]
+id = "4.3"
+title = "Smooth motion"
+planned_start = 152.5
+planned_end = 169.5
+
+[[shotlist_sections]]
+id = "4.4"
+title = "No frame cap, 480 Hz"
+planned_start = 169.5
+planned_end = 190.5
+
+[[shotlist_sections]]
+id = "4.5"
+title = "Fluid sky"
+planned_start = 190.5
+planned_end = 195.5
+
+[[shotlist_sections]]
+id = "4.6"
+title = "Native pixels, horizontal plus"
+planned_start = 195.5
+planned_end = 212.5
+
+[[shotlist_sections]]
+id = "4.7"
+title = "The status bar, the crosshair"
+planned_start = 212.5
+planned_end = 221.1
+
+[[shotlist_sections]]
+id = "4.8"
+title = "Nails from the barrels"
+planned_start = 221.1
+planned_end = 230.3
+
+[[shotlist_sections]]
+id = "4.9"
+title = "The mixer"
+planned_start = 230.3
+planned_end = 237.9
+
+[[shotlist_sections]]
+id = "4.10"
+title = "And the rest"
+planned_start = 237.9
+planned_end = 258.8
+
+[[shotlist_sections]]
+id = "4.11"
+title = "The perspective, last and short"
+planned_start = 258.8
+planned_end = 285.8
+
+[[shotlist_sections]]
+id = "4.12"
+title = "All of it, on"
+planned_start = 285.8
+planned_end = 294.8
+
+[[shotlist_sections]]
+id = "5"
+title = "How it was built"
+planned_start = 294.8
+planned_end = 316.1
+
+[[shotlist_sections]]
+id = "6"
+title = "Closing"
+planned_start = 316.1
+planned_end = 338.6
+
+[[shotlist]]
+id = "S01"
+section = "1"
+planned_start = 0.0
+planned_len = 4.5
+kind = "game"
+desc = "e1m1's first corridor, Classic, as 1996 drew it"
+reuse_id = "S01"
+
+[[shotlist]]
+id = "S02"
+section = "1"
+planned_start = 4.5
+planned_len = 4.17
+kind = "game"
+desc = "demo1 in Classic: a grenade"
+reuse_id = "S02"
+
+[[shotlist]]
+id = "S03"
+section = "1"
+planned_start = 8.67
+planned_len = 3.96
+kind = "game"
+desc = "e1m8's ziggurat in its lava"
+reuse_id = "S03"
+
+[[shotlist]]
+id = "S04"
+section = "1"
+planned_start = 12.63
+planned_len = 1.62
+kind = "game"
+desc = "demo2: a Scrag overhead"
+reuse_id = "S04"
+
+[[shotlist]]
+id = "S05"
+section = "1"
+planned_start = 14.25
+planned_len = 2.63
+kind = "game"
+desc = "demo3: the rocket launcher"
+reuse_id = "S05"
+
+[[shotlist]]
+id = "S06"
+section = "1"
+planned_start = 16.88
+planned_len = 1.4
+kind = "game"
+desc = "the Quad Damage turning"
+reuse_id = "S06"
+
+[[shotlist]]
+id = "S07"
+section = "1"
+planned_start = 18.28
+planned_len = 5.29
+kind = "game"
+desc = "the wireframe dissolving into e1m1's big room"
+reuse_id = "S07"
+
+[[shotlist]]
+id = "S08"
+section = "1"
+planned_start = 23.57
+planned_len = 1.98
+kind = "game"
+desc = "x-ray: the BSP leaves"
+reuse_id = "S08"
+
+[[shotlist]]
+id = "S09"
+section = "1"
+planned_start = 25.55
+planned_len = 1.93
+kind = "game"
+desc = "x-ray: the potentially visible set, the camera craning up"
+reuse_id = "S09"
+
+[[shotlist]]
+id = "S10"
+section = "1"
+planned_start = 27.48
+planned_len = 1.44
+kind = "game"
+desc = "x-ray: the surface cache's light, dissolving to the picture"
+reuse_id = "S10"
+
+[[shotlist]]
+id = "S11"
+section = "1"
+planned_start = 28.92
+planned_len = 1.11
+kind = "diagram"
+desc = "diagram D01: fixed point"
+diagram = "D01"
+
+[[shotlist]]
+id = "S12"
+section = "1"
+planned_start = 30.03
+planned_len = 3.9
+kind = "diagram"
+desc = "diagram D02: the palette"
+diagram = "D02"
+
+[[shotlist]]
+id = "S13"
+section = "1"
+planned_start = 33.93
+planned_len = 3.1
+kind = "game"
+desc = "x-ray: id's 16-pixel perspective segments, sweeping in"
+reuse_id = "S13"
+
+[[shotlist]]
+id = "S14"
+section = "1"
+planned_start = 37.03
+planned_len = 3.4
+kind = "title"
+desc = "the title card"
+
+[[shotlist]]
+id = "S15"
+section = "2"
+planned_start = 40.43
+planned_len = 13.05
+kind = "game"
+desc = "start's spawn, the game's first view, in the slop preset"
+
+[[shotlist]]
+id = "S18a"
+section = "2"
+planned_start = 53.4
+planned_len = 4.5
+kind = "game"
+desc = "the Options page: Slop Options, then Picture and sound"
+reuse_in = 3.17
+reuse_path = "footage/web/S18-slop-options-menu.mp4"
+
+[[shotlist]]
+id = "S18b"
+section = "2"
+planned_start = 57.9
+planned_len = 1.0
+kind = "game"
+desc = "the cursor passes Reset to Slop and Reset to Classic"
+reuse_in = 1.95
+reuse_path = "footage/web/S18"
+
+[[shotlist]]
+id = "S16"
+section = "2"
+planned_start = 58.9
+planned_len = 3.53
+kind = "game"
+desc = "start's spawn again: the 4:3 box closes in, Classic"
+
+[[shotlist]]
+id = "S20"
+section = "3"
+planned_start = 64.8
+planned_len = 5.0
+kind = "game"
+desc = "e1m1: id's C and the port side by side, the oracle's band"
+reuse_in = 1.0
+reuse_id = "S21"
+
+[[shotlist]]
+id = "S21"
+section = "3"
+planned_start = 69.8
+planned_len = 7.4
+kind = "game"
+desc = "the four maps, id's C and the port side by side"
+reuse_id = "S21"
+
+[[shotlist]]
+id = "BD1"
+section = "3"
+planned_start = 77.2
+planned_len = 4.4
+kind = "edit"
+desc = "e1m1's two panels slide together into their difference"
+
+[[shotlist]]
+id = "BD2"
+section = "3"
+planned_start = 81.6
+planned_len = 2.5
+kind = "edit"
+desc = "the difference, full frame: black"
+
+[[shotlist]]
+id = "BD3"
+section = "3"
+planned_start = 84.1
+planned_len = 5.9
+kind = "edit"
+desc = "the four maps' differences, all black"
+
+[[shotlist]]
+id = "S26"
+section = "3"
+planned_start = 90.0
+planned_len = 9.7
+kind = "game"
+desc = "demo1 in Classic, the checks it passes listed"
+reuse_id = "S26"
+
+[[shotlist]]
+id = "S27"
+section = "3"
+planned_start = 99.7
+planned_len = 4.7
+kind = "game"
+desc = "demo1 continuing under the terminal: ten checks, ALL PASS"
+
+[[shotlist]]
+id = "ST0"
+section = "4.0"
+planned_start = 104.4
+planned_len = 6.5
+kind = "new"
+desc = "e1m3's gable flame in the Classic box, every option off"
+renders = ["ST0"]
+
+[[shotlist]]
+id = "TQ1"
+section = "4.1"
+planned_start = 110.9
+planned_len = 2.5
+kind = "new"
+desc = "the flame starts to flicker: TORCHES!"
+captions = [
+  { kind = "bumper", text = "TORCHES!", at_planned = 111.2 },
+]
+renders = ["TQ1"]
+
+[[shotlist]]
+id = "ST1a"
+section = "4.1"
+planned_start = 113.4
+planned_len = 5.3
+kind = "new"
+desc = "the torch hall, steady against flickering"
+renders = ["ST1a"]
+
+[[shotlist]]
+id = "ST1b"
+section = "4.1"
+planned_start = 118.7
+planned_len = 4.4
+kind = "new"
+desc = "e1m2's arch, its two torches steady against flickering"
+renders = ["ST1b"]
+
+[[shotlist]]
+id = "LAB1"
+section = "4.1"
+planned_start = 123.1
+planned_len = 7.1
+kind = "new"
+desc = "the same arch, the light alone, then textured"
+renders = ["LAB1"]
+
+[[shotlist]]
+id = "ST1c"
+section = "4.1"
+planned_start = 130.2
+planned_len = 6.7
+kind = "new"
+desc = "the gable flame close, one luxel wandering about id's light"
+renders = ["ST1c"]
+
+[[shotlist]]
+id = "ST2"
+section = "4.2"
+planned_start = 136.9
+planned_len = 9.6
+kind = "new"
+desc = "the fluorescent corridor, a light style flickering"
+reuse_id = "N3b"
+
+[[shotlist]]
+id = "LAB2"
+section = "4.2"
+planned_start = 146.5
+planned_len = 6.0
+kind = "game"
+desc = "the light style at 1/16 speed: id's steps against slop's glide"
+reuse_id = "S48"
+
+[[shotlist]]
+id = "LAB3a"
+section = "4.3"
+planned_start = 152.5
+planned_len = 8.6
+kind = "game"
+desc = "a grunt at 240 Hz, 1/8 speed: id's steps against slop's glide"
+reuse_id = "S45"
+
+[[shotlist]]
+id = "LAB3b"
+section = "4.3"
+planned_start = 161.1
+planned_len = 5.8
+kind = "game"
+desc = "its poses held against blended"
+reuse_id = "S46a"
+
+[[shotlist]]
+id = "ST3"
+section = "4.3"
+planned_start = 166.9
+planned_len = 2.6
+kind = "new"
+desc = "demo1's zombies, the options so far on"
+renders = ["ST3"]
+
+[[shotlist]]
+id = "LAB4a"
+section = "4.4"
+planned_start = 169.5
+planned_len = 6.5
+kind = "new"
+desc = "a 240 Hz screen at quarter speed: id's gate draws every 4th refresh, slop every one"
+renders = ["LAB4a"]
+
+[[shotlist]]
+id = "LAB4b"
+section = "4.4"
+planned_start = 176.0
+planned_len = 3.9
+kind = "new"
+desc = "a run at 480 frames a second, eight for each one shown"
+reuse_id = "N3c"
+
+[[shotlist]]
+id = "LAB4c"
+section = "4.4"
+planned_start = 179.9
+planned_len = 10.6
+kind = "game"
+desc = "jumps and grenades, at 72 Hz and at 480 Hz"
+reuse_id = "N4"
+
+[[shotlist]]
+id = "LAB5"
+section = "4.5"
+planned_start = 190.5
+planned_len = 5.0
+kind = "new"
+desc = "id's clouds against slop's"
+reuse_id = "F11"
+
+[[shotlist]]
+id = "BURST"
+section = "4.6"
+planned_start = 195.5
+planned_len = 6.0
+kind = "new"
+desc = "the Classic box bursting to native 16:9"
+renders = ["BURST"]
+
+[[shotlist]]
+id = "LAB6a"
+section = "4.6"
+planned_start = 201.5
+planned_len = 7.0
+kind = "game"
+desc = "4:3, then id's 16:9 cutting off the top and the bottom"
+reuse_in = 1.0
+reuse_id = "S38"
+
+[[shotlist]]
+id = "LAB6b"
+section = "4.6"
+planned_start = 208.5
+planned_len = 4.0
+kind = "game"
+desc = "the cross-fade to horizontal plus"
+reuse_id = "S39"
+
+[[shotlist]]
+id = "ST7"
+section = "4.7"
+planned_start = 212.5
+planned_len = 8.6
+kind = "new"
+desc = "the status bar scaling, the world beside it, the crosshair"
+captions = [
+  { kind = "caption", text = "CROSSHAIR" },
+]
+renders = ["ST7"]
+
+[[shotlist]]
+id = "LAB8a"
+section = "4.8"
+planned_start = 221.1
+planned_len = 4.7
+kind = "game"
+desc = "a nail's first frame, above the barrel"
+reuse_id = "N8a"
+
+[[shotlist]]
+id = "LAB8b"
+section = "4.8"
+planned_start = 225.8
+planned_len = 2.3
+kind = "game"
+desc = "id's nails, wide of the gun"
+reuse_id = "N8b"
+
+[[shotlist]]
+id = "LAB8c"
+section = "4.8"
+planned_start = 228.1
+planned_len = 2.2
+kind = "game"
+desc = "id's nails against slop's, from the barrels"
+reuse_id = "F13"
+
+[[shotlist]]
+id = "LAB9"
+section = "4.9"
+planned_start = 230.3
+planned_len = 7.6
+kind = "game"
+desc = "e1m8's rune gate, under the mixer's click"
+reuse_id = "N9"
+
+[[shotlist]]
+id = "LAB10m"
+section = "4.10"
+planned_start = 237.9
+planned_len = 2.0
+kind = "game"
+desc = "the Options page: Reset to Slop and Reset to Classic"
+reuse_in = 1.67
+reuse_path = "footage/web/S18-slop-options-menu.mp4"
+
+[[shotlist]]
+id = "LAB10a"
+section = "4.10"
+planned_start = 239.9
+planned_len = 1.6
+kind = "new"
+desc = "each thread's bands of the frame"
+captions = [
+  { kind = "caption", text = "EVERY CORE · THE SAME PIXELS" },
+]
+reuse_id = "F02"
+
+[[shotlist]]
+id = "LAB10c"
+section = "4.10"
+planned_start = 244.1
+planned_len = 2.8
+kind = "game"
+desc = "the page loading in the browser"
+captions = [
+  { kind = "caption", text = "WEBASSEMBLY · IN THE BROWSER" },
+]
+reuse_in = 2.3
+reuse_path = "footage/web/F01-page-load.mp4"
+
+[[shotlist]]
+id = "LAB10d"
+section = "4.10"
+planned_start = 246.9
+planned_len = 2.0
+kind = "game"
+desc = "a live run on e1m2 in full slop, the player's own eye"
+
+[[shotlist]]
+id = "LAB10e"
+section = "4.10"
+planned_start = 248.9
+planned_len = 1.6
+kind = "game"
+desc = "mouse-look"
+captions = [
+  { kind = "caption", text = "MOUSE-LOOK · WASD" },
+]
+reuse_id = "N7a"
+
+[[shotlist]]
+id = "LAB10f"
+section = "4.10"
+planned_start = 250.5
+planned_len = 1.0
+kind = "game"
+desc = "a gamepad's hit, the pad shaking"
+captions = [
+  { kind = "caption", text = "GAMEPAD · RUMBLE" },
+]
+reuse_id = "F06"
+
+[[shotlist]]
+id = "LAB10g"
+section = "4.10"
+planned_start = 251.5
+planned_len = 3.8
+kind = "game"
+desc = "the phone's touch controls"
+captions = [
+  { kind = "caption", text = "GAMEPAD · TOUCH" },
+]
+reuse_path = "footage/web/F05b-phone-touch.mp4"
+
+[[shotlist]]
+id = "LAB10h"
+section = "4.10"
+planned_start = 255.3
+planned_len = 3.5
+kind = "game"
+desc = "the WASD keys of 1996 and of 2026"
+reuse_in = 0.5
+reuse_id = "N7b"
+
+[[shotlist]]
+id = "PER1"
+section = "4.11"
+planned_start = 258.8
+planned_len = 8.0
+kind = "game"
+desc = "e1m6's wall turning, divided every 16 pixels"
+reuse_id = "N2a"
+
+[[shotlist]]
+id = "PER2"
+section = "4.11"
+planned_start = 266.8
+planned_len = 2.1
+kind = "game"
+desc = "every divide drawn"
+reuse_id = "N2b"
+
+[[shotlist]]
+id = "PER3"
+section = "4.11"
+planned_start = 268.9
+planned_len = 4.6
+kind = "game"
+desc = "the divides doubling at span 8"
+reuse_id = "N2c"
+
+[[shotlist]]
+id = "PER4"
+section = "4.11"
+planned_start = 273.5
+planned_len = 3.0
+kind = "new"
+desc = "the span flipping through its settings"
+reuse_id = "N2d"
+
+[[shotlist]]
+id = "PER5"
+section = "4.11"
+planned_start = 276.5
+planned_len = 4.8
+kind = "game"
+desc = "four spans side by side, the error tinted"
+captions = [
+  { kind = "caption", text = "+10% WORK · 1/4 THE ERROR" },
+]
+reuse_in = 5.3
+reuse_id = "S34"
+
+[[shotlist]]
+id = "PER6"
+section = "4.11"
+planned_start = 281.3
+planned_len = 4.5
+kind = "game"
+desc = "exact at every pixel, the wall turning"
+reuse_id = "N2e"
+
+[[shotlist]]
+id = "HERO"
+section = "4.12"
+planned_start = 285.8
+planned_len = 9.0
+kind = "new"
+desc = "e1m3's last hall in full slop: torches, rockets, fiends"
+renders = ["HERO"]
+
+[[shotlist]]
+id = "S57"
+section = "5"
+planned_start = 294.8
+planned_len = 7.6
+kind = "game"
+desc = "start's hall, the fleet's merges drawn over it"
+reuse_id = "N10"
+
+[[shotlist]]
+id = "S58"
+section = "5"
+planned_start = 302.4
+planned_len = 4.0
+kind = "game"
+desc = "start's hall, continued"
+
+[[shotlist]]
+id = "S59"
+section = "5"
+planned_start = 306.4
+planned_len = 6.5
+kind = "game"
+desc = "the start map's wireframe, orbiting, under the rules"
+reuse_id = "S59"
+
+[[shotlist]]
+id = "S60"
+section = "5"
+planned_start = 312.9
+planned_len = 3.2
+kind = "game"
+desc = "the Shambler's lightning"
+reuse_id = "S60"
+
+[[shotlist]]
+id = "S61"
+section = "6"
+planned_start = 316.1
+planned_len = 7.5
+kind = "game"
+desc = "Chthon rises from the lava"
+reuse_id = "S61"
+
+[[shotlist]]
+id = "S62"
+section = "6"
+planned_start = 323.6
+planned_len = 4.6
+kind = "game"
+desc = "the options switched off one by one, back to Classic"
+reuse_id = "S62.clean"
+
+[[shotlist]]
+id = "S63"
+section = "6"
+planned_start = 328.2
+planned_len = 4.4
+kind = "game"
+desc = "the 1996 corridor again"
+reuse_id = "S63"
+
+[[shotlist]]
+id = "S64"
+section = "6"
+planned_start = 334.6
+planned_len = 4.0
+kind = "title"
+desc = "the end card"
+
+# S01: e1m1's first corridor, Classic, as 1996 drew it
+[shots.S01]
+len = 4.5
+fade_in = 2.0
+overlays = [
+  { type = "card", name = "disclaimer" },
+]
+
+# S02: demo1 in Classic: a grenade
+[shots.S02]
+sync = { at = 2.78, word = "quake" }
+game_lufs = -24.0
+over = "In nineteen ninety-six, id Software released Quake."
+
+# S03: e1m8's ziggurat in its lava
+[shots.S03]
+over = "It changed how a generation saw three-dimensional space."
+
+# S04: demo2: a Scrag overhead
+[shots.S04]
+over = "It went online."
+
+# S05: demo3: the rocket launcher
+[shots.S05]
+over = "People rebuilt it, raced through it,"
+
+# S06: the Quad Damage turning
+[shots.S06]
+over = "and competed in it."
+
+# S07: the wireframe dissolving into e1m1's big room
+[shots.S07]
+fit = true
+over = "Underneath ran a monument of applied mathematics."
+
+# S08: x-ray: the BSP leaves
+[shots.S08]
+over = "binary space partitions,"
+
+# S09: x-ray: the potentially visible set, the camera craning up
+[shots.S09]
+overlays = [
+  { type = "card", name = "label", text = "seen from here", x = 1110, y = 900, scale = 3, ax = 1060, ay = 930 },
+]
+over = "a potentially visible set,"
+
+# S10: x-ray: the surface cache's light, dissolving to the picture
+[shots.S10]
+over = "a surface cache,"
+source = ["footage/game/S10b.mp4"]
+
+# S11: diagram D01: fixed point
+[shots.S11]
+over = "fixed point."
+music_dips = [["point", "point$+0.1", -5.0]]
+
+# S12: diagram D02: the palette
+[shots.S12]
+over = "Every pixel, one of two hundred and fifty-six colours."
+
+# S13: x-ray: id's 16-pixel perspective segments, sweeping in
+[shots.S13]
+sync = { at = 0.9, word = "rationed" }
+over = "And one division, rationed."
+
+# S14: the title card
+[shots.S14]
+card = "title"
+len = 3.4
+fade_out = 0.6
+
+# S15: start's spawn, the game's first view, in the slop preset
+[shots.S15]
+fit = false
+over = "This is quake-srp: the slop rust port. Quake, ported to Rust by AI agents."
+source = ["footage/game/S15s.mp4"]
+chain = "S15c"
+switches = []
+overlays = []
+
+# S18a: the Options page: Slop Options, then Picture and sound
+[shots.S18a]
+in = 3.17
+source = "footage/web/S18-slop-options-menu.mp4"
+over = "Each departure"
+
+# S18b: the cursor passes Reset to Slop and Reset to Classic
+[shots.S18b]
+source = "footage/web/S18-slop-options-menu.mp4"
+in = 1.95
+over = "Switch them all off"
+
+# S16: start's spawn again: the 4:3 box closes in, Classic
+[shots.S16]
+overlays = [
+  { type = "pillars", at = 0.0, dur = 0.4, mode = "close" },
+  { type = "card", name = "label", text = "Classic", box = [248, 8, 484, 92], scale = 3, band = 1.0, at = 0.4 },
+]
+over = "and you get Classic"
+source = ["footage/game/S15s.mp4"]
+in = 19.0
+switches = [
+  { path = "footage/game/S15c.mp4", at = 0.4 },
+]
+game_dips = [["how", "faithful$", -4.0, 0.3]]
+game_fade_out = 0.3
+
+# S20: e1m1: id's C and the port side by side, the oracle's band
+[shots.S20]
+overlays = [
+  { type = "card", name = "label", text = "", box = [54, 36, 217, 85], scale = 3, band = 1.0 },
+  { type = "video", glob = ["diagrams/v7/D03*alpha*.mov", "diagrams/v6/D03*alpha*.mov"] },
+]
+in = 1.0
+over = "Build id's own C to run without a screen: the oracle."
+lift = 0.8
+source = "footage/game/S21m.mp4"
+
+# S21: the four maps, id's C and the port side by side
+[shots.S21]
+over = "Give both the same camera, the same clock, the same monsters, and compare the frames, pixel by pixel."
+lift = 0.8
+source = "footage/game/S21m.mp4"
+
+# BD1: e1m1's two panels slide together into their difference
+[shots.BD1]
+card = "bd1"
+cues = { minus = "subtract" }
+card_opts = { c = ["footage/proof/post-fix-ents/e1m1_ents_320x200.c.ppm"], port = ["footage/proof/post-fix-ents/e1m1_ents_320x200.port.ppm"] }
+over = "Subtract one frame"
+
+# BD2: the difference, full frame: black
+[shots.BD2]
+voiceless = true
+len = 2.5
+card = "black"
+mute = true
+
+# BD3: the four maps' differences, all black
+[shots.BD3]
+card = "bd3"
+voice_after = 0.0
+mute_windows = [[0.0, "no-0.02"]]
+cues = { grid = "on#1" }
+card_opts = { label = "ID'S C - THE PORT · E1M1 · 320×200", label_grid = "ID'S C - THE PORT · 320×200", four_places = true, maps = [
+  { name = "e1m1", c = ["footage/proof/post-fix-ents/e1m1_ents_320x200.c.ppm"], port = ["footage/proof/post-fix-ents/e1m1_ents_320x200.port.ppm"] },
+  { name = "e1m2", c = ["footage/proof/post-fix-ents/e1m2_ents_320x200.c.ppm"], port = ["footage/proof/post-fix-ents/e1m2_ents_320x200.port.ppm"] },
+  { name = "e1m3", c = ["footage/proof/post-fix-ents/e1m3_ents_320x200.c.ppm"], port = ["footage/proof/post-fix-ents/e1m3_ents_320x200.port.ppm"] },
+  { name = "e1m5", c = ["footage/proof/post-fix-ents/e1m5_ents_320x200.c.ppm"], port = ["footage/proof/post-fix-ents/e1m5_ents_320x200.port.ppm"] },
+] }
+over = "No, your video"
+
+# S26: demo1 in Classic, the checks it passes listed
+[shots.S26]
+overlays = [
+  { type = "png", path = "edit/v5/art/S26-line0.png", cue = "sample#1" },
+  { type = "png", path = "edit/v5/art/S26-line1.png", cue = "frame#1" },
+  { type = "png", path = "edit/v5/art/S26-line2.png", cue = "camera" },
+  { type = "png", path = "edit/v5/art/S26-line3.png", cue = "entity" },
+  { type = "png", path = "edit/v5/art/S26-line4.png", cue = "every#2" },
+]
+fit = true
+over = "The mixer matches"
+
+# S27: demo1 continuing under the terminal: ten checks, ALL PASS
+[shots.S27]
+card = "terminal"
+cues = { allpass = "all#1", against = "against" }
+render = "N1"
+no_inherit = true
+overlays = [
+  { type = "card", name = "terminal_over" },
+]
+over = "One command runs all of it, and prints: all pass."
+source = ["footage/game/N1b.mp4", "footage/game/N1.mp4"]
+
+# ST0: e1m3's gable flame in the Classic box, every option off
+[shots.ST0]
+overlays = [
+  { type = "card", name = "label", text = "Classic", x = 264, y = 28, scale = 3 },
+]
+over = "Now, the slop"
+source = "footage/game/STG.mp4"
+
+# TQ1: the flame starts to flicker: TORCHES!
+[shots.TQ1]
+voiceless = true
+len = 2.5
+drop_captions = ["TORCHES!"]
+overlays = [
+  { type = "video", glob = ["diagrams/v4/bumper-torches-stg_alpha.mov"] },
+]
+source = "footage/game/STG.mp4"
+in = 7.25
+
+# ST1a: the torch hall, steady against flickering
+[shots.ST1a]
+fit = true
+over = "First: torches"
+source = "footage/game/ST1a2.mp4"
+in_add = 0.0
+game_dips = [["of", "walls$+0.1", -5.0]]
+overlays = [
+  { type = "card", name = "label", text = "id's: light baked, still", box = [252, 8, 860, 68], scale = 3, band = 1.0 },
+  { type = "card", name = "label", text = "slop: flickering", box = [1259, 8, 1666, 68], scale = 3, band = 1.0 },
+]
+
+# ST1b: e1m2's arch, its two torches steady against flickering
+[shots.ST1b]
+over = "a hundred and forty-three"
+overlays = [
+  { type = "card", name = "label", text = "id's: light baked, still", box = [252, 8, 860, 68], scale = 3, band = 1.0 },
+  { type = "card", name = "label", text = "slop: flickering", box = [1259, 8, 1666, 68], scale = 3, band = 1.0 },
+]
+
+# LAB1: the same arch, the light alone, then textured
+[shots.LAB1]
+over = "The port finds"
+overlays = [
+  { type = "card", name = "label", text = "id's: light baked, still", box = [252, 8, 860, 68], scale = 3, band = 1.0 },
+  { type = "card", name = "label", text = "slop: flickering", box = [1259, 8, 1666, 68], scale = 3, band = 1.0 },
+]
+
+# ST1c: the gable flame close, one luxel wandering about id's light
+[shots.ST1c]
+overlays = [
+  { type = "video", glob = ["diagrams/v6/D13-luxel_alpha.mov", "diagrams/v5/D13-luxel_alpha.mov"] },
+]
+over = "The user asked"
+source = "footage/game/ST1cG.mp4"
+
+# ST2: the fluorescent corridor, a light style flickering
+[shots.ST2]
+overlays = [
+  { type = "video", glob = ["diagrams/v4/D12*alpha*.mov", "diagrams/v3/D12*alpha*.mov"] },
+]
+over = "The lights id did animate"
+
+# LAB2: the light style at 1/16 speed: id's steps against slop's glide
+[shots.LAB2]
+overlays = [
+  { type = "video", glob = ["diagrams/v7/D12b-glide-strip_alpha.mov", "diagrams/final/D12b-glide-strip_alpha.mov"] },
+]
+over = "On a sharp, fast"
+
+# LAB3a: a grunt at 240 Hz, 1/8 speed: id's steps against slop's glide
+[shots.LAB3a]
+overlays = [
+  { type = "card", name = "frame_counter", first = -0.033, step = 0.8, x = 48, y = 990 },
+]
+over = "Monsters still think"
+
+# LAB3b: its poses held against blended
+[shots.LAB3b]
+overlays = [
+  { type = "card", name = "label", text = "ice-skating (poses held)", box = [12, 20, 628, 94], scale = 3, band = 1.0 },
+  { type = "card", name = "label", text = "slop", box = [966, 20, 1498, 94], scale = 3, band = 1.0 },
+]
+over = "Slop glides him"
+
+# ST3: demo1's zombies, the options so far on
+[shots.ST3]
+voiceless = true
+len = 2.6
+source = "footage/game/ST3.g065.mp4"
+
+# LAB4a: a 240 Hz screen at quarter speed: id's gate draws every 4th refresh, slop every one
+[shots.LAB4a]
+over = "id capped the game"
+source = "footage/game/LAB4a3.mp4"
+sound = "footage/game/LAB4a3.wav"
+overlays = [
+  { type = "card", name = "label", text = "a 240 Hz screen · ¼ speed", box = [588, 14, 1332, 70], scale = 3, band = 0.85 },
+  { type = "card", name = "label", text = "id's 72 cap:\nevery 4th refresh", box = [384, 84, 816, 160], scale = 3, band = 0.85 },
+  { type = "card", name = "label", text = "a frame every refresh", box = [1056, 84, 1584, 160], scale = 3, band = 0.85 },
+]
+
+# LAB4b: a run at 480 frames a second, eight for each one shown
+[shots.LAB4b]
+source = ["footage/game/N3w-box.zoom.mp4", "footage/game/N3c-turn-box.zoom.mp4"]
+fit = true
+over = "Run id's code faster"
+mask43 = true
+
+# LAB4c: jumps and grenades, at 72 Hz and at 480 Hz
+[shots.LAB4c]
+overlays = [
+  { type = "video", glob = ["diagrams/v6/D11-jump_alpha.mov", "diagrams/v5/D11-jump_alpha.mov"], scale = 0.75, x = 502, y = 135 },
+]
+over = "jumps peak higher"
+source = ["footage/game/N4-box.mp4", "footage/game/N4.mp4"]
+mask43 = true
+
+# LAB5: id's clouds against slop's
+[shots.LAB5]
+over = "The clouds used to jump"
+
+# BURST: the Classic box bursting to native 16:9
+[shots.BURST]
+burst = { a = "footage/game/BURST2r-a.mp4", b = "footage/game/BURST2r-b.mp4", at = "picture$+0.8", dur = 0.5, in = 0.5 }
+over = "Now, the picture"
+
+# LAB6a: 4:3, then id's 16:9 cutting off the top and the bottom
+[shots.LAB6a]
+in = 1.0
+over = "id spread its"
+overlays = [
+  { type = "card", name = "label", text = "id's", x = 36, y = 40, scale = 3 },
+]
+
+# LAB6b: the cross-fade to horizontal plus
+[shots.LAB6b]
+over = "Horizontal plus keeps"
+overlays = [
+  { type = "card", name = "label", text = "slop", x = 36, y = 40, scale = 3 },
+]
+
+# ST7: the status bar scaling, the world beside it, the crosshair
+[shots.ST7]
+caption_opts = { CROSSHAIR = { at = 6.5 } }
+overlays = [
+  { type = "card", name = "label", text = "id's 1:1", x = 36, y = 40, scale = 3, until = 2.0 },
+  { type = "card", name = "label", text = "scaled", x = 36, y = 40, scale = 3, at = 2.0, until = 4.0 },
+  { type = "card", name = "label", text = "the world beside it", x = 36, y = 40, scale = 3, at = 4.0 },
+  { type = "card", name = "label", text = "the strips become world", x = 136, y = 880, scale = 3, ax = 70, ay = 1030, at = 4.0, until = 6.4 },
+]
+over = "The status bar scales"
+
+# LAB8a: a nail's first frame, above the barrel
+[shots.LAB8a]
+overlays = [
+  { type = "card", name = "label", text = "not from the barrel", x = 980, y = 560, scale = 3, ax = 872, ay = 648, at = 1.55 },
+]
+out = 2.56
+game_mute = [[1.55, 10.0]]
+over = "QuakeC fires"
+
+# LAB8b: id's nails, wide of the gun
+[shots.LAB8b]
+over = "At ten-eighty"
+
+# LAB8c: id's nails against slop's, from the barrels
+[shots.LAB8c]
+game_lufs = -24.0
+over = "So now they leave"
+game_fade_out = 0.06
+game_dips = [["barrels", "barrels$+0.1", -4.0]]
+
+# LAB9: e1m8's rune gate, under the mixer's click
+[shots.LAB9]
+over = "id's mixer runs at"
+fit = true
+no_inherit = true
+source = ["footage/game/LAB9b.mp4", "footage/game/N9.mp4"]
+overlays = [
+  { type = "video", glob = ["diagrams/v6/D14-mixer-teleporter_alpha.mov", "diagrams/v5/D14-mixer-teleporter_alpha.mov"] },
+]
+game_lufs = -21.5
+sound_compose = [
+  { wav = "footage/game/N9-click-slop.wav", from = 0.5, to = 4.25, repeat_from = 0.5, at = 0.0, until = "fixed$+0.55", db = -10.0, fade_in = 0.3, fade_out = 0.4 },
+  { wav = "footage/game/N9-click-id.wav", from = 2.22, to = 4.25, at = "fixed$+0.15", until = "fixed$+2.18", fade_in = 0.4, db = -3.7 },
+  { wav = "footage/game/N9-click-id.wav", from = 0.63, to = 4.25, repeat_from = 0.0, at = "fixed$+2.18", until = "click$", db = -3.7 },
+  { wav = "footage/game/N9-click-slop.wav", from = 0.5, to = 4.25, repeat_from = 0.5, at = "click$", until = 30.0, db = -2.0 },
+]
+voice_gains = [["like-0.25", "like-0.04", -6.0]]
+
+# LAB10m: the Options page: Reset to Slop and Reset to Classic
+[shots.LAB10m]
+in = 1.67
+source = "footage/web/S18-slop-options-menu.mp4"
+over = "The rest is the same"
+out = 3.1
+fit = "slow"
+fit_min = 0.4
+voice_after = 1.0
+
+# LAB10a: each thread's bands of the frame
+[shots.LAB10a]
+fit = false
+over = "Every core draws"
+source = ["footage/game/LAB10a3.mp4", "footage/game/LAB10a2.mp4"]
+sync = { at = 6.4, word = "pixels$", stretch = true }
+caption_opts = { "EVERY CORE · THE SAME PIXELS" = { cue = "every" } }
+voice_after = 0.5
+
+# LAB10c: the page loading in the browser
+[shots.LAB10c]
+in = 5.0
+source = "footage/web/F01-page-load.mp4"
+over = "It runs in a browser"
+drop_captions = []
+overlays = []
+
+# LAB10d: a live run on e1m2 in full slop, the player's own eye
+[shots.LAB10d]
+source = ["footage/game/LAB10d.mp4", "footage/game/N3c-turn.clean.mp4"]
+over = "It's fast"
+
+# LAB10e: mouse-look
+[shots.LAB10e]
+over = "Mouse-look"
+
+# LAB10f: a gamepad's hit, the pad shaking
+[shots.LAB10f]
+game_lufs = -24.0
+over = "a gamepad"
+drop_captions = ["GAMEPAD · RUMBLE"]
+overlays = [
+  { type = "caption", text = "GAMEPAD · TOUCH" },
+]
+
+# LAB10g: the phone's touch controls
+[shots.LAB10g]
+source = ["footage/web/F05b-phone-touch.mp4", "footage/web/F05-phone-touch.mp4"]
+over = "a phone"
+drop_captions = ["TOUCH"]
+overlays = [
+  { type = "caption", text = "GAMEPAD · TOUCH", typed = false },
+]
+in = 0.0
+sync = { at = 2.5, word = "zoomer" }
+voice_gains = [["zoomer", "zoomer$", 2.0]]
+
+# LAB10h: the WASD keys of 1996 and of 2026
+[shots.LAB10h]
+voiceless = true
+len = 3.8
+overlays = [
+  { type = "card", name = "label", text = "1996's keys", x = 264, y = 40, scale = 3 },
+  { type = "card", name = "label", text = "A: looks up", x = 48, y = 880, scale = 3, at = 0.8 },
+  { type = "card", name = "label", text = "D: swims up", x = 48, y = 950, scale = 3, at = 1.7 },
+]
+in = 0.5
+
+# PER1: e1m6's wall turning, divided every 16 pixels
+[shots.PER1]
+chain = "N2"
+overlays = [
+  { type = "video", glob = ["diagrams/v6/D06a*alpha*.mov", "diagrams/v3/D06a*alpha*.mov"] },
+  { type = "card", name = "label", text = "id's x86 drew while it divided", box = [552, 24, 1368, 104], scale = 3, band = 0.85, at = "pixels" },
+]
+over = "One last switch"
+
+# PER2: every divide drawn
+[shots.PER2]
+chain = "N2"
+over = "Here is every divide"
+
+# PER3: the divides doubling at span 8
+[shots.PER3]
+chain = "N2"
+over = "The slop preset divides every eight"
+
+# PER4: the span flipping through its settings
+[shots.PER4]
+sync = { at = 1.6, word = "felt" }
+overlays = [
+  { type = "video", glob = ["diagrams/v4/PER4-menu-row_alpha.mov"] },
+]
+over = "Why eight"
+
+# PER5: four spans side by side, the error tinted
+[shots.PER5]
+overlays = [
+  { type = "card", name = "label", text = "64", x = 36, y = 30, scale = 3 },
+  { type = "card", name = "label", text = "id's 16", x = 996, y = 30, scale = 3 },
+  { type = "card", name = "label", text = "8 (slop)", x = 36, y = 566, scale = 3 },
+  { type = "card", name = "label", text = "exact", x = 996, y = 566, scale = 3 },
+]
+in = 5.3
+over = "A tenth more work"
+drop_captions = ["+10% WORK · 1/4 THE ERROR"]
+
+# PER6: exact at every pixel, the wall turning
+[shots.PER6]
+voiceless = false
+len = 4.5
+overlays = []
+over = "And that's the slop"
+lead = 0.68
+source = "footage/game/N2e.clean.mp4"
+
+# HERO: e1m3's last hall in full slop: torches, rockets, fiends
+[shots.HERO]
+voice_after = 0.4
+voiceless = true
+len = 7.28
+cut_on = "on$"
+source = "footage/game/HERO7.mp4"
+switches = []
+game_lufs = -18.0
+game_unducked = true
+music_dips = [[0.0, 2.0, 3.0]]
+in = 1.0
+
+# S57: start's hall, the fleet's merges drawn over it
+[shots.S57]
+render = "N10"
+voice_after = 0.5
+overlays = [
+  { type = "video", glob = ["diagrams/v4/D15-fleet-gate_alpha.mov", "diagrams/v2/D15-fleet-gate-overlay_alpha.mov"] },
+]
+over = "Claude, Anthropic's model, wrote the code, as fleets of agents, each on its own branch with a written brief."
+
+# S58: start's hall, continued
+[shots.S58]
+render = "N10"
+overlays = [
+  { type = "video", glob = ["diagrams/v4/D15-fleet-gate_alpha.mov", "diagrams/v2/D15-fleet-gate-overlay_alpha.mov"], chain_from = "S57" },
+]
+over = "A chair merged a branch only when every check passed."
+
+# S59: the start map's wireframe, orbiting, under the rules
+[shots.S59]
+overlays = [
+  { type = "card", name = "rules" },
+]
+cues = { rule1 = "no#1", rule2 = "no#2", rule3 = "classic" }
+dim = 1.0
+fit = true
+over = "The user set the rules: no dependencies, no unsafe code, and Classic proven."
+source = "footage/game/S59b.mp4"
+voice_gains = [["proven", "proven$", 2.0]]
+
+# S60: the Shambler's lightning
+[shots.S60]
+game_lufs = -22.0
+over = "Then played it, and said what was wrong."
+game_dips = [["what", "what$+0.1", -11.0]]
+
+# S61: Chthon rises from the lava
+[shots.S61]
+over = "id Software released Quake's source under a free licence. This port follows it, file by file."
+
+# S62: the options switched off one by one, back to Classic
+[shots.S62]
+over = "Every change has a name. Every name can be switched off."
+no_inherit = true
+source = "footage/game/S62.clean.mp4"
+sfx_dips = [["has", "name#1", -6.0]]
+
+# S63: the 1996 corridor again
+[shots.S63]
+over = "And underneath, pixel for pixel, it is still nineteen ninety-six."
+fit = true
+
+# S64: the end card
+[shots.S64]
+card = "endcard_v4"
+fade_out = 1.5
+voiceless = true
+len = 9.0
+fade_in = 0.5
