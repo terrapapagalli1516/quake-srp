@@ -1057,7 +1057,7 @@ mod tests {
                 let options =
                     RenderOptions { video: VideoCvars { torches, ..VideoCvars::CLASSIC }, ..RenderOptions::default() };
                 let scene = Scene {
-                    time,
+                    time: time.into(),
                     colormap: Some(&colormap),
                     light_styles: &styles,
                     options,
@@ -1196,7 +1196,7 @@ mod tests {
     ) -> Scene<'a> {
         let cam = Camera::looking_at([0.0, -200.0, 0.0], [0.0, 100.0, -128.0], 90.0);
         let options = RenderOptions { video: VideoCvars { torches, ..VideoCvars::MODERN }, ..RenderOptions::default() };
-        Scene { time, colormap: Some(colormap), options, ..Scene::new(bsp, cam, 160, 100, palette) }
+        Scene { time: time.into(), colormap: Some(colormap), options, ..Scene::new(bsp, cam, 160, 100, palette) }
     }
 
     fn row_colormap() -> Vec<u8> {

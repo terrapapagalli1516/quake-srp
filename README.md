@@ -21,9 +21,9 @@ which draws the preset's values: Screen size 110 (no inventory bar) and perspect
 
 id Software's *Quake* (1996), ported to Rust from the WinQuake C source, with only the
 standard library and no `unsafe` code. With every extra switched off it is id's game,
-checked against id's own C: every pixel but two in id's standard 3-D views, the sound
-mixer sample for sample, and in demo playback the camera, every entity and every dynamic
-light, frame by frame. What is known to differ still is a list
+checked against id's own C: every pixel of the 3-D view in every view tried, monsters awake
+among them, the sound mixer sample for sample, and in demo playback the camera, every entity
+and every dynamic light, frame by frame. What is known to differ still is a list
 ([AUDIT.md](AUDIT.md), "Open"). Every check is one command. By default it is the same software renderer given a 2026 machine. It plays
 in a browser; natively, `quaketool` runs the same engine without a window.
 
@@ -48,7 +48,10 @@ dependencies, no `unsafe`, and Classic is id's game, proven for anything touched
   There is no multiplayer.
 - **Checked against id's code.** id's C, built headless (the "oracle", in `oracle/`), is the
   reference. With every extra switched off, the port and id's C agree on:
-  - 100.00% of pixels in the standard 3-D views (two pixels differ on one map);
+  - every pixel of the 3-D view, in every view tried: thousands of them, over the
+    shareware, registered and mission-pack maps, at sizes up to 1280x1024, and with the
+    player among each map's monsters, awake and attacking (id's C with
+    every float operation in the type it declares: [Proof](#proof), "Which C");
   - the status bar, menus and console, apart from a few explained differences (the version
     string, the video-mode list, the port's own Options rows);
   - the mixer's output, sample for sample, on scripted cases;
@@ -228,11 +231,11 @@ input, touch and offline play in detail.
 ## Proof
 
 ```sh
-uv run oracle/classic_check.py      # about a minute once built; prints ALL PASS
+uv run oracle/classic_check.py      # prints ALL PASS
 ```
 
-This runs the Classic preset through nine checks. Four compare the port with values
-recorded from a tree known to be right. Five run id's C next to the port:
+This runs the Classic preset through ten checks. Four compare the port with values
+recorded from a tree known to be right. Six run id's C next to the port:
 
 | check | compares | against |
 |---|---|---|
@@ -241,13 +244,26 @@ recorded from a tree known to be right. Five run id's C next to the port:
 | `timedemo` | id's benchmark: the frame counts | recorded |
 | `census` | a headless playthrough of all nine maps | recorded |
 | `edicts` | the entities' fields against id's server on all nine maps (the known differences, such as the player's edict number and random numbers, are recorded) | id's C |
-| `oracle` | the 3-D view, pixel by pixel | id's C |
+| `oracle` | the 3-D view, pixel by pixel, in four maps' first frames, with and without the entities | id's C |
+| `exact` | the 3-D view in 676 frames: each of the nine maps' first frames, turned, tilted and rolled, at two sizes; and the player moved among each map's monsters, awake, with every view once found differing, at id's 16- and 8-pixel spans; not one pixel may differ | id's C |
 | `screen2d` | the status bar, menus and console | id's C |
 | `demolerp` | demo playback, frame by frame | id's C |
 | `sound` | the mixer, sample by sample | id's C |
 
+**Which C.** The oracle is id's WinQuake source built headless with gcc, in two builds. The
+pixel checks (`oracle`, `exact`) run the build with SSE2 floats, where every float operation is
+rounded to the type the C declares: that is what the source says, and what any conforming
+compiler gives. Classic matches it on every pixel of every view tried. The default build, with
+x87 floats, is not the target: gcc keeps some float variables in the FPU's 80-bit registers,
+and which ones is its register allocation, not the C, so that build differs on scattered
+single pixels. Nor is it what players saw in 1996: id's own binaries drew with the FPU set
+to 24-bit precision, rounding toward zero: a third arithmetic again. The other four id's-C
+checks (the game state, the 2-D layer, demos, sound) run the x87 build; where its arithmetic
+and the SSE build's part in that code, the port follows the x87's
+([oracle/README.md](oracle/README.md), "Bit for bit").
+
 The id's-C checks need id's WinQuake source ([id-Software/Quake](https://github.com/id-Software/Quake))
-and docker to build the oracle once. Put the source at `quake-c/` (so that
+and docker to build the oracles once. Put the source at `quake-c/` (so that
 `quake-c/WinQuake` exists), or point `QUAKE_C_SRC` at its `WinQuake` directory.
 [oracle/README.md](oracle/README.md) has every result and explains each remaining
 difference.

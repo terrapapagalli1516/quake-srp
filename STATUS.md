@@ -46,11 +46,13 @@ the older history, kept as evidence, with superseded items marked.
   - a player's own `pak1.pak` and CD tracks;
   - QuakeC errors end the game as id's `Host_Error` does.
 - **Measured** (on `244bcd5` plus this branch's docs):
-  - **Classic:** `uv run oracle/classic_check.py` prints ALL PASS. That covers the
-    goldens `4807aaa1` / `9ae2b478` / `c65b7046`, 42 play hashes and tallies, the
-    timedemo counts, the census and id's edicts on nine maps, the eight 3-D oracle rows
-    at 100.00%, 146 2-D shots at their recorded match, demo playback against id's client
-    over 17,500 frames, and the mixer against id's C in 28 of 28 cases.
+  - **Classic** (since `fleet/pixelexact`, 2026-10-05): `uv run oracle/classic_check.py`
+    prints ALL PASS, ten checks. They cover the goldens `790c53d3` / `3684efc6` /
+    `e18bb516`, 42 play hashes and tallies, the timedemo counts, the census and id's
+    edicts on nine maps, the eight 3-D oracle rows at 100.0000% and 414 swept views with
+    not one pixel off (both against id's C built with SSE2 floats, the port's target:
+    AUDIT, "Bit for bit"), 146 2-D shots at their recorded match, demo playback against
+    id's client over 17,500 frames, and the mixer against id's C in 28 of 28 cases.
   - **Tests:** `cargo test --release` gives 781 in quake-rs (plus a few ignored ones that
     need the mission packs' data, `QUAKE_*_DIR`/`QUAKE_HIP1M1_PAK`) and 198 in quake-wasm (1
     ignored: the 2-D oracle's harness).
@@ -380,7 +382,7 @@ From the repository's root:
 (cd quake-rs && cargo test --release && cargo clippy --release --all-targets)
 (cd quake-wasm && cargo test --release && cargo clippy --release --all-targets)
 
-# Classic's proof (goldens, play hashes, timedemo, census, edicts, and id's C: 3-D, 2-D, demos, sound)
+# Classic's proof, ten checks (goldens, play hashes, timedemo, census; and id's C: edicts, 3-D, the 414-view sweep, 2-D, demos, sound)
 uv run oracle/classic_check.py
 
 # the uncapped game against 72 Hz
@@ -845,8 +847,9 @@ spans and the mip levels are done (as fidelity fixes), and `draw_submodel` and
 
 ## ⚠️ Caveats / debt
 
-1. *Superseded: the goldens are `4807aaa1` / `9ae2b478` / `c65b7046` since 2026-09-25
-   (top of this file).* **Golden baseline is `fb14bd65` / `a6f98d8a` / `0211e6d4`**
+1. *Superseded: the goldens are `790c53d3` / `3684efc6` / `e18bb516` since 2026-10-05,
+   `4807aaa1` / `9ae2b478` / `c65b7046` from 2026-09-25 (top of this file).*
+   **Golden baseline is `fb14bd65` / `a6f98d8a` / `0211e6d4`**
    (e1m1/e1m2/e1m3, post submodel cache). The submodel surface cache (`d2fc0d6`) was re-verified
    **byte-identical** to its parent (0 px diff on e1m1), so its "byte-identical"
    message is correct. (Note: each *world*-cache texel-baking step earlier in the

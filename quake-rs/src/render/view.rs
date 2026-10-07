@@ -178,19 +178,34 @@ pub fn viewmodel_fudge(viewsize: f32) -> f32 {
     }
 }
 
+/// `V_CalcRefdef`'s nudge (view.c): the eye, `r_refdef.vieworg`, moves 1/32
+/// along each axis — "never let it sit exactly on a node line, because a
+/// water plane can dissapear when viewed with the eye exactly on it" — so an
+/// eye at a whole height (an origin on the wire's 1/8 grid plus `viewheight`)
+/// is never on a level floor's or pool's plane, and `R_SetupFrame`'s view
+/// leaf ([`super::view_contents`], the warp and the tint) is never decided
+/// there. The live clients' cameras carry it; the intermission's
+/// (`V_CalcIntermissionRefdef`) does not, nor the gun ([`viewmodel_origin_ofs`]).
+pub const VIEWORG_NUDGE: f32 = 1.0 / 32.0;
+
+/// `eye` with [`VIEWORG_NUDGE`] on each axis: `r_refdef.vieworg`.
+pub fn nudge_vieworg(eye: Vec3) -> Vec3 {
+    eye.map(|c| c + VIEWORG_NUDGE)
+}
+
 /// The gun origin relative to the camera, as V_CalcRefdef builds it: both
 /// start at the entity origin + `viewheight` + the vertical bob (so those
 /// cancel); the camera then gets the 1/32 "never sit exactly on a node line"
-/// epsilon on each axis and the gun does not, the gun moves `forward * bob *
+/// nudge on each axis ([`VIEWORG_NUDGE`]) and the gun does not, the gun moves `forward * bob *
 /// 0.4` — `forward` from the player entity's angles, which V_CalcRefdef has
 /// just set to the view's yaw and pitch (`ent->angles[PITCH] =
 /// -cl.viewangles[PITCH]`) — and up by the viewsize fudge
 /// ([`viewmodel_fudge`]). `gun_angles` are [`Viewmodel::angles`](super::alias::Viewmodel::angles); they differ
 /// from `cl.viewangles` only by a demo's damage-kick pitch (an accepted
-/// hundredth-of-a-unit gap). The epsilon is relative, so it is right whether or
-/// not the caller's camera carries it.
+/// hundredth-of-a-unit gap). The offset takes the nudge back out, so the
+/// camera it is added to carries it, as `r_refdef.vieworg` does.
 pub fn viewmodel_origin_ofs(gun_angles: Vec3, bob: f32, viewsize: f32) -> Vec3 {
-    const EPSILON: f32 = 1.0 / 32.0;
+    const EPSILON: f32 = VIEWORG_NUDGE;
     let yaw = (gun_angles[1] as f64).to_radians();
     let elev = (gun_angles[0] as f64).to_radians();
     let f = (bob * 0.4) as f64;

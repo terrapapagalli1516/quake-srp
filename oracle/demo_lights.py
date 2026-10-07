@@ -96,6 +96,8 @@ def run_compare(demo: str, frame: int, mode: str, out: Path, args) -> tuple[dict
            "--settle", str(frame), "--oracle-dt", DT, "--aspect", "0.8333333", "--spans", "16", "--viewmodel",
            "--id-lightstyles",
            "--dlights", demo if mode == "port" else mode, "--quaketool", str(args.quaketool), "--out", str(out)]
+    if args.sse:
+        cmd.append("--sse")
     res = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
     if res.returncode != 0:
         sys.exit(f"compare.py failed for {demo}:{frame} {mode}:\n{res.stdout[-2000:]}{res.stderr[-2000:]}")
@@ -117,6 +119,7 @@ def main() -> None:
     ap.add_argument("--out", type=Path, default=HERE / "build" / "demo-lights")
     ap.add_argument("--quaketool", type=Path, default=QUAKETOOL)
     ap.add_argument("--scale", type=int, default=3, help="scale of the before/after images")
+    ap.add_argument("--sse", action="store_true", help="id's C built with SSE floats (compare.py --sse)")
     args = ap.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
 

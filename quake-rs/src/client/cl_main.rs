@@ -865,6 +865,9 @@ fn client_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid, dra
     // (V_CalcIntermissionRefdef has no bob and no stair smoothing).
     if !intermission {
         eye[2] += bob;
+        // r_refdef.vieworg is never exactly on a node line (V_CalcRefdef's
+        // 1/32 on each axis): a view whose leaf a level water plane decides.
+        eye = render::nudge_vieworg(eye);
         // Stair-step view smoothing (view.c V_CalcRefdef ~960): while on the ground
         // and the player's origin Z rose this frame, lag the eye Z behind by up to 12
         // units and catch up at 80 u/s, so climbing stairs glides instead of jolting
@@ -986,6 +989,7 @@ fn client_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid, dra
         .iter()
         .filter_map(|(name, origin, angles, frame, color, skin, blend)| match w.model_cache.get(name) {
             Some(Some(mdl)) => Some(ModelInstance {
+                syncbase: 0.0,
                 mdl,
                 origin: *origin,
                 yaw: angles[1],
@@ -1012,6 +1016,7 @@ fn client_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid, dra
             // cache entry (model absent from the pak) skips the piece.
             if let Some(Some(mdl)) = w.model_cache.get(seg.model.model_name()) {
                 instances.push(ModelInstance {
+                    syncbase: 0.0,
                     mdl,
                     origin: seg.origin,
                     yaw: seg.yaw,
@@ -1047,6 +1052,7 @@ fn client_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid, dra
         .iter()
         .filter_map(|(name, origin, angles, frame, k)| match w.sprite_cache.get(name) {
             Some(Some(spr)) => Some(render::SpriteInstance {
+                syncbase: 0.0,
                 sprite: spr,
                 origin: *origin,
                 angles: *angles,
@@ -1134,8 +1140,9 @@ fn client_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid, dra
     let vrect = refdef.vrect;
     // R_SetupFrame's r_dowarp (r_waterwarp 1): with the eye's leaf in water,
     // slime or lava the view is rendered into the (at most 320x200) warp
-    // buffer, and D_WarpScreen stretches it over `vrect` below.
-    let eye_contents = crate::world::point_contents(&w.bsp, eye);
+    // buffer, and D_WarpScreen stretches it over `vrect` below. The leaf is
+    // the render tree's (Mod_PointInLeaf), as for the tint below.
+    let eye_contents = render::view_contents(&w.bsp, cam.pos);
     let dowarp = eye_contents <= crate::bsp::CONTENTS_WATER;
     let rvrect = if dowarp {
         crate::screen::warp_vrect(render_w, render_h, w.viewsize, intermission, vid.video.hires)
@@ -1144,7 +1151,7 @@ fn client_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid, dra
     };
     let scene = render::Scene {
         colormap: w.colormap.as_deref(),
-        time: w.clock,
+        time: f64::from(w.clock),
         light_styles: &light_styles,
         dlights: &active_dlights,
         bmodels: &bmodels,
@@ -1198,7 +1205,7 @@ fn client_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid, dra
     // over the screen's view rectangle while it wobbles, BEFORE the content
     // tint so the screen ripples, not just darkens.
     if let Some(view) = warp_view {
-        w.renderer.warp_into(view, &mut img, vrect, below, w.clock, vid.video.hires);
+        w.renderer.warp_into(view, &mut img, vrect, below, f64::from(w.clock), vid.video.hires);
     }
     // The 2-D oracle harness paints the view one flat colour (the C oracle's
     // `oracle_blank`), so a shot measures the 2-D layer alone (`set_view_hook`).

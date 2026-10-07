@@ -39,13 +39,15 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 //                                      and when a timedemo finishes
 //   oracle_shot path                   queue a shot: writes path.pgm (raw palette
 //                                      indices), path.ppm (RGB), path.json (the view,
-//                                      clock, vrect, light styles, ...), path.ents
+//                                      clock, vrect, light styles and their strings, ...), path.ents
 //                                      (the entities the frame drew, one per line)
 //                                      and path.parts (the particles it drew)
 //   oracle_spans 8|16|1                 (a cvar) the textured-span routine: 8 = id's portable
 //                                      C D_DrawSpans8 (default), 16 = d_draw16.s's D_DrawSpans16 in C
 //                                      (the x86 asm default, d_subdiv16 1, its integer steps), 1 = exact
-//                                      per-pixel perspective (an attribution experiment, not id)
+//                                      per-pixel perspective (the port's extra, in double; not id).
+//                                      Liquids follow it as the port's r_perspspan does: Turbulent8
+//                                      (id's, 16-pixel segments) at 16, its arithmetic at 8, exact at 1
 //   oracle_bench n                     (a cvar) render each shot n more times first and report
 //                                      the warm ms/frame (renderer only)
 //   oracle_trace path [frames]         write one record per rendered frame to path: the client
@@ -521,10 +523,15 @@ static void Oracle_Trace_f (void)
 }
 
 void Oracle_Walk_Init (void);
+void Oracle_StagesInit (void);
+void Oracle_StagesBegin (void);
+void Oracle_StagesEnd (void);
+void Oracle_StagesGrads (espan_t *pspan, char *kind);
 
 void Oracle_Init (void)
 {
 	Oracle_Walk_Init ();
+	Oracle_StagesInit ();
 	Cmd_AddCommand ("oracle_trace", Oracle_Trace_f);
 	Cmd_AddCommand ("oracle_field", Oracle_Field_f);
 	Cmd_AddCommand ("oracle_entfield", Oracle_EntField_f);
@@ -677,6 +684,23 @@ static void Oracle_Dump (oracle_shot_t *s, int stage)
 	fprintf (f, "  \"lightstyles\": [");
 	for (i=0 ; i<MAX_LIGHTSTYLES ; i++)
 		fprintf (f, "%s%d", i ? ", " : "", d_lightstylevalue[i]);
+	fprintf (f, "],\n");
+	// the strings R_AnimateLight animates (svc_lightstyle's, the game's state:
+	// QuakeC's lightstyle() calls), any byte outside a-z escaped
+	fprintf (f, "  \"lightstyle_maps\": [");
+	for (i=0 ; i<MAX_LIGHTSTYLES ; i++)
+	{
+		char	*c;
+		fprintf (f, "%s\"", i ? ", " : "");
+		for (c = cl_lightstyle[i].map ; *c ; c++)
+		{
+			if (*c >= 'a' && *c <= 'z')
+				fputc (*c, f);
+			else
+				fprintf (f, "\\u%04x", (unsigned char)*c);
+		}
+		fprintf (f, "\"");
+	}
 	fprintf (f, "]\n}\n");
 	fclose (f);
 
@@ -810,10 +834,14 @@ void __wrap_R_RenderView (void)
 	if (active && active->has_time)
 		cl.time = active->time;
 	if (active)
+	{
 		Oracle_DumpParticles (active);
+		Oracle_StagesBegin ();
+	}
 
 	__real_R_RenderView ();
 	used_time = cl.time;
+	Oracle_StagesEnd ();
 	Oracle_Blank ();
 
 	bench_frames = 0;
@@ -1018,51 +1046,78 @@ static void Oracle_DrawSpans16 (espan_t *pspan)
 
 /*
 =============
+Oracle_DtoI64
+
+The exact perspective's conversion of a double to a 64-bit integer, as the
+port's Rust `as i64` makes it: truncation, saturating at the range's ends,
+a NaN 0. (Its own rule, not x86's: the exact perspective is the port's.)
+=============
+*/
+static long long Oracle_DtoI64 (double x)
+{
+	if (x != x)
+		return 0;
+	if (x >= 9223372036854775808.0)
+		return 9223372036854775807LL;
+	if (x < -9223372036854775808.0)
+		return -9223372036854775807LL - 1;
+	return (long long)x;
+}
+
+/*
+=============
 Oracle_DrawSpansExact
 
-Every pixel perspective-correct: s = s/z / (1/z) at the pixel itself, clamped
-to the surface block like D_DrawSpans8's first pixel. Not an id routine --
-it answers "how much of the diff is the affine segments".
+Every pixel perspective-correct, the port's exact perspective extra
+(quaketool view --exactpersp 1) as its reference writes it, in double: the
+span's s/z, t/z and 1/z planes evaluated at its first pixel from id's float
+gradients (origin + v*stepv + u*stepu), stepped by an add a pixel, the
+divide at every pixel, s = (long long)(s/z * z) + sadjust, and the texel
+clamped to the block. Not an id routine: it answers "how much of the diff is
+the affine segments", and is the port's own extra to the bit.
 =============
 */
 static void Oracle_DrawSpansExact (espan_t *pspan)
 {
-	int				count;
+	int				count, bw, bh;
 	unsigned char	*pbase, *pdest;
-	fixed16_t		s, t;
-	float			sdivz, tdivz, zi, z, du, dv;
+	long long		s, t;
+	double			sdivz, tdivz, zi, z, du, dv;
 
 	pbase = (unsigned char *)cacheblock;
+	bw = (bbextents + 1) >> 16;
+	bh = (bbextentt + 1) >> 16;
 
 	do
 	{
 		pdest = (unsigned char *)((byte *)d_viewbuffer +
 				(screenwidth * pspan->v) + pspan->u);
 		count = pspan->count;
-		du = (float)pspan->u;
-		dv = (float)pspan->v;
+		du = (double)pspan->u;
+		dv = (double)pspan->v;
+
+		sdivz = (double)d_sdivzorigin + dv*(double)d_sdivzstepv + du*(double)d_sdivzstepu;
+		tdivz = (double)d_tdivzorigin + dv*(double)d_tdivzstepv + du*(double)d_tdivzstepu;
+		zi = (double)d_ziorigin + dv*(double)d_zistepv + du*(double)d_zistepu;
 
 		do
 		{
-			sdivz = d_sdivzorigin + dv*d_sdivzstepv + du*d_sdivzstepu;
-			tdivz = d_tdivzorigin + dv*d_tdivzstepv + du*d_tdivzstepu;
-			zi = d_ziorigin + dv*d_zistepv + du*d_zistepu;
-			z = (float)0x10000 / zi;
-
-			s = (int)(sdivz * z) + sadjust;
-			if (s > bbextents)
-				s = bbextents;
-			else if (s < 0)
+			z = 65536.0 / zi;
+			s = (Oracle_DtoI64 (sdivz * z) + sadjust) >> 16;
+			t = (Oracle_DtoI64 (tdivz * z) + tadjust) >> 16;
+			if (s < 0)
 				s = 0;
-
-			t = (int)(tdivz * z) + tadjust;
-			if (t > bbextentt)
-				t = bbextentt;
-			else if (t < 0)
+			else if (s > bw - 1)
+				s = bw - 1;
+			if (t < 0)
 				t = 0;
+			else if (t > bh - 1)
+				t = bh - 1;
 
-			*pdest++ = *(pbase + (s >> 16) + (t >> 16) * cachewidth);
-			du += 1;
+			*pdest++ = *(pbase + (int)s + (int)t * cachewidth);
+			zi += (double)d_zistepu;
+			sdivz += (double)d_sdivzstepu;
+			tdivz += (double)d_tdivzstepu;
 		} while (--count > 0);
 
 	} while ((pspan = pspan->pnext) != NULL);
@@ -1070,6 +1125,7 @@ static void Oracle_DrawSpansExact (espan_t *pspan)
 
 void __wrap_D_DrawSpans8 (espan_t *pspan)
 {
+	Oracle_StagesGrads (pspan, "spans");
 	switch ((int)oracle_spans.value)
 	{
 	case 16:
@@ -1080,6 +1136,223 @@ void __wrap_D_DrawSpans8 (espan_t *pspan)
 		break;
 	default:
 		__real_D_DrawSpans8 (pspan);
+		break;
+	}
+}
+
+//=============================================================================
+//
+// LIQUIDS
+//
+// Turbulent8 is C in the x86 build too (16-pixel segments), so id's liquids
+// are the same at every oracle_spans. The port's r_perspspan steps its
+// liquids as it steps its walls, so oracle_spans 8 and 1 draw them the same
+// way here: Turbulent8's arithmetic at 8 (the port's --perspspan 8), and
+// the exact perspective's (--exactpersp 1). d_edge.c's call is wrapped.
+//
+//=============================================================================
+
+void __real_Turbulent8 (espan_t *pspan);
+
+extern unsigned char	*r_turb_pbase, *r_turb_pdest;
+extern fixed16_t		r_turb_s, r_turb_t, r_turb_sstep, r_turb_tstep;
+extern int				*r_turb_turb;
+extern int				r_turb_spancount;
+void D_DrawTurbulent8Span (void);
+
+/*
+=============
+Oracle_Turbulent8N
+
+Turbulent8 with its 16 as n (a power of two, 1 << shift): the same floats,
+clamps and steps, n pixels a segment.
+=============
+*/
+static void Oracle_Turbulent8N (espan_t *pspan, int shift)
+{
+	int				count, n;
+	fixed16_t		snext, tnext;
+	float			sdivz, tdivz, zi, z, du, dv, spancountminus1;
+	float			sdivznstepu, tdivznstepu, zinstepu;
+
+	n = 1 << shift;
+	r_turb_turb = sintable + ((int)(cl.time*SPEED)&(CYCLE-1));
+	r_turb_sstep = 0;
+	r_turb_tstep = 0;
+	r_turb_pbase = (unsigned char *)cacheblock;
+
+	sdivznstepu = d_sdivzstepu * n;
+	tdivznstepu = d_tdivzstepu * n;
+	zinstepu = d_zistepu * n;
+
+	do
+	{
+		r_turb_pdest = (unsigned char *)((byte *)d_viewbuffer +
+				(screenwidth * pspan->v) + pspan->u);
+		count = pspan->count;
+		du = (float)pspan->u;
+		dv = (float)pspan->v;
+
+		sdivz = d_sdivzorigin + dv*d_sdivzstepv + du*d_sdivzstepu;
+		tdivz = d_tdivzorigin + dv*d_tdivzstepv + du*d_tdivzstepu;
+		zi = d_ziorigin + dv*d_zistepv + du*d_zistepu;
+		z = (float)0x10000 / zi;
+
+		r_turb_s = (int)(sdivz * z) + sadjust;
+		if (r_turb_s > bbextents)
+			r_turb_s = bbextents;
+		else if (r_turb_s < 0)
+			r_turb_s = 0;
+
+		r_turb_t = (int)(tdivz * z) + tadjust;
+		if (r_turb_t > bbextentt)
+			r_turb_t = bbextentt;
+		else if (r_turb_t < 0)
+			r_turb_t = 0;
+
+		do
+		{
+			if (count >= n)
+				r_turb_spancount = n;
+			else
+				r_turb_spancount = count;
+
+			count -= r_turb_spancount;
+
+			if (count)
+			{
+				sdivz += sdivznstepu;
+				tdivz += tdivznstepu;
+				zi += zinstepu;
+				z = (float)0x10000 / zi;
+
+				snext = (int)(sdivz * z) + sadjust;
+				if (snext > bbextents)
+					snext = bbextents;
+				else if (snext < n)
+					snext = n;
+
+				tnext = (int)(tdivz * z) + tadjust;
+				if (tnext > bbextentt)
+					tnext = bbextentt;
+				else if (tnext < n)
+					tnext = n;
+
+				r_turb_sstep = (snext - r_turb_s) >> shift;
+				r_turb_tstep = (tnext - r_turb_t) >> shift;
+			}
+			else
+			{
+				spancountminus1 = (float)(r_turb_spancount - 1);
+				sdivz += d_sdivzstepu * spancountminus1;
+				tdivz += d_tdivzstepu * spancountminus1;
+				zi += d_zistepu * spancountminus1;
+				z = (float)0x10000 / zi;
+				snext = (int)(sdivz * z) + sadjust;
+				if (snext > bbextents)
+					snext = bbextents;
+				else if (snext < n)
+					snext = n;
+
+				tnext = (int)(tdivz * z) + tadjust;
+				if (tnext > bbextentt)
+					tnext = bbextentt;
+				else if (tnext < n)
+					tnext = n;
+
+				if (r_turb_spancount > 1)
+				{
+					r_turb_sstep = (snext - r_turb_s) / (r_turb_spancount - 1);
+					r_turb_tstep = (tnext - r_turb_t) / (r_turb_spancount - 1);
+				}
+			}
+
+			r_turb_s = r_turb_s & ((CYCLE<<16)-1);
+			r_turb_t = r_turb_t & ((CYCLE<<16)-1);
+
+			D_DrawTurbulent8Span ();
+
+			r_turb_s = snext;
+			r_turb_t = tnext;
+
+		} while (count > 0);
+
+	} while ((pspan = pspan->pnext) != NULL);
+}
+
+/*
+=============
+Oracle_TurbulentExact
+
+The port's exact perspective on a liquid: Oracle_DrawSpansExact's double
+divide at every pixel, the 16.16 position clamped to the liquid's extents
+and masked as Turbulent8 masks a segment's start, then
+D_DrawTurbulent8Span's warp of that one pixel.
+=============
+*/
+static void Oracle_TurbulentExact (espan_t *pspan)
+{
+	int				count;
+	long long		s, t;
+	double			sdivz, tdivz, zi, z, du, dv;
+
+	r_turb_turb = sintable + ((int)(cl.time*SPEED)&(CYCLE-1));
+	r_turb_sstep = 0;
+	r_turb_tstep = 0;
+	r_turb_pbase = (unsigned char *)cacheblock;
+
+	do
+	{
+		r_turb_pdest = (unsigned char *)((byte *)d_viewbuffer +
+				(screenwidth * pspan->v) + pspan->u);
+		count = pspan->count;
+		du = (double)pspan->u;
+		dv = (double)pspan->v;
+
+		sdivz = (double)d_sdivzorigin + dv*(double)d_sdivzstepv + du*(double)d_sdivzstepu;
+		tdivz = (double)d_tdivzorigin + dv*(double)d_tdivzstepv + du*(double)d_tdivzstepu;
+		zi = (double)d_ziorigin + dv*(double)d_zistepv + du*(double)d_zistepu;
+
+		do
+		{
+			z = 65536.0 / zi;
+			s = Oracle_DtoI64 (sdivz * z) + sadjust;
+			t = Oracle_DtoI64 (tdivz * z) + tadjust;
+			if (s < 0)
+				s = 0;
+			else if (s > bbextents)
+				s = bbextents;
+			if (t < 0)
+				t = 0;
+			else if (t > bbextentt)
+				t = bbextentt;
+
+			r_turb_s = (int)s & ((CYCLE<<16)-1);
+			r_turb_t = (int)t & ((CYCLE<<16)-1);
+			r_turb_spancount = 1;
+			D_DrawTurbulent8Span ();
+
+			zi += (double)d_zistepu;
+			sdivz += (double)d_sdivzstepu;
+			tdivz += (double)d_tdivzstepu;
+		} while (--count > 0);
+
+	} while ((pspan = pspan->pnext) != NULL);
+}
+
+void __wrap_Turbulent8 (espan_t *pspan)
+{
+	Oracle_StagesGrads (pspan, "turb");
+	switch ((int)oracle_spans.value)
+	{
+	case 8:
+		Oracle_Turbulent8N (pspan, 3);
+		break;
+	case 1:
+		Oracle_TurbulentExact (pspan);
+		break;
+	default:
+		__real_Turbulent8 (pspan);
 		break;
 	}
 }

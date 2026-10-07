@@ -6,13 +6,13 @@
 """The proof of Classic: every check that the port, with every departure off
 (the Classic preset), is still id's WinQuake — in one command.
 
-    uv run oracle/classic_check.py                 # everything (about a minute once built), a report
+    uv run oracle/classic_check.py                 # everything, a report
     uv run oracle/classic_check.py --only play,goldens
     uv run oracle/classic_check.py --record        # rewrite oracle/classic_expected.txt
 
-Two kinds of check:
+Ten checks, of two kinds:
 
-- **Identity** (the port against itself, recorded in `oracle/classic_expected.txt`
+- **Identity** (four: the port against itself, recorded in `oracle/classic_expected.txt`
   on a tree known to be Classic, `a50d8d7` for the first recording):
   - `goldens`: `quaketool scene` of e1m1/e1m2/e1m3, sha256 prefixes;
   - `play`: `quaketool play`'s frame hashes and sound-call tallies for id's
@@ -21,14 +21,25 @@ Two kinds of check:
   - `timedemo`: id's `timedemo` frame counts for demo1..3 (id's C draws 969
     for demo1);
   - `census`: the `quaketool census` playthrough of all nine maps through
-    the real QuakeC (its whole report, by hash);
-  - `edicts`: id's own server edicts (the C oracle) diffed against the
-    port's for all nine maps at t = 1.7, 4.7 and 10.7 s (`census/`) — the
-    diff report, by hash: a change means the port's game state moved.
-- **Against id's C** (absolute, the C oracle built from id's source):
-  - `oracle`: `compare.py --aspect 0.8333333 --spans 16`, the eight standard
-    3-D rows (e1m1/2/3/7, world and entities) at the page's aspect: every
-    row 100.00%;
+    the real QuakeC (its whole report, by hash).
+- **Against id's C** (six: the C oracle built from id's source runs in the
+  same check):
+  - `edicts`: id's own server edicts diffed against the port's for all nine
+    maps at t = 1.7, 4.7 and 10.7 s (`census/`). The diff is not empty (the
+    player's edict number, random numbers: oracle/README.md, "Classic"), so
+    it is judged by hash against the recorded one: a change means the port's
+    game state moved;
+  - `oracle`: `compare.py --aspect 0.8333333 --spans 16 --sse`, the eight
+    standard 3-D rows (e1m1/2/3/7, world and entities) at the page's aspect,
+    against id's C built with SSE floats: every row 100.0000%;
+  - `exact`: `exact_sweep.py` against the same build — every map's first
+    frame, 18 yaws and pitches and 4 rolled views, the entities drawn, at
+    320x200 and at the page's 640x400 and aspect; and with the player
+    moved among each map's monsters, awake (12 views a map, and the fixed
+    cases: four proof frames and every view once found differing), at the
+    page's 320x200 at id's 16-pixel spans and its portable C's 8: not one
+    pixel differs (the x87 build's count is in its report, `exact.txt`,
+    not judged);
   - `screen2d`: `screen2d.py`, id's composited 2-D layer at 320x200 and
     640x400, the port in its Classic preset: no shot below its recorded
     `2d exact%` (the known residues, oracle/README.md, are recorded);
@@ -40,10 +51,20 @@ Two kinds of check:
     id's game and the port's (start, a teleporter, the e1m1 slipgate): every
     sound call the walk makes identical.
 
+"id's C" is id's WinQuake source built headless with gcc, in two builds
+(oracle/README.md, "Bit for bit"). `oracle` and `exact` run the SSE2 one,
+every float operation in the type the C declares, which any conforming
+compiler gives. The default x87 build is not their target: gcc keeps some
+float variables in 80-bit registers, by its own register allocation, not by
+anything the C says. `edicts`, `screen2d`, `demolerp` and `sound` run the x87
+build: where the two part there, the port follows the x87's registers
+(`world.rs`'s plane distances, the centerprint's row, the mixer's float steps).
+
 Needs cargo, uv, the shareware pak at `quake-data/ID1/PAK0.PAK`, and for
-`edicts`/`oracle`/`screen2d`/`demolerp`/`sound` the C oracles (`oracle/build.sh`,
-`oracle/build_sound.sh`: docker; each tool builds its oracle when it is missing
-or older than its sources, `oraclebin.py`). The report (and every tool's own
+`edicts`/`oracle`/`exact`/`screen2d`/`demolerp`/`sound` the C oracles
+(`oracle/build.sh`, its SSE build `ORACLE_FPMATH=sse oracle/build.sh`,
+`oracle/build_sound.sh`: docker; each tool builds its oracle when it is
+missing or older than its sources, `oraclebin.py`). The report (and every tool's own
 output) goes to `--out` (default `oracle/build/classic-check`); the exit
 status is 0 only when every check passed.
 """
@@ -69,7 +90,7 @@ TIMEDEMO_RES = "320x200,640x400"
 # The server times of the edict dumps, and the 0.1 s frames id's oracle
 # waits for each after the last (the player connects at sv.time 1.2).
 EDICT_TIMES = [(1.7, 5), (4.7, 30), (10.7, 60)]
-CHECKS = ["goldens", "play", "timedemo", "census", "edicts", "oracle", "screen2d", "demolerp", "sound"]
+CHECKS = ["goldens", "play", "timedemo", "census", "edicts", "oracle", "exact", "screen2d", "demolerp", "sound"]
 
 
 def run(cmd, cwd=PROJECT, timeout=1800) -> str:
@@ -180,13 +201,31 @@ def check_edicts(qt: Path, out: Path) -> dict:
 
 def check_oracle(qt: Path, out: Path) -> dict:
     d = out / "compare"
-    text = run(["uv", "run", HERE / "compare.py", "--aspect", "0.8333333", "--spans", "16",
+    text = run(["uv", "run", HERE / "compare.py", "--aspect", "0.8333333", "--spans", "16", "--sse",
                 "--quaketool", qt, "--out", d])
     (out / "compare.txt").write_text(text)
     rows = json.loads((d / "summary.json").read_text())
     if len(rows) != 8:
         raise RuntimeError(f"{len(rows)} rows, not the eight standard ones")
     return {f"oracle.{k}": f"{v['exact_pct']:.4f}" for k, v in rows.items()}
+
+
+def check_exact(qt: Path, out: Path) -> dict:
+    sweep = ["uv", "run", str(HERE / "exact_sweep.py"), "--quaketool", str(qt), "--maps", ",".join(MAPS),
+             "--mode", "ents", "--oracles", "sse,x87"]
+    world = ["--views", "standard,sweep,roll"]
+    # the player among the monsters, awake, and the fixed cases; at id's 16-pixel
+    # spans and its portable C's 8 (the port's --perspspan 8)
+    monsters = ["--views", "cases,monsters", "--aspect", "0.8333333"]
+    text, failed = "", False
+    for extra in (world, world + ["--res", "640x400", "--aspect", "0.8333333"], monsters, monsters + ["--spans", "8"]):
+        res = subprocess.run(sweep + extra, cwd=PROJECT, capture_output=True, text=True, timeout=1800)
+        text += res.stdout + res.stderr
+        failed |= res.returncode != 0
+    (out / "exact.txt").write_text(text)
+    if failed:
+        raise RuntimeError("exact_sweep.py: a view differs from id's SSE build (see exact.txt)")
+    return {}
 
 
 def check_screen2d(qt: Path, out: Path) -> dict:

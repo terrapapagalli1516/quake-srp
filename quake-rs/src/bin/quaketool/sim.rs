@@ -251,6 +251,7 @@ pub fn cmd_walk(pak_path: &str, map_name: &str, out_prefix: &str, steps: u32) ->
     let instances: Vec<render::ModelInstance> = owned
         .iter()
         .map(|(mdl, origin, yaw, color)| render::ModelInstance {
+            syncbase: 0.0,
             mdl,
             origin: *origin,
             yaw: *yaw,
@@ -345,6 +346,7 @@ pub fn cmd_demo(pak_path: &str, demo_name: &str, out_prefix: &str, stride_arg: u
         let instances: Vec<render::ModelInstance> = owned
             .iter()
             .map(|(mdl, origin, yaw, color)| render::ModelInstance {
+                syncbase: 0.0,
                 mdl,
                 origin: *origin,
                 yaw: *yaw,

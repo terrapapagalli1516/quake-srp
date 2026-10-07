@@ -235,12 +235,33 @@ void Sys_SendKeyEvents (void)
 {
 }
 
+// -oracle_fpcw: the FPU state id's x86 builds rendered in. R_RenderView_ calls
+// Sys_LowFPPrecision once the frame is set up and Sys_HighFPPrecision at its
+// end; sys_wina.s / sys_dosa.s load single_cw there ("make FDIV fast": the x87
+// precision control at 24 bits, and chop rounding) and full_cw (64 bits,
+// round to nearest) back (Sys_SetFPCW). Without the flag, null drivers' no-ops,
+// as before. The x87 build only: SSE arithmetic does not read the x87 word.
+static qboolean	oracle_fpcw;
+
+static void Oracle_LoadFPCW (unsigned short rcpc)
+{
+	unsigned short	cw;
+
+	__asm__ volatile ("fnstcw %0" : "=m" (cw));
+	cw = (cw & 0xF0FF) | (rcpc << 8);
+	__asm__ volatile ("fldcw %0" : : "m" (cw));
+}
+
 void Sys_HighFPPrecision (void)
 {
+	if (oracle_fpcw)
+		Oracle_LoadFPCW (0x03);	// round mode, 64-bit precision
 }
 
 void Sys_LowFPPrecision (void)
 {
+	if (oracle_fpcw)
+		Oracle_LoadFPCW (0x0C);	// chop mode, single precision
 }
 
 void Sys_SetFPCW (void)
@@ -257,6 +278,7 @@ int main (int argc, char **argv)
 
 	parms.memsize = 32*1024*1024;
 	COM_InitArgv (argc, argv);
+	oracle_fpcw = COM_CheckParm ("-oracle_fpcw") != 0;
 	parms.argc = com_argc;
 	parms.argv = com_argv;
 

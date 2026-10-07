@@ -63,6 +63,9 @@ pub struct SpriteInstance<'a> {
     /// in an explosion, a few units apart) the later one wins. `usize::MAX`:
     /// after them all.
     pub models_before: usize,
+    /// `currententity->syncbase`: the sprite's phase in its group frames,
+    /// added to `cl.time` (`R_GetSpriteframe`; the port's live clients pass 0).
+    pub syncbase: f32,
 }
 
 /// `MAXWORKINGVERTS` (r_local.h): the clip buffers' size. id `Sys_Error`s at
@@ -115,7 +118,7 @@ impl SpriteView {
     pub(super) fn new(frame: &Frame) -> SpriteView {
         let (cam, w, h) = (&frame.cam, frame.w, frame.h);
         let proj = Projection::new(cam, &frame.geom, frame.scene.options.aspect());
-        let Projection { cx, cy, xscale, yscale } = proj;
+        let Projection { cx, cy, xscale, yscale, .. } = proj;
         let (vpn, vright, vup) = cam.basis();
         let (wf, hf) = (w as f32, h as f32);
         SpriteView {
@@ -654,7 +657,7 @@ mod tests {
     /// `zbuf`, as the renderer's bands draw them.
     fn draw(img: &mut Image, zbuf: &mut [i16], cam: Camera, sprites: &[SpriteInstance], time: f32) {
         let world = crate::render::demo_room();
-        let scene = Scene { sprites, time, ..Scene::new(&world, cam, img.w, img.h, &[[0; 3]; 256]) };
+        let scene = Scene { sprites, time: time.into(), ..Scene::new(&world, cam, img.w, img.h, &[[0; 3]; 256]) };
         let frame = Frame::new(&scene, img.w, img.h);
         let view = SpriteView::new(&frame);
         let mut band = Band::whole(img.w, &mut img.pixels, zbuf);
@@ -783,8 +786,14 @@ mod tests {
         let mut img = Image::new(w, h, 9);
         let mut zbuf = vec![i16::MIN; w * h];
         let spr = sprite_of_type(SPR_VP_PARALLEL, 16, 16, 42);
-        let inst =
-            SpriteInstance { sprite: &spr, origin: [100.0, 0.0, 0.0], angles: [0.0; 3], frame: 0, models_before: 0 };
+        let inst = SpriteInstance {
+            syncbase: 0.0,
+            sprite: &spr,
+            origin: [100.0, 0.0, 0.0],
+            angles: [0.0; 3],
+            frame: 0,
+            models_before: 0,
+        };
         draw(&mut img, &mut zbuf, cam_at_origin(), std::slice::from_ref(&inst), 0.0);
         let painted: Vec<(usize, usize)> =
             (0..w * h).filter(|&i| img.pixels[i] == 42).map(|i| (i % w, i / w)).collect();
@@ -805,8 +814,14 @@ mod tests {
         let mut img = Image::new(w, h, 9);
         let mut zbuf = vec![i16::MIN; w * h];
         let spr = sprite_of_type(SPR_VP_PARALLEL, 16, 16, 255);
-        let inst =
-            SpriteInstance { sprite: &spr, origin: [100.0, 0.0, 0.0], angles: [0.0; 3], frame: 0, models_before: 0 };
+        let inst = SpriteInstance {
+            syncbase: 0.0,
+            sprite: &spr,
+            origin: [100.0, 0.0, 0.0],
+            angles: [0.0; 3],
+            frame: 0,
+            models_before: 0,
+        };
         draw(&mut img, &mut zbuf, cam_at_origin(), std::slice::from_ref(&inst), 0.0);
         assert!(img.pixels.iter().all(|&p| p == 9));
         assert!(zbuf.iter().all(|&z| z == i16::MIN));
@@ -819,8 +834,14 @@ mod tests {
         let mut img = Image::new(w, h, 9);
         let mut zbuf = vec![3276i16; w * h];
         let spr = sprite_of_type(SPR_VP_PARALLEL, 16, 16, 42);
-        let inst =
-            SpriteInstance { sprite: &spr, origin: [100.0, 0.0, 0.0], angles: [0.0; 3], frame: 0, models_before: 0 };
+        let inst = SpriteInstance {
+            syncbase: 0.0,
+            sprite: &spr,
+            origin: [100.0, 0.0, 0.0],
+            angles: [0.0; 3],
+            frame: 0,
+            models_before: 0,
+        };
         draw(&mut img, &mut zbuf, cam_at_origin(), std::slice::from_ref(&inst), 0.0);
         assert!(img.pixels.iter().all(|&p| p == 9));
     }
@@ -835,6 +856,7 @@ mod tests {
         let mut zbuf = vec![i16::MIN; w * h];
         let spr = sprite_of_type(SPR_ORIENTED, 32, 32, 42);
         let inst = SpriteInstance {
+            syncbase: 0.0,
             sprite: &spr,
             origin: [100.0, 0.0, 0.0],
             angles: [0.0, 45.0, 0.0],
@@ -864,8 +886,14 @@ mod tests {
         let mut img = Image::new(w, h, 9);
         let mut zbuf = vec![i16::MIN; w * h];
         let spr = sprite_of_type(SPR_VP_PARALLEL, 64, 64, 42);
-        let inst =
-            SpriteInstance { sprite: &spr, origin: [60.0, 70.0, 0.0], angles: [0.0; 3], frame: 0, models_before: 0 };
+        let inst = SpriteInstance {
+            syncbase: 0.0,
+            sprite: &spr,
+            origin: [60.0, 70.0, 0.0],
+            angles: [0.0; 3],
+            frame: 0,
+            models_before: 0,
+        };
         draw(&mut img, &mut zbuf, cam_at_origin(), std::slice::from_ref(&inst), 0.0);
         let rows_at_left = (0..h).filter(|&y| img.pixels[y * w] == 42).count();
         assert!(rows_at_left > 20, "the clipped poster reaches column 0 on {rows_at_left} rows");

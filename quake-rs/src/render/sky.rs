@@ -114,13 +114,10 @@ impl SkyView {
         up: Vec3,
         longest: f32,
         centre: (i32, i32),
-        time: f32,
+        time: f64,
         mode: SkyScroll,
     ) -> SkyView {
-        const TEMP: f64 = 512.0;
-        let t = time as f64;
-        let skytime = (t - ((t / TEMP) as i32 as f64) * TEMP) as f32;
-        let scroll = skytime * SKY_SPEED;
+        let scroll = sky_time(time) * SKY_SPEED;
         let front = match mode {
             // R_MakeSky: xshift = skytime*skyspeed, truncated to int.
             SkyScroll::Classic => (scroll as i32) << 16,
@@ -130,6 +127,16 @@ impl SkyView {
         };
         SkyView { forward, right, up, half_w: centre.0, half_h: centre.1, longest, scroll, front }
     }
+}
+
+/// `R_SetSkyFrame`'s `skytime` at `cl.time` `time`: `cl.time - (int)(cl.time
+/// / temp) * temp`, `temp = SKYSIZE*s1*s2` = 512 a float, the product a
+/// float's (exact: a whole number of 512s), the difference a double's,
+/// stored to a float.
+pub(super) fn sky_time(time: f64) -> f32 {
+    const TEMP: f32 = 512.0;
+    let whole = ((time / f64::from(TEMP)) as i32) as f32 * TEMP;
+    (time - f64::from(whole)) as f32
 }
 
 /// `D_Sky_uv_To_st` (d_sky.c): the 16.16 sky coordinates for screen pixel
@@ -325,7 +332,15 @@ mod tests {
             // right = forward x worldup, up = right x forward (orthonormal-ish).
             let (right, _) = normalize(cross(f, [0.0, 0.0, 1.0]));
             let (up, _) = normalize(cross(right, f));
-            SkyView::new(f, right, up, w.max(h) as f32, ((w as i32) >> 1, (h as i32) >> 1), time, SkyScroll::Classic)
+            SkyView::new(
+                f,
+                right,
+                up,
+                w.max(h) as f32,
+                ((w as i32) >> 1, (h as i32) >> 1),
+                f64::from(time),
+                SkyScroll::Classic,
+            )
         };
         // The view as D_DrawSurfaces draws a sky surface covering it: one span
         // per row (the sky uses the view ray, not a face's (s,t)).
@@ -437,7 +452,7 @@ mod tests {
         // (D_Sky_uv_To_st) and the front layer another (int)(skytime*8) on top,
         // or in the fluid sky skytime*8 itself.
         let at = |time: f32, mode| {
-            SkyView::new([1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, 1.0], 320.0, (160, 100), time, mode)
+            SkyView::new([1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, 1.0], 320.0, (160, 100), f64::from(time), mode)
         };
         let v = at(1.6, SkyScroll::Classic);
         assert_eq!((v.scroll, v.front), (12.8, 12 << 16));
@@ -545,8 +560,15 @@ mod tests {
             let up = [-spi * cy, -spi * sy, cp];
             let (w, h) = [(320, 200), (1920, 1080), (2640, 1080)][case % 3];
             let scroll = if case % 2 == 0 { SkyScroll::Classic } else { SkyScroll::Fluid };
-            let view =
-                SkyView::new(forward, right, up, w as f32, (w / 2, h / 2), (next() % 600_000) as f32 / 1000.0, scroll);
+            let view = SkyView::new(
+                forward,
+                right,
+                up,
+                w as f32,
+                (w / 2, h / 2),
+                f64::from((next() % 600_000) as f32 / 1000.0),
+                scroll,
+            );
             for count in 0..=300 {
                 let (u, v) = ((next() % w as u32) as i32 - 40, (next() % h as u32) as i32);
                 let walk = std::cell::RefCell::new(Vec::new());
@@ -644,7 +666,8 @@ mod tests {
         let side = if f[2].abs() > 0.99 { [1.0, 0.0, 0.0] } else { [0.0, 0.0, 1.0] };
         let (right, _) = normalize(cross(f, side));
         let (up, _) = normalize(cross(right, f));
-        let view = SkyView::new(f, right, up, w.max(h) as f32, ((w as i32) >> 1, (h as i32) >> 1), time, mode);
+        let view =
+            SkyView::new(f, right, up, w.max(h) as f32, ((w as i32) >> 1, (h as i32) >> 1), f64::from(time), mode);
         let mut frame = vec![0u8; w * h];
         for (v, row) in frame.chunks_mut(w).enumerate() {
             sample(row, v as i32, &view);
@@ -672,7 +695,7 @@ mod tests {
                     [0.0, 0.0, 1.0],
                     1.0,
                     (0, 0),
-                    time,
+                    f64::from(time),
                     SkyScroll::Fluid,
                 )
                 .scroll;

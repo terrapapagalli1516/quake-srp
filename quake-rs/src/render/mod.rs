@@ -94,10 +94,10 @@ pub use surf::MipCvars;
 pub use torch::TorchFlicker;
 pub use video::{FovMode, HIRES_MAXHEIGHT, HIRES_MAXWIDTH, MAXHEIGHT, MAXWIDTH, VideoCvars};
 pub use view::{
-    FramePalette, build_gamma_table, content_cshift, cshift_ramps, pack_rgba, powerup_cshift, view_bob,
-    viewmodel_angles, viewmodel_fudge, viewmodel_origin_ofs,
+    FramePalette, VIEWORG_NUDGE, build_gamma_table, content_cshift, cshift_ramps, nudge_vieworg, pack_rgba,
+    powerup_cshift, view_bob, viewmodel_angles, viewmodel_fudge, viewmodel_origin_ofs,
 };
-pub use vis::point_in_leaf;
+pub use vis::{point_in_leaf, view_contents};
 pub use world::{BModelInstance, ExternalBModel};
 
 // ---------------------------------------------------------------------------
@@ -333,48 +333,17 @@ impl Camera {
         Camera { pos, yaw, pitch, roll: 0.0, fov_deg }
     }
 
-    /// The orthonormal camera basis `(forward, right, up)` in world space.
+    /// The camera basis `(forward, right, up)` in world space: `vpn`,
+    /// `vright` and `vup`, as `R_SetupFrame` gets them from
+    /// `AngleVectors (r_refdef.viewangles, ...)` — in the C's floats
+    /// ([`angle_vectors_f32`](crate::math::angle_vectors_f32)), so that every
+    /// projection downstream starts from id's bits. `viewangles[PITCH]` is
+    /// `-pitch` (Quake's pitch looks down).
     ///
-    /// `forward` is the view direction (the camera looks down `+forward`).
-    /// `right` points to the camera's right, `up` to its top. Derived directly
-    /// from `yaw`/`pitch` so the renderer's view transform is fully under our
-    /// control (rather than depending on Quake's `AngleVectors` sign quirks).
+    /// `forward` is the view direction (the camera looks down `+forward`),
+    /// `right` the camera's right, `up` its top.
     fn basis(&self) -> (Vec3, Vec3, Vec3) {
-        let cy = (self.yaw as f64).to_radians();
-        let cp = (self.pitch as f64).to_radians();
-        let (sin_y, cos_y) = (cy.sin(), cy.cos());
-        let (sin_p, cos_p) = (cp.sin(), cp.cos());
-
-        // forward: yaw rotates in XY, pitch lifts in Z.
-        let forward: Vec3 = [(cos_p * cos_y) as f32, (cos_p * sin_y) as f32, sin_p as f32];
-        // right: forward rotated -90 deg about +Z, kept level (no pitch), so the
-        // horizon stays horizontal regardless of pitch. (cos_y, sin_y) -> rotate
-        // by -90 -> (sin_y, -cos_y).
-        let right: Vec3 = [sin_y as f32, -cos_y as f32, 0.0];
-        // up = right x forward completes a right-handed (right, up, forward) set.
-        let up = cross(right, forward);
-        if self.roll == 0.0 {
-            // No bank: exact pre-roll basis (keeps level-view renders bit-identical).
-            return (forward, right, up);
-        }
-        // Bank the (right, up) pair about the forward axis by `roll` degrees. Derived
-        // from id's AngleVectors at pitch=0: with sr=sin(roll), cr=cos(roll),
-        //   right' = cr*right - sr*up,  up' = sr*right + cr*up.
-        // Rotating the already-pitch-correct level basis about forward reproduces
-        // V_CalcViewRoll's bank at any pitch.
-        let rr = (self.roll as f64).to_radians();
-        let (sr, cr) = (rr.sin(), rr.cos());
-        let right2: Vec3 = [
-            (right[0] as f64 * cr - up[0] as f64 * sr) as f32,
-            (right[1] as f64 * cr - up[1] as f64 * sr) as f32,
-            (right[2] as f64 * cr - up[2] as f64 * sr) as f32,
-        ];
-        let up2: Vec3 = [
-            (right[0] as f64 * sr + up[0] as f64 * cr) as f32,
-            (right[1] as f64 * sr + up[1] as f64 * cr) as f32,
-            (right[2] as f64 * sr + up[2] as f64 * cr) as f32,
-        ];
-        (forward, right2, up2)
+        crate::math::angle_vectors_f32([-self.pitch, self.yaw, self.roll])
     }
 }
 
@@ -516,6 +485,18 @@ impl RenderOptions {
         }
     }
 
+    /// Where a view's pixels sit in `d_pzbuffer`: its row length `d_zwidth`
+    /// (`vid.width`, the warp buffer's too) and the view's corner,
+    /// `r_refdef.vrect.x/y` — `D_DrawZSpans` stores by the address's parity.
+    /// Without a place on a screen the view is the screen (a window's is the
+    /// view it opens onto).
+    fn zbuffer_place(&self, geom: &ViewGeom) -> (usize, usize, usize) {
+        match self.screen {
+            Some(p) => (p.vid_w, p.x, p.y),
+            None => (geom.proj_w, geom.ox, geom.oy),
+        }
+    }
+
     /// [`RenderOptions::pixel_aspect`], with a non-finite or non-positive value
     /// read as square pixels.
     pub(crate) fn aspect(&self) -> f32 {
@@ -528,31 +509,52 @@ impl RenderOptions {
 /// `(vx, vy, vz)` (along `vright`, `vup`, `vpn`) lands at
 /// `x = cx + xscale*vx/vz`, `y = cy - yscale*vy/vz`.
 ///
-/// `xscale = vrect.width / horizontalFieldOfView` = `(w/2) / tan(fov_x/2)` and
-/// `yscale = xscale * pixelAspect`; the vertical field of view follows from
-/// them (the software renderer never uses `fov_y`). The centre is `w/2, h/2`
-/// because pixel `(px, py)` has its centre at `(px + 0.5, py + 0.5)` here: id's
-/// `xcenter = w/2 - 0.5` with centres on the integers. A window
-/// ([`ViewGeom`]) is projected as the view it lies in: that view's scales,
-/// and its centre in the window's own pixels.
+/// Every number is id's, in its C types: `horizontalFieldOfView`
+/// ([`horizontal_fov`]), `xscale = vrect.width / horizontalFieldOfView`,
+/// `yscale = xscale * pixelAspect`, `verticalFieldOfView =
+/// horizontalFieldOfView / screenAspect` with `screenAspect =
+/// vrect.width*pixelAspect / vrect.height` (the software renderer never uses
+/// `fov_y`). The centre is `w/2, h/2` because pixel `(px, py)` has its centre
+/// at `(px + 0.5, py + 0.5)` here: id's `xcenter = w/2 - 0.5` with centres on
+/// the integers. A window ([`ViewGeom`]) is projected as the view it lies in:
+/// that view's scales, and its centre in the window's own pixels.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Projection {
     pub(crate) cx: f32,
     pub(crate) cy: f32,
     pub(crate) xscale: f32,
     pub(crate) yscale: f32,
+    /// `horizontalFieldOfView` and `verticalFieldOfView`: twice the tangent
+    /// of the half angles, which `R_ViewChanged`'s `screenedge` planes take.
+    pub(crate) hfov: f32,
+    pub(crate) vfov: f32,
 }
 
 impl Projection {
     pub(crate) fn new(cam: &Camera, geom: &ViewGeom, pixel_aspect: f32) -> Projection {
-        let cx = geom.proj_w as f32 / 2.0;
-        let cy = geom.proj_h as f32 / 2.0;
-        let tan_half = (cam.fov_deg as f64 * 0.5).to_radians().tan();
-        // A degenerate fov falls back to ~90 degrees (xscale = cx).
-        let xscale = if tan_half.abs() < 1e-6 { cx } else { (cx as f64 / tan_half) as f32 };
+        let (w, h) = (geom.proj_w as f32, geom.proj_h as f32);
+        let hfov = horizontal_fov(cam.fov_deg);
+        let xscale = w / hfov;
+        let screen_aspect = w * pixel_aspect / h;
         // (A whole view's offsets are 0: its centre is id's to the bit.)
-        Projection { cx: cx - geom.ox as f32, cy: cy - geom.oy as f32, xscale, yscale: xscale * pixel_aspect }
+        Projection {
+            cx: w / 2.0 - geom.ox as f32,
+            cy: h / 2.0 - geom.oy as f32,
+            xscale,
+            yscale: xscale * pixel_aspect,
+            hfov,
+            vfov: hfov / screen_aspect,
+        }
     }
+}
+
+/// `R_ViewChanged`'s `horizontalFieldOfView = 2.0 * tan (r_refdef.fov_x/360*M_PI)`
+/// in the C's types: the division a `float`'s, the tangent and the doubling
+/// in double, the result stored to a `float`. A degenerate field of view
+/// (a tangent under 1e-6, or not a number) is read as 90 degrees, 2.0.
+pub(crate) fn horizontal_fov(fov_x: f32) -> f32 {
+    let hfov = 2.0 * (f64::from(fov_x / 360.0) * std::f64::consts::PI).tan();
+    if hfov.abs() >= 2e-6 { hfov as f32 } else { 2.0 }
 }
 
 // ---------------------------------------------------------------------------
@@ -849,7 +851,7 @@ pub struct Scene<'a> {
     /// two-layer scroll, animated wall textures (`R_TextureAnimation`) and
     /// alias frame and skin groups all run on it. At 0 they show their first
     /// frame.
-    pub time: f32,
+    pub time: f64,
     /// The brightness of each light style (`d_lightstylevalue` / 256, `1.0`
     /// normal), from [`crate::server::Server::lightstyle_scales`]
     /// (`R_AnimateLight`): a face's lightmap is the sum of its up to four
@@ -1232,7 +1234,7 @@ impl Renderer {
         } else {
             let threads = self.workers.threads();
             let set = self.torches.get_or_insert_with(|| torch::TorchSet::build(first.world, threads));
-            set.animate(first.time, video.lightstyles, video.torches);
+            set.animate(first.time as f32, video.lightstyles, video.torches);
             Some(&*set)
         };
         if let Some(t) = t_view {
@@ -1295,6 +1297,11 @@ impl Renderer {
         for b in &bands {
             self.prof.absorb(b);
         }
+        if self.edge.stages.is_some() {
+            for (frame, world, _) in &ready {
+                self.edge.stage_grads(world, &bakes, frame.scene.time);
+            }
+        }
         self.surfaces.baked(&bakes.finish());
         let drawn = ready.len() as u64;
         for (_, world, _) in ready {
@@ -1315,6 +1322,20 @@ impl Renderer {
                 s.view_ns += ns;
             });
         }
+    }
+
+    /// Record the stages of the frames from now on (`on`), or stop: what
+    /// `oracle/pixel_trace.py` compares with id's, record by record
+    /// (`quaketool view --stages`; `render::edge::stages`). For one-view
+    /// frames; debugging only.
+    pub fn set_stages(&mut self, on: bool) {
+        self.edge.stages = on.then(edge::Stages::default);
+    }
+
+    /// The stages recorded since [`Renderer::set_stages`] (or the last take),
+    /// as text; recording goes on.
+    pub fn take_stages(&mut self) -> Option<String> {
+        self.edge.stages.as_mut().map(|st| std::mem::take(&mut st.text))
     }
 
     /// How many threads draw a frame (1, the default: the calling thread
@@ -1347,7 +1368,7 @@ impl Renderer {
     /// is [`Renderer::render_extended`]'s, `below` rows taller than `at`, and
     /// the wobble runs on over that many rows of `screen` under `at`, as the
     /// view's own tables continue there; `at`'s rows are id's either way.
-    pub fn warp_into(&mut self, view: Image, screen: &mut Image, at: ViewRect, below: usize, clock: f32, hires: bool) {
+    pub fn warp_into(&mut self, view: Image, screen: &mut Image, at: ViewRect, below: usize, clock: f64, hires: bool) {
         let (sw, threads) = (screen.w, self.threads());
         let (x0, y0) = (at.x.min(sw), at.y.min(screen.h));
         let (w, h) = (at.w.min(sw - x0), at.h.min(screen.h - y0));
@@ -1428,7 +1449,11 @@ impl<'a> Entities<'a> {
         let ts = prof.now();
         let view = SpriteView::new(frame);
         let mut sprites: Vec<_> = (scene.sprites.iter())
-            .filter_map(|inst| Some((inst.models_before, SpriteDraw::prepare(&view, inst, scene.time)?)))
+            // R_GetSpriteframe: `time = cl.time + syncbase`, stored to a float.
+            .filter_map(|inst| {
+                let time = (scene.time + f64::from(inst.syncbase)) as f32;
+                Some((inst.models_before, SpriteDraw::prepare(&view, inst, time)?))
+            })
             .collect();
         sprites.sort_by_key(|&(before, _)| before);
         if let Some(t) = ts {
@@ -2026,8 +2051,14 @@ mod tests {
         // at x = 84, it faces the eye in the plane x = 100.
         let models = [ModelInstance::with_frame(&mdl, [84.0, 0.0, 0.0], 90.0, 0, [200, 40, 40])];
         let pixel = |models_before: usize| {
-            let sprites =
-                [SpriteInstance { sprite: &spr, origin: [100.0, 0.0, 0.0], angles: [0.0; 3], frame: 0, models_before }];
+            let sprites = [SpriteInstance {
+                syncbase: 0.0,
+                sprite: &spr,
+                origin: [100.0, 0.0, 0.0],
+                angles: [0.0; 3],
+                frame: 0,
+                models_before,
+            }];
             let scene = Scene { models: &models, sprites: &sprites, ..Scene::new(&world, cam, 160, 120, &pal) };
             // Inside both, below and right of the centre: world (100, -6, -6).
             render_once(&scene).pixels[64 * 160 + 84]
@@ -2053,6 +2084,7 @@ mod tests {
             .map(|i| ([-150.0 + i as f32, (i % 13) as f32 * 9.0 - 60.0, (i % 7) as f32 * 9.0], (i % 250) as u8))
             .collect();
         let sprites = [SpriteInstance {
+            syncbase: 0.0,
             sprite: &spr,
             origin: [-60.0, 20.0, 10.0],
             angles: [0.0; 3],

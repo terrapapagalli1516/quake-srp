@@ -338,17 +338,21 @@ impl<'b, 'a> PolyFramebuffer<'b, 'a> {
     }
 
     /// `D_PolysetCalcGradients` (d_polyse.c): the per-pixel x and y steps of
-    /// light, s, t and 1/z across the (affine) triangle. The C's `int`
-    /// differences wrap and its `(int)` casts give 0x80000000 out of range
-    /// ([`c_ftoi`]); the steps built from them wrap too (`left_edge_steps`,
-    /// `scan_left_edge`, `draw_spans`), so a sliver draws what id's does.
+    /// light, s, t and 1/z across the (affine) triangle, in the C's floats:
+    /// each `int` difference stored to a `float` (rounded: a 1/z difference
+    /// keeps 24 bits), `xstepdenominv = 1.0 / (float)d_xdenom`, the products
+    /// and the difference float operations, `ceil` of the light's. The C's
+    /// `int` differences wrap and its `(int)` casts give 0x80000000 out of
+    /// range ([`c_ftoi`]); the steps built from them wrap too
+    /// (`left_edge_steps`, `scan_left_edge`, `draw_spans`), so a sliver draws
+    /// what id's does.
     fn calc_gradients(&mut self, p: &[[i32; 6]; 3], d_xdenom: i32, skinwidth: i32) {
-        let d = |a: i32, b: i32| a.wrapping_sub(b) as f64;
+        let d = |a: i32, b: i32| a.wrapping_sub(b) as f32;
         let p00_minus_p20 = d(p[0][0], p[2][0]);
         let p01_minus_p21 = d(p[0][1], p[2][1]);
         let p10_minus_p20 = d(p[1][0], p[2][0]);
         let p11_minus_p21 = d(p[1][1], p[2][1]);
-        let xstepdenominv = 1.0 / d_xdenom as f32 as f64;
+        let xstepdenominv = 1.0 / d_xdenom as f32;
         let ystepdenominv = -xstepdenominv;
         let step = |k: usize| {
             let t0 = d(p[0][k], p[2][k]);
@@ -360,17 +364,17 @@ impl<'b, 'a> PolyFramebuffer<'b, 'a> {
         };
         // ceil() for light so positive steps are exaggerated, negative diminished
         let (lx, ly) = step(4);
-        self.r_lstepx = c_ftoi(lx.ceil());
-        self.r_lstepy = c_ftoi(ly.ceil());
+        self.r_lstepx = c_ftoi(f64::from(lx).ceil());
+        self.r_lstepy = c_ftoi(f64::from(ly).ceil());
         let (sx, sy) = step(2);
-        self.r_sstepx = c_ftoi(sx);
-        self.r_sstepy = c_ftoi(sy);
+        self.r_sstepx = c_ftoi(sx.into());
+        self.r_sstepy = c_ftoi(sy.into());
         let (tx, ty) = step(3);
-        self.r_tstepx = c_ftoi(tx);
-        self.r_tstepy = c_ftoi(ty);
+        self.r_tstepx = c_ftoi(tx.into());
+        self.r_tstepy = c_ftoi(ty.into());
         let (zx, zy) = step(5);
-        self.r_zistepx = c_ftoi(zx);
-        self.r_zistepy = c_ftoi(zy);
+        self.r_zistepx = c_ftoi(zx.into());
+        self.r_zistepy = c_ftoi(zy.into());
         self.a_sstepxfrac = self.r_sstepx & 0xFFFF;
         self.a_tstepxfrac = self.r_tstepx & 0xFFFF;
         // int arithmetic in the C: wraps like it
@@ -784,7 +788,7 @@ mod tests {
             r_ambientlight: 0,
             r_shadelight: 0.0,
             plightvec: [0.0; 3],
-            ziscale: ALIAS_ZISCALE,
+            ziscale: ALIAS_ZISCALE as f32,
             subdiv: false,
             skin: Some(&skin),
             skinwidth: 1,
@@ -853,7 +857,7 @@ mod tests {
                 r_ambientlight: 0,
                 r_shadelight: 0.0,
                 plightvec: [0.0; 3],
-                ziscale: ALIAS_ZISCALE,
+                ziscale: ALIAS_ZISCALE as f32,
                 subdiv: false,
                 skin: (round % 7 != 0).then_some(&skin[..]),
                 skinwidth: skinw as i32,
@@ -934,7 +938,7 @@ mod tests {
             r_ambientlight: 0,
             r_shadelight: 0.0,
             plightvec: [0.0; 3],
-            ziscale: ALIAS_ZISCALE,
+            ziscale: ALIAS_ZISCALE as f32,
             subdiv: false,
             skin: Some(&skin),
             skinwidth: 2,

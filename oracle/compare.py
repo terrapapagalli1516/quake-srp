@@ -31,7 +31,8 @@ player's spawn, cl.time at that frame) unless --view/--time pin it; the port is
 then handed exactly that vieworg/viewangles/cl.time. In `ents` mode the port
 draws the entity list id's frame drew (the .ents file), so both renderers get the
 same inputs and the diff measures rendering alone, not the simulation. In either
-mode it draws the particles id's frame drew (the .parts file).
+mode it draws the particles id's frame drew (the .parts file), lit by id's dynamic
+lights and id's light-style strings (the game's state; the port animates them).
 """
 
 from __future__ import annotations
@@ -85,22 +86,23 @@ def pak_has_file(pak: Path, name: str) -> bool:
 
 
 def pak_for_map(args, mapname: str) -> str:
-    """The `quaketool view` pak argument for `mapname`: `--pak` (plus `--pak1`)
-    alone when it has the map, unchanged from before `--game-dir` existed;
-    otherwise that layered under the first `--game-dir` pack that has it
-    instead (a mission pack's own map, e.g. hip1m1 in hipnotic/pak0.pak),
-    comma-joined the way `quaketool view`'s layered pak list reads (the last
-    one searched first) — the mission pack's own bsp/progs over id1's shared
-    palette."""
+    """The `quaketool view` pak argument for `mapname`, comma-joined the way
+    `quaketool view`'s layered pak list reads (the last one searched first):
+    `--pak` alone when it has the map and no `--game-dir` is given; a map of
+    id1's registered `--pak1`, the two; with `--game-dir`s, every pak of
+    the game's search path as id's `-NAME` builds it — id1's, then each game
+    directory's `pak0.pak` and `pak1.pak` over them — so that a pack's own
+    map, `progs.dat` and models win, its `start.bsp` over id1's included."""
     want = f"maps/{mapname}.bsp"
-    if pak_has_file(args.pak, want):
-        return str(args.pak)
     base = [str(args.pak)] + ([str(args.pak1)] if args.pak1 else [])
-    for _name, path in args.game_dir:
-        pak = Path(path) / "pak0.pak"
-        if pak.exists() and pak_has_file(pak, want):
-            return ",".join(base + [str(pak)])
-    sys.exit(f"{want} not found in --pak, --pak1 or any --game-dir")
+    game = [str(Path(path) / p) for _name, path in args.game_dir for p in ("pak0.pak", "pak1.pak")
+            if (Path(path) / p).exists()]
+    paks = base + game
+    if not game and pak_has_file(args.pak, want):
+        return str(args.pak)
+    if not any(pak_has_file(Path(p), want) for p in paks):
+        sys.exit(f"{want} not found in --pak, --pak1 or any --game-dir")
+    return ",".join(paks)
 
 
 def read_pnm(path: Path) -> np.ndarray:
@@ -173,12 +175,15 @@ def run_c(args, case: str, mapname: str, ents: bool, out: Path) -> dict:
         start = f"playdemo {args.demo}" if args.demo else f"map {mapname}"
         cmds += [f'oracle_shot "{out / case}.c"', start] + args.c_post
         (base / "id1" / "oracle.cfg").write_text("\n".join(cmds) + "\n")
-        cmd = [str(ensure_oracle(args.oracle)), "-basedir", str(base), "-width", str(w), "-height", str(h)]
+        oracle = ensure_oracle(args.oracle, getattr(args, "sse", False))
+        cmd = [str(oracle), "-basedir", str(base), "-width", str(w), "-height", str(h)]
         cmd += extra_flags
         if args.aspect is not None:
             cmd += ["-oracle_aspect", str(args.aspect)]
         if args.oracle_dt is not None:
             cmd += ["-oracle_dt", repr(args.oracle_dt)]
+        if getattr(args, "fpcw", False):
+            cmd += ["-oracle_fpcw"]
         cmd += ["+exec", "oracle.cfg"]
         res = subprocess.run(cmd, cwd=base, capture_output=True, text=True, timeout=120)
         meta_path = out / f"{case}.c.json"
@@ -254,17 +259,25 @@ def run_port(args, qt: Path, case: str, mapname: str, meta: dict, ents: bool, ou
     # (muzzle flashes, explosions: e.g. --c-cmd +attack) by default.
     for dl in frame_dlights(args, qt, meta):
         cmd += ["--dlight", ",".join(repr(float(v)) for v in dl)]
-    # id's light styles of the frame (`d_lightstylevalue`), not the ones the port
-    # derives from the clock: a demo's styles are the recording's, which the map's own
-    # animation does not know (a frame's `cl.time` also reaches R_AnimateLight a tenth earlier)
+    # The light styles. By default id's light-style strings of the frame
+    # (`cl_lightstyle[].map`): the game's state, as the entity list is — QuakeC's
+    # lightstyle() calls, lights a trigger switched off or on since the spawn,
+    # which the port's `view` (the map spawned, never run) cannot know — animated
+    # by the port's R_AnimateLight at id's clock. With --id-lightstyles id's
+    # values themselves (`d_lightstylevalue`), R_AnimateLight's output.
     if args.id_lightstyles:
         cmd += ["--style-values", ",".join(str(int(v)) for v in meta["lightstyles"])]
+    elif "lightstyle_maps" in meta:
+        cmd += ["--style-maps", ",".join(meta["lightstyle_maps"])]
     if args.viewmodel and meta["viewmodel"]["model"]:
         vm = meta["viewmodel"]
         cmd += ["--viewmodel", f'{vm["model"]}:{vm["frame"]}',
                 "--viewent", ",".join(repr(float(v)) for v in vm["origin"] + vm["angles"])]
     if args.bench:
         cmd += ["--bench", str(args.bench)]
+    # the frame's stages, for pixel_trace.py (id's: `oracle_stages`)
+    if getattr(args, "stages", False):
+        cmd += ["--stages", str(out / f"{case}.port.stages")]
     # The renderer's mip cvars are the port's too: `--c-cmd "d_mipscale 0"` puts
     # both renderers at mip 0.
     for c in args.c_cmd:
@@ -384,9 +397,8 @@ def main() -> None:
                     help="id's host frame step in seconds (-oracle_dt; default the oracle's 0.1). "
                          "0.01388888899236917 is the port's 1/72 s, the step `quaketool play` runs at")
     ap.add_argument("--id-lightstyles", action="store_true",
-                    help="hand the port id's light styles of the frame (d_lightstylevalue, from its json) "
-                         "instead of the ones it derives from the clock; for demo frames, whose styles are the "
-                         "recording's")
+                    help="hand the port id's light-style values of the frame (d_lightstylevalue, from its json) "
+                         "instead of id's light-style strings, which the port animates at id's clock (the default)")
     ap.add_argument("--dlights", default="id",
                     help="the dynamic lights the port's frame is lit with: id (id's own cl_dlights of the "
                          "frame, default), none, or demoN (the lights the port's playback of demo N makes "
@@ -403,6 +415,13 @@ def main() -> None:
                          "(id's -hipnotic/-rogue/-game convention), and tried for a --maps entry id1 doesn't have")
     ap.add_argument("--quaketool", help="use this quaketool binary instead of building quake-rs")
     ap.add_argument("--oracle", help="use this C oracle binary (default oracle/build/quake-oracle)")
+    ap.add_argument("--sse", action="store_true",
+                    help="id's C built with SSE2 floats (oracle/build/quake-oracle-sse, ORACLE_FPMATH=sse "
+                         "oracle/build.sh): strict single precision, which the port's Classic matches to the pixel; "
+                         "the default x87 build keeps intermediates in 80-bit registers")
+    ap.add_argument("--fpcw", action="store_true",
+                    help="id's x86 FPU state while rendering (-oracle_fpcw: R_RenderView_'s Sys_LowFPPrecision, "
+                         "24-bit precision and chop rounding, as sys_wina.s sets it); the x87 build's arithmetic only")
     ap.add_argument("--full", action="store_true",
                     help="C: dump the composited screen at VID_Update (sbar, console, notify text too) instead "
                          "of the 3-D view alone; give the console --settle 8+ frames to retract")

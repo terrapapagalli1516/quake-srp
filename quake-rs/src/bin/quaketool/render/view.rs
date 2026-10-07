@@ -28,10 +28,18 @@
 //! --viewent x,y,z,p,y,r  the weapon's origin and angles, `cl.viewent` (default:
 //!                    V_CalcRefdef's for a still player at viewsize 120)
 //! --bench N          then render the same view N more times, report warm ms/frame
+//! --style-maps S0,S1,...  the light-style strings (`cl_lightstyle[].map`, up to 64,
+//!                    empty ones too): the game's state at the frame, animated at
+//!                    --time (default: the strings the map's spawn sets)
+//! --style-values V0,V1,...  the styles' values themselves, `d_lightstylevalue[]` (the
+//!                    .json's `lightstyles`), over any strings
 //! --particles FILE   draw these particles: the oracle's `.parts` list, one per line,
 //!                    `x y z color`, in id's draw order (without it: none)
 //! --dlight x,y,z,radius[,minlight]  a live dynamic light (repeatable; the oracle
 //!                    passes id's `cl_dlights`, in slot order)
+//! --stages FILE      also write the frame's stages to FILE (the edges, surfaces,
+//!                    gradients and spans, as id's `oracle_stages` writes them:
+//!                    `oracle/pixel_trace.py` puts the two side by side)
 //! --d-mipscale X     the `d_mipscale` cvar (default 1; 0 = every surface at mip 0)
 //! --d-mipcap N       the `d_mipcap` cvar (default 0; the finest mip level allowed)
 //! --video, --fov-mode, --hires, --sky, --lightstyles, --perspspan  the port's video cvars
@@ -84,10 +92,12 @@ pub fn cmd_view(args: &[String]) -> CmdResult {
     let mut vrect: Option<(usize, usize, usize, usize)> = None;
     let (mut ents_path, mut viewmodel_arg): (Option<&str>, Option<&str>) = (None, None);
     let mut bench: Option<u32> = None;
+    let mut stages_path: Option<&str> = None;
     let mut viewent: Option<[f32; 6]> = None;
     let mut dlights: Vec<quake_rs::dlight::DynamicLight> = Vec::new();
     let mut particles: Vec<([f32; 3], u8)> = Vec::new();
     let mut style_values: Option<Vec<f32>> = None;
+    let mut style_maps: Option<Vec<String>> = None;
     let mut video = VideoArgs::default();
     let mut res: Option<&str> = None;
     let mut i = 3;
@@ -102,7 +112,7 @@ pub fn cmd_view(args: &[String]) -> CmdResult {
             "--res" => res = Some(val),
             "--origin" => origin = Some(parse_vec3(flag, val)?),
             "--angles" => angles = Some(parse_vec3(flag, val)?),
-            "--time" => time = Some(val.parse::<f32>().map_err(|_| format!("--time: bad number {val:?}"))?),
+            "--time" => time = Some(val.parse::<f64>().map_err(|_| format!("--time: bad number {val:?}"))?),
             "--fov" => fov = val.parse().map_err(|_| format!("--fov: bad number {val:?}"))?,
             "--vrect" => {
                 let v: Vec<usize> = val
@@ -149,6 +159,16 @@ pub fn cmd_view(args: &[String]) -> CmdResult {
                     .map_err(|_| format!("--style-values: expected comma-separated integers, got {val:?}"))?;
                 style_values = Some(v);
             }
+            "--style-maps" => {
+                // id's light-style strings of the frame (`cl_lightstyle[].map`, the .json's
+                // `lightstyle_maps`): the game's state, in place of the map's spawn; the port's
+                // R_AnimateLight animates them at --time.
+                let maps: Vec<String> = val.split(',').map(str::to_owned).collect();
+                if maps.len() > quake_rs::server::MAX_LIGHTSTYLES {
+                    return Err(format!("--style-maps: {} strings, at most 64", maps.len()).into());
+                }
+                style_maps = Some(maps);
+            }
             "--viewmodel" => viewmodel_arg = Some(val.as_str()),
             "--viewent" => {
                 let v: Vec<f32> = val
@@ -159,6 +179,7 @@ pub fn cmd_view(args: &[String]) -> CmdResult {
                 viewent = Some(v.try_into().map_err(|_| format!("--viewent: expected 6 numbers, got {val:?}"))?);
             }
             "--bench" => bench = Some(val.parse::<u32>().map_err(|_| format!("--bench: bad count {val:?}"))?.max(1)),
+            "--stages" => stages_path = Some(val.as_str()),
             "--d-mipscale" | "--d-mipcap" => {
                 let x: f32 = val.parse().map_err(|_| format!("{flag}: bad number {val:?}"))?;
                 if flag == "--d-mipscale" { opts.mip.mipscale = x } else { opts.mip.mipcap = x }
@@ -212,8 +233,11 @@ pub fn cmd_view(args: &[String]) -> CmdResult {
     };
     let angles = angles.unwrap_or([0.0, start.map_or(0.0, |(_, a)| a), 0.0]);
     let cam = Camera { pos: origin, yaw: angles[1], pitch: -angles[0], roll: angles[2], fov_deg: fov };
-    let time = time.unwrap_or_else(|| server.time());
-    let mut light_styles = server.lightstyle_scales(f64::from(time), video.cvars.lightstyles);
+    let time: f64 = time.unwrap_or_else(|| f64::from(server.time()));
+    let mut light_styles = match &style_maps {
+        Some(maps) => quake_rs::server::lightstyle_scales_at(maps, time, video.cvars.lightstyles),
+        None => server.lightstyle_scales(time, video.cvars.lightstyles),
+    };
     // `R_BuildLightMap` multiplies a luxel by `d_lightstylevalue[style]` against a white point of 256.
     for (scale, value) in light_styles.iter_mut().zip(style_values.iter().flatten()) {
         *scale = value / 256.0;
@@ -223,11 +247,11 @@ pub fn cmd_view(args: &[String]) -> CmdResult {
     let mut mdls: HashMap<String, Option<Mdl>> = HashMap::new();
     let mut sprs: HashMap<String, Option<Sprite>> = HashMap::new();
     let mut ext: HashMap<String, Option<Bsp>> = HashMap::new();
-    // (model, origin, angles, frame, skin) per alias entity.
-    type AliasDesc = (String, [f32; 3], [f32; 3], usize, i32);
+    // (model, origin, angles, frame, skin, syncbase) per alias entity.
+    type AliasDesc = (String, [f32; 3], [f32; 3], usize, i32, f32);
     let mut alias_descs: Vec<AliasDesc> = Vec::new();
-    // (model, origin, angles, frame, alias entries before it) per sprite entity.
-    type SpriteDesc = (String, [f32; 3], [f32; 3], usize, usize);
+    // (model, origin, angles, frame, alias entries before it, syncbase) per sprite entity.
+    type SpriteDesc = (String, [f32; 3], [f32; 3], usize, usize, f32);
     let mut sprite_descs: Vec<SpriteDesc> = Vec::new();
     let mut ext_descs: Vec<(String, [f32; 3])> = Vec::new();
     let mut bmodels: Vec<render::BModelInstance> = Vec::new();
@@ -243,6 +267,9 @@ pub fn cmd_view(args: &[String]) -> CmdResult {
                 return Err(format!("{p}: malformed entity line {line:?}").into());
             };
             let (model, org, ang) = (model.to_string(), [ox, oy, oz], [ap, ay, ar]);
+            // `syncbase`, the entity's phase in its group frames (a line
+            // without one: 0).
+            let syncbase = num(9).unwrap_or(0.0);
             if let Some(n) = model.strip_prefix('*') {
                 let model_index = n.parse().map_err(|_| format!("{p}: bad submodel {model:?}"))?;
                 // The `.ents` line carries this entity's angles too (oracle.c
@@ -254,10 +281,10 @@ pub fn cmd_view(args: &[String]) -> CmdResult {
                 ext_descs.push((model, org));
             } else if model.ends_with(".spr") {
                 sprs.entry(model.clone()).or_insert_with(|| read_pak(&model).ok().and_then(|b| Sprite::parse(&b).ok()));
-                sprite_descs.push((model, org, ang, fr as usize, alias_descs.len()));
+                sprite_descs.push((model, org, ang, fr as usize, alias_descs.len(), syncbase));
             } else if model.ends_with(".mdl") {
                 mdls.entry(model.clone()).or_insert_with(|| read_pak(&model).ok().and_then(|b| Mdl::parse(&b).ok()));
-                alias_descs.push((model, org, ang, fr as usize, sk as i32));
+                alias_descs.push((model, org, ang, fr as usize, sk as i32, syncbase));
             } else {
                 skipped += 1;
             }
@@ -265,8 +292,9 @@ pub fn cmd_view(args: &[String]) -> CmdResult {
     }
     let instances: Vec<render::ModelInstance> = alias_descs
         .iter()
-        .filter_map(|(name, org, ang, frame, skin)| match mdls.get(name) {
+        .filter_map(|(name, org, ang, frame, skin, syncbase)| match mdls.get(name) {
             Some(Some(mdl)) => Some(render::ModelInstance {
+                syncbase: *syncbase,
                 mdl,
                 origin: *org,
                 yaw: ang[1],
@@ -297,8 +325,9 @@ pub fn cmd_view(args: &[String]) -> CmdResult {
         .collect();
     let sprites: Vec<render::SpriteInstance> = sprite_descs
         .iter()
-        .filter_map(|(name, org, ang, frame, k)| match sprs.get(name) {
+        .filter_map(|(name, org, ang, frame, k, syncbase)| match sprs.get(name) {
             Some(Some(sprite)) => Some(render::SpriteInstance {
+                syncbase: *syncbase,
                 sprite,
                 origin: *org,
                 angles: *ang,
@@ -330,10 +359,12 @@ pub fn cmd_view(args: &[String]) -> CmdResult {
         None => (w, h),
     };
 
-    let dowarp = quake_rs::world::point_contents(&bsp, cam.pos) <= quake_rs::bsp::CONTENTS_WATER;
+    // R_SetupFrame's r_dowarp: the view leaf's contents, Mod_PointInLeaf's rule.
+    let dowarp = render::view_contents(&bsp, cam.pos) <= quake_rs::bsp::CONTENTS_WATER;
     let mut renderer = render::Renderer::new();
     renderer.set_threads(video.threads());
-    let mut render_once = || {
+    renderer.set_stages(stages_path.is_some());
+    let render_once = |renderer: &mut render::Renderer| {
         // cl.viewent as given (the oracle's), else V_CalcRefdef's for a still
         // player in a full-frame view (id at viewsize 120: no fudge, no bob).
         let (origin_ofs, gun_angles) = match viewent {
@@ -380,13 +411,18 @@ pub fn cmd_view(args: &[String]) -> CmdResult {
         }
         renderer.render(&scene)
     };
-    let img = render_once();
+    let img = render_once(&mut renderer);
+    if let Some(path) = stages_path {
+        let text = renderer.take_stages().unwrap_or_default();
+        std::fs::write(path, text).map_err(|e| format!("cannot write {path}: {e}"))?;
+        renderer.set_stages(false);
+    }
     // Warm re-renders of the same view (the first, cold frame above is excluded),
     // the port side of the oracle's `oracle_bench`: renderer cost only.
     let bench = bench.map(|n| {
         let start = std::time::Instant::now();
         for _ in 0..n {
-            std::hint::black_box(render_once());
+            std::hint::black_box(render_once(&mut renderer));
         }
         (n, start.elapsed().as_secs_f64() * 1000.0 / n as f64)
     });

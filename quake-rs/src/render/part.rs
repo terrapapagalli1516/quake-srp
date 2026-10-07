@@ -5,7 +5,7 @@
 //! The particle simulation itself is [`crate::particles`].
 
 use super::band::Band;
-use super::{Camera, Image, ViewGeom};
+use super::{Camera, Image, ViewGeom, horizontal_fov};
 use crate::math::{Vec3, dot, sub};
 
 /// Draw a set of engine particles into `image`, z-tested and depth-written
@@ -87,8 +87,10 @@ pub(super) fn project_particles(cam: &Camera, proj: &ParticleProjection, particl
             continue; // (a NaN depth fails the finite test below)
         }
         let zi = 1.0 / t[2];
-        let fu = proj.xcenter + zi * t[0] + 0.5;
-        let fv = proj.ycenter - zi * t[1] + 0.5;
+        // `(int)(xcenter + zi * transformed[0] + 0.5)`: a float sum, then the
+        // double `+ 0.5`.
+        let fu = f64::from(proj.xcenter + zi * t[0]) + 0.5;
+        let fv = f64::from(proj.ycenter - zi * t[1]) + 0.5;
         if !(fu.is_finite() && fv.is_finite()) {
             continue;
         }
@@ -196,10 +198,8 @@ impl ParticleProjection {
     pub(crate) fn in_view(cam: &Camera, geom: &ViewGeom, pixel_aspect: f32, hires: bool) -> Self {
         let (w, h) = (geom.proj_w, geom.proj_h);
         let (wf, hf) = (w as f32, h as f32);
-        // horizontalFieldOfView = 2*tan(fov_x/2), a float; a degenerate fov
-        // falls back to ~90 degrees as `Projection` does.
-        let hfov = (2.0 * (cam.fov_deg as f64 * 0.5).to_radians().tan()) as f32;
-        let hfov = if hfov.abs() < 2e-6 { 2.0 } else { hfov };
+        // R_ViewChanged's horizontalFieldOfView and xscaleshrink.
+        let hfov = horizontal_fov(cam.fov_deg);
         let xscaleshrink = (w as i64 - 6) as f32 / hfov;
         let (pix_min, pix_max, pix_mul, pix_shift) = if hires {
             // izi * xscale / 20480 as 16.16: xscale*65536/20480 = xscale*3.2.

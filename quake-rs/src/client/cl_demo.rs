@@ -700,6 +700,7 @@ fn render_demo_frame(
                 None
             };
             owned.push(ModelInstance {
+                syncbase: 0.0,
                 mdl,
                 origin: e.origin,
                 yaw: e.angles[1],
@@ -739,6 +740,7 @@ fn render_demo_frame(
         } else if let Some(Some(spr)) = d.sprites.get(e.modelindex) {
             // Sprite-model entity (the boot demo's s_explod.spr explosion flashes).
             sprite_insts.push(render::SpriteInstance {
+                syncbase: 0.0,
                 sprite: spr,
                 origin: e.origin,
                 angles: e.angles,
@@ -761,6 +763,7 @@ fn render_demo_frame(
             };
             if let Some(Some(mdl)) = d.models.get(idx) {
                 owned.push(ModelInstance {
+                    syncbase: 0.0,
                     mdl,
                     origin: seg.origin,
                     yaw: seg.yaw,
@@ -795,14 +798,15 @@ fn render_demo_frame(
         // recorded SU_ONGROUND, the strafe/damage/dead view roll
         // (V_CalcViewRoll) and the recorded punchangle added LAST. V_AddIdle
         // is a no-op here (v_idlescale defaults to 0 outside intermission);
-        // the 1/32 anti-node-line epsilon is omitted, matching this port's
-        // live walk. The listener pose below deliberately stays UNbobbed
+        // the eye gets the 1/32 nudge off node lines, as the live walk's.
+        // The listener pose below deliberately stays UNbobbed
         // (audio panning must not jitter with the head-bob), like walk_frame.
         let vel = v.velocity;
         let speed_xy = (vel[0] * vel[0] + vel[1] * vel[1]).sqrt();
         let bob = render::view_bob(speed_xy, v.time);
         let mut eye = v.view_origin; // view entity origin + recorded viewheight
         eye[2] += bob;
+        eye = render::nudge_vieworg(eye);
         // Stair-step smoothing (V_CalcRefdef ~960): the same port as
         // walk_frame's, driven by the recorded onground flag + the relinked
         // view entity origin z, stepping by `steptime = cl.time - cl.oldtime`
@@ -954,8 +958,8 @@ fn render_demo_frame(
     let refdef = render::calc_refdef(render_w, render_h, d.viewsize, f.intermission != 0, d.sbar_layout);
     let vrect = refdef.vrect;
     // R_SetupFrame's r_dowarp: a submerged recorded POV renders into the warp
-    // buffer (at most 320x200) like live play.
-    let eye_contents = crate::world::point_contents(&d.bsp, cam.pos);
+    // buffer (at most 320x200) like live play; the leaf is Mod_PointInLeaf's.
+    let eye_contents = render::view_contents(&d.bsp, cam.pos);
     let dowarp = eye_contents <= crate::bsp::CONTENTS_WATER;
     let rvrect = if dowarp {
         crate::screen::warp_vrect(render_w, render_h, d.viewsize, f.intermission != 0, vid.video.hires)
@@ -964,7 +968,7 @@ fn render_demo_frame(
     };
     let scene = render::Scene {
         colormap: d.colormap.as_deref(),
-        time: v.time,
+        time: f64::from(v.time),
         light_styles: &demo_styles,
         dlights: &lights,
         bmodels: &bmodels,
@@ -993,7 +997,7 @@ fn render_demo_frame(
         let below = warp_below(&refdef, vid);
         let view = d.renderer.render_extended(&scene, below);
         lap(Phase::Render3d);
-        d.renderer.warp_into(view, &mut img, vrect, below, v.time, vid.video.hires);
+        d.renderer.warp_into(view, &mut img, vrect, below, f64::from(v.time), vid.video.hires);
     } else {
         draw_view(&mut d.renderer, &scene, &refdef, &mut img);
         lap(Phase::Render3d);
