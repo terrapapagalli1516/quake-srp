@@ -865,6 +865,9 @@ fn client_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid, dra
     // (V_CalcIntermissionRefdef has no bob and no stair smoothing).
     if !intermission {
         eye[2] += bob;
+        // r_refdef.vieworg is never exactly on a node line (V_CalcRefdef's
+        // 1/32 on each axis): a view whose leaf a level water plane decides.
+        eye = render::nudge_vieworg(eye);
         // Stair-step view smoothing (view.c V_CalcRefdef ~960): while on the ground
         // and the player's origin Z rose this frame, lag the eye Z behind by up to 12
         // units and catch up at 80 u/s, so climbing stairs glides instead of jolting
@@ -1137,8 +1140,9 @@ fn client_frame(w: &mut Walk, host_frametime: f64, menu_up: bool, vid: &Vid, dra
     let vrect = refdef.vrect;
     // R_SetupFrame's r_dowarp (r_waterwarp 1): with the eye's leaf in water,
     // slime or lava the view is rendered into the (at most 320x200) warp
-    // buffer, and D_WarpScreen stretches it over `vrect` below.
-    let eye_contents = crate::world::point_contents(&w.bsp, eye);
+    // buffer, and D_WarpScreen stretches it over `vrect` below. The leaf is
+    // the render tree's (Mod_PointInLeaf), as for the tint below.
+    let eye_contents = render::view_contents(&w.bsp, cam.pos);
     let dowarp = eye_contents <= crate::bsp::CONTENTS_WATER;
     let rvrect = if dowarp {
         crate::screen::warp_vrect(render_w, render_h, w.viewsize, intermission, vid.video.hires)

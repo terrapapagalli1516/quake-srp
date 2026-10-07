@@ -340,7 +340,8 @@ pub fn cmd_view(args: &[String]) -> CmdResult {
         None => (w, h),
     };
 
-    let dowarp = quake_rs::world::point_contents(&bsp, cam.pos) <= quake_rs::bsp::CONTENTS_WATER;
+    // R_SetupFrame's r_dowarp: the view leaf's contents, Mod_PointInLeaf's rule.
+    let dowarp = render::view_contents(&bsp, cam.pos) <= quake_rs::bsp::CONTENTS_WATER;
     let mut renderer = render::Renderer::new();
     renderer.set_threads(video.threads());
     renderer.set_stages(stages_path.is_some());

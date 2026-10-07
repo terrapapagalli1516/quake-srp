@@ -66,6 +66,20 @@ pub fn point_in_leaf(bsp: &Bsp, p: Vec3) -> Option<usize> {
     None
 }
 
+/// `r_viewleaf->contents`: `R_SetupFrame` (r_misc.c) finds the view's leaf
+/// with `Mod_PointInLeaf` and reads its contents, for `r_dowarp` (`<=
+/// CONTENTS_WATER`: water, slime, lava and the currents) and for
+/// `V_SetContentsColor`'s tint. That is the render tree's rule, not the
+/// server's: a point exactly on a plane is in the back child here (the front
+/// only when `d > 0`) and in the front one for `SV_HullPointContents` (the
+/// back only when `d < 0`, [`crate::world::point_contents`]). So an eye on a
+/// pool's surface plane is under water to id's client, warped and tinted,
+/// and in the air to its server. A malformed tree reads as solid: no warp,
+/// no tint.
+pub fn view_contents(bsp: &Bsp, p: Vec3) -> i32 {
+    point_in_leaf(bsp, p).and_then(|leaf| bsp.leafs.get(leaf)).map_or(crate::bsp::CONTENTS_SOLID, |l| l.contents)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -185,6 +199,21 @@ mod tests {
         // Exactly on the plane (d == 0) goes to the BACK child (strict `d > 0`,
         // matching C Mod_PointInLeaf) -> leaf 2.
         assert_eq!(point_in_leaf(&bsp, [0.0, 5.0, -3.0]), Some(2));
+    }
+
+    #[test]
+    fn the_view_on_a_plane_is_behind_it_where_the_server_is_in_front() {
+        // Water behind the plane (x < 0), air in front: on the plane the
+        // client's view is in the water and the server's point in the air.
+        let mut bsp = two_leaf_bsp();
+        bsp.leafs[2].contents = crate::bsp::CONTENTS_WATER;
+        let on = [0.0, 5.0, -3.0];
+        assert_eq!(view_contents(&bsp, on), crate::bsp::CONTENTS_WATER);
+        assert_eq!(crate::world::point_contents(&bsp, on), crate::bsp::CONTENTS_EMPTY);
+        assert_eq!(view_contents(&bsp, [1.0 / 32.0, 5.0, -3.0]), crate::bsp::CONTENTS_EMPTY, "V_CalcRefdef's nudge");
+        // A malformed tree is solid to the view: no warp, no tint.
+        bsp.models[0].headnode = [999, 0, 0, 0];
+        assert_eq!(view_contents(&bsp, on), crate::bsp::CONTENTS_SOLID);
     }
 
     #[test]

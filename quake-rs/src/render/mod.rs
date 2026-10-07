@@ -94,10 +94,10 @@ pub use surf::MipCvars;
 pub use torch::TorchFlicker;
 pub use video::{FovMode, HIRES_MAXHEIGHT, HIRES_MAXWIDTH, MAXHEIGHT, MAXWIDTH, VideoCvars};
 pub use view::{
-    FramePalette, build_gamma_table, content_cshift, cshift_ramps, pack_rgba, powerup_cshift, view_bob,
-    viewmodel_angles, viewmodel_fudge, viewmodel_origin_ofs,
+    FramePalette, VIEWORG_NUDGE, build_gamma_table, content_cshift, cshift_ramps, nudge_vieworg, pack_rgba,
+    powerup_cshift, view_bob, viewmodel_angles, viewmodel_fudge, viewmodel_origin_ofs,
 };
-pub use vis::point_in_leaf;
+pub use vis::{point_in_leaf, view_contents};
 pub use world::{BModelInstance, ExternalBModel};
 
 // ---------------------------------------------------------------------------
