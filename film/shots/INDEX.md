@@ -96,8 +96,8 @@ uv run oracle/compare.py --maps e1m1 --modes world,ents --aspect 0.8333333 --spa
 The others change only the map, `--view=`, `--settle` and the origin: e1m2
 `1543,1385,226,4,270,0`, 19, `1543 1385 204`; e1m3 `1283.8,912.2,582,4,315,0`, 11,
 `1283.8 912.2 560`; e1m5 `160.7,2549.3,446,4,0,0`, 15, `160.7 2549.3 424`. All four come out
-at 0 pixels differing. `--sse` (id's C built with SSE2 floats) is not in this tree's
-`compare.py` yet. The film's S21m lays each map's `e1mN_ents_320x200.c.ppm` and `.port.ppm`
+at 0 pixels differing. Every proof command needs `--sse`: the pixel checks run id's C in its
+SSE2 build. The film's S21m lays each map's `e1mN_ents_320x200.c.ppm` and `.port.ppm`
 side by side at 880x660 (nearest), "id's C" and "the port" above them and the map's name
 below, for 1.95 s each from shot second 0 (e1m1, e1m2, e1m3, e1m5); under them, 0.5 s after
 each map appears, the difference (the largest channel's difference times 4, 360x270, in a rust
@@ -129,6 +129,13 @@ quaketool sndscript quake-data/ID1/PAK0.PAK hum1-48000.txt slop.raw --rate 48000
 Each `.raw` is 16-bit stereo at its rate, 4.25 s, kept as a WAV. In id's, the channel falls
 silent for 65 samples at 3.62 s: the click. The edit lays slop's under the voice, id's alone for
 two laps, then slop's again.
+
+**The game's own eye.** Since the pixel-exact work, `camera walk`, `camera player` and a
+demo's camera draw id's eye nudged 1/32 unit, as id's V_CalcRefdef does. The cut was rendered
+before that, so these shot files reproduce their shots with slightly different frames (about
+5.5% of the pixels in HERO7 and the walks): F06, F13-barrels, F13-id, HERO7, LAB10d, N1b,
+N3w-box, N4-box, N8a, N8b, S02, S04, S05, S15c, S15s, S26, ST3.g065 and ST7. Shots with the
+film's own cameras (`path`, `fixed`, `follow`, `orbit`) render as the cut has them.
 
 **S13** was rendered by the first version of the film tool. Its `segments` x-ray has changed
 since, so `S13-segments` rendered today differs from the film's S13 once the sweep begins; the
