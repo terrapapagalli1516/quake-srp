@@ -34,8 +34,12 @@ Ten checks, of two kinds:
     against id's C built with SSE floats: every row 100.0000%;
   - `exact`: `exact_sweep.py` against the same build — every map's first
     frame, 18 yaws and pitches and 4 rolled views, the entities drawn, at
-    320x200 and at the page's 640x400 and aspect: not one pixel differs
-    (the x87 build's count is in its report, `exact.txt`, not judged);
+    320x200 and at the page's 640x400 and aspect; and with the player
+    moved among each map's monsters, awake (12 views a map, and the fixed
+    cases: four proof frames and every view once found differing), at the
+    page's 320x200 at id's 16-pixel spans and its portable C's 8: not one
+    pixel differs (the x87 build's count is in its report, `exact.txt`,
+    not judged);
   - `screen2d`: `screen2d.py`, id's composited 2-D layer at 320x200 and
     640x400, the port in its Classic preset: no shot below its recorded
     `2d exact%` (the known residues, oracle/README.md, are recorded);
@@ -208,9 +212,13 @@ def check_oracle(qt: Path, out: Path) -> dict:
 
 def check_exact(qt: Path, out: Path) -> dict:
     sweep = ["uv", "run", str(HERE / "exact_sweep.py"), "--quaketool", str(qt), "--maps", ",".join(MAPS),
-             "--views", "standard,sweep,roll", "--mode", "ents", "--oracles", "sse,x87"]
+             "--mode", "ents", "--oracles", "sse,x87"]
+    world = ["--views", "standard,sweep,roll"]
+    # the player among the monsters, awake, and the fixed cases; at id's 16-pixel
+    # spans and its portable C's 8 (the port's --perspspan 8)
+    monsters = ["--views", "cases,monsters", "--aspect", "0.8333333"]
     text, failed = "", False
-    for extra in ([], ["--res", "640x400", "--aspect", "0.8333333"]):
+    for extra in (world, world + ["--res", "640x400", "--aspect", "0.8333333"], monsters, monsters + ["--spans", "8"]):
         res = subprocess.run(sweep + extra, cwd=PROJECT, capture_output=True, text=True, timeout=1800)
         text += res.stdout + res.stderr
         failed |= res.returncode != 0
