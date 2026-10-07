@@ -62,11 +62,11 @@ ffmpeg with libx264 (and hevc_vaapi for the GPU path), `uv`, and docker for the 
   the same bytes as the cut's own footage, sound and event logs included: the layouts here are
   the production's, operation for operation.
 
-Every VAAPI file is decoded in full by ffmpeg's software decoder before it is kept; one that
-does not decode cleanly is made again once, then the job fails. (The GPU's decoder does not
-report a broken HEVC stream. The files keep HEVC's default `hev1` tag: with `hvc1` an mp4 keeps
-only the encoder's global header, whose initial QP is not the one its slices were coded
-against.)
+Every VAAPI file passes [`vaapi.py`](../vaapi.py)'s checks before it is kept: radeonsi writes its
+own parameter sets into the stream, which are not the ones FFmpeg would put in the file's header,
+so the header is built from the stream's own (and checked against them), the HEVC keeps its
+default `hev1` tag, and the whole file is decoded in software (the GPU's decoder does not report a
+broken stream). A file that does not decode cleanly is made again once, then the job fails.
 
 Both convert the frames to 4:2:0 the same way (ffmpeg's scaler, BT.709, tv range) before the
 encoder; only the codec differs.

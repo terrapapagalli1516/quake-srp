@@ -282,27 +282,22 @@ class Stream:
 def encoder_cmd(hw: str, w: int, h: int, out: Path) -> list[str]:
     """ffmpeg reading raw RGB24 frames on stdin. Both paths convert to 4:2:0 in BT.709 (tv range)
     the same way; `none` is v7's H.264 (libx264, CRF 16, medium), `vaapi` HEVC on the GPU at a
-    low constant QP. Not `-tag:v hvc1`: hevc_vaapi's global-header PPS gives another initial QP
-    than the in-band one its slices use, and an hvc1 file keeps only the global one, so every
-    slice decodes at the wrong QP (CABAC errors, then garbage); hev1, the default, keeps both."""
+    low constant QP, tagged hev1 and with the file's header built from the stream's own parameter
+    sets: radeonsi's in-band sets are not the ones FFmpeg would write in the header (vaapi.py)."""
     vf = "scale=out_color_matrix=bt709:out_range=tv"
     head = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
     raw = ["-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{w}x{h}", "-r", str(FPS), "-i", "-"]
     tags = ["-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709", "-color_range", "tv"]
-    if hw == "vaapi":
-        return (head + ["-vaapi_device", VAAPI_DEVICE] + raw
-                + ["-vf", vf + ",format=nv12,hwupload", "-c:v", "hevc_vaapi", "-rc_mode", "CQP", "-qp", str(VAAPI_QP),
-                   "-profile:v", "main"] + tags + ["-movflags", "+faststart", str(out)])
+    if hw == "vaapi":  # the file's header made from the stream's own parameter sets (vaapi.py)
+        return vaapi.consistent(head + ["-vaapi_device", VAAPI_DEVICE] + raw
+                                + ["-vf", vf + ",format=nv12,hwupload", "-c:v", "hevc_vaapi", "-rc_mode", "CQP",
+                                   "-qp", str(VAAPI_QP), "-profile:v", "main"] + tags
+                                + ["-movflags", "+faststart", str(out)])
     return (head + raw + ["-vf", vf + ",format=yuv420p", "-c:v", "libx264", "-preset", "medium", "-crf", "16",
                           "-pix_fmt", "yuv420p"] + tags + ["-movflags", "+faststart", str(out)])
 
 
 DECODE_FAILED = "does not decode cleanly"
-
-
-def decode_errors(path: Path) -> str | None:
-    """None if all of `path` decodes clean in software (film/pipeline/vaapi.py), else the first errors."""
-    return vaapi.decodes_clean(path)
 
 
 def encoder_id(hw: str) -> str:
@@ -327,8 +322,11 @@ class Writer:
         self.proc.stdin.close()
         if self.proc.wait() != 0:
             raise RuntimeError(f"ffmpeg failed for {self.out.name}")
-        if self.hw == "vaapi" and (err := decode_errors(self.part)):
-            raise RuntimeError(f"{self.out.name} {DECODE_FAILED}: {err}")
+        if self.hw == "vaapi":  # vaapi.py's checks: the header's sets are the stream's, all of it decodes
+            if wrong := vaapi.structure(self.part):
+                raise RuntimeError(f"{self.out.name}: {wrong}")
+            if bad := vaapi.decodes_clean(self.part):
+                raise RuntimeError(f"{self.out.name} {DECODE_FAILED}: {bad}")
         os.replace(self.part, self.out)
         return self.n
 
