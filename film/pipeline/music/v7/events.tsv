@@ -1,0 +1,163 @@
+# The score's named events: one row each. nominal = the planned time, kept if the clock lacks the event.
+# source tells fit_events.py where to find it in the edit's clock (edit/v7/clock.json):
+#   cut:SHOT[+-s]           the cut to SHOT (clock.cuts), plus an offset in seconds
+#   next:SHOT               the cut that follows SHOT's cut
+#   moment:NAME             clock.events[name]  (the named moments of the edit's config)
+#   pic:SHOT:what:i         clock.picture_events, the i-th time
+#   hit:SHOT:what:i         clock.edit_hits, the i-th time
+#   voice:ID:start|end[+-s] a voice line's speech span in clock.voice
+#   film_end                clock.film.duration
+#   ladder:ITEM, ladder_off:ITEM   ladder-events.json beside the clock: when the item lights / goes dark
+#   a|b                     try a, then b
+#   derived / nominal       computed from another event / kept at its nominal time
+# name	nominal	source	what happens
+T_M1_SUB	2.0	nominal	the sub creeps in
+T_M1_MOTIF	4.5	cut:S02	the dark motif begins
+T_BLAST	7.62	moment:blast_quake	S02's grenade blast on the word "Quake" (the music rests 0.17 s before)
+T_M1_REST	=T_BLAST-0.17	derived	
+T_M1_CRANE	8.667	cut:S03	
+T_M1_CUT1	12.633	cut:S04	
+T_M1_CUT2	14.25	cut:S05	
+T_M1_CUT3	16.883	cut:S06	
+T_M1_WIRE	18.283	cut:S07	
+T_M1_TEXT	22.728	cut:S07+4.445	the wireframe dissolves into texture
+T_M1_LEAVES	23.567	cut:S08	
+T_M1_PVS	25.55	cut:S09	
+T_M1_CACHE	27.483	cut:S10	
+T_M1_FIXED	28.917	cut:S11	
+T_M1_COLOURS	30.033	cut:S12	
+T_M1_DROP	33.933	cut:S13	
+T_M1_SILENCE	36.222	voice:V3-07:end+0.06|cut:S13+2.289	the cold open cuts to silence after "rationed" (0:36.40), with a 50 ms fade
+T_TITLE	37.033	cut:S14	
+T_TITLE2	38.233	cut:S14+1.2	
+T_M2	40.433	cut:S15	
+T_M2_OPEN	42.521	cut:S15	S15 is slop from its first frame; the pad opens with it
+WIPE	48.7	moment:s15_switch|cut:S17	the switch, Classic to slop (on S15, in the gap after "agents"): the lift to Dorian
+T_M2_MOTIF	=WIPE-3.4	derived	the motif's first four notes land their A on the wipe
+CLASSIC_D	58.9	cut:S16	Classic in its box: a plain D minor chord
+T_M3	62.43	moment:oracle_cut|cut:S20|cut:S19	the ostinato (on the oracle cut; S16's Classic chord carries across the breath and the question)
+BD1	77.2	cut:BD1	the panels slide together; the twin bells close in
+BD2_BLACK	81.6	moment:diff_black|cut:BD2	HARD CUT TO SILENCE, every bus
+BD1_MERGE	=BD2_BLACK-0.2	derived	the panels merge, just before the black: one unison note
+BD2_END	84.1	moment:video_not_frozen|cut:BD3	the voice's first word after the black (silence ends; the music stays out)
+STANDARD_VIEWS	87.6	moment:standard_views|cut:BD3+3.5	"On the standard views": the ostinato returns, deadpan
+T_S26	90.0	cut:S26	demo1: the percussion
+ALL_PASS	103.3	moment:all_pass_end|moment:all_pass|cut:S27+3.6	the end of "pass": the A major chord, ringing through the act break
+PASS1	103.3	hit:S27:pass_lines:0	a PASS line types: a tick above the voice
+PASS2	103.3	hit:S27:pass_lines:1	
+PASS3	103.3	hit:S27:pass_lines:2	
+PASS4	103.3	hit:S27:pass_lines:3	
+PASS5	103.3	hit:S27:pass_lines:4	
+PASS6	103.3	hit:S27:pass_lines:5	
+PASS7	103.3	hit:S27:pass_lines:6	
+PASS8	103.3	hit:S27:pass_lines:7	
+PASS9	103.3	hit:S27:pass_lines:8	
+PASS10	103.3	hit:S27:pass_lines:9	
+ALL_PASS_CARD	103.3	hit:S27:all_pass_card:0|moment:all_pass	ALL PASS on the card, on "All"
+CLASSIC	104.4	moment:classic_start|cut:ST0	everything off: the sub and a low bell every 4 s
+TORCHES_HIT	110.9	moment:torches_hit|cut:TQ1	TORCHES!: the metal stab, two bars
+TORCHES_ON	111.2	moment:torches_flicker_on|ladder:TORCH FLICKER|cut:TQ1+0.3	the flicker starts (the ladder lights)
+TORCHES_END	113.4	cut:ST1a	pulled back hard for the voice; the warm pad stays
+WARM_BREATH	136.31	voice:V3-24:end	the breath after "a warm feeling": the torch pad swells
+GLIDE_START	136.9	cut:ST2	the pad's tremolo, stepped (id's letters)
+GLIDE_ON	150.1	moment:gliding_lights|ladder:GLIDING LIGHTS|cut:LAB2+3.6	GLIDING LIGHTS on: the tremolo glides; a glass bell
+SMOOTH_START	152.5	cut:LAB3a	the grunt: stepped bass notes on its steps
+STEP1	152.467	pic:LAB3a:id_steps:0	the grunt's first id step (then every 0.8 s, thirteen)
+POSES	161.1	cut:LAB3b	the poses
+SNAP1	161.067	pic:LAB3b:held_pose_changes:0	the first held-pose snap (then every 0.8 s)
+SMOOTH_MON	169.75	moment:smooth_monsters|ladder:SMOOTH MONSTERS|cut:ST3+0.25	SMOOTH MONSTERS: a hit
+SMOOTH_ON	167.0	moment:smooth_animations|ladder:SMOOTH ANIMATIONS|cut:ST3+0.8	SMOOTH ANIMATIONS: the bass slides, then glides
+FRAMECAP_START	169.5	cut:LAB4a	hats in sixteenths
+STRIP480	176.0	cut:LAB4b	the 480 Hz strip: hats in thirty-seconds
+FRAMECAP_ON	177.3	moment:frame_rate_cap|ladder:FRAME RATE CAP: NONE|cut:LAB4b+1.3	NO FRAME CAP on: a hat burst
+JUMPS	179.9	cut:LAB4c	N4: the jumps
+JUMP1	180.9	pic:LAB4c:sounds: player/plyrjmp8.wav:0	a glissando follows each jump
+JUMP2	184.4	pic:LAB4c:sounds: player/plyrjmp8.wav:1	the 480 Hz arc, higher
+JUMP3	188.9	pic:LAB4c:sounds: player/plyrjmp8.wav:2	fused on id's curve
+SKY_START	190.5	cut:LAB5	
+SKY_ON	191.3	moment:fluid_sky|ladder:FLUID SKY|cut:LAB5+0.8	FLUID SKY on: the cymbal wash
+BURST	196.9	moment:burst|ladder:NATIVE PIXELS|cut:BURST+1.4	THE BURST, in 1.5 s of air: a real hit (+6 dB on its bar)
+BURST_END	197.4	ladder:WIDESCREEN FOV|cut:BURST+1.9	the box has burst
+HUD	212.5	cut:ST7	the gallop
+SCALED_HUD	214.5	ladder:SCALED 2-D LAYER|cut:ST7+2.0	a hit
+HUD_OVERLAY	216.5	ladder:STATUS BAR OVERLAY|cut:ST7+4.0	a hit
+CROSSHAIR	219.0	ladder:CROSSHAIR|cut:ST7+6.5	a sharp tick
+NAILS	221.1	cut:LAB8a	the nailgun at a quarter speed
+NAIL_FREEZE	222.6	pic:LAB8a:freeze:0	a tape stop to silence on the freeze
+NAILS_REAL	225.8	cut:LAB8b	back at tempo with a crash
+NAIL_ON	235.4	ladder:NAILS FROM BARRELS|cut:LAB8c+0.2	NAILS FROM BARRELS: a metal hit
+MIXER	230.3	moment:lab9_bed_in|cut:LAB9	LAB9: THE SCORE SILENT (id's hum, its clicks, slop's clean hum)
+SOUND_ON	249.05	moment:full_rate_sound|ladder:FULL-RATE SOUND	FULL-RATE SOUND (the score stays silent)
+MIXER_CLEAN	236.5	next:LAB9	the score returns on the next cut
+REST	237.9	moment:rest_same|next:HERO	"The rest is the same in both presets": after HERO, a coda
+CODA_VOICE	237.9	voice:V4-39a:start|next:HERO+1.0	the coda's first line (or 1.0 s after HERO's out)
+CAP2	244.1	cut:LAB10c	
+CAP3	246.9	cut:LAB10d	
+CAP4	248.9	cut:LAB10e	
+CAP5	250.5	cut:LAB10f	
+CAP6	251.5	cut:LAB10g	
+WASD	255.3	moment:wasd_gag|cut:LAB10h	THE WASD GAG: silence
+WASD_END	258.8	next:LAB10h	the cut after the gag
+PER1	275.767	cut:PER1	"One last switch, and it's subtle.": sub and pad
+DIVIDES	266.8	cut:PER2	every divide snaps on
+SPAN8_ON	268.9	moment:span8|ladder:PERSPECTIVE SPAN: 8|cut:PER3	SPAN 8: accents every 8
+FLIP1	273.8	pic:PER4:flips:0	the flip: 64 32 16 8 4 exact
+FLIP2	274.067	pic:PER4:flips:1	
+FLIP3	274.333	pic:PER4:flips:2	
+FLIP4	274.6	pic:PER4:flips:3	
+FLIP5	274.867	pic:PER4:flips:4	
+FLIP6	275.133	pic:PER4:flips:5	
+SHRUG	275.4	moment:felt_right|pic:PER4:flips:6	back to 8 on "felt right": the shrug
+RUNIN_GAP	275.4	voice:V3-45:end+0.15	in the gap before V4-47, a hit the duck lets through
+PER5	276.5	cut:PER5	
+PER6	281.3	cut:PER6	D08, no voice
+RED1	284.0	hit:PER6:d08_red_cells:0|cut:PER6+1.60	D08's red cells: small bells
+RED2	284.05	hit:PER6:d08_red_cells:1|cut:PER6+1.65	
+RED3	284.1	hit:PER6:d08_red_cells:2|cut:PER6+1.70	
+RED4	284.15	hit:PER6:d08_red_cells:3|cut:PER6+1.75	
+HERO	285.8	moment:all_on|cut:HERO	ALL ON: the act's loudest; V4-47's "on" ends on this cut
+HERO_ACTION	304.85	moment:hero_action|cut:HERO+2.8	HERO's action half: the guitar
+HERO_SWITCH	304.85	moment:hero_switch|moment:all_on	HERO's internal cut, if its picture has one; otherwise the hit doubles HERO's downbeat
+KILL1	304.85	hit:HERO:hero_kills:0	HERO7: a fiend dies (its accent goes on the score's nearest sixteenth: kills.py)
+KILL2	304.85	hit:HERO:hero_kills:1	
+KILL3	304.85	hit:HERO:hero_kills:2	
+KILL4	304.85	hit:HERO:hero_kills:3	
+ALL_ON_OUT	310.75	moment:all_on_out|next:HERO	THE BUTTON on HERO's out cut
+BUILT	294.8	cut:S57	the fleet
+MERGE1	303.2	hit:S58:d15_merges:0|cut:S58+0.8	a bell on each merge
+MERGE2	303.5	hit:S58:d15_merges:1|cut:S58+1.1	
+MERGE3	303.8	hit:S58:d15_merges:2|cut:S58+1.4	
+MERGE4	304.1	hit:S58:d15_merges:3|cut:S58+1.7	
+MERGE5	304.4	hit:S58:d15_merges:4|cut:S58+2.0	
+MERGE6	304.7	hit:S58:d15_merges:5|cut:S58+2.3	
+MERGE7	305.0	hit:S58:d15_merges:6|cut:S58+2.6	
+MERGE8	305.3	hit:S58:d15_merges:7|cut:S58+2.9	
+MERGE9	305.6	hit:S58:d15_merges:8|cut:S58+3.2	
+MERGE10	305.9	hit:S58:d15_merges:9|cut:S58+3.5	
+MERGE11	306.2	hit:S58:d15_merges:10|cut:S58+3.8	
+MERGED	306.4	cut:S59	
+RULE1	308.613	hit:S59:rules:0|cut:S59+2.213	a strike per rule
+RULE2	309.953	hit:S59:rules:1|cut:S59+3.553	
+RULE3	311.473	hit:S59:rules:2|cut:S59+5.073	
+SHAMBLER_OUT	312.7	cut:S60	everything out on S60's cut (the Shambler's own sounds)
+FINALE	316.1	cut:S61	the full theme again
+CHTHON	317.1	moment:chthon|pic:S61:chthon_woken:0|cut:S61+1.0	a boom as Chthon breaks the lava
+OFF_SPAN8	340.167	ladder_off:PERSPECTIVE SPAN: 8|cut:S62+0.40	S62: the ladder goes dark, 14 to 1
+OFF_SOUNDFIX	340.447	ladder_off:FULL-RATE SOUND|cut:S62+0.68	
+OFF_NAIL	340.727	ladder_off:NAILS FROM BARRELS|cut:S62+0.96	
+OFF_CROSSHAIR	341.007	ladder_off:CROSSHAIR|cut:S62+1.24	
+OFF_OVERLAY	341.287	ladder_off:STATUS BAR OVERLAY|cut:S62+1.52	
+OFF_SCALEDHUD	341.567	ladder_off:SCALED 2-D LAYER|cut:S62+1.80	
+OFF_WIDESCREEN	341.847	ladder_off:WIDESCREEN FOV|cut:S62+2.08	
+OFF_NATIVE	342.127	ladder_off:NATIVE PIXELS|cut:S62+2.36	
+OFF_SKY	342.407	ladder_off:FLUID SKY|cut:S62+2.64	
+OFF_FRAMECAP	342.687	ladder_off:FRAME RATE CAP: NONE|cut:S62+2.92	
+OFF_SMOOTHANIM	342.967	ladder_off:SMOOTH ANIMATIONS|cut:S62+3.20	
+OFF_SMOOTHMON	343.247	ladder_off:SMOOTH MONSTERS|cut:S62+3.48	
+OFF_GLIDE	343.527	ladder_off:GLIDING LIGHTS|cut:S62+3.76	
+OFF_TORCHES	343.807	ladder_off:TORCH FLICKER|cut:S62+4.04	
+S63	328.2	cut:S63	the bare sub and the low bell of 1:44.4
+LINE54_START	328.2	voice:V3-54:start	"And underneath, pixel for pixel, it is still nineteen ninety-six.": the last line
+LINE54_END	328.2	voice:V3-54:end	its end: the cadence arrives just after it
+END_CARD	334.6	moment:end_card|cut:S64	the end card (6.5 s): its chord enters under the line
+END	338.6	film_end	

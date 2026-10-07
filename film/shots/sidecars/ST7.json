@@ -1,0 +1,15 @@
+{
+ "head_s": 1.0,
+ "shot_s": 8.6,
+ "tail_s": 1.0,
+ "frames": 636,
+ "fps": 60,
+ "sound": "ST7.wav",
+ "events": "ST7.events.json",
+ "states_shot_s": {
+  "id's 1:1": 0.0,
+  "scaled": 2.0,
+  "the world beside it": 4.0,
+  "crosshair": 6.5
+ }
+}

@@ -1,0 +1,10 @@
+{
+ "head_s": 1.0,
+ "shot_s": 7.0,
+ "tail_s": 1.0,
+ "frames": 540,
+ "fps": 60,
+ "sound": "S61.wav",
+ "chthon_woken_shot_s": 0.9,
+ "events": "S61.events.json"
+}

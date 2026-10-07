@@ -1,0 +1,23 @@
+# N2e.clean: e1m6's corridor at exact perspective, every pixel divided, plain.
+# `r_perspspan 1`, turning from yaw 74.7 to 99.3 over the file, the divide rig's second
+# pass, plain: slop at 1920x1080, no status bar. The film's PER6.
+#
+# Under V4-47: "And that's the slop preset, switched on." Its "on" is the cut to HERO.
+
+map e1m6
+
+duration 19.2
+fps 60
+size 1920x1080
+
+preset slop
+hud off
+cvar r_perspspan 1
+cvar gamma 0.8
+
+camera path
+key 0     504,500,242  0,74.7209  ease linear
+key 19.2  504,500,242  0,99.2791
+
+sound on
+events on

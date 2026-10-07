@@ -1,6 +1,12 @@
 # S26: demo1 (e1m3) from 12.8 s, Classic at 320x200 with the status bar and the gun: the
-# gibs burst at about 14 s. id's recorded camera and its sound ("The mixer matches"). The
-# four lines of text over it are the edit's.
+# gibs burst at about 14 s. id's recorded camera and its sound. The five lines of text
+# over it (SOUND: SAMPLE FOR SAMPLE, 28 OF 28; FRAME BY FRAME: 17,500 FRAMES; CAMERA,
+# EVERY ENTITY and EVERY DYNAMIC LIGHT, each ticked) are the edit's art, in Quake's
+# lettering on dark bands at the 4:3 box's top right, each brought in on its word; they
+# are not part of the shot. The edit plays it slowed a little, to run under both lines.
+#
+# Under V3-17a, "The mixer matches id's, sample for sample.", and V3-17b, "Demo playback
+# matches frame by frame: the camera, every entity, every dynamic light."
 
 demo demo1 from 11.8
 

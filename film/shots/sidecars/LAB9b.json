@@ -1,0 +1,9 @@
+{
+ "head_s": 1.0,
+ "shot_s": 12.1,
+ "tail_s": 1.0,
+ "frames": 846,
+ "fps": 60,
+ "sound": "LAB9b.wav",
+ "events": "LAB9b.events.json"
+}

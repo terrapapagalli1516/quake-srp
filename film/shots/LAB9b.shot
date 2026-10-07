@@ -1,0 +1,37 @@
+# LAB9b: e1m8's rune gate, a slow push. The gate is a teleporter whose ambient sound is
+# `ambience/hum1.wav` (trigger_teleport *25 is not silent, so QuakeC's `ambientsound`
+# plays the hum at its middle, 672,1012,-704). Full slop, native 1920x1080, fov 70,
+# Brightness 0.65. One eased push over the whole file (the handles are its slow ends),
+# from the room's corner, the gate on the left, to the opening centre-frame, the starfield
+# warping inside; the Quad Damage turns at the right edge. 12.1 s with a second of handle
+# each end.
+#
+# Under V3-38: "id's mixer runs at your device's rate now, with four of its bugs fixed.
+# Like that click."
+#
+# Assembly (LAB9): the sound is not this render's (its own `LAB9b.wav` is the gate's hum
+# through slop's mixer, unused) but one `ambience/hum1.wav` loop beside a still listener
+# through each mixer, `N9-click-slop.wav` and `N9-click-id.wav` (INDEX.md): slop's hum
+# under the voice, then id's alone for two laps, its click in the voice's gap before "Like
+# that click", then slop's again. The mixer diagram and the options ladder over it are the
+# edit's.
+
+map e1m8
+skill 2
+warmup 2
+
+duration 14.1
+fps 60
+size 1920x1080
+
+preset slop
+cvar gamma 0.65
+
+camera path
+key 0     548,890,-698  at 664,1012,-702  fov 70  ease inout
+key 14.1  604,936,-702  at 668,1012,-704  fov 70
+
+mark gate 672,1012,-704
+
+sound on
+events on

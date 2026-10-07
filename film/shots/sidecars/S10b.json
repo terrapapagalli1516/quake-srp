@@ -1,0 +1,23 @@
+{
+ "head_s": 1.0,
+ "shot_s": 1.4333,
+ "tail_s": 1.0,
+ "frames": 206,
+ "fps": 60,
+ "sound": null,
+ "events": "S10b.events.json",
+ "mix_shot_s": {
+  "lightmaps": [
+   -1.0,
+   0.42
+  ],
+  "dissolve": [
+   0.42,
+   1.02
+  ],
+  "picture": [
+   1.02,
+   2.4333
+  ]
+ }
+}

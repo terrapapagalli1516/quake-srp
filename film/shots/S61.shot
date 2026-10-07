@@ -1,8 +1,10 @@
-# S61: e1m7, the camera craning back from the lava pit as Chthon rises ("id Software
-# released Quake's source"). Chthon is woken the game's own way, by its `use` with the
-# player as the activator, as taking the rune does: `fire t4 at 1.9`. The player waits
-# behind the entrance corridor's end wall, out of the line of fire, so no damage flash
-# tints the picture. Slop, no status bar.
+# S61: e1m7, the camera craning back from the lava pit as Chthon rises. Chthon is woken
+# the game's own way, by its `use` with the player as the activator, as taking the rune
+# does: `fire t4 at 1.9`. The player waits behind the entrance corridor's end wall, out of
+# the line of fire, so no damage flash tints the picture. Slop, no status bar.
+#
+# Under V3-52: "id Software released Quake's source under a free licence. This port
+# follows it, file by file."
 
 map e1m7
 

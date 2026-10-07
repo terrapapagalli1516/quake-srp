@@ -1,5 +1,9 @@
-# N10: the start map's entrance hall, slop, no status bar, a slow linear dolly ("Claude,
-# Anthropic's model, wrote the code"). The edit dims it under its diagram.
+# N10: the start map's entrance hall, slop, no status bar, a slow linear dolly. The edit
+# dims it under its diagram.
+#
+# Under V3-48: "Claude, Anthropic's model, wrote the code, as fleets of agents, each on
+# its own branch with a written brief." (S57), and V3-49, "A chair merged a branch only
+# when every check passed." (S58).
 
 map start
 

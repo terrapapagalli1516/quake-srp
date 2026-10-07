@@ -1,0 +1,88 @@
+# ST1a2: e1m3's torch hall, the torches as id baked them wiped to flickering. The hall is
+# the room demo1 crosses at 33.5 to 38.8 s, from its south-west corner: a still camera at
+# fov 90 on the flame on its stand (left of centre), a wall flame on the left wall, one
+# through the arch, and the far room's flames and wall torches by its carved door (right).
+# The Classic box (960x600 shown 4:3), A with `r_torchflicker 0` and B flickering: B wipes
+# in from the right over shot seconds 0.4 to 4.4 (file 1.4 to 5.4, smoothstep in 0.1 s
+# keys), behind the tool's line, under the tool's labels; the sound is B's. On id's side
+# nothing moves but the flames themselves. Brightness 0.55. 5.3 s with a second of handle
+# each end. The marks are the flames.
+#
+# Under V3-20, "First: torches.", and V3-21, "id's mappers baked most of them into the
+# walls, perfectly still: a hundred and forty-three, from the second map to the seventh."
+#
+# Assembly (ST1a): the 1440x1080 picture at x 240 of a black 1920x1080 frame; the edit's
+# labels ("id's: light baked, still", "slop: flickering") cover the tool's.
+
+map e1m3
+
+duration 7.3
+fps 60
+size 1440x1080
+
+preset classic
+mode 960x600
+display 4:3
+hud off
+cvar gamma 0.55
+
+camera fixed -1380,-700,-20 at -1150,-300,10
+fov 90
+
+ab cvar r_torchflicker 0 | cvar r_torchflicker 1
+ablabels ID'S: BAKED, STILL | SLOP: FLICKERING
+split line
+splitat 0 1
+splitat 1.40 1.0000
+splitat 1.50 0.9982
+splitat 1.60 0.9928
+splitat 1.70 0.9840
+splitat 1.80 0.9720
+splitat 1.90 0.9570
+splitat 2.00 0.9393
+splitat 2.10 0.9188
+splitat 2.20 0.8960
+splitat 2.30 0.8709
+splitat 2.40 0.8438
+splitat 2.50 0.8147
+splitat 2.60 0.7840
+splitat 2.70 0.7518
+splitat 2.80 0.7183
+splitat 2.90 0.6836
+splitat 3.00 0.6480
+splitat 3.10 0.6117
+splitat 3.20 0.5747
+splitat 3.30 0.5375
+splitat 3.40 0.5000
+splitat 3.50 0.4625
+splitat 3.60 0.4252
+splitat 3.70 0.3883
+splitat 3.80 0.3520
+splitat 3.90 0.3164
+splitat 4.00 0.2817
+splitat 4.10 0.2482
+splitat 4.20 0.2160
+splitat 4.30 0.1853
+splitat 4.40 0.1562
+splitat 4.50 0.1291
+splitat 4.60 0.1040
+splitat 4.70 0.0812
+splitat 4.80 0.0608
+splitat 4.90 0.0430
+splitat 5.00 0.0280
+splitat 5.10 0.0160
+splitat 5.20 0.0072
+splitat 5.30 0.0018
+splitat 5.40 0.0000
+absound b
+
+mark f1 -1352,-432,14
+mark f2 -1040,-272,38
+mark f3 -1432,-256,38
+mark f4 -960,-48,14
+mark f5 -1144,48,38
+mark f6 -544,-238,-4
+mark f7 -544,-82,-4
+
+sound on
+events on

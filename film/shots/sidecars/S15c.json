@@ -1,0 +1,9 @@
+{
+ "head_s": 1.0,
+ "shot_s": 23.0,
+ "tail_s": 1.0,
+ "frames": 1500,
+ "fps": 60,
+ "sound": "S15c.wav",
+ "events": "S15c.events.json"
+}

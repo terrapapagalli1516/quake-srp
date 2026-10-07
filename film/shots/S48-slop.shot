@@ -1,5 +1,8 @@
 # S48-slop: S48-id with slop's gliding light styles (`r_lerplightstyles 1`).
 #
+# Under V7-27: "On a sharp, fast screen they hold, then jump: a stutter in a smooth
+# picture. Slop glides between the letters."
+#
 # Assembly (S48): S48-id at (20,196) and S48-slop at (960,196) on a black 1920x1080 frame,
 # each film frame shown four times (a 60 fps file, 1/16 speed), labelled "id's" and
 # "slop". The shot proper (cl.time 4.95, frame 11 of the render) starts 0.733 s in; the

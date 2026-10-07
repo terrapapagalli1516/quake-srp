@@ -1,0 +1,38 @@
+# ST1cG: STG's end view, still, the gable flame flickering. e1m3's gable flame close
+# (600,-890,110, fov 60), the Classic box, the torch flickering (`r_torchflicker 1`),
+# Brightness 0.7. 4.5 s with a second of handle each end. The bottom fifth is the dark top
+# of the slab under the flame, where the edit's diagram of the flame's luxels sits. The
+# marks are the corners of the flame model's box.
+#
+# Under V3-24: "The user asked for that: a warm feeling."
+
+map e1m3
+skill 2
+warmup 2
+
+duration 6.5
+fps 60
+size 1920x1080
+
+preset classic
+mode 960x600
+display 4:3
+hud off
+cvar gamma 0.7
+cvar r_torchflicker 1
+
+camera fixed 600,-890,110  -12,180
+fov 60
+
+mark fo 518,-890,120
+mark f0 510.4,-897.6,107.6 radius 0
+mark f1 525.6,-897.6,107.6 radius 0
+mark f2 510.4,-882.4,107.6 radius 0
+mark f3 525.6,-882.4,107.6 radius 0
+mark f4 510.4,-897.6,163.6 radius 0
+mark f5 525.6,-897.6,163.6 radius 0
+mark f6 510.4,-882.4,163.6 radius 0
+mark f7 525.6,-882.4,163.6 radius 0
+
+sound on
+events on

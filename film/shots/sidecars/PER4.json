@@ -1,0 +1,39 @@
+{
+ "head_s": 1.0,
+ "shot_s": 2.0,
+ "tail_s": 1.0,
+ "frames": 240,
+ "fps": 60,
+ "sound": null,
+ "events": "PER4.events.json",
+ "flips_shot_s": [
+  {
+   "t": 0.0,
+   "span": 64
+  },
+  {
+   "t": 0.267,
+   "span": 32
+  },
+  {
+   "t": 0.533,
+   "span": 16
+  },
+  {
+   "t": 0.8,
+   "span": 8
+  },
+  {
+   "t": 1.067,
+   "span": 4
+  },
+  {
+   "t": 1.333,
+   "span": 1
+  },
+  {
+   "t": 1.6,
+   "span": 8
+  }
+ ]
+}

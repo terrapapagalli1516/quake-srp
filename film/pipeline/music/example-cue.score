@@ -1,0 +1,49 @@
+# Example cue: a 16-second build into an impact that must land at exactly 12.40 s.
+
+title   Example: a hit at 12.40 s
+tuning  D2=72              # the score's tonic D2 is 72 Hz, the game's tick rate
+length  16                 # the WAV is exactly 16.000 s long
+fadeout 1.5
+loudness -16
+
+tempo   1:1 76             # nominal 76 bpm ...
+anchor  5:1 12.40          # ... but bar 5 must land at 12.40 s: bars 1-4 are stretched to fit
+section 1:1 build
+section 5:1 after
+hit     5:1 impact         # reported in example-cue.json, in seconds and samples
+
+track drone patch=drone  gain=-14 duck=0.3
+track pad   patch=pad    gain=-12 hp=80 hall=0.4
+track glass patch=glass  gain=-8  hall=0.3 delay=0.2 delay_time=0.39
+track tick  patch=tick   gain=-6  room=0.2 tone=2400
+track swell patch=swell  gain=-8
+track boom  patch=impact gain=-8  hall=0.25
+track brass patch=brass  gain=-6  hall=0.3
+
+pattern motif length=8     # the film's motif: D A Bb G A
+  0    D3  2    0.9
+  2    A3  1    0.8
+  3    Bb3 1/2  0.85
+  3.5  G3  1/2  0.75
+  4    A3  4    0.85
+end
+
+pattern clock length=4
+  0    tick - 0.1 0.8
+  1    tick - 0.1 0.5
+  2    tick - 0.1 0.6
+  3    tick - 0.1 0.5
+end
+
+1:1    drone D1 16s 0.8                          # 16 seconds, whatever the tempo
+1:1    pad   D3,A3 16 0.6 cutoff=200 cutoff_end=1800
+level  pad   1:1 -8                              # pad fades up from -8 dB ...
+level  pad   4:4 0                               # ... to 0 dB by bar 4, beat 4
+arp    1:1 glass D4,F4,A4,E5 16 step=1/2 order=0,1,2,3,2,1 vel=0.3 vel_end=0.65
+play   clock 2:1 times=3
+@3.00  boom  - 1s 0.4 freq=60                    # a soft thud on a picture cut at 3.00 s
+4:1    swell D4 4 0.9                            # rises for one bar, stops dead on 5:1
+
+5:1    boom  - 1 1.0                             # the impact: 12.400 s exactly
+play   motif 5:1 track=brass transpose=12 stretch=1/2   # the motif at double speed
+5:1    pad   D3,F#3,A3,D4 4 0.7 cutoff=1500

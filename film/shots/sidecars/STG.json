@@ -1,0 +1,10 @@
+{
+ "head_s": 1.0,
+ "shot_s": 8.75,
+ "tail_s": 1.0,
+ "frames": 645,
+ "fps": 60,
+ "sound": "STG.wav",
+ "events": "STG.events.json",
+ "torchflicker_on_shot_s": 6.55
+}

@@ -1,0 +1,43 @@
+# BURST2r-a: e1m3's courtyard in the Classic box, settings 1 to 5 on, a slow push. An
+# eased push from (1347,330,600) to (1347,392,600) looking north (yaw 90, pitch -4 to -5)
+# over the 9 s file; 960x600 shown 4:3, and settings 1 to 5 are the torches' flicker,
+# gliding lights, smooth monsters and poses, no frame cap and the fluid sky. No status bar
+# or gun; Brightness 0.8; id's mixer. The courtyard's near flames (at 1008 and 1686, 652,
+# 672) sit 45 to 53 degrees off the axis for the whole file: outside the 4:3 box, inside
+# the 16:9 frame. 7 s with a second of handle each end, frame for frame with BURST2r-b.
+#
+# Under V3-33, "Now, the picture.", and V3-34, "Your screen's own pixels: square, and
+# never smoothed."
+#
+# Assembly (BURST): from file second 0.5, BURST2r-a over BURST2r-b. 2.31 s in, over 0.5 s
+# (ease-out cubic), the box's picture stretches from 1440 to 1920 pixels wide as it fades
+# out, and the black pillars slide off the frame's edges: the box bursts, and a flame
+# comes into each side. The sound is BURST2r-b's.
+
+map e1m3
+skill 2
+warmup 2
+
+duration 9
+fps 60
+size 1920x1080
+
+preset classic
+mode 960x600
+display 4:3
+cvar r_torchflicker 1
+cvar r_lerplightstyles 1
+cvar r_lerpmove 1
+cvar r_lerpmodels 1
+clock free
+stepping uncapped
+cvar r_fluidsky 1
+crosshair 0
+cvar gamma 0.8
+
+camera path
+key 0  1347,330,600  -4,90 fov 90  ease inout
+key 9  1347,392,600  -5,90 fov 90
+
+sound on
+events on

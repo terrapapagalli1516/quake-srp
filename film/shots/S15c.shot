@@ -1,0 +1,34 @@
+# S15c: the game's very first view, in the Classic preset as it ships. The start map, the
+# player at its spawn (544,288,32, yaw 90), its own eye, not moving, QUAKE carved over the
+# arch. 960x600 in the 4:3 box, id's status bar 1:1, the gun, id's 72 Hz frame gate on a
+# 60 Hz screen (`display 4:3 60`; with no screen a 60 fps film would never show one tick
+# in six), id's mixer at 11025 Hz, Brightness 0.8. Only the flames, the sky and the lava
+# move. 23 s with a second of handle each end. S15c and S15s share one clock: file frame k
+# is the same game second in both, so the film cuts from one to the other at the same file
+# time.
+#
+# Under V4-11, "Switch them all off, and you get Classic: id's game.", and V3-12, "How do
+# you prove a port is faithful?" (S16).
+#
+# Assembly (S15, S16): S15 is S15s alone from file second 1.0. S16 takes both files from
+# file second 19.0 (the camera never moves, so the later frames show the same view): it
+# opens on S15s, black pillars close in to the 4:3 box over 0.4 s (eased), and on the
+# closed box the picture is S15c, with the edit's "Classic" label at the box's top left
+# and id's menu sound on the switch.
+
+map start
+
+duration 25
+fps 60
+size 1920x1080
+
+preset classic
+display 4:3 60
+hud on
+gun on
+cvar gamma 0.8
+
+camera player
+
+sound on
+events on

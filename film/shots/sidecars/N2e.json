@@ -1,0 +1,9 @@
+{
+ "head_s": 1.0,
+ "shot_s": 17.2,
+ "tail_s": 1.0,
+ "frames": 1152,
+ "fps": 60,
+ "sound": "N2e.wav",
+ "events": "N2e.events.json"
+}

@@ -1,0 +1,14 @@
+{
+ "head_s": 1.0,
+ "shot_s": 5.3,
+ "tail_s": 1.0,
+ "frames": 438,
+ "fps": 60,
+ "sound": "ST1a2.wav (side B; the two sides' sound is the same game)",
+ "events": "ST1a2.events.json",
+ "events_a": "ST1a2.events-a.json",
+ "wipe_file_s": [
+  1.4,
+  5.4
+ ]
+}

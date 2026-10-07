@@ -1,7 +1,9 @@
 # S01: the cold open's first shot, e1m1's first corridor as 1996 drew it. Classic at
 # 320x200, shown 4:3, no status bar, id's Brightness slider at 0.7. A linear dolly down
-# the corridor; the film uses seconds 1 to 7 (a second of handle each end). No sound: in
-# the game's own mixer this corridor is silent.
+# the corridor, a second of handle each end. No sound: in the game's own mixer this
+# corridor is silent.
+#
+# No narration: the film opens on it, under the edit's opening card.
 
 map e1m1
 

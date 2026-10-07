@@ -1,0 +1,87 @@
+{
+ "head_s": 1.0,
+ "shot_s": 17.3,
+ "tail_s": 1.0,
+ "frames": 1158,
+ "fps": 60,
+ "sound": "N4-box.wav",
+ "events": "N4-box.events.json",
+ "sounds_shot_s": [
+  [
+   1.0,
+   "player/plyrjmp8.wav"
+  ],
+  [
+   2.0,
+   "weapons/grenade.wav"
+  ],
+  [
+   2.767,
+   "weapons/bounce.wav"
+  ],
+  [
+   3.3,
+   "weapons/bounce.wav"
+  ],
+  [
+   3.567,
+   "weapons/bounce.wav"
+  ],
+  [
+   4.5,
+   "player/plyrjmp8.wav"
+  ],
+  [
+   4.5,
+   "weapons/r_exp3.wav"
+  ],
+  [
+   6.0,
+   "weapons/grenade.wav"
+  ],
+  [
+   6.767,
+   "weapons/bounce.wav"
+  ],
+  [
+   7.3,
+   "weapons/bounce.wav"
+  ],
+  [
+   7.567,
+   "weapons/bounce.wav"
+  ],
+  [
+   8.483,
+   "weapons/r_exp3.wav"
+  ],
+  [
+   9.0,
+   "player/plyrjmp8.wav"
+  ],
+  [
+   11.0,
+   "weapons/grenade.wav"
+  ],
+  [
+   11.767,
+   "weapons/bounce.wav"
+  ],
+  [
+   12.3,
+   "weapons/bounce.wav"
+  ],
+  [
+   12.567,
+   "weapons/bounce.wav"
+  ],
+  [
+   13.0,
+   "player/plyrjmp8.wav"
+  ],
+  [
+   13.483,
+   "weapons/r_exp3.wav"
+  ]
+ ]
+}

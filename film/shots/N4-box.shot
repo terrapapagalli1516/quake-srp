@@ -1,0 +1,59 @@
+# N4-box: jumps and grenades at e1m1's start, in the Classic box with no frame cap. The
+# player at (480,-352,88, yaw 90), its own eye, god mode, with the grenade launcher
+# (`impulse 9`, `impulse 6`): it jumps (file seconds 2.0, 5.5, 10.0, 14.0) and fires
+# grenades down the corridor (3.0, 7.0, 12.0). 960x600 shown 4:3, settings 1 to 4 on, and
+# no frame cap: `clock free`, `stepping uncapped`, a host frame every 60 fps film frame.
+# id's status bar, the gun, Brightness 0.8, id's mixer at 11025 Hz. 17.3 s with a second
+# of handle each end.
+#
+# Under V3-31, "Run id's code faster, and the physics drifts: at four hundred and eighty
+# hertz, jumps peak higher, and grenades land further.", and V3-32a, "The slop preset
+# draws a frame on every refresh, and steps gravity so that every jump lands on id's
+# seventy-two hertz curve."
+#
+# Assembly (LAB4c): the edit's jump diagram covers the box's right side, from just right
+# of its centre.
+
+map e1m1
+
+duration 19.3
+fps 60
+size 1920x1080
+
+preset classic
+mode 960x600
+display 4:3
+clock free
+stepping uncapped
+cvar r_torchflicker 1
+cvar r_lerplightstyles 1
+cvar r_lerpmove 1
+cvar r_lerpmodels 1
+cvar vid_native 0
+cvar fov_adapt 0
+cvar gamma 0.8
+hud on
+gun on
+
+player 480,-352,88,90
+camera player
+
+impulse 9 at 0
+impulse 6 at 0.1
+cmd +jump at 2.0
+cmd -jump at 2.3
+attack on at 3.0
+attack off at 3.4
+cmd +jump at 5.5
+cmd -jump at 5.8
+attack on at 7.0
+attack off at 7.4
+cmd +jump at 10.0
+cmd -jump at 10.3
+attack on at 12.0
+attack off at 12.4
+cmd +jump at 14.0
+cmd -jump at 14.3
+
+sound on
+events on

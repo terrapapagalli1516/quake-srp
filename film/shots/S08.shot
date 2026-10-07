@@ -1,6 +1,9 @@
 # S08: S07's room in the `leaves` x-ray: each visible point coloured by its BSP leaf. The
 # pan continues S07's at 4 degrees a second: the file's second 1.0 is the frame after the
 # last one of S07 the film shows. Classic at 320x200.
+#
+# Under V3-05: "A software renderer: binary space partitions, a potentially visible set, a
+# surface cache, fixed point."
 
 map e1m1
 

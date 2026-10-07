@@ -1,9 +1,11 @@
 # PER4: the rig's span flipping 64, 32, 16, 8, 4, exact (every pixel), and back to 8,
 # 0.267 s each, the divides marked at alpha 0.6 so the exact step shows the wall through
-# them ("Why eight"). The window is frames 1464 to 1703, the rig's film seconds 24.4 to
-# 28.4. The divide rig: e1m6's corridor from (504,500,242), a linear turn from yaw 104
-# down at 0.778 degrees a second, no status bar, slop at 1920x1080. N2a, N2b, N2c and PER4
-# are the same turn; the film cuts each where its line falls.
+# them. The window is frames 1464 to 1703, the rig's film seconds 24.4 to 28.4. The divide
+# rig: e1m6's corridor from (504,500,242), a linear turn from yaw 104 down at 0.778
+# degrees a second, no status bar, slop at 1920x1080. N2a, N2b, N2c and PER4 are the same
+# turn; the film cuts each where its line falls.
+#
+# Under V3-45's middle: "Why eight? Honestly, it felt right."
 
 map e1m6
 

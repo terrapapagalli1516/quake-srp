@@ -1,0 +1,45 @@
+# S59b: the start map's whole wireframe, bronze on black, the camera orbiting it. Every
+# edge of the world is drawn through the walls (`xray black`, `wire world through`); the
+# camera orbits 40 degrees about the map's middle (736,1704,-86), bearing 25 to 65,
+# smoothstep over the file, radius 2600, the eye at z 1700, fov 60. 6.47 s with a second
+# of handle each end; no sound.
+#
+# Under V3-50: "The user set the rules: no dependencies, no unsafe code, and Classic
+# proven." The rules card over it is the edit's.
+
+map start
+skill 2
+warmup 2
+
+duration 8.4667
+fps 60
+size 1920x1080
+
+preset slop
+cvar gamma 0.8
+
+camera path
+key 0.0000  3092.4,2802.8,1700.0  at 736,1704,-86  fov 60  ease linear
+key 0.5000  3084.6,2819.3,1700.0  at 736,1704,-86  fov 60  ease linear
+key 1.0000  3062.0,2865.8,1700.0  at 736,1704,-86  fov 60  ease linear
+key 1.5000  3024.8,2937.5,1700.0  at 736,1704,-86  fov 60  ease linear
+key 2.0000  2973.0,3029.1,1700.0  at 736,1704,-86  fov 60  ease linear
+key 2.5000  2906.5,3135.4,1700.0  at 736,1704,-86  fov 60  ease linear
+key 3.0000  2825.8,3250.8,1700.0  at 736,1704,-86  fov 60  ease linear
+key 3.5000  2731.9,3370.2,1700.0  at 736,1704,-86  fov 60  ease linear
+key 4.0000  2626.7,3488.7,1700.0  at 736,1704,-86  fov 60  ease linear
+key 4.5000  2512.9,3602.0,1700.0  at 736,1704,-86  fov 60  ease linear
+key 5.0000  2394.2,3706.6,1700.0  at 736,1704,-86  fov 60  ease linear
+key 5.5000  2274.9,3799.6,1700.0  at 736,1704,-86  fov 60  ease linear
+key 6.0000  2159.9,3879.4,1700.0  at 736,1704,-86  fov 60  ease linear
+key 6.5000  2054.5,3944.9,1700.0  at 736,1704,-86  fov 60  ease linear
+key 7.0000  1964.0,3995.7,1700.0  at 736,1704,-86  fov 60  ease linear
+key 7.5000  1893.9,4031.9,1700.0  at 736,1704,-86  fov 60  ease linear
+key 8.0000  1849.2,4053.6,1700.0  at 736,1704,-86  fov 60  ease linear
+key 8.4667  1834.8,4060.4,1700.0  at 736,1704,-86  fov 60  ease linear
+
+xray black
+wire world through
+
+events on
+sound off

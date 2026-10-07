@@ -1,0 +1,8 @@
+{
+ "head_s": 1.0,
+ "shot_s": 3.5,
+ "tail_s": 1.0,
+ "frames": 330,
+ "fps": 60,
+ "sound": null
+}

@@ -1,6 +1,8 @@
-# ST2: e1m1's fluorescent corridor in real time, light style 10 flickering ("The lights id
-# did animate"). Classic, 960x600 in its 4:3 box, id's 72 Hz ticks; cl.time 3.0 at file
-# second 1. Brightness 0.7.
+# ST2: e1m1's fluorescent corridor in real time, light style 10 flickering. Classic,
+# 960x600 in its 4:3 box, id's 72 Hz ticks; cl.time 3.0 at file second 1. Brightness 0.7.
+#
+# Under V3-26: "The lights id did animate are strings of letters, from a for dark to zee
+# for bright, a new letter every tenth of a second."
 
 map e1m1
 warmup until 2.0

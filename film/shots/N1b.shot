@@ -1,0 +1,25 @@
+# N1b: demo1 from 17.3 s in Classic, the 1996 look. 320x200 shown 4:3, the status bar and
+# the gun, id's recorded camera and its sound (id's mixer, 11025 Hz), Brightness 0.8.
+# After the run the player looks up the lift shaft (shot seconds 4.9 to 7.4), and the tail
+# fires the nailgun. 8 s with a second of handle each end.
+#
+# Under V6-18: "One command runs ten checks, six of them against id's own C. All ten
+# pass."
+#
+# Assembly (S27): the terminal over it, listing the ten checks, is the edit's: the six
+# against id's C brighten on "against id's own C", and ALL PASS comes up on "All".
+
+demo demo1 from 17.3
+
+duration 10
+fps 60
+size 1920x1080
+
+preset classic
+mode 320x200
+hud on
+gun on
+cvar gamma 0.8
+
+sound on
+events on

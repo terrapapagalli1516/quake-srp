@@ -1,7 +1,10 @@
-# N2c: the rig at the slop preset's span, 8 pixels, the divides marked ("The slop preset
-# divides every eight"). The divide rig: e1m6's corridor from (504,500,242), a linear turn
-# from yaw 104 down at 0.778 degrees a second, no status bar, slop at 1920x1080. N2a, N2b,
-# N2c and PER4 are the same turn; the film cuts each where its line falls.
+# N2c: the rig at the slop preset's span, 8 pixels, the divides marked. The divide rig:
+# e1m6's corridor from (504,500,242), a linear turn from yaw 104 down at 0.778 degrees a
+# second, no status bar, slop at 1920x1080. N2a, N2b, N2c and PER4 are the same turn; the
+# film cuts each where its line falls.
+#
+# Under V3-45's first sentence: "The slop preset divides every eight pixels, as id's own
+# portable C did."
 
 map e1m6
 

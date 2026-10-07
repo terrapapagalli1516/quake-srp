@@ -1,0 +1,8 @@
+{
+ "head_s": 1.0,
+ "shot_s": 4.0,
+ "tail_s": 1.0,
+ "frames": 360,
+ "fps": 60,
+ "sound": "S02.wav"
+}
