@@ -51,13 +51,13 @@ stage by stage, by the scripts the sections below describe:
 The film comes out as:
 
 - `cut.mp4`, the master: 60 fps at `--res`, HEVC at 3840x2160 (made for uploading);
-- `cut-1080p.mp4`, the same picture area-averaged to 1920x1080 (beside a 4K master);
+- `cut-1080p.mp4`, the same picture scaled to 1920x1080 (beside a 4K master);
 - `cut-480p30-hevc.mp4`, the phone file, under 10 MB, and `cut-480p30.mp4`, its H.264
   fallback for players without HEVC;
 - `cut-loudness.md` and `cut-contact.png` (the loudness report, a frame every 5 s), and
   `cut.srt`, `cut.vtt`;
-- `edit/build-NNN/`, the build's record: its timeline, mix report, stems, and `inputs/`, a
-  copy of every file it read.
+- `edit/build-NNN/`, the build's record: its timeline, mix report, stems, and `inputs/`,
+  every file it read with its MD5 (reflinked copies, where the disk has reflinks).
 
 **At 4K.** The slop shots render at 3840x2160 natively. Classic's shots keep their own
 modes (320x200, 960x600) and are scaled up as at 1080, in a 4:3 box of 2880x2160. Every
@@ -68,21 +68,35 @@ device pixel ratio of 2. `--res 1920x1080` renders the 1080 film: the same timel
 and mix, and the same picture except where a re-rendered shot looks through the player's eye
 ([1. The footage](#1-the-footage)).
 
-**Encoding.** With `--hw vaapi` (the default), the GPU encodes through VAAPI
-(`VAAPI_DEVICE`, default `/dev/dri/renderD128`): the footage, the edit's segments (HEVC at a
-low constant QP, not lossless: a 4K film's lossless segments would not fit most disks), the
-master (HEVC) and the 1080p copy (H.264). The phone files are always software x265 and x264:
-at under 10 MB, quality per bit decides, and there the GPU's encoders lose. The diagram
-overlays are ProRes 4444 in software, since VAAPI has no alpha. `--hw none` encodes
+**Encoding.** With `--hw vaapi` (the default), the GPU does the video work through VAAPI
+(`VAAPI_DEVICE`, default `/dev/dri/renderD128`). The footage and the edit's segments are HEVC
+at a low constant QP (not lossless: a 4K film's lossless segments would not fit most disks),
+and the segments decode their footage on the GPU too. The master is the segments themselves,
+joined without decoding them again (no second generation); the 1080p copy is decoded, scaled
+and encoded (H.264) without leaving the GPU. The phone files are always software x265 and
+x264: at under 10 MB, quality per bit decides, and there the GPU's encoders lose. The diagram
+overlays are ProRes 4444 in software, since VAAPI has no alpha. Every file a VAAPI encoder
+writes is checked before it is used ([`pipeline/vaapi.py`](pipeline/vaapi.py)): its HEVC is
+tagged `hev1`, never `hvc1` (hevc_vaapi's global and in-band headers disagree, and an `hvc1`
+file decodes to garbage), and all of it decodes clean in software. `--hw none` encodes
 everything in software, for a machine without VAAPI: the segments lossless at 1080 (as the
 v7 cut was built), the master x264.
+
+**Memory.** Each stage runs in a memory cap (`--mem-cap`, a systemd user scope with no swap),
+so a job that runs away is stopped alone rather than the system's services. At 4K the
+edit renders two segments at a time (`--jobs`): one 4K segment's ffmpeg holds a few
+gigabytes.
 
 **Incremental.** Each stage records what it was made from in `OUT_DIR/.make/`, and a stage
 whose inputs did not change is skipped, so the command can be run again after any change and
 does only what the change needs. The clock's times come from the narration and `edit.toml`
 alone: a change that moves a word or a shot makes the diagrams' ladder, the score and the
 sound effects again; a changed shot file re-renders its footage and the edit. Caches and
-intermediates go to `FILM_SCRATCH` (default `OUT_DIR/scratch/`).
+intermediates go to `FILM_SCRATCH` (default `OUT_DIR/scratch/`), and the stages' temporary
+files under it, on disk: `/tmp` is often a tmpfs, held in RAM, and a 4K render's scratch would
+fill it. Stopping the command (Ctrl-C, or a SIGTERM) stops the running stage the same way, and
+its temporary files are removed; run it again to carry on. The scripts run alone default to
+`/var/tmp/quake-srp-film/` for their scratch.
 
 ```sh
 uv run film/make.py --res 1920x1080 --voice VOICE_DIR --out OUT_DIR   # the 1080 film
@@ -118,7 +132,7 @@ the build.
 
 Every script below reads and writes under one folder, `FILM_ROOT` (default: this folder;
 `make.py` sets it to `OUT_DIR`), and keeps caches in `FILM_SCRATCH` (default:
-`quake-srp-film/` in the system's temp folder). Paths in `edit.toml` are `FILM_ROOT`'s; the
+`/var/tmp/quake-srp-film/`, on disk). Paths in `edit.toml` are `FILM_ROOT`'s; the
 media keep the production's folder names, version numbers included (`diagrams/v6/`,
 `footage/game/`), and the edit's own are plain (`edit/`, `music/score.wav`,
 `sound/sfx.wav`). Commands run from the repository's root.
@@ -278,7 +292,8 @@ QP with `--hw vaapi`), mixes the voice, the score
 (fitted to the cut, ducked under the voice), the game's own sound and the effects stem,
 masters to −14 LUFS under −1 dBTP, and encodes the film. It takes minutes. Each build is a
 fresh `build-NNN/` with its `timeline.json`, its mix report, its stems, a loudness report, a
-contact sheet, and `inputs/`, a copy of every file it read; nothing earlier is overwritten.
+contact sheet, and `inputs/`, every file it read with its MD5 (reflinked copies where the
+disk has reflinks); nothing earlier is overwritten.
 
 ### 8. Subtitles and the viewing kit
 

@@ -28,9 +28,11 @@ not change is skipped. The clock runs again as the media land (cheap), since the
 times come from the narration and edit.toml alone, so they are the same at any resolution.
 
   --res WxH         3840x2160 (the film at 4K: every overlay, card and label at 2x its 1080 geometry) or 1920x1080
-  --hw vaapi|none   vaapi (default): the footage, the edit's segments, the master and the 1080p copy are encoded on
-                    the GPU (VAAPI_DEVICE, default /dev/dri/renderD128); none: in software, for a machine without it.
-                    The phone files are always software x265/x264: at under 10 MB, quality per bit decides.
+  --hw vaapi|none   vaapi (default): the GPU (VAAPI_DEVICE, default /dev/dri/renderD128) encodes the footage and the
+                    edit's segments, decodes the footage, and makes the 1080p copy; the master is the segments joined
+                    as they are. Every VAAPI file is checked (pipeline/vaapi.py). none: all in software, for a machine
+                    without VAAPI. The phone files are always software x265/x264: at under 10 MB, quality per bit
+                    decides.
   --stages a,b      only these stages (each still skips if up to date); --force a,b: remake these even if up to date
   --media STAGE=PATH  take a stage's output from elsewhere instead of rendering it: footage=DIR (with game/, proof/,
                     web/ in it), web=DIR, diagrams=DIR, score=WAV, sfx=WAV. Copied in (reflinks where the disk has
@@ -38,9 +40,13 @@ times come from the narration and edit.toml alone, so they are the same at any r
   --range A-B       the edit renders only this stretch (film seconds), as OUT/range.mp4: a quick look
   --burn-in         a review build: the timecode and the shot ids burned in
   --quaketool BIN   use this quaketool (default: build quake-rs's, as oracle/classic_check.py does)
-  --jobs N          the edit's segments rendered at once (default: build.py's)
+  --jobs N          the edit's segments rendered at once (default: build.py's: 4 at 1080, 2 above)
+  --mem-cap SIZE    each stage runs in a memory cap, a systemd user scope with MemoryMax=SIZE and no swap (default
+                    12G; 0 for none), so a job that runs away is killed alone instead of the system's services
 
-Caches and intermediates go to FILM_SCRATCH (default OUT/scratch: at 4K the edit's segments are large). Needs
+Caches and intermediates go to FILM_SCRATCH (default OUT/scratch: at 4K the edit's segments are large), and the
+stages' temporary files under it (TMPDIR), on disk rather than in a tmpfs /tmp. Stopping make.py (SIGTERM, Ctrl-C)
+stops the running stage the same way, so its temporary files are removed. Needs
 what film/README.md lists (Rust, ffmpeg, uv, cairo, fonts), and VAAPI for --hw vaapi. Python only through uv.
 """
 
@@ -51,6 +57,7 @@ import hashlib
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -80,6 +87,15 @@ class Make:
         self.range = a.range
         self.burn_in = a.burn_in
         self.jobs = a.jobs
+        self.cap = None
+        if a.mem_cap.lower() not in ("0", "none", "off"):
+            ok = shutil.which("systemd-run") and subprocess.run(
+                ["systemd-run", "--user", "--scope", "-q", "-p", "MemoryMax=64M", "--", "true"],
+                capture_output=True).returncode == 0
+            if ok:
+                self.cap = a.mem_cap
+            else:
+                log("no systemd user manager (systemd-run --user --scope): the stages run without a memory cap")
         self.force = set(filter(None, (a.force or "").split(",")))
         self.media = {}
         for m in a.media or []:
@@ -90,6 +106,9 @@ class Make:
         self.quaketool = Path(a.quaketool).resolve() if a.quaketool else None
         self.env = dict(os.environ, FILM_ROOT=str(self.out),
                         FILM_SCRATCH=os.environ.get("FILM_SCRATCH") or str(self.out / "scratch"))
+        tmp = Path(self.env["FILM_SCRATCH"]) / "tmp"   # the stages' temporary files on disk too, not in a tmpfs /tmp
+        tmp.mkdir(parents=True, exist_ok=True)
+        self.env["TMPDIR"] = str(tmp)
         if self.quaketool:
             self.env["QUAKETOOL"] = str(self.quaketool)  # filmroot.py's, for every stage
         (self.out / ".make").mkdir(parents=True, exist_ok=True)
@@ -99,9 +118,28 @@ class Make:
     def run(self, *cmd, cwd: Path | None = None) -> None:
         cmd = [str(c) for c in cmd]
         log("$", " ".join(cmd))
-        r = subprocess.run(cmd, cwd=cwd or REPO, env=self.env)
+        cap = ["systemd-run", "--user", "--scope", "-q", "-p", f"MemoryMax={self.cap}", "-p", "MemorySwapMax=0",
+               "--"] if self.cap else []
+        # its own process group, so that stopping make.py (SIGTERM, Ctrl-C) stops the whole stage the same way:
+        # every process in it gets SIGTERM and exits normally, removing its temporary files (filmroot.py)
+        p = subprocess.Popen(cap + cmd, cwd=cwd or REPO, env=self.env, start_new_session=True)
+        try:
+            rc = p.wait()
+        except BaseException:
+            for sig, wait in ((signal.SIGTERM, 60), (signal.SIGKILL, 10)):
+                try:
+                    os.killpg(p.pid, sig)
+                    p.wait(wait)
+                    break
+                except (ProcessLookupError, subprocess.TimeoutExpired):
+                    continue
+            raise
+        r = subprocess.CompletedProcess(cmd, rc)
         if r.returncode:
-            sys.exit(f"make: {Path(cmd[2] if cmd[:2] == ['uv', 'run'] else cmd[0]).name} failed ({r.returncode})")
+            name = Path(cmd[2] if cmd[:2] == ["uv", "run"] else cmd[0]).name
+            hint = (f" (a process killed with -9 or 137 reached --mem-cap {self.cap}: raise it, or lower --jobs)"
+                    if self.cap else "")
+            sys.exit(f"make: {name} failed ({r.returncode}){hint}")
 
     def uv(self, script: Path, *args) -> None:
         self.run("uv", "run", script, *args)
@@ -403,7 +441,12 @@ class Make:
         self.done("subs", sig, t0)
 
 
+def _exit_on_term(signum, _frame) -> None:
+    sys.exit(128 + signum)
+
+
 def main() -> None:
+    signal.signal(signal.SIGTERM, _exit_on_term)  # stopped: the running stage is stopped too, then a normal exit
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0],
                                  formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
     ap.add_argument("--res", default="3840x2160", help="3840x2160 (default) or 1920x1080")
@@ -417,6 +460,8 @@ def main() -> None:
     ap.add_argument("--burn-in", action="store_true", help="a review build: timecode and shot ids burned in")
     ap.add_argument("--quaketool", help="use this quaketool binary instead of building quake-rs's")
     ap.add_argument("--jobs", type=int, help="the edit's segments rendered at once (build.py's default otherwise)")
+    ap.add_argument("--mem-cap", default="12G", help="each stage's memory limit (systemd-run --user --scope, "
+                    "MemoryMax, no swap): a runaway job is killed alone, not the system's services; 0 for none")
     a = ap.parse_args()
     m = Make(a)
     only = set(filter(None, (a.stages or "").split(",")))
@@ -424,7 +469,7 @@ def main() -> None:
     if unknown:
         sys.exit(f"make: no stage {', '.join(sorted(unknown))}: {', '.join(STAGES)}")
     t0 = time.time()
-    log(f"{m.w}x{m.h} (scale {m.scale}), hw {m.hw}, into {m.out}")
+    log(f"{m.w}x{m.h} (scale {m.scale}), hw {m.hw}, memory cap {m.cap or 'none'}, into {m.out}")
     # the clock runs first on the narration alone (the diagrams, the score and the effects are timed by it), then
     # again as the media land, since the timeline names them (a second each, skipped when nothing changed)
     plan = ["voice", "clock", "footage", "web", "diagrams", "clock", "score", "sfx", "clock", "edit", "subs"]
