@@ -308,12 +308,12 @@ class Make:
         script = PIPE / "web" / "capture.py"
         if not script.exists():
             sys.exit("make: the web stage (film/pipeline/web/capture.py) is not here yet: --media web=DIR")
-        sig = self.sig(self.code(PIPE / "web", REPO / "web"), self.scale)
+        sig = self.sig(self.code(PIPE / "web", REPO / "web"), self.scale, self.hw)
         if self.up_to_date("web", sig, [self.out / "footage" / "web"]):
             log("web: up to date")
             return
         t0 = time.time()
-        self.uv(script, "--scale", self.scale, "--out", self.out / "footage" / "web")
+        self.uv(script, "--scale", self.scale, "--out", self.out / "footage" / "web", "--hw", self.hw)
         self.done("web", sig, t0)
 
     def stage_diagrams(self) -> None:
