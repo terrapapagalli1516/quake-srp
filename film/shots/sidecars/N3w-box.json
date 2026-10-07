@@ -1,0 +1,9 @@
+{
+ "head_s": 1.0,
+ "shot_s": 2.1,
+ "tail_s": 1.0,
+ "frames": 246,
+ "fps": 60,
+ "sound": "N3w-box.wav",
+ "events": "N3w-box.events.json"
+}
