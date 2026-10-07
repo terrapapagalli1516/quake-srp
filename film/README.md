@@ -23,13 +23,102 @@ film, as text and code. The media are not here ([The media](#the-media)).
 | [`shots/`](shots/) | every game shot of the cut as a `quaketool film` shot file; [`shots/INDEX.md`](shots/INDEX.md) maps the cut's shots to them |
 | [`render.py`](render.py) | renders shot files to footage |
 | [`edit.toml`](edit.toml) | the edit: the shot list, every shot's source, in-point, overlays and sound, the voice's pauses, the levels, the moments the score and the sound effects hit |
-| [`pipeline/`](pipeline/) | the code that makes the rest: [`edit/`](pipeline/edit/), [`music/`](pipeline/music/), [`sound/`](pipeline/sound/), [`diagrams/`](pipeline/diagrams/), [`review/`](pipeline/review/) |
+| [`make.py`](make.py) | renders the whole film in one command ([Render it](#render-it)) |
+| [`voice.json`](voice.json) | the narration's line map: each line's clip, text, pause and word times |
+| [`pipeline/`](pipeline/) | the code that makes the rest: [`footage/`](pipeline/footage/), [`web/`](pipeline/web/), [`diagrams/`](pipeline/diagrams/), [`music/`](pipeline/music/), [`sound/`](pipeline/sound/), [`edit/`](pipeline/edit/), [`voice/`](pipeline/voice/), [`review/`](pipeline/review/) |
+
+## Render it
+
+```sh
+uv run film/make.py --res 3840x2160 --voice VOICE_DIR --out OUT_DIR
+```
+
+[`make.py`](make.py) renders the whole film from this folder into `OUT_DIR`, in one command.
+`VOICE_DIR` is the narration's clips, the one input that is not in the repository: the files
+[`voice.json`](voice.json) names ([2. The voice](#2-the-voice)). Everything else is rendered,
+stage by stage, by the scripts the sections below describe:
+
+| stage | what it runs | what it writes under `OUT_DIR` |
+|---|---|---|
+| voice | copies the clips `voice.json` names | `voice/` |
+| clock | [`timeline.py`](pipeline/edit/timeline.py) | `edit/timeline.json`, `clock.json`, `clock-score.json`, `ladder-events.json` |
+| footage | [`footage/make_footage.py`](pipeline/footage/) | `footage/game/`, `footage/proof/` |
+| web | [`web/capture.py`](pipeline/web/) | `footage/web/` |
+| diagrams | [`diagrams/render_all.py`](pipeline/diagrams/render_all.py) | `diagrams/` |
+| score | the score fitted to the clock and synthesized ([5](#5-the-score)) | `music/score.wav`, its stems and MIDI |
+| sfx | [`sound/render.py`](pipeline/sound/render.py) on the clock | `sound/sfx.wav` |
+| edit | [`build.py`](pipeline/edit/build.py) | `cut.mp4` and the files below, `edit/build-NNN/` |
+| subs | [`make_subs.py`](pipeline/edit/subs/make_subs.py) | `cut.srt`, `cut.vtt` |
+
+The film comes out as:
+
+- `cut.mp4`, the master: 60 fps at `--res`, HEVC at 3840x2160 (made for uploading);
+- `cut-1080p.mp4`, the same picture scaled to 1920x1080 (beside a 4K master);
+- `cut-480p30-hevc.mp4`, the phone file, under 10 MB, and `cut-480p30.mp4`, its H.264
+  fallback for players without HEVC;
+- `cut-loudness.md` and `cut-contact.png` (the loudness report, a frame every 5 s), and
+  `cut.srt`, `cut.vtt`;
+- `edit/build-NNN/`, the build's record: its timeline, mix report, stems, and `inputs/`,
+  every file it read with its MD5 (reflinked copies, where the disk has reflinks).
+
+**At 4K.** The slop shots render at 3840x2160 natively. Classic's shots keep their own
+modes (320x200, 960x600) and are scaled up as at 1080, in a 4:3 box of 2880x2160. Every
+card, label, overlay and diagram is drawn at exactly twice its 1080 geometry: `edit.toml`'s
+positions stay in 1080's units, cairo draws with a 2x transform, and id's 8x8 glyphs are
+doubled nearest-neighbour, as are the proof's frames. The browser captures are taken at a
+device pixel ratio of 2. `--res 1920x1080` renders the 1080 film: the same timeline, clock
+and mix, and the same picture except where a re-rendered shot looks through the player's eye
+([1. The footage](#1-the-footage)).
+
+**Encoding.** With `--hw vaapi` (the default), the GPU does the video work through VAAPI
+(`VAAPI_DEVICE`, default `/dev/dri/renderD128`). The footage and the edit's segments are HEVC
+at a low constant QP (not lossless: a 4K film's lossless segments would not fit most disks),
+and the segments decode their footage on the GPU too. The master is the segments themselves,
+joined without decoding them again (no second generation); the 1080p copy is decoded, scaled
+and encoded (H.264) without leaving the GPU. The phone files are always software x265 and
+x264: at under 10 MB, quality per bit decides, and there the GPU's encoders lose. The diagram
+overlays are ProRes 4444 in software, since VAAPI has no alpha. Every file a VAAPI encoder
+writes is checked before it is used ([`pipeline/vaapi.py`](pipeline/vaapi.py)): its HEVC is
+tagged `hev1`, never `hvc1` (hevc_vaapi's global and in-band headers disagree, and an `hvc1`
+file decodes to garbage), and all of it decodes clean in software. `--hw none` encodes
+everything in software, for a machine without VAAPI: the segments lossless at 1080 (as the
+v7 cut was built), the master x264.
+
+**Memory.** Each stage runs in a memory cap (`--mem-cap`, a systemd user scope with no swap),
+so a job that runs away is stopped alone rather than the system's services. At 4K the
+edit renders two segments at a time (`--jobs`): one 4K segment's ffmpeg holds a few
+gigabytes.
+
+**Incremental.** Each stage records what it was made from in `OUT_DIR/.make/`, and a stage
+whose inputs did not change is skipped, so the command can be run again after any change and
+does only what the change needs. The clock's times come from the narration and `edit.toml`
+alone: a change that moves a word or a shot makes the diagrams' ladder, the score and the
+sound effects again; a changed shot file re-renders its footage and the edit. Caches and
+intermediates go to `FILM_SCRATCH` (default `OUT_DIR/scratch/`), and the stages' temporary
+files under it, on disk: `/tmp` is often a tmpfs, held in RAM, and a 4K render's scratch would
+fill it. Stopping the command (Ctrl-C, or a SIGTERM) stops the running stage the same way, and
+its temporary files are removed; run it again to carry on. The scripts run alone default to
+`/var/tmp/quake-srp-film/` for their scratch.
+
+```sh
+uv run film/make.py --res 1920x1080 --voice VOICE_DIR --out OUT_DIR   # the 1080 film
+uv run film/make.py ... --stages footage,edit      # only these stages (each still skips when up to date)
+uv run film/make.py ... --force sfx                # remake a stage even if it is up to date
+uv run film/make.py ... --range 113.5-116.5        # the edit renders one stretch, as OUT_DIR/range.mp4
+uv run film/make.py ... --burn-in                  # a review build: the timecode and the shot ids burned in
+uv run film/make.py ... --media footage=DIR        # a stage's output taken from elsewhere (footage, web,
+                                                   # diagrams: a folder; score, sfx: a WAV), copied in
+```
+
+It needs what [How it is made](#how-it-is-made) lists, VAAPI for `--hw vaapi`, and a lot of
+disk at 4K: the footage, the diagrams' ProRes overlays and the edit's segments are large.
+It builds `quaketool` itself (`cargo build --release`) unless `--quaketool BIN` names one.
 
 ## How it is made
 
 ```
 id's pak + this repository
-  ├─ footage ─────── shots/*.shot ──► render.py ──────────────────────────┐
+  ├─ footage ─────── shots/*.shot ──► footage/make_footage.py, web/ ─────┐
   ├─ voice ───────── script.md ──► ElevenLabs takes ──► clips + word times │
   │                    └─► the clock: timeline.py + edit.toml             │
   │                          ├─► diagrams (the slop-options ladder, D01…) ├─► build.py ──► the cut
@@ -43,11 +132,12 @@ comes before everything timed to the cut. The diagrams, the score and the sound 
 made from the clock, so a change that moves a word or a shot means making them again before
 the build.
 
-Every script below reads and writes under one folder, `FILM_ROOT` (default: this folder),
-and keeps caches in `FILM_SCRATCH` (default: `quake-srp-film/` in the system's temp
-folder). Paths in `edit.toml` are `FILM_ROOT`'s and keep the production's folder names,
-version numbers included (`diagrams/v6/`, `edit/v7/`, `music/score-v10.wav`), so the same
-pipeline runs on the tree the film was made in. Commands run from the repository's root.
+Every script below reads and writes under one folder, `FILM_ROOT` (default: this folder;
+`make.py` sets it to `OUT_DIR`), and keeps caches in `FILM_SCRATCH` (default:
+`/var/tmp/quake-srp-film/`, on disk). Paths in `edit.toml` are `FILM_ROOT`'s; the
+media keep the production's folder names, version numbers included (`diagrams/v6/`,
+`footage/game/`), and the edit's own are plain (`edit/`, `music/score.wav`,
+`sound/sfx.wav`). Commands run from the repository's root.
 
 **What it needs.** Rust (to build `quaketool`: `cargo build --release --bin quaketool` in
 `quake-rs/`), id's shareware pak at `quake-data/ID1/PAK0.PAK` ([Build and run
@@ -63,10 +153,10 @@ speech to text, Scribe, with its key in `ELEVENLABS_API_KEY`.
 ### 1. The footage
 
 ```sh
-uv run film/render.py --out film/footage/game                # every shot (this takes a while)
-uv run film/render.py --out film/footage/game S01 STG        # only these
+uv run film/pipeline/footage/make_footage.py --res 3840x2160 --out film/footage   # every file the cut reads
+uv run film/pipeline/web/capture.py --scale 2 --out film/footage/web              # the page's three shots
+uv run film/render.py --out film/footage/game S01 STG        # single shot files, as they are
 uv run film/render.py --list                                 # each shot and what it shows
-cp film/shots/sidecars/*.json film/footage/game/             # what the edit reads beside each file
 ```
 
 Each shot file goes through `quaketool film` and ffmpeg into `NAME.mp4` (H.264, CRF 16, at
@@ -85,19 +175,23 @@ happens in it, which the clock, the score and the sound effects are cued on.
 
 Some of the cut's footage is several renders laid together: a wipe, two halves side by
 side, a cross-fade, crops that follow a monster. Those are one shot file per render, and
-each file's header says how they were laid together; the scripts that did it are not here.
-The browser footage (the Options page, the page loading, the phone's touch controls) was
-captured from the page itself with Playwright, not with the film tool. The proof's frames,
-monsters in view, are `oracle/compare.py`'s. The index lists every shot with what made it,
-and gives the proof's commands; each needs `--sse`, since the pixel checks run id's C in its
-SSE2 build.
+[`pipeline/footage/`](pipeline/footage/) lays them together as the production did, writes
+the sidecars beside them and makes the proof's frames (monsters in view, `oracle/compare.py`'s,
+with `--sse`, since the pixel checks run id's C in its SSE2 build) and their layout, S21m: its
+README has the files and the flags. The browser footage (the Options page, the page loading,
+the phone's touch controls) is captured from the page itself by
+[`pipeline/web/`](pipeline/web/): the page built from this repository, filmed with
+Playwright in a headless Chromium. The index lists every shot with what made it.
 
 ### 2. The voice
 
 The narration is [`script.md`](script.md), spoken by "Frederick" on ElevenLabs
 (`eleven_v4`, seed 7). Each line's chosen take was trimmed to its speech and levelled to
-−16 LUFS, and Scribe heard it back to give every word's time. The result is
-`voice/v7-lines.json` (each line's clip and words) and the clips under `voice/`.
+−16 LUFS, and Scribe heard it back to give every word's time. The result is the clips and
+[`voice.json`](voice.json), the line map: each line's clip (a path in the clips' folder), its
+text, its pause and every word's time. [`pipeline/voice/voice_map.py`](pipeline/voice/voice_map.py)
+wrote the map from the takes' folder; the edit reads it as `FILM_ROOT/voice/voice.json`,
+beside the clips (`make.py` puts it there).
 
 The scripts that did this are not here: a take costs money, and the same text gives a
 different take each time, so the takes are the film's source and are kept, not re-made.
@@ -106,7 +200,7 @@ different take each time, so the takes are the film's source and are kept, not r
 
 ```sh
 uv run film/pipeline/edit/timeline.py --dry      # print it
-uv run film/pipeline/edit/timeline.py            # write edit/v7/timeline.json, clock.json, clock.txt, ladder-events.json
+uv run film/pipeline/edit/timeline.py            # write edit/timeline.json, clock.json, clock.txt, ladder-events.json
 ```
 
 [`timeline.py`](pipeline/edit/timeline.py) lays the clips end to end with the script's
@@ -114,8 +208,8 @@ pauses, cuts each shot on its first word (`over` in `edit.toml`), gives every sh
 narration its own length, and resolves every source and overlay from what is on disk. The
 result is `timeline.json`, the edit decision list, and `clock.json`, the named moments the
 score and the sound effects hit (`[events]` in `edit.toml`). The score is composed on a
-frozen copy of the clock, `edit/v7/clock-score.json`; the build fits it to the cut shot by
-shot.
+copy of the clock, `edit/clock-score.json`, renewed only when the clock's times change; the
+build fits the score to the cut shot by shot.
 
 ### 4. The diagrams
 
@@ -123,7 +217,11 @@ shot.
 uv run film/pipeline/diagrams/render_v7.py            # every diagram the cut uses (this takes minutes)
 uv run film/pipeline/diagrams/render_v7.py D01 ladder # some, by name
 uv run film/pipeline/diagrams/render_v7.py --list     # the commands, without running them
+uv run film/pipeline/diagrams/render_all.py --scale 2 --clock OUT/edit --out OUT/diagrams   # at 3840x2160
 ```
+
+[`pipeline/diagrams/README.md`](pipeline/diagrams/README.md) has the outputs, the codecs and
+the scale.
 
 The diagrams are drawn with [`qkit`](pipeline/diagrams/qkit/), a small kit on cairo that
 draws in id's palette and lettering, read from the pak (palette, conchars, gfx.wad): the
@@ -143,7 +241,7 @@ with `quaketool sndscript`.
 uv run film/pipeline/music/v7/fit_events.py -o film/pipeline/music/v7/events-v7.inc   # the cut's moments, from the clock
 uv run film/pipeline/music/v7/make_scores.py           # score-v10.score, from its template
 uv run film/pipeline/music/v7/kills.py                 # the climax's kills, on the score's grid
-uv run film/pipeline/music/synth/render.py film/pipeline/music/score-v10.score --stems --midi
+uv run film/pipeline/music/synth/render.py film/pipeline/music/score-v10.score -o film/music/score.wav --stems --midi
 ```
 
 The score is synthesized: [`music/synth/`](pipeline/music/synth/) is a synthesizer in numpy
@@ -152,18 +250,20 @@ notes placed at named moments, tuned so that D2 is 72 Hz, the game's tick rate
 ([`score.py`](pipeline/music/synth/score.py) describes the format; `render.py --patches`
 lists the instruments). [`score-v10.score`](pipeline/music/score-v10.score) includes the
 [`v7/`](pipeline/music/v7/) files, one per part of the film, and `events-v7.inc`, the cut's
-moments on the clock (`edit/v7/clock.json`, read by `fit_events.py`), so the score's hits
+moments on the clock (`edit/clock.json`, read by `fit_events.py`), so the score's hits
 land on the cut: the torches, the burst, the climax. The first three commands are needed only
-when the clock moves (their outputs are here); the render writes `music/score-v10.wav`, its
-stems and a MIDI file, takes minutes, needs nothing but the score's text, and gives the same
-bytes on every run (each note's noise is seeded from the note).
+when the clock moves (their outputs are here, fitted to the v7 cut's clock; `make.py` runs
+them on a copy of this folder in `OUT_DIR/music/src/`, so the repository's stay as they are);
+the render writes `music/score.wav`, its stems and a MIDI file, takes minutes, needs nothing
+but the score's text, and gives the same bytes on every run (each note's noise is seeded from
+the note).
 
 ### 6. The sound effects
 
 ```sh
 uv run film/pipeline/sound/extract_id.py      # id's sounds out of the pak: sound/id/
 uv run film/pipeline/sound/design.py          # the designed sounds: sound/designed/
-uv run film/pipeline/sound/render.py          # the cue list on the cut's clock: sound/sfx-v7.wav
+uv run film/pipeline/sound/render.py          # the cue list on the cut's clock: sound/sfx.wav
 ```
 
 The sound effects are one stem the edit mixes under the voice. Most are id's own sounds,
@@ -180,25 +280,29 @@ run.
 
 ```sh
 uv run film/pipeline/edit/s26_lines.py                       # S26's check lines (Quake's lettering)
-uv run film/pipeline/edit/build.py --publish cut             # edit/v7/build-NNN/, then edit/v7/cut.mp4
+uv run film/pipeline/edit/build.py --publish cut             # edit/build-NNN/, then edit/cut.mp4
 uv run film/pipeline/edit/build.py --publish cut-clean --no-burn-in --preview   # no timecode; phone files
 uv run film/pipeline/edit/build.py --range 113.5-116.5       # one stretch, as build-NNN/range.mp4
+uv run film/pipeline/edit/s26_lines.py --scale 2             # at 3840x2160: the lines at 2x, then
+uv run film/pipeline/edit/build.py --scale 2 --hw vaapi --publish cut --no-burn-in --preview
 ```
 
 [`build.py`](pipeline/edit/build.py) makes the clock again, draws the edit's own pictures
 (the title, the proof's panels, labels, captions, the end card:
-[`cards.py`](pipeline/edit/cards.py)), renders one lossless segment per shot (the footage at
-its in-point, the overlays and diagrams composited, fades), mixes the voice, the score
+[`cards.py`](pipeline/edit/cards.py)), renders one segment per shot (the footage at its
+in-point, the overlays and diagrams composited, fades; lossless in software, HEVC at a low
+QP with `--hw vaapi`), mixes the voice, the score
 (fitted to the cut, ducked under the voice), the game's own sound and the effects stem,
 masters to −14 LUFS under −1 dBTP, and encodes the film. It takes minutes. Each build is a
 fresh `build-NNN/` with its `timeline.json`, its mix report, its stems, a loudness report, a
-contact sheet, and `inputs/`, a copy of every file it read; nothing earlier is overwritten.
+contact sheet, and `inputs/`, every file it read with its MD5 (reflinked copies where the
+disk has reflinks); nothing earlier is overwritten.
 
 ### 8. Subtitles and the viewing kit
 
 ```sh
-uv run film/pipeline/edit/subs/make_subs.py --cut edit/v7/cut.mp4 --voice voice/v7-lines.json --clock edit/v7/clock.json
-uv run film/pipeline/review/watch.py edit/v7/build-NNN/film.mp4
+uv run film/pipeline/edit/subs/make_subs.py --cut edit/cut.mp4 --voice voice/voice.json --clock edit/clock.json
+uv run film/pipeline/review/watch.py edit/build-NNN/film.mp4
 ```
 
 [`make_subs.py`](pipeline/edit/subs/make_subs.py) writes SRT, VTT and ASS subtitles timed by
@@ -218,18 +322,12 @@ effects from their sources. The voice
 cannot: the takes were paid for, and a take cannot be regenerated byte for byte.
 `film/.gitignore` keeps the media folders out of git when they are rendered here.
 
-**Left out, and why.** The code below made media the film uses, but it writes into the
-production's own tree, drives services or hardware outside this repository, or only checked
-the work; each part's text above says what replaces it.
+**Left out, and why.** The code below made media the film uses, but it drives services
+outside this repository or only checked the work; each part's text above says what replaces
+it. (The footage's compositing and the browser captures, left out of earlier versions of
+this folder, are now its stages: [`pipeline/footage/`](pipeline/footage/),
+[`pipeline/web/`](pipeline/web/).)
 
-- The footage scripts that laid several renders together (the wipes, side-by-side halves,
-  crops that follow a monster, cross-fades, the mosaics), graded two shots and wrote the
-  sidecars. Each shot file's header says how its renders were laid together, and
-  [`shots/sidecars/`](shots/sidecars/) keeps what the edit and the sound read from each
-  footage file (its handles, its sound, the times of its events).
-- The browser captures' scripts: Playwright recording the page, served from a deployed copy,
-  on a desktop and in a phone's profile. A recapture is close, not identical (the page's boot
-  is a real-time screen recording).
 - The voice's scripts: the ElevenLabs takes, choosing and trimming them, the levelling, and
   Scribe's word times. The takes are the source; see [2. The voice](#2-the-voice).
 - The score's and the sound's analysis and check tools, the earlier cuts' scores, cue lists

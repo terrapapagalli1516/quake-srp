@@ -6,7 +6,7 @@
 """The edit decision list, derived: the shot list and settings in film/edit.toml + the narration's clips -> timeline.json.
 
     uv run film/pipeline/edit/timeline.py --dry       # print the clock: every shot and line, against the plan
-    uv run film/pipeline/edit/timeline.py             # and write edit/v7/timeline.json, clock.json, clock.txt,
+    uv run film/pipeline/edit/timeline.py             # and write edit/timeline.json, clock.json, clock.txt,
                                                       # ladder-events.json (the config's paths.out, under FILM_ROOT)
 
 The narration drives the clock.
@@ -887,6 +887,8 @@ def main() -> None:
     if not a.dry:
         out_dir = FILM / cfg.get("paths", {}).get("out", "edit")
         out = Path(a.out) if a.out else out_dir / "timeline.json"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out_dir.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(tl, indent=1, ensure_ascii=False))
         print(f"\n-> {out}")
         if cfg.get("paths", {}).get("format") in ("v2", "v3"):
@@ -1362,15 +1364,18 @@ def clips_v3(cfg: dict) -> tuple[list[dict], float]:
     if not lp.exists() and cfg["paths"].get("lines_standin"):  # the voice map not landed yet: the edit's stand-in
         print(f"note: {cfg['paths']['lines']} not there yet; using {cfg['paths']['lines_standin']}", file=sys.stderr)
         lp = FILM / cfg["paths"]["lines_standin"]
-    lines = json.loads(lp.read_text())["lines"]
+    doc = json.loads(lp.read_text())
+    lines = doc["lines"]
     words_src: dict[str, dict] = {}
     for name in ("clips.json", "clips-v2.json", "clips-v3.json", "clips-v4.json", "clips-v6.json", "clips-v7.json"):
         f = vdir / name
         if f.exists():
             for c in json.loads(f.read_text())["clips"]:
                 words_src[(name, c["id"])] = c
-    v1 = json.loads((vdir / "clips.json").read_text())
-    gap = v1["natural_sentence_gap_s"]
+    if doc.get("natural_sentence_gap_s") is not None:  # a self-contained map (film/voice.json): every line's words in it
+        gap = float(doc["natural_sentence_gap_s"])
+    else:
+        gap = json.loads((vdir / "clips.json").read_text())["natural_sentence_gap_s"]
     sections = {}
     sec = None
     for line in (FILM / cfg["paths"]["script"]).read_text().splitlines():
@@ -1383,7 +1388,8 @@ def clips_v3(cfg: dict) -> tuple[list[dict], float]:
     split = cfg.get("voice", {}).get("split", {})
     out = []
     for ln in lines:
-        src = ln if ln.get("words") else words_src.get((ln["words_from"], ln["clip"]))  # a stand-in carries its own
+        emb = bool(ln.get("words"))  # the line carries its own words (film/voice.json, a stand-in)
+        src = ln if emb else words_src.get((ln["words_from"], ln["clip"]))
         if src is None:
             raise SystemExit(f"{ln['id']}: no word times for clip {ln['clip']} in {ln['words_from']}")
         f_ = ln["file"] if ln["file"].startswith(("voice/", "/")) else "voice/" + ln["file"]
@@ -1393,8 +1399,9 @@ def clips_v3(cfg: dict) -> tuple[list[dict], float]:
              "words": src["words"]}
         if ln.get("pause_after_s") is not None:
             c["pause_after_s"], c["paragraph_end"] = float(ln["pause_after_s"]), True
-        elif ln["kind"] == "TAKE" and src.get("pause_after_s") is not None:
-            c["pause_after_s"], c["paragraph_end"] = src["pause_after_s"], bool(src.get("paragraph_end", True))
+        elif ln["kind"] == "TAKE" and (ln.get("clip_pause_after_s") if emb else src.get("pause_after_s")) is not None:
+            c["pause_after_s"] = ln["clip_pause_after_s"] if emb else src["pause_after_s"]
+            c["paragraph_end"] = bool(ln.get("clip_paragraph_end", True) if emb else src.get("paragraph_end", True))
         else:
             c["pause_after_s"], c["paragraph_end"] = 0.6, True
         if ln["id"] in split:  # one clip said as two: cut in its silence, a gap between

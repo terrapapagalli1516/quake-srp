@@ -8,7 +8,7 @@
     uv run film/pipeline/music/v7/fit_events.py -o film/pipeline/music/v7/events-v7.inc
 
 Reads events.tsv beside this file (name, nominal time, source) and the edit's clock
-(default FILM_ROOT/edit/v7/clock.json, which the edit's timeline step writes, with the
+(default FILM_ROOT/edit/clock.json, which the edit's timeline step writes, with the
 ladder-events.json beside it), and finds each event there: `cut:SHOT+s` (the cut to SHOT),
 `moment:NAME` (the clock's named events), `pic:SHOT:what:i` (picture events), `hit:SHOT:what:i`
 (the edit's hits), `next:SHOT` (the cut after SHOT's), `voice:ID:start|end`, `ladder:ITEM` /
@@ -125,8 +125,8 @@ def fit(clock):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("clock", nargs="?", type=Path, default=FILM / "edit" / "v7" / "clock.json",
-                    help="the edit's clock.json (default: FILM_ROOT/edit/v7/clock.json)")
+    ap.add_argument("clock", nargs="?", type=Path, default=FILM / "edit" / "clock.json",
+                    help="the edit's clock.json (default: FILM_ROOT/edit/clock.json)")
     ap.add_argument("-o", "--out", type=Path, help="write the .inc here instead of to stdout")
     a = ap.parse_args()
     clock = load_clock(a.clock)

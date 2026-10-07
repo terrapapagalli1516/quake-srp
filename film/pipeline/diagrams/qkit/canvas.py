@@ -54,15 +54,26 @@ def _background(w: int, h: int, vignette: float) -> cairo.ImageSurface:
 
 
 class Canvas:
-    """One frame. `c.ctx` is the cairo context, for anything the helpers lack."""
+    """One frame. `c.ctx` is the cairo context, for anything the helpers lack.
 
-    def __init__(self, surface: cairo.ImageSurface, transparent: bool = False):
+    `scale`: the surface is that many times W x H's coordinates. Drawing stays in 1080's
+    coordinates (`c.w`, `c.h` are the logical size); the cairo transform does the rest, so a
+    line or Inter is drawn sharp at the scale's resolution and id's 8x8 glyphs at their scale
+    times it, nearest neighbour. `c.surface` is the device-size surface (`canvas_image(c)`
+    reads it). A canvas built directly keeps scale 1, its surface's own size, as before;
+    new_canvas() gives look.SCALE.
+    """
+
+    def __init__(self, surface: cairo.ImageSurface, transparent: bool = False, scale: int = 1):
         self.surface = surface
         self.transparent = transparent  # an overlay render (--alpha): background() draws nothing
+        self.scale = int(scale)
         self.ctx = cairo.Context(surface)
         self.ctx.set_line_join(cairo.LINE_JOIN_ROUND)
-        self.w = surface.get_width()
-        self.h = surface.get_height()
+        if self.scale != 1:
+            self.ctx.scale(self.scale, self.scale)
+        self.w = surface.get_width() // self.scale
+        self.h = surface.get_height() // self.scale
 
     # ------------------------------------------------------- state ----
 
@@ -110,8 +121,15 @@ class Canvas:
         """id's near-black, darkening to black at the corners (nothing in a transparent render)."""
         if self.transparent:
             return
-        self.ctx.set_source_surface(_background(self.w, self.h, vignette), 0, 0)
+        if self.scale == 1:
+            self.ctx.set_source_surface(_background(self.w, self.h, vignette), 0, 0)
+            self.ctx.paint()
+            return
+        self.ctx.save()  # the gradient made at the surface's own size, not stretched
+        self.ctx.identity_matrix()
+        self.ctx.set_source_surface(_background(self.surface.get_width(), self.surface.get_height(), vignette), 0, 0)
         self.ctx.paint()
+        self.ctx.restore()
 
     # ------------------------------------------------------ shapes ----
 
@@ -445,5 +463,22 @@ class Canvas:
             self.text(label, x1 + (8 if align == "left" else -8), y1, scale, color, alpha, align, "middle")
 
 
-def new_canvas(w: int = W, h: int = H) -> Canvas:
-    return Canvas(cairo.ImageSurface(cairo.FORMAT_RGB24, w, h))
+def new_canvas(w: int = W, h: int = H, alpha: bool = False, scale: int | None = None) -> Canvas:
+    """A canvas of w x h in 1080's coordinates, at `scale` (default: look.SCALE): an opaque
+    RGB24 surface, or with `alpha` a transparent ARGB32 one (background() then draws nothing)."""
+    s = look.SCALE if scale is None else int(scale)
+    fmt = cairo.FORMAT_ARGB32 if alpha else cairo.FORMAT_RGB24
+    return Canvas(cairo.ImageSurface(fmt, w * s, h * s), transparent=alpha, scale=s)
+
+
+def canvas_image(c: Canvas):
+    """The canvas's pixels as a Pillow image at its device size: RGBA for an ARGB32 surface
+    (unpremultiplied), else RGB."""
+    from PIL import Image
+
+    c.surface.flush()
+    size = (c.surface.get_width(), c.surface.get_height())
+    data, stride = bytes(c.surface.get_data()), c.surface.get_stride()
+    if c.surface.get_format() == cairo.FORMAT_ARGB32:
+        return Image.frombuffer("RGBA", size, data, "raw", "BGRa", stride, 1)
+    return Image.frombuffer("RGB", size, data, "raw", "BGRX", stride, 1)

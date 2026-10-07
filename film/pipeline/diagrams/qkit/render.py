@@ -10,6 +10,7 @@ its command line is then:
     uv run diagram.py --cues cues.json  # retimed: named cues from a JSON object
     uv run diagram.py --duration 4.35 --cues cues.json  # to an edit's slot
     uv run diagram.py --print-cues    # the cue table, as JSON to edit
+    uv run diagram.py --scale 2       # at 3840x2160: every line, letter and glyph twice the size
     uv run diagram.py --alpha         # transparent: RGBA PNGs and a ProRes 4444 .mov, to lay over footage
 
 Frames go to a fresh directory under filmroot's scratch (FILM_SCRATCH), `diagrams/frames/NAME/`,
@@ -35,7 +36,7 @@ import numpy as np
 from PIL import Image
 
 from . import look, text
-from .canvas import Canvas, new_canvas
+from .canvas import Canvas, canvas_image, new_canvas
 from .quake import filmroot
 
 
@@ -62,18 +63,11 @@ def duration_arg(default: float) -> float:
 
 
 def render_frame(t: float) -> Image.Image:
-    """One frame at time t as a Pillow image: RGB, or RGBA with --alpha."""
+    """One frame at time t as a Pillow image at look.SCALE: RGB, or RGBA with --alpha."""
     w, h = _SIZE
-    if _ALPHA:
-        c = Canvas(cairo.ImageSurface(cairo.FORMAT_ARGB32, w, h), transparent=True)
-    else:
-        c = new_canvas(w, h)
+    c = new_canvas(w, h, alpha=_ALPHA)
     _FRAME(c, t)
-    c.surface.flush()
-    data, stride = bytes(c.surface.get_data()), c.surface.get_stride()
-    if _ALPHA:
-        return Image.frombuffer("RGBA", (w, h), data, "raw", "BGRa", stride, 1)
-    return Image.frombuffer("RGB", (w, h), data, "raw", "BGRX", stride, 1)
+    return canvas_image(c)
 
 
 def _worker_init():
@@ -125,6 +119,7 @@ def contact_sheet(times: list[float], out: Path, jobs: int, cols: int = 6, title
     rows = math.ceil(len(times) / cols)
     label_h = 28
     head = 40 if title else 0
+    s = look.SCALE  # the sheet is drawn at the render's scale, its thumbnails too
     sheet = new_canvas(look.W, head + rows * (th + label_h))
     sheet.ctx.set_source_rgb(*look.BG_DEEP)
     sheet.ctx.paint()
@@ -133,12 +128,11 @@ def contact_sheet(times: list[float], out: Path, jobs: int, cols: int = 6, title
     for k, t in enumerate(times):
         r, col = divmod(k, cols)
         sheet.text(f"{t:.2f} s", col * tw + 6, head + r * (th + label_h) + th + 4, 2, "dim")
-    sheet.surface.flush()
-    base = Image.frombuffer("RGB", (sheet.w, sheet.h), bytes(sheet.surface.get_data()), "raw", "BGRX",
-                            sheet.surface.get_stride(), 1).copy()
+    base = canvas_image(sheet).copy()
     for k, im in enumerate(imgs):
         r, col = divmod(k, cols)
-        base.paste(im.resize((tw - 4, th - 4), Image.LANCZOS), (col * tw + 2, head + r * (th + label_h) + 2))
+        base.paste(im.resize(((tw - 4) * s, (th - 4) * s), Image.LANCZOS),
+                   ((col * tw + 2) * s, (head + r * (th + label_h) + 2) * s))
     base.save(out)
 
 
@@ -166,7 +160,10 @@ def run(frame, duration: float, name: str | None = None, cues=None, fps: int = l
     ap.add_argument("--keep-frames", action="store_true", help="keep the PNG frames after the video is made")
     ap.add_argument("--no-encode", action="store_true")
     ap.add_argument("--crf", type=int, default=16)
+    ap.add_argument("--scale", type=int, default=1,
+                    help="draw at this whole multiple of 1920x1080 (2: 3840x2160), the geometry the same")
     a = ap.parse_args()
+    look.set_scale(a.scale)
 
     if a.cues:
         cues.load(a.cues)

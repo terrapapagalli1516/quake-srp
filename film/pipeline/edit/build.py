@@ -5,15 +5,24 @@
 # ///
 """build.py: the whole film from its parts, in one command.
 
-    uv run film/pipeline/edit/build.py --publish cut        # a new edit/v7/build-NNN/, then edit/v7/cut.*
+    uv run film/pipeline/edit/build.py --publish cut        # a new edit/build-NNN/, then edit/cut.*
     uv run film/pipeline/edit/build.py --publish cut --preview --no-burn-in    # the clean master and the phone files
     uv run film/pipeline/edit/build.py --range 113.5-116.5  # a stretch only, as build-NNN/range.mp4
+    uv run film/pipeline/edit/build.py --scale 2 --hw vaapi --root OUT --publish cut --publish-to OUT --preview
+                                                            # the film at 3840x2160, encoded on the GPU
     uv run film/pipeline/edit/timeline.py --dry             # the clock alone, in a second
 
-A full build takes minutes (the lossless segments, then the encode); give it a low priority (nice). The
-config is film/edit.toml; the media are read from FILM_ROOT and the builds written under it (paths.out);
-caches and intermediates go to FILM_SCRATCH/edit (film/pipeline/filmroot.py). It needs ffmpeg (libx264,
-libx265 for --preview), cairo, the Inter font for the cards and a monospace font for the timecode.
+film/make.py runs it as the film's last stage but one. A full build takes minutes (the segments, then the
+encode); give it a low priority (nice). The config is film/edit.toml; the media are read from FILM_ROOT (or
+--root) and the builds written under it (paths.out); caches and intermediates go to FILM_SCRATCH/edit
+(film/pipeline/filmroot.py). It needs ffmpeg (libx264; libx265 for --preview; VAAPI for --hw vaapi), cairo,
+the Inter font for the cards and a monospace font for the timecode.
+
+--scale N draws the film at N x 1920x1080: edit.toml's positions and sizes stay in 1080's units and are
+multiplied by N, the cards and labels are drawn by cairo with an N x transform (Quake's glyphs nearest-
+neighbour, so exactly N x), the 4:3 box is N x 1440x1080, and overlay movies drawn at 1080 are scaled up
+nearest-neighbour. With N > 1 a 1080p copy (area-averaged from the same segments) is written beside the master,
+and the phone files are made from it.
 
 Steps, each from what exists on disk now:
 1. **Timeline** (timeline.py): shots.md + the voice's clips + edit.toml -> timeline.json, the edit
@@ -22,16 +31,19 @@ Steps, each from what exists on disk now:
 2. **Art** (cards.py, in Quake's font through the diagram kit): slates, the edit's cards
    (title, terminal, end card) and overlays (the montage's captions, S28's title, S37's proof
    crawl, S59's rules), as PNG frames. Cached by content.
-3. **Segments**: one lossless H.264 file per shot, exactly its frame count at 60 fps, the source
-   decoded once (in-point, fit to 1920x1080, held on its last frame if short), overlays, fades,
-   a dissolve from the shot before if asked. Cached by content under the scratch dir.
+3. **Segments**: one file per shot, exactly its frame count at 60 fps, the source decoded once
+   (in-point, fit to the frame, held on its last frame if short), overlays, fades, a dissolve from
+   the shot before if asked. Lossless H.264 at 1080 in software; with --hw vaapi, HEVC at QP 16 on
+   the GPU (a 4K film's lossless segments would not fit a disk). Cached by content under the scratch dir.
 4. **Audio** (numpy): every narration clip levelled to one loudness and placed on its sample;
    the score (or the theme sketch as a stand-in) placed by section and ducked under the voice,
    phrase by phrase, to sit `balance_lu` below it; each shot's own game sound, if its source
    has one; the master normalised to -14 LUFS and limited under -1 dBTP.
 5. **Encode**: the segments concatenated (stream order, frame-exact) and encoded once, H.264
-   CRF 17 yuv420p BT.709, AAC 256k 48 kHz; with --burn-in (default) a timecode, and each real
-   shot's id, are burned in for review.
+   CRF 17 yuv420p BT.709 in software or HEVC QP 18 on the GPU (the 1080p copy: H.264 QP 18),
+   AAC 48 kHz; with --burn-in (default) a timecode, and each real shot's id, are burned in for
+   review. The phone files (--preview) are always software x265/x264: under 10 MB, quality per
+   bit decides, and the GPU's encoders lose there.
 6. **Checks**: the frame count, a contact sheet (a frame every 5 s), and a loudness report
    (integrated, range, true peak; the voice against the score in some voiced passages).
 
@@ -41,6 +53,7 @@ Nothing is deleted: each build is a fresh build-NNN/ and a fresh scratch dir.
 from __future__ import annotations
 
 import argparse
+import functools
 import hashlib
 import json
 import math
@@ -50,6 +63,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -62,16 +76,24 @@ from scipy import ndimage, signal
 EDIT = Path(__file__).resolve().parent
 sys.path.insert(0, str(EDIT))
 sys.path.insert(0, str(EDIT.parent))
+if "--root" in sys.argv[:-1]:  # FILM_ROOT for this build: filmroot reads it once, at import
+    os.environ["FILM_ROOT"] = str(Path(sys.argv[sys.argv.index("--root") + 1]).resolve())
 
 import cards  # noqa: E402
 import timeline  # noqa: E402
 from filmroot import FILM, PIPELINE, scratch  # noqa: E402
+import vaapi  # noqa: E402
 
 SCRATCH = scratch("edit")
 CACHE = SCRATCH / "cache"
 QKIT = PIPELINE / "diagrams" / "qkit"
-FPS, SR, W, H = 60, 48000, 1920, 1080
+FPS, SR, W, H = 60, 48000, 1920, 1080   # W, H: the edit's own units (edit.toml's coordinates are 1080's)
 SPF = SR // FPS  # samples per frame: 800
+S = 1            # the frame is S x W by S x H (--scale): every size and position below is multiplied by it
+HW = "none"      # --hw: "vaapi" encodes on the GPU (the segments, the master, the 1080p copy), "none" in software
+VAAPI_DEVICE = vaapi.DEVICE
+SEG_QP = 16      # the segments' constant QP on the GPU: a high-quality intermediate (lossless 4K would not fit the disk)
+MASTER_QP = 18   # the master's
 
 
 def mono_font() -> str:
@@ -81,7 +103,7 @@ def mono_font() -> str:
         if r.returncode == 0 and r.stdout and Path(r.stdout).exists():
             return r.stdout
     raise SystemExit("build.py: no monospace font for the timecode (fontconfig's fc-match found none)")
-SEG_VERSION = "seg-v3"  # bump when the segment graph changes, so the cache renews
+SEG_VERSION = "seg-v5"  # bump when the segment graph changes, so the cache renews
 
 
 def log(*a) -> None:
@@ -244,8 +266,20 @@ def render_art(jobs: list, procs: int) -> None:
 
 # ============================================================== segments ====
 
+_OVW: dict = {}
+
+
+def overlay_upscale(path) -> int:
+    """How much a full-frame overlay movie must be scaled to fill this frame: 1 when it was rendered at this
+    frame's size (the diagrams stage at --scale), S when it is a 1080 render (media brought in for a test)."""
+    if path not in _OVW:
+        _OVW[path] = (timeline.probe(Path(path)).get("width") or W * S)
+    w = _OVW[path]
+    return S if (S > 1 and w == W) else 1
+
 def source_chain(idx: int, src: dict, length: float, start_at: float | None = None) -> str:
-    """Filters that turn input idx into 1920x1080 gbrp at 60 fps, from the in-point, held at its end."""
+    """Filters that turn input idx into the frame (S x 1920x1080) in gbrp at 60 fps, from the in-point, held at
+    its end. Classic's 960x600 shows 4:3 in the box (S x 1440x1080, S x 240 px bars), scaled as v7 scaled it."""
     if src["type"] == "video":
         f = "setpts=PTS-STARTPTS"
         sp = float(src.get("speed", 1.0))
@@ -254,15 +288,17 @@ def source_chain(idx: int, src: dict, length: float, start_at: float | None = No
         if sp != 1.0:  # faster (> 1) or slower (< 1) than it was rendered
             f += f",setpts=PTS/{sp:.6f}"
         if src.get("box"):
-            f += ",fps=60,scale=1440:1080:flags=bicubic,pad=1920:1080:240:0:color=black,setsar=1,format=gbrp"
+            f += f",fps=60,scale={1440 * S}:{1080 * S}:flags=bicubic,pad={1920 * S}:{1080 * S}:{240 * S}:0:color=black," \
+                 "setsar=1,format=gbrp"
         else:
-            f += ",fps=60,scale=1920:1080:force_original_aspect_ratio=decrease:flags=bicubic," \
-                 "pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,format=gbrp"
+            f += f",fps=60,scale={1920 * S}:{1080 * S}:force_original_aspect_ratio=decrease:flags=bicubic," \
+                 f"pad={1920 * S}:{1080 * S}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,format=gbrp"
         if src.get("lift"):  # a display lift, as id's Brightness slider: pow(x, gamma), alike on every channel
             gm = float(src["lift"])
             f += f",lutrgb=r='255*pow(val/255,{gm})':g='255*pow(val/255,{gm})':b='255*pow(val/255,{gm})'"
         if src.get("mask43"):  # a 16:9 picture shown in the box phase: its sides masked to the 4:3 box (a stopgap)
-            f += ",drawbox=x=0:y=0:w=240:h=1080:color=black:t=fill,drawbox=x=1680:y=0:w=240:h=1080:color=black:t=fill"
+            f += (f",drawbox=x=0:y=0:w={240 * S}:h={1080 * S}:color=black:t=fill,"
+                  f"drawbox=x={1680 * S}:y=0:w={240 * S}:h={1080 * S}:color=black:t=fill")
         span = None
         if src.get("out") is not None:
             span = src["out"] - (start_at if start_at is not None else src["in"])
@@ -270,19 +306,37 @@ def source_chain(idx: int, src: dict, length: float, start_at: float | None = No
             f += f",trim=end={span:.5f}"
         f += f",tpad=stop_mode=clone:stop_duration={length + 1:.3f},settb=1/60"
         return f"[{idx}:v]{f}"
-    return f"[{idx}:v]scale=1920:1080,format=gbrp,setsar=1,settb=1/60"
+    return f"[{idx}:v]scale={1920 * S}:{1080 * S},format=gbrp,setsar=1,settb=1/60"
+
+
+@functools.lru_cache(maxsize=None)
+def _codec(path: str) -> tuple[str, str]:
+    r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=codec_name,pix_fmt",
+                        "-of", "csv=p=0", path], capture_output=True, text=True)
+    return tuple((r.stdout.strip().split(",") + ["", ""])[:2])
+
+
+def hw_decode(path) -> list[str]:
+    """With --hw vaapi, the GPU decodes an input it can (8-bit 4:2:0 H.264 or HEVC: all the footage) and the frames
+    stay on it until the filters' hwdownload; a 4K segment then takes a third less CPU. ProRes, PNGs and anything
+    else decode in software."""
+    if HW == "vaapi" and _codec(str(path)) in (("h264", "yuv420p"), ("hevc", "yuv420p")):
+        return ["-hwaccel", "vaapi", "-hwaccel_output_format", "vaapi"]
+    return []
 
 
 def video_input(src: dict, at: float) -> list[str]:
     p = src.get("frozen") or str(FILM / src["path"])
     dur = (src.get("probe") or {}).get("duration") or 0.0
     at = min(at, max(0.0, dur - 2 / FPS)) if dur else at
-    return (["-ss", f"{at:.5f}"] if at > 0 else []) + ["-i", p]
+    return hw_decode(p) + (["-ss", f"{at:.5f}"] if at > 0 else []) + ["-i", p]
 
 
 def segment_spec(s: dict, prev: dict | None, art: dict, burn_in: bool) -> dict:
     src = s["source"]
-    spec = {"v": SEG_VERSION, "id": s["id"], "frames": s["frames"], "fade_in": s["fade_in"], "fade_out": s["fade_out"],
+    spec = {"v": SEG_VERSION, "scale": S, "codec": segment_codec(), "decode": HW,
+            "checks": [vaapi.CHECKS, "tagged bt709"] if HW == "vaapi" else None,
+            "id": s["id"], "frames": s["frames"], "fade_in": s["fade_in"], "fade_out": s["fade_out"],
             "dim": s["dim"], "burn_in": burn_in, "slate_len": s["len"] if src["type"] == "slate" else None}
     if src["type"] == "burst":
         spec["src"] = {k: src.get(k) for k in ("a", "b", "in", "at", "dur")} | {
@@ -309,6 +363,37 @@ def segment_spec(s: dict, prev: dict | None, art: dict, burn_in: bool) -> dict:
     return spec
 
 
+_CROP_LOCK = threading.Lock()
+
+
+def cropped(src: Path, seq: bool = False) -> tuple[Path, int, int]:
+    """A full-frame overlay (a PNG, or a folder of PNG frames) cut to where any frame is not transparent, and
+    where to lay it: (the cut file or folder, x, y). ffmpeg decodes a looped PNG again on every frame and queues
+    the frames, so a full-frame one costs gigabytes at 4K; cut to its label, a few megabytes. The picture is the
+    same: a fully transparent pixel leaves the frame under it untouched. Cached by the source files' signature."""
+    from PIL import Image
+    files = sorted(src.glob("*.png")) if seq else [src]
+    d = CACHE / "crop" / digest("crop", [file_sig(f) for f in files])
+    meta = d / "box.json"
+    with _CROP_LOCK:
+        if not meta.exists():
+            box = None
+            for f in files:
+                a = np.asarray(Image.open(f).convert("RGBA"))[..., 3]
+                rows, cols = np.flatnonzero(a.any(1)), np.flatnonzero(a.any(0))
+                if rows.size:
+                    b = [int(cols[0]), int(rows[0]), int(cols[-1]) + 1, int(rows[-1]) + 1]
+                    box = b if box is None else [min(box[0], b[0]), min(box[1], b[1]), max(box[2], b[2]),
+                                                 max(box[3], b[3])]
+            box = box or [0, 0, 2, 2]  # nothing drawn: a corner, transparent
+            d.mkdir(parents=True, exist_ok=True)
+            for f in files:
+                Image.open(f).convert("RGBA").crop(tuple(box)).save(d / f.name, compress_level=1)
+            meta.write_text(json.dumps(box))
+        box = json.loads(meta.read_text())
+    return (d if seq else d / src.name), box[0], box[1]
+
+
 def segment_cmd(s: dict, prev: dict | None, prev_art: dict | None, art: dict, out: Path) -> list[str]:
     src = s["source"]
     n, length = s["frames"], s["frames"] / FPS
@@ -324,17 +409,19 @@ def segment_cmd(s: dict, prev: dict | None, prev_art: dict | None, art: dict, ou
         ia = add(video_input({"path": src["a"], "probe": src.get("a_probe"), "frozen": src.get("frozen_a")}, src["in"]))
         ib = add(video_input({"path": src["b"], "probe": src.get("probe"), "frozen": src.get("frozen")}, src["in"]))
         ease = f"(1-pow(1-clip((t-{T:.4f})/{D:.4f},0,1),3))"
-        graph.append(f"[{ib}:v]setpts=PTS-STARTPTS,fps=60,scale=1920:1080:flags=bicubic,setsar=1,format=gbrp,"
+        graph.append(f"[{ib}:v]setpts=PTS-STARTPTS,fps=60,scale={1920 * S}:{1080 * S}:flags=bicubic,setsar=1,format=gbrp,"
                      f"tpad=stop_mode=clone:stop_duration={length + 1:.3f},settb=1/60[bb]")
-        crop_a = "crop=1440:1080:240:0," if (src.get("a_probe") or {}).get("width") == 1920 else ""  # (a) comes boxed
-        graph.append(f"[{ia}:v]setpts=PTS-STARTPTS,fps=60,{crop_a}scale=1440:1080:flags=bicubic,setsar=1,format=gbrap,"
-                     f"tpad=stop_mode=clone:stop_duration={length + 1:.3f},settb=1/60,"
-                     f"scale=w='2*trunc((1440+480*{ease})/2)':h=1080:eval=frame,"
+        ap_ = src.get("a_probe") or {}
+        boxed = ap_.get("width") and ap_.get("height") and abs(ap_["width"] / ap_["height"] - 16 / 9) < 0.01
+        crop_a = "crop=ih*4/3:ih:(iw-ih*4/3)/2:0," if boxed else ""  # (a) comes boxed in a 16:9 frame
+        graph.append(f"[{ia}:v]setpts=PTS-STARTPTS,fps=60,{crop_a}scale={1440 * S}:{1080 * S}:flags=bicubic,setsar=1,"
+                     f"format=gbrap,tpad=stop_mode=clone:stop_duration={length + 1:.3f},settb=1/60,"
+                     f"scale=w='2*trunc(({1440 * S}+{480 * S}*{ease})/2)':h={1080 * S}:eval=frame,"
                      f"fade=t=out:st={T:.4f}:d={D:.4f}:alpha=1[ba]")
-        k1 = add(["-f", "lavfi", "-i", "color=c=black:s=240x1080:r=60"])
-        k2 = add(["-f", "lavfi", "-i", "color=c=black:s=240x1080:r=60"])
-        graph.append(f"[bb][{k1}:v]overlay=x='-240*{ease}':y=0:eval=frame:format=gbrp[bl]")
-        graph.append(f"[bl][{k2}:v]overlay=x='1680+240*{ease}':y=0:eval=frame:format=gbrp[br]")
+        k1 = add(["-f", "lavfi", "-i", f"color=c=black:s={240 * S}x{1080 * S}:r=60"])
+        k2 = add(["-f", "lavfi", "-i", f"color=c=black:s={240 * S}x{1080 * S}:r=60"])
+        graph.append(f"[bb][{k1}:v]overlay=x='-{240 * S}*{ease}':y=0:eval=frame:format=gbrp[bl]")
+        graph.append(f"[bl][{k2}:v]overlay=x='{1680 * S}+{240 * S}*{ease}':y=0:eval=frame:format=gbrp[br]")
         graph.append(f"[br][ba]overlay=x='(W-w)/2':y=0:eval=frame:format=gbrp:eof_action=repeat[b0]")
     elif src["type"] == "video":
         i = add(video_input(src, src["in"]))
@@ -342,9 +429,9 @@ def segment_cmd(s: dict, prev: dict | None, prev_art: dict | None, art: dict, ou
     elif src["type"] == "slate":
         i = add(["-loop", "1", "-framerate", "60", "-i", str(art["slate"])])
         graph.append(source_chain(i, src, length) + "[s0]")
-        j = add(["-f", "lavfi", "-i", "color=c=0xAF632F:s=1920x6:r=60"])
+        j = add(["-f", "lavfi", "-i", f"color=c=0xAF632F:s={1920 * S}x{6 * S}:r=60"])
         graph.append(f"[{j}:v]format=gbrp[bar]")
-        graph.append(f"[s0][bar]overlay=x='-w+w*t/{length:.4f}':y=H-6:eval=frame:format=gbrp[b0]")
+        graph.append(f"[s0][bar]overlay=x='-w+w*t/{length:.4f}':y=H-{6 * S}:eval=frame:format=gbrp[b0]")
     else:
         i = add(["-framerate", "60", "-i", str(art["card"] / "%05d.png")])
         graph.append(source_chain(i, src, length) + ",tpad=stop_mode=clone:stop_duration=1[b0]")
@@ -383,17 +470,18 @@ def segment_cmd(s: dict, prev: dict | None, prev_art: dict | None, art: dict, ou
             u = f"(1-pow(1-clip((t-{pT:.4f})/{pD:.4f},0,1),3))"
             off = u if mode == "open" else f"(1-{u})"
             en = f"between(t,{pT:.4f},{pT + pD:.4f})" if mode == "open" else f"gte(t,{pT:.4f})"
-            k1 = add(["-f", "lavfi", "-i", "color=c=black:s=240x1080:r=60"])
-            k2 = add(["-f", "lavfi", "-i", "color=c=black:s=240x1080:r=60"])
-            graph.append(f"[{cur}][{k1}:v]overlay=x='-240*{off}':y=0:eval=frame:format=gbrp:enable='{en}'[pl{m}]")
-            graph.append(f"[pl{m}][{k2}:v]overlay=x='1680+240*{off}':y=0:eval=frame:format=gbrp:enable='{en}'[v{m}]")
+            k1 = add(["-f", "lavfi", "-i", f"color=c=black:s={240 * S}x{1080 * S}:r=60"])
+            k2 = add(["-f", "lavfi", "-i", f"color=c=black:s={240 * S}x{1080 * S}:r=60"])
+            graph.append(f"[{cur}][{k1}:v]overlay=x='-{240 * S}*{off}':y=0:eval=frame:format=gbrp:enable='{en}'[pl{m}]")
+            graph.append(f"[pl{m}][{k2}:v]overlay=x='{1680 * S}+{240 * S}*{off}':y=0:eval=frame:format=gbrp:"
+                         f"enable='{en}'[v{m}]")
             cur = f"v{m}"
             continue
         if "diff_tint" in o:  # the pixels where two panels of one frame differ, tinted on the first (S33)
             d = o["diff_tint"]
-            ax, ay, w, h = d["a"]
-            bx, by = d["b"][:2]
-            thr, top = int(d.get("threshold", 24)), int(d.get("skip_top", 0))
+            ax, ay, w, h = (int(v) * S for v in d["a"])
+            bx, by = (int(v) * S for v in d["b"][:2])
+            thr, top = int(d.get("threshold", 24)), int(d.get("skip_top", 0)) * S
             k = add(["-f", "lavfi", "-i", f"color=c={d.get('color', '0xDB7F3B')}:s={w}x{h}:r=60"])
             graph.append(f"[{cur}]split=3[dt0_{m}][dt1_{m}][dt2_{m}]")
             graph.append(f"[dt1_{m}]crop={w}:{h}:{ax}:{ay},format=gray[dga_{m}]")
@@ -405,17 +493,21 @@ def segment_cmd(s: dict, prev: dict | None, prev_art: dict | None, art: dict, ou
             cur = f"v{m}"
             continue
         if "png_at" in o:
-            k = add(["-loop", "1", "-framerate", "60", "-i", str(o["png_at"])])
+            png, x, y = cropped(o["png_at"])
+            k = add(["-loop", "1", "-framerate", "60", "-i", str(png)])
             graph.append(f"[{k}:v]format=gbrap,fade=t=in:st={o['at']:.3f}:d=0.15:alpha=1,settb=1/60[o{m}]")
             en = f":enable='lt(t,{float(o['until']):.4f})'" if o.get("until") is not None else ""
-            graph.append(f"[{cur}][o{m}]overlay=0:0:format=gbrp{en}[v{m}]")
+            graph.append(f"[{cur}][o{m}]overlay={x}:{y}:format=gbrp{en}[v{m}]")
             cur = f"v{m}"
             continue
         if "video" in o:
-            k = add((["-ss", f"{o['in']:.5f}"] if o.get("in") else []) + ["-i", str(o["video"])])
+            k = add(hw_decode(o["video"]) + (["-ss", f"{o['in']:.5f}"] if o.get("in") else []) + ["-i", str(o["video"])])
             f = f"[{k}:v]setpts=PTS-STARTPTS,fps=60,format=gbrap"
             if o.get("at"):  # it starts later in the shot
                 f += f",setpts=PTS+{int(round(float(o['at']) * FPS))}"
+            up = overlay_upscale(o["video"])  # a full-frame render made for a smaller frame (1080 media in a 4K build)
+            if up != 1:
+                f += f",scale=iw*{up}:ih*{up}:flags=neighbor"
             if o.get("scale", 1.0) != 1.0:
                 f += f",scale=iw*{o['scale']}:ih*{o['scale']}:flags=area"
             if o.get("fade_in_at") is not None:  # an opaque clip, faded in over the shot (S62's clean end)
@@ -427,27 +519,30 @@ def segment_cmd(s: dict, prev: dict | None, prev_art: dict | None, art: dict, ou
                 ui, uo = f"clip((t-{fa})/{fd},0,1)", f"clip((t-{fb - fd})/{fd},0,1)"
                 mm = f"({ease.format(u=ui)})*(1-({ease.format(u=uo)}))"
                 sc = f"({ps}+(1-{ps})*{mm})"
-                f += f",scale=w='2*trunc(960*{sc})':h='2*trunc(540*{sc})':eval=frame"
+                f += f",scale=w='2*trunc({960 * S}*{sc})':h='2*trunc({540 * S}*{sc})':eval=frame"
                 graph.append(f + f",settb=1/60[o{m}]")
-                graph.append(f"[{cur}][o{m}]overlay=x='{px}*(1-{mm})':y='{py}*(1-{mm})':eval=frame:eof_action=repeat:"
+                graph.append(f"[{cur}][o{m}]overlay=x='{px * S}*(1-{mm})':y='{py * S}*(1-{mm})':eval=frame:eof_action=repeat:"
                              f"format=gbrp{en}[v{m}]")
                 cur = f"v{m}"
                 continue
             graph.append(f + f",settb=1/60[o{m}]")
-            graph.append(f"[{cur}][o{m}]overlay={o.get('x', 0)}:{o.get('y', 0)}:eof_action=repeat:format=gbrp{en}[v{m}]")
+            graph.append(f"[{cur}][o{m}]overlay={int(o.get('x', 0)) * S}:{int(o.get('y', 0)) * S}:eof_action=repeat:"
+                         f"format=gbrp{en}[v{m}]")
             cur = f"v{m}"
             continue
         if "seq" in o:
-            k = add(["-framerate", "60", "-i", str(o["seq"] / "%05d.png")])
+            seq, x, y = cropped(o["seq"], seq=True)
+            k = add(["-framerate", "60", "-i", str(seq / "%05d.png")])
             if o.get("at"):
                 graph.append(f"[{k}:v]format=gbrap,settb=1/60,setpts=PTS+{int(round(o['at'] * FPS))}[o{m}]")
-                graph.append(f"[{cur}][o{m}]overlay=0:0:eof_action=repeat:format=gbrp[v{m}]")
+                graph.append(f"[{cur}][o{m}]overlay={x}:{y}:eof_action=repeat:format=gbrp[v{m}]")
                 cur = f"v{m}"
                 continue
         else:
-            k = add(["-loop", "1", "-framerate", "60", "-i", str(o["png"])])
+            png, x, y = cropped(o["png"])
+            k = add(["-loop", "1", "-framerate", "60", "-i", str(png)])
         graph.append(f"[{k}:v]format=gbrap,settb=1/60[o{m}]")
-        graph.append(f"[{cur}][o{m}]overlay=0:0:eof_action=repeat:format=gbrp[v{m}]")
+        graph.append(f"[{cur}][o{m}]overlay={x}:{y}:eof_action=repeat:format=gbrp[v{m}]")
         cur = f"v{m}"
     tail = []
     if s["fade_in"] > 0:
@@ -456,15 +551,33 @@ def segment_cmd(s: dict, prev: dict | None, prev_art: dict | None, art: dict, ou
         tail.append(f"fade=t=out:st={length - s['fade_out']:.4f}:d={s['fade_out']:.3f}")
     tail += [f"trim=end_frame={n}", "setpts=PTS-STARTPTS",
              "scale=out_color_matrix=bt709:out_range=tv:flags=accurate_rnd+full_chroma_int", "format=yuv420p"]
+    if HW == "vaapi":  # every segment's frames tagged alike, so the master's concat never meets a change mid-stream
+        tail += ["setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv", "format=nv12", "hwupload"]
     graph.append(f"[{cur}]" + ",".join(tail) + "[vout]")
+    for k, a in enumerate(inputs):  # an input decoded on the GPU comes down to the CPU's filters first
+        if "-hwaccel" in a:
+            graph = [f"[{k}:v]hwdownload,format=nv12," + g[len(f"[{k}:v]"):] if g.startswith(f"[{k}:v]") else g
+                     for g in graph]
     cmd = ["ffmpeg", "-y", "-loglevel", "error", "-threads", "4"]
+    if HW == "vaapi":
+        cmd += ["-vaapi_device", VAAPI_DEVICE]
     for a in inputs:
         cmd += a
-    cmd += ["-filter_complex", ";".join(graph), "-map", "[vout]", "-frames:v", str(n), "-an",
-            "-c:v", "libx264", "-qp", "0", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+    cmd += ["-filter_complex", ";".join(graph), "-map", "[vout]", "-frames:v", str(n), "-an", *segment_codec(),
             "-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709", "-color_range", "tv",
             "-r", "60", "-video_track_timescale", "15360", str(out)]
     return cmd
+
+
+def segment_codec() -> list[str]:
+    """The intermediate segments' codec. At 1080 in software: lossless H.264, as v7 was built. On the GPU (--hw
+    vaapi): HEVC at a low constant QP (SEG_QP), visually lossless and a small fraction of a lossless 4K file's size.
+    In software above 1080: H.264 at CRF 10, for the same reason."""
+    if HW == "vaapi":
+        return ["-c:v", "hevc_vaapi", "-rc_mode", "CQP", "-qp", str(SEG_QP), "-profile:v", "main"]
+    if S == 1:
+        return ["-c:v", "libx264", "-qp", "0", "-preset", "ultrafast", "-pix_fmt", "yuv420p"]
+    return ["-c:v", "libx264", "-crf", "10", "-preset", "veryfast", "-pix_fmt", "yuv420p"]
 
 
 def count_frames(p: Path) -> int:
@@ -493,12 +606,15 @@ def render_segments(tl: dict, art: dict, burn_in: bool, jobs: int, only: set | N
         paths.append(p)
         if not p.exists():
             todo.append((s, prev, art.get(prev["id"]) if prev else None, art[s["id"]], p))
-    log(f"segments: {len(shots)} shots, {len(todo)} to render, {len(shots) - len(todo)} cached")
+    log(f"segments: {len(paths)} shots, {len(todo)} to render, {len(paths) - len(todo)} cached")
 
     def one(job):
         s, prev, prev_art, a, p = job
         tmp = p.with_suffix(".part.mp4")
-        sh(segment_cmd(s, prev, prev_art, a, tmp))
+        if HW == "vaapi":
+            vaapi.encode(segment_cmd(s, prev, prev_art, a, tmp), tmp, log=log)  # decoded in full before it is cached
+        else:
+            sh(segment_cmd(s, prev, prev_art, a, tmp))
         got = count_frames(tmp)
         if got != s["frames"]:
             raise RuntimeError(f"{s['id']}: {got} frames, want {s['frames']}")
@@ -1274,21 +1390,59 @@ def balance_report(tl: dict, stems: dict, meter) -> list[dict]:
 
 # ================================================================ encode ====
 
-def encode_video(paths: list[Path], out: Path, burn_in: bool, tmpdir: Path) -> None:
-    """The one lossy encode of the picture: the lossless segments, concatenated in order."""
+VUI_709 = "colour_primaries=1:transfer_characteristics=1:matrix_coefficients=1:video_full_range_flag=0"
+
+
+def encode_video(paths: list[Path], out: Path, burn_in: bool, tmpdir: Path, height: int | None = None) -> None:
+    """The picture's final encode: the segments, concatenated in order, at the frame's size (the master) or scaled
+    down to `height` (the 1080p copy of a 4K build).
+    In software: H.264 at CRF 17 (the 1080p copy area-averaged).
+    With --hw vaapi: the master is the segments themselves, stream-copied (they are already HEVC from the same
+    encoder: no decode, no second generation); a review build's burned-in timecode needs them decoded (on the GPU),
+    drawn on and encoded again at MASTER_QP. The 1080p copy never leaves the GPU: decoded, scaled (scale_vaapi's
+    high-quality mode, within 50 dB of an area average) and encoded in H.264. hevc_vaapi drops the BT.709 tags from
+    its stream, so they are written back into it (hevc_metadata / h264_metadata). Everything VAAPI wrote is checked
+    before it is accepted (vaapi.encode: its header made from the stream's own parameter sets, hev1, a full software
+    decode); the stream-copied master gets the structural checks."""
     lst = tmpdir / "segments.txt"
     lst.write_text("".join(f"file '{p}'\n" for p in paths))
-    vf = []
-    if burn_in:
-        vf.append(f"drawtext=fontfile={mono_font()}:text='%{{pts\\:hms}}':x=w-tw-30:y=8:fontsize=22:"
-                  "fontcolor=0xEFBF77@0.9:box=1:boxcolor=0x000000@0.55:boxborderw=6")
+    drawtext = (f"drawtext=fontfile={mono_font()}:text='%{{pts\\:hms}}':x=w-tw-{30 * S}:y={8 * S}:fontsize={22 * S}:"
+                f"fontcolor=0xEFBF77@0.9:box=1:boxcolor=0x000000@0.55:boxborderw={6 * S}") if burn_in else ""
+    cat = ["-f", "concat", "-safe", "0", "-i", str(lst), "-map", "0:v"]
+    tags = ["-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709", "-color_range", "tv"]
+    if HW == "vaapi":
+        dec = ["-vaapi_device", VAAPI_DEVICE, "-hwaccel", "vaapi", "-hwaccel_output_format", "vaapi"]
+        # (the segments must be alike, tags included: a concat that meets a change mid-stream reinitialises its
+        # filters, and frames on the GPU cannot take the software conversion that adds; segment_cmd tags them all)
+        if height:
+            cmd = ["ffmpeg", "-y", "-loglevel", "error", "-nostdin", *dec, *cat, "-vf",
+                   (f"hwdownload,format=nv12,{drawtext},scale=-2:{height}:flags=area,format=nv12,hwupload" if burn_in
+                    else f"scale_vaapi=w=-2:h={height}:mode=hq:format=nv12"),
+                   "-fps_mode", "cfr", "-r", "60", "-c:v", "h264_vaapi", "-rc_mode", "CQP", "-qp", str(MASTER_QP),
+                   "-profile:v", "high", "-bsf:v", f"h264_metadata={VUI_709}", "-an", str(out)]
+            # (no -color_* options here: asking the encoder for tags the GPU frames do not carry makes ffmpeg insert
+            # a software conversion it cannot link to them; the bitstream filter writes the tags)
+            vaapi.encode(cmd, out, log=log)
+        elif burn_in:
+            cmd = ["ffmpeg", "-y", "-loglevel", "error", "-nostdin", *dec, *cat, "-vf",
+                   f"hwdownload,format=nv12,{drawtext},format=nv12,hwupload", "-fps_mode", "cfr", "-r", "60",
+                   "-c:v", "hevc_vaapi", "-rc_mode", "CQP", "-qp", str(MASTER_QP), "-profile:v", "main",
+                   "-bsf:v", f"hevc_metadata={VUI_709}", *tags, "-an", str(out)]
+            vaapi.encode(cmd, out, log=log)
+        else:
+            sh(["ffmpeg", "-y", "-loglevel", "error", "-nostdin", *cat, "-c:v", "copy",
+                "-bsf:v", f"hevc_metadata={VUI_709}", *tags, "-an", str(out)])
+            wrong = vaapi.structure(out)  # hev1, and its header the segments' own parameter sets (vaapi.py)
+            if wrong:
+                raise RuntimeError(f"{out}: {wrong}")
+        return
+    vf = [drawtext] if burn_in else []
+    if height:
+        vf.append(f"scale=-2:{height}:flags=area")
     vf.append("format=yuv420p")
-    cmd = ["ffmpeg", "-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", str(lst),
-           "-map", "0:v", "-vf", ",".join(vf), "-fps_mode", "cfr", "-r", "60",
-           "-c:v", "libx264", "-preset", "slow", "-crf", "17", "-pix_fmt", "yuv420p", "-profile:v", "high",
-           "-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709", "-color_range", "tv",
-           "-an", str(out)]
-    sh(cmd)
+    sh(["ffmpeg", "-y", "-loglevel", "error", *cat, "-vf", ",".join(vf), "-fps_mode", "cfr", "-r", "60",
+        "-c:v", "libx264", "-preset", "slow", "-crf", "17", "-pix_fmt", "yuv420p", "-profile:v", "high", *tags,
+        "-an", str(out)])
 
 
 def mux(video: Path, master: Path, out: Path, kbps: int = 320) -> None:
@@ -1467,14 +1621,23 @@ def keep_inputs(tl: dict, cfg: dict, config_path: Path, out: Path) -> None:
               *sorted(QKIT.glob("*.py"))):
         add(f)
     keep = out / "inputs"
+    copied = True
     for rel_ in sorted(files):
         dst = keep / rel_
         dst.parent.mkdir(parents=True, exist_ok=True)
         src = src_root / rel_[len("source/"):] if rel_.startswith("source/") else FILM / rel_
-        subprocess.run(["cp", "--reflink=auto", str(src), str(dst)], check=True)
-    sums = subprocess.run(["md5sum", *sorted(files)], cwd=keep, capture_output=True, text=True, check=True).stdout
+        if copied and subprocess.run(["cp", "--reflink=always", str(src), str(dst)], capture_output=True).returncode:
+            copied = False  # no reflinks on this disk: a 4K film's inputs copied whole would be tens of gigabytes
+            log("inputs: the disk has no reflinks, so inputs/MD5SUMS lists them without copies")
+    keep.mkdir(parents=True, exist_ok=True)
+    if copied:
+        sums = subprocess.run(["md5sum", *sorted(files)], cwd=keep, capture_output=True, text=True, check=True).stdout
+    else:
+        sums = "".join(subprocess.run(["md5sum", str(src_root / f[len("source/"):] if f.startswith("source/") else FILM / f)],
+                                      capture_output=True, text=True, check=True).stdout.split()[0] + f"  {f}\n"
+                       for f in sorted(files))
     (keep / "MD5SUMS").write_text(sums)
-    log(f"inputs: {len(files)} files kept in {keep}")
+    log(f"inputs: {len(files)} files {'kept in' if copied else 'listed in'} {keep}")
 
 
 PHONE_FPS, PHONE_AUDIO_K = 30, 64   # a phone file under 10 MB: at 60 fps the picture gets ~121 kbit/s and Quake's
@@ -1589,19 +1752,34 @@ def main() -> None:
     ap.add_argument("--publish", help="also copy the result to OUT/NAME.mp4 (+ -contact.png, -loudness.md)")
     ap.add_argument("--no-burn-in", dest="burn_in", action="store_false", help="no timecode or shot ids burned in")
     ap.add_argument("--preview", action="store_true", help="also a 480p phone preview under 10 MB (NAME-480p.mp4)")
-    ap.add_argument("--jobs", type=int, default=4, help="segments encoded at once")
+    ap.add_argument("--jobs", type=int, help="segments encoded at once (default 4 at 1080, 2 above: a 4K segment's "
+                    "ffmpeg holds a few gigabytes)")
     ap.add_argument("--procs", type=int, default=8, help="processes drawing the art")
     ap.add_argument("--remix", action="store_true", help="the sound only: the newest earlier build's picture, if this "
                     "config draws exactly the same picture (its segments.json), with a new mix (a score or stem landed)")
     ap.add_argument("--range", help="only a stretch of the film, A-B in film seconds or m:ss (an experiment's A/B): "
                     "the shots it touches, the whole film's mix sliced; written as OUT/build-NNN/range.mp4")
+    ap.add_argument("--scale", type=int, default=1, help="the frame is SCALE x 1920x1080 (2: 3840x2160); every card, "
+                    "label and position is drawn at SCALE x its 1080 geometry")
+    ap.add_argument("--root", help="the film's media tree (FILM_ROOT) for this build")
+    ap.add_argument("--hw", choices=["vaapi", "none"], default="none",
+                    help="vaapi: encode the segments, the master and the 1080p copy on the GPU (VAAPI_DEVICE, default "
+                         "/dev/dri/renderD128); none: in software")
+    ap.add_argument("--publish-to", help="the folder the published files go to (default: the config's paths.out)")
     a = ap.parse_args()
 
+    global S, HW, CODE_SIG
+    S, HW = a.scale, a.hw
+    a.jobs = a.jobs or (4 if S == 1 else 2)
+    cards.set_scale(S)
+    CODE_SIG = digest(CODE_SIG, "scale", S)  # the art is drawn at this scale
     t0 = time.time()
     cfg = timeline.load_config(a.config)
     base = FILM / cfg.get("paths", {}).get("out", "edit")
+    pub = Path(a.publish_to).resolve() if a.publish_to else base
     tl = timeline.build(cfg)
     print(timeline.report(tl))
+    base.mkdir(parents=True, exist_ok=True)
     out = next_build_dir(base)
     out.mkdir()
     tmp = SCRATCH / f"{base.name}-{out.name}"  # v7-build-NNN
@@ -1614,7 +1792,7 @@ def main() -> None:
     if cfg.get("paths", {}).get("format") in ("v2", "v3"):
         timeline.write_clock(tl, cfg, base)
         timeline.write_ladder_events(tl, cfg, base)
-    log(f"build {out.name}: {tl['frames']} frames, {tl['duration']:.2f} s")
+    log(f"build {out.name}: {tl['frames']} frames, {tl['duration']:.2f} s, {W * S}x{H * S}, hw {HW}")
 
     keep_inputs(tl, cfg, Path(a.config).resolve(), out)
     freeze_sources(tl, tmp)
@@ -1676,17 +1854,36 @@ def main() -> None:
         sf.write(str(tmp / "master.wav"), y, SR, subtype="PCM_24")
     (out / "mix.json").write_text(json.dumps(rep, indent=1))
 
+    film_1080 = None
+    if S > 1:  # the 1080p copy: the same segments, area-averaged down, with the master's sound as it was muxed
+        log("encode: the 1080p copy")
+        v1080 = tmp / "video-1080p.mp4"
+        if prev_video is None:
+            encode_video(paths, v1080, a.burn_in, tmp, height=H)
+        else:
+            sh(["ffmpeg", "-y", "-loglevel", "error", "-i", str(prev_video.with_name("film-1080p.mp4")), "-map", "0:v",
+                "-c:v", "copy", str(v1080)])
+        film_1080 = out / "film-1080p.mp4"
+        mux(v1080, tmp / "master.wav", film_1080, int(lv.get("aac_kbps", 256)))
+
     log("loudness, contact sheet")
     master_m = ebur128(tmp / "master.wav")
     (out / "loudness.md").write_text(loudness_md(rep, final, master_m, tl, cfg))
-    contact_sheet(film, tl, out / "contact.png", tmp)
+    contact_sheet(film_1080 or film, tl, out / "contact.png", tmp)
     if a.publish:
-        for src, dst in [(film, base / f"{a.publish}.mp4"), (out / "contact.png", base / f"{a.publish}-contact.png"),
-                         (out / "loudness.md", base / f"{a.publish}-loudness.md")]:
+        pub.mkdir(parents=True, exist_ok=True)
+        files = [(film, pub / f"{a.publish}.mp4"), (out / "contact.png", pub / f"{a.publish}-contact.png"),
+                 (out / "loudness.md", pub / f"{a.publish}-loudness.md")]
+        if film_1080:
+            files.append((film_1080, pub / f"{a.publish}-1080p.mp4"))
+        for src, dst in files:
             sh(["cp", "--reflink=auto", str(src), str(dst)])
-        if a.preview:
-            preview_480p_hevc(film, base / f"{a.publish}-480p30-hevc.mp4", tl["duration"])   # the phone file
-            preview_480p(film, base / f"{a.publish}-480p30.mp4", tl["duration"])             # the H.264 fallback
+        if a.preview:  # the phone files, from the 1080p copy when there is one (the same picture, a quarter to decode)
+            src_ = film_1080 or film
+            preview_480p_hevc(src_, pub / f"{a.publish}-480p30-hevc.mp4", tl["duration"])   # the phone file
+            preview_480p(src_, pub / f"{a.publish}-480p30.mp4", tl["duration"])             # the H.264 fallback
+    for f in (video, tmp / "video-1080p.mp4"):  # the picture lives on in film.mp4: at 4K its scratch copy is gigabytes
+        f.unlink(missing_ok=True)
     log(f"done in {time.time() - t0:.0f} s: {film} ({final['integrated']:.1f} LUFS, TP {final['true_peak']:.1f} dBTP)")
 
 
@@ -1708,9 +1905,20 @@ def build_range(a, cfg: dict, tl: dict, out: Path, tmp: Path, t0: float) -> None
     master(stems, cfg["levels"], cfg["levels"]["limiter_ceiling"], tmp, rep, tl)
     y, _ = sf.read(str(tmp / "master.wav"), dtype="float64")
     sf.write(str(tmp / "range.wav"), y[int(lo_s * SR):int(hi_s * SR)], SR, subtype="PCM_24")
-    sh(["ffmpeg", "-y", "-loglevel", "error", "-ss", f"{lo_s - f0:.4f}", "-t", f"{hi_s - lo_s:.4f}", "-i", str(video),
-        "-i", str(tmp / "range.wav"), "-map", "0:v", "-map", "1:a", "-c:v", "libx264", "-preset", "slow", "-crf", "17",
-        "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "320k", "-shortest", "-movflags", "+faststart", str(out / "range.mp4")])
+    if HW == "vaapi":  # cut frame-exact, so encoded again: on the GPU, as the master, never leaving it
+        vcodec = ["-c:v", "hevc_vaapi", "-rc_mode", "CQP", "-qp", str(MASTER_QP), "-profile:v", "main",
+                  "-bsf:v", f"hevc_metadata={VUI_709}"]
+        dev = ["-vaapi_device", VAAPI_DEVICE, "-hwaccel", "vaapi", "-hwaccel_output_format", "vaapi"]
+    else:
+        vcodec = ["-c:v", "libx264", "-preset", "slow", "-crf", "17", "-pix_fmt", "yuv420p"]
+        dev = []
+    cmd = ["ffmpeg", "-y", "-loglevel", "error", "-nostdin", *dev, "-ss", f"{lo_s - f0:.4f}", "-t", f"{hi_s - lo_s:.4f}",
+           "-i", str(video), "-i", str(tmp / "range.wav"), "-map", "0:v", "-map", "1:a", *vcodec,
+           "-c:a", "aac", "-b:a", "320k", "-shortest", "-movflags", "+faststart", str(out / "range.mp4")]
+    if HW == "vaapi":
+        vaapi.encode(cmd, out / "range.mp4", log=log)
+    else:
+        sh(cmd)
     (out / "mix.json").write_text(json.dumps(rep, indent=1))
     log(f"done in {time.time() - t0:.0f} s: {out / 'range.mp4'}")
 

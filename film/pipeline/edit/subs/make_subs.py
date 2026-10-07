@@ -698,6 +698,9 @@ def occupancy(tl: dict) -> list[dict]:
             elif ty == "png":
                 from PIL import Image
                 im = np.asarray(Image.open(FILM / o["path"]).convert("RGBA"))[..., 3]
+                k_ = im.shape[1] // W  # drawn for a larger frame (a 4K build's art is n x 1080): its 1080 view
+                if k_ > 1 and im.shape == (H * k_, W * k_):
+                    im = im.reshape(H, k_, W, k_).max(axis=(1, 3))
                 if im.shape != (H, W):
                     continue
                 g = im.reshape(H // GRID, GRID, W // GRID, GRID).max(axis=(1, 3)) > 40
