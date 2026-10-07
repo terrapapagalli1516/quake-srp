@@ -1,5 +1,8 @@
-# F06: demo3 (e1m6) from 15 s: an ogre's chainsaw lands, the damage flash ("a gamepad").
-# Slop, the status bar and the gun, id's recorded camera and its sound.
+# F06: demo3 (e1m6) from 15 s: an ogre's chainsaw lands, the damage flash. Slop, the
+# status bar and the gun, id's recorded camera and its sound.
+#
+# Under V3-41: "It's fast, and it feels fast. Mouse-look, W A S D, a gamepad, a phone:
+# even a zoomer can play it." (on "a gamepad").
 #
 # Assembly (F06): a gamepad in bronze line art at the bottom right, on a dark band, shakes
 # by up to 6 pixels for 0.3 s from each red damage flash, with "rumble" beside it.

@@ -1,0 +1,61 @@
+# HERO7: the climax, every slop option on: e1m3's last hall at skill 3 (nightmare). The
+# two fiends at the exit's skull arch wake to the player's first rocket and charge; each
+# death teleports the next fiend in (the map's own trigger chain), and the last two dead
+# bring the shambler. The player stands in the hall's south-east aisle under the large
+# flames on the east wall (eye 1600,400,582), its own eye (`camera walk`: the game's own
+# movement and bob), turning to the nearest fiend it sees and firing rockets while the
+# view is on one more than 200 units away (`aim monsters ... fire 200`), so no blast hurts
+# it and no rocket is fired at nothing. Full slop, the status bar scaled and overlaid, the
+# gun, crosshair 1, Brightness 0.8. The first rocket's blast wakes the fiends; the `wake`
+# lines at 2 s are part of this fight (the game is chaotic: without them it is another).
+#
+# The fight runs 14 s from film second 0; `frames 91..648` writes the window 2.517 to
+# 9.797 s (7.28 s) with a second of handle each end (the game runs from frame 0 either
+# way). It opens on the second rocket's blast at the arch, the fiends already charging;
+# four fiends die in it (shot seconds 0.53, 2.90, 3.83, 7.13), and it ends 0.15 s into the
+# fourth's blast. The shambler teleports in 0.2 s after, in the tail.
+#
+# No narration: it follows V4-47, "And that's the slop preset, switched on.", whose "on"
+# is the cut to it.
+
+map e1m3
+skill 3
+warmup 1
+wake 1288,920,560 at 2
+wake 1408,920,560 at 2
+
+duration 14
+frames 91..648
+fps 60
+size 1920x1080
+
+preset slop
+hud on
+gun on
+crosshair 1
+notarget off
+cvar gamma 0.8
+
+camera walk within 160
+key 0 1600,400,582 at 1380,940,600
+key 14 1600,400,582 at 1380,940,600
+aim monsters from 1 fire 200
+
+impulse 9
+
+# Measuring aids, never drawn: the hall's six large flames (light_flame_large_yellow,
+# each mark at the flame's middle), the fiends and the shambler.
+mark f1 1008,396,688 radius 24
+mark f2 1008,652,688 radius 24
+mark f3 1008,884,688 radius 24
+mark f4 1686,396,688 radius 24
+mark f5 1686,652,688 radius 24
+mark f6 1686,884,688 radius 24
+mark d0 entity monster_demon1#0
+mark d1 entity monster_demon1#1
+mark d2 entity monster_demon1#2
+mark d3 entity monster_demon1#3
+mark sh entity monster_shambler#0
+
+sound on
+events on

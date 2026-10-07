@@ -1,0 +1,22 @@
+{
+ "head_s": 1.0,
+ "shot_s": 7.4,
+ "tail_s": 1.033,
+ "frames": 566,
+ "fps": 60,
+ "sound": null,
+ "held_pose_changes_shot_s": [
+  -0.833,
+  -0.033,
+  0.767,
+  1.567,
+  2.367,
+  3.167,
+  3.967,
+  4.767,
+  5.567,
+  6.367
+ ],
+ "muzzle_flash_shot_s": 7.167,
+ "events": "S46a.events.json"
+}

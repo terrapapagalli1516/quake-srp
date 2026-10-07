@@ -1,7 +1,9 @@
 # S46a-held: a grunt with a clear shot runs, raises its gun and fires, at 240 Hz played at
-# 1/8 ("Slop glides him"). It glides between steps (r_lerpmove 1) and holds each pose
-# until the next, as id's did (r_lerpmodels 0). Film second 0 is the wake; the window,
-# frames 114 to 396, is game seconds 0.475 to 1.655 after it.
+# 1/8. It glides between steps (r_lerpmove 1) and holds each pose until the next, as id's
+# did (r_lerpmodels 0). Film second 0 is the wake; the window, frames 114 to 396, is game
+# seconds 0.475 to 1.655 after it.
+#
+# Under V3-29: "Slop glides him, and blends his poses. Without the blend, he ice-skates."
 #
 # Assembly (S46a): a 470x520 crop that follows the grunt, enlarged 2x (nearest), from
 # S46a-held at (13,20) and S46a-blended at (967,20) of a black 1920x1080 frame, each film

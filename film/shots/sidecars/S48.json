@@ -1,0 +1,16 @@
+{
+ "head_s": 0.7333,
+ "shot_s": 9.5,
+ "tail_s": 1.3,
+ "frames": 692,
+ "fps": 60,
+ "sound": null,
+ "id_light_steps_shot_s": [
+  0.8,
+  4.0,
+  5.6,
+  7.2,
+  8.8
+ ],
+ "events": "S48.events.json"
+}

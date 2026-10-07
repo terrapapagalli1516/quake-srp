@@ -1,5 +1,8 @@
 # N8b: N8a at real speed, the trigger held from film second 0.5: id's nails start wide of
-# the gun's barrels ("At ten-eighty").
+# the gun's barrels.
+#
+# Under V3-37: "QuakeC fires each nail six point seven units above the barrel. At
+# ten-eighty, you can tell. So now they leave the barrels."
 
 map e1m1
 

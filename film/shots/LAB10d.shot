@@ -1,0 +1,129 @@
+# LAB10d: a live run on e1m2, the player's own eye. `camera player`, the game's own
+# physics, bob and gun sway, `cmd +forward` from file second 0.85 and one `look` line per
+# 60 fps frame (a hand's yaw in minimum-jerk strokes), never a path. From the east room
+# the player runs west up the steps into the square hall, turns 90 degrees left into the
+# rose-window hall (shot 0.8 to 1.2), steps east past the grunt who patrols it, with a
+# glance at him (he walks on and does not fire: `notarget`, the film's default), and runs
+# on toward the arch under the window, at 320 units a second through the whole shot. Full
+# slop, the status bar scaled and overlaid, the gun, crosshair 1, Brightness 0.7. 2.9 s
+# with a second of handle each end. The marks m0 to m3 (far points, for measuring the eye)
+# and g (the grunt) are never drawn.
+#
+# Under V3-41, "It's fast, and it feels fast. Mouse-look, W A S D, a gamepad, a phone:
+# even a zoomer can play it.", on "It's fast, and it feels fast."
+
+map e1m2
+
+duration 4.9
+fps 60
+size 1920x1080
+
+preset slop
+hud on
+gun on
+crosshair 1
+cvar gamma 0.7
+
+player 1540,680,340,180
+camera player
+
+look 0,180
+cmd +forward at 0.85
+cmd -forward at 4.6
+cmd +moveleft at 2.45
+cmd -moveleft at 2.8
+cmd +moveright at 3.15
+cmd -moveright at 3.4
+look 0,180.061 at 1.8167
+look 0,180.458 at 1.8333
+look 0,181.445 at 1.8500
+look 0,183.194 at 1.8667
+look 0,185.807 at 1.8833
+look 0,189.316 at 1.9000
+look 0,193.701 at 1.9167
+look 0,198.889 at 1.9333
+look 0,204.769 at 1.9500
+look 0,211.196 at 1.9667
+look 0,218.001 at 1.9833
+look 0,225.000 at 2.0000
+look 0,231.999 at 2.0167
+look 0,238.804 at 2.0333
+look 0,245.231 at 2.0500
+look 0,251.111 at 2.0667
+look 0,256.299 at 2.0833
+look 0,260.684 at 2.1000
+look 0,264.193 at 2.1167
+look 0,266.806 at 2.1333
+look 0,268.555 at 2.1500
+look 0,269.542 at 2.1667
+look 0,269.939 at 2.1833
+look 0,270.000 at 2.2000
+look 0,269.979 at 2.8167
+look 0,269.846 at 2.8333
+look 0,269.537 at 2.8500
+look 0,269.025 at 2.8667
+look 0,268.321 at 2.8833
+look 0,267.460 at 2.9000
+look 0,266.499 at 2.9167
+look 0,265.501 at 2.9333
+look 0,264.540 at 2.9500
+look 0,263.679 at 2.9667
+look 0,262.975 at 2.9833
+look 0,262.463 at 3.0000
+look 0,262.154 at 3.0167
+look 0,262.021 at 3.0333
+look 0,262.000 at 3.0500
+look 0,262.006 at 3.0667
+look 0,262.043 at 3.0833
+look 0,262.136 at 3.1000
+look 0,262.302 at 3.1167
+look 0,262.548 at 3.1333
+look 0,262.880 at 3.1500
+look 0,263.294 at 3.1667
+look 0,263.784 at 3.1833
+look 0,264.339 at 3.2000
+look 0,264.946 at 3.2167
+look 0,265.589 at 3.2333
+look 0,266.250 at 3.2500
+look 0,266.911 at 3.2667
+look 0,267.554 at 3.2833
+look 0,268.161 at 3.3000
+look 0,268.716 at 3.3167
+look 0,269.206 at 3.3333
+look 0,269.620 at 3.3500
+look 0,269.952 at 3.3667
+look 0,270.198 at 3.3833
+look 0,270.364 at 3.4000
+look 0,270.457 at 3.4167
+look 0,270.494 at 3.4333
+look 0,270.500 at 3.4500
+look 0,270.498 at 3.6167
+look 0,270.489 at 3.6333
+look 0,270.465 at 3.6500
+look 0,270.424 at 3.6667
+look 0,270.363 at 3.6833
+look 0,270.283 at 3.7000
+look 0,270.185 at 3.7167
+look 0,270.072 at 3.7333
+look 0,269.948 at 3.7500
+look 0,269.817 at 3.7667
+look 0,269.683 at 3.7833
+look 0,269.552 at 3.8000
+look 0,269.428 at 3.8167
+look 0,269.315 at 3.8333
+look 0,269.217 at 3.8500
+look 0,269.137 at 3.8667
+look 0,269.076 at 3.8833
+look 0,269.035 at 3.9000
+look 0,269.011 at 3.9167
+look 0,269.002 at 3.9333
+look 0,269.000 at 3.9500
+
+mark m0 0,0,0
+mark m1 3000,0,0
+mark m2 0,3000,0
+mark m3 0,0,3000
+mark g entity monster_army#6
+
+sound on
+events on

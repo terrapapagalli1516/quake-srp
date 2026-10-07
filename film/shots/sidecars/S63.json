@@ -1,0 +1,9 @@
+{
+ "head_s": 1.0,
+ "shot_s": 5.2,
+ "tail_s": 1.0,
+ "frames": 432,
+ "fps": 60,
+ "sound": null,
+ "events": "S63.events.json"
+}

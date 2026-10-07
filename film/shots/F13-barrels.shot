@@ -1,5 +1,8 @@
 # F13-barrels: F13-id with the nails leaving the barrels (`r_nailbarrels 1`).
 #
+# Under V3-37: "QuakeC fires each nail six point seven units above the barrel. At
+# ten-eighty, you can tell. So now they leave the barrels." (its last sentence).
+#
 # Assembly (F13): the 470x520 crops at (725,450), from the cross down to the gun, of
 # F13-id and F13-barrels, enlarged 2x (nearest), side by side at (13,20) and (967,20) of a
 # black 1920x1080 frame, labelled "nails: id's" and "nails: from the barrels". The sound

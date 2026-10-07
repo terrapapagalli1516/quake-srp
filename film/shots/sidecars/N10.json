@@ -1,0 +1,9 @@
+{
+ "head_s": 1.0,
+ "shot_s": 11.6,
+ "tail_s": 1.0,
+ "frames": 816,
+ "fps": 60,
+ "sound": "N10.wav",
+ "events": "N10.events.json"
+}

@@ -1,0 +1,9 @@
+{
+ "head_s": 1.0,
+ "shot_s": 38.1,
+ "tail_s": 1.0,
+ "frames": 2406,
+ "fps": 60,
+ "sound": "N2a.wav",
+ "events": "N2a.events.json"
+}

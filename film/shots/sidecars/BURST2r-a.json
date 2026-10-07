@@ -1,0 +1,9 @@
+{
+ "head_s": 1.0,
+ "shot_s": 7.0,
+ "tail_s": 1.0,
+ "frames": 540,
+ "fps": 60,
+ "sound": "BURST2r-a.wav",
+ "events": "BURST2r-a.events.json"
+}

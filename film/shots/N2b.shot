@@ -1,7 +1,9 @@
-# N2b: N2a with a thin mark at every perspective divide ("Here is every divide"). The
-# divide rig: e1m6's corridor from (504,500,242), a linear turn from yaw 104 down at 0.778
-# degrees a second, no status bar, slop at 1920x1080. N2a, N2b, N2c and PER4 are the same
-# turn; the film cuts each where its line falls.
+# N2b: N2a with a thin mark at every perspective divide. The divide rig: e1m6's corridor
+# from (504,500,242), a linear turn from yaw 104 down at 0.778 degrees a second, no status
+# bar, slop at 1920x1080. N2a, N2b, N2c and PER4 are the same turn; the film cuts each
+# where its line falls.
+#
+# Under V3-44b: "Here is every divide."
 
 map e1m6
 

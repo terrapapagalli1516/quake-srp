@@ -1,7 +1,10 @@
 # ST7: demo2 from 50.0 s, the ogres' fight and the blast near 56 s, native 1920x1080 in
-# the slop preset with the options not yet shown held at id's ("The status bar scales").
-# The status bar changes in the render: scaled at file second 3.0, the world beside it at
-# 5.0, the crosshair at 7.5. Brightness 0.8. The state labels over it are the edit's.
+# the slop preset with the options not yet shown held at id's. The status bar changes in
+# the render: scaled at file second 3.0, the world beside it at 5.0, the crosshair at 7.5.
+# Brightness 0.8. The state labels over it are the edit's.
+#
+# Under V3-36: "The status bar scales up in whole pixels, and the brown strips beside it
+# become more world." The crosshair then pops on with no voice.
 
 demo demo2 from 49.0
 

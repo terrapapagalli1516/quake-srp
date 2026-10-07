@@ -1,6 +1,9 @@
 # N7a: mouse-look at e1m1's start: a flick up and left, a swing right and down past the
-# corridor, and an eased settle on it, each a minimum-jerk stroke ("Mouse-look"). Slop,
-# the status bar, the gun and the crosshair. The camera's keys are dense (every 1/60 s).
+# corridor, and an eased settle on it, each a minimum-jerk stroke. Slop, the status bar,
+# the gun and the crosshair. The camera's keys are dense (every 1/60 s).
+#
+# Under V3-41: "It's fast, and it feels fast. Mouse-look, W A S D, a gamepad, a phone:
+# even a zoomer can play it." (on "Mouse-look").
 
 map e1m1
 

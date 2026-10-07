@@ -1,0 +1,10 @@
+{
+ "head_s": 1.0,
+ "shot_s": 4.4,
+ "tail_s": 1.0,
+ "frames": 384,
+ "fps": 60,
+ "sound": "N8a.wav",
+ "events": "N8a.events.json",
+ "freeze_shot_s": 1.483
+}

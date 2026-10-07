@@ -1,0 +1,33 @@
+# S15s: the game's very first view, in the slop preset as it ships. S15c's view: native
+# 1920x1080, horizontal plus (id's 90 degrees widened), the status bar scaled and
+# overlaid, the gun, `crosshair 1` (it sits on the far teleporter's NORMAL plaque), a
+# frame every refresh (`clock free`), the mixer at 48000 Hz, Brightness 0.8. 23 s with a
+# second of handle each end, on S15c's clock.
+#
+# Under V3-08, "This is quake-srp: the slop rust port. Quake, ported to Rust by AI
+# agents.", and V3-09, "By default, it is the same renderer, given a twenty twenty-six
+# machine." (S15); S16 opens on it under V4-11, "Switch them all off, and you get Classic:
+# id's game."
+#
+# Assembly (S15, S16): S15 is S15s alone from file second 1.0. S16 takes both files from
+# file second 19.0 (the camera never moves, so the later frames show the same view): it
+# opens on S15s, black pillars close in to the 4:3 box over 0.4 s (eased), and on the
+# closed box the picture is S15c, with the edit's "Classic" label at the box's top left
+# and id's menu sound on the switch.
+
+map start
+
+duration 25
+fps 60
+size 1920x1080
+
+preset slop
+crosshair 1
+hud on
+gun on
+cvar gamma 0.8
+
+camera player
+
+sound on
+events on

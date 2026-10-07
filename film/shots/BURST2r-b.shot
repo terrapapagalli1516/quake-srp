@@ -1,0 +1,41 @@
+# BURST2r-b: BURST2r-a's push, native 1920x1080 in horizontal plus. `fov_adapt 1`, the
+# slop preset with the options the film has not yet reached held at id's: the 16-pixel
+# perspective span, id's 1:1 status bar layer, no overlay, no crosshair, id's nails and
+# id's mixer (`snd_modern 0`). Brightness 0.8. The marks are the near flames: seen on
+# every frame of the shot, at x 47 to 207 and 1713 to 1873.
+#
+# Under V3-33, "Now, the picture.", and V3-34, "Your screen's own pixels: square, and
+# never smoothed."
+#
+# Assembly (BURST): from file second 0.5, BURST2r-a over BURST2r-b. 2.31 s in, over 0.5 s
+# (ease-out cubic), the box's picture stretches from 1440 to 1920 pixels wide as it fades
+# out, and the black pillars slide off the frame's edges: the box bursts, and a flame
+# comes into each side. The sound is BURST2r-b's.
+
+map e1m3
+skill 2
+warmup 2
+
+duration 9
+fps 60
+size 1920x1080
+
+preset slop
+cvar fov_adapt 1
+cvar r_perspspan 16
+cvar wasm_scaled2d 0
+cvar scr_sbaroverlay 0
+crosshair 0
+cvar r_nailbarrels 0
+cvar snd_modern 0
+cvar gamma 0.8
+
+camera path
+key 0  1347,330,600  -4,90 fov 90  ease inout
+key 9  1347,392,600  -5,90 fov 90
+
+mark flameL 1008,652,672 radius 12
+mark flameR 1686,652,672 radius 12
+
+sound on
+events on

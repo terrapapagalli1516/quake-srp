@@ -1,0 +1,9 @@
+{
+ "head_s": 1.0,
+ "shot_s": 7.28,
+ "tail_s": 1.003,
+ "frames": 557,
+ "fps": 60,
+ "sound": "HERO7.wav",
+ "events": "HERO7.events.json"
+}

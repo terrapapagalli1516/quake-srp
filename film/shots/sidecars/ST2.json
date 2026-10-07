@@ -1,0 +1,9 @@
+{
+ "head_s": 1.0,
+ "shot_s": 11.5,
+ "tail_s": 1.0,
+ "frames": 810,
+ "fps": 60,
+ "sound": "ST2.wav",
+ "events": "ST2.events.json"
+}

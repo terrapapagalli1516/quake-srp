@@ -1,0 +1,176 @@
+# N3w-box: a run from e1m1's spawn at 480 frames a second, in the Classic box with no
+# frame cap. 960x600 shown 4:3, with settings 1 to 4 on (the torches' flicker, gliding
+# lights, smooth monsters and poses) and no frame cap (`clock free`, `stepping uncapped`):
+# a host frame every 480 fps film frame. The player's own eye: `cmd +forward` from file
+# second 1.0 to 3.1, the yaw turned from 135 to 45 by one `look` line per 60 fps frame
+# (minimum-jerk), the strafe keys holding its line north (`+moveright` while the yaw is
+# past 90, `+moveleft` after); the game bobs the run itself, and the gun sways with the
+# steps. id's status bar, the gun, Brightness 0.8. 2.1 s with a second of handle each end.
+#
+# Under V3-31: "Run id's code faster, and the physics drifts: at four hundred and eighty
+# hertz, jumps peak higher, and grenades land further."
+#
+# Assembly (N3w-box.zoom, the film's LAB4b): each 60 fps frame is 480 Hz frame 8k; along
+# the box's top, on a 55% dark band over x 240 to 1680, y 0 to 164, the eight frames 8k to
+# 8k+7 as 176x132 tiles from x 256, y 16, each a 1:1 crop about (960,400) (the riveted
+# beam and the far doorway, where the steps read), numbered 1 to 8, a 2-pixel black seam
+# between; "480 HZ" under the strip at the box's right. The edit plays it at 3/4 speed.
+
+map e1m1
+
+duration 4.1
+fps 480
+size 1920x1080
+
+preset classic
+mode 960x600
+display 4:3
+clock free
+stepping uncapped
+cvar r_torchflicker 1
+cvar r_lerplightstyles 1
+cvar r_lerpmove 1
+cvar r_lerpmodels 1
+cvar vid_native 0
+cvar fov_adapt 0
+hud on
+gun on
+cvar gamma 0.8
+
+camera player
+
+look 0,135
+cmd +forward at 1.0
+cmd +moveright at 1.0
+look 0,134.983 at 1.0167
+look 0,134.933 at 1.0333
+look 0,134.849 at 1.0500
+look 0,134.734 at 1.0667
+look 0,134.586 at 1.0833
+look 0,134.407 at 1.1000
+look 0,134.198 at 1.1167
+look 0,133.958 at 1.1333
+look 0,133.688 at 1.1500
+look 0,133.389 at 1.1667
+look 0,133.062 at 1.1833
+look 0,132.707 at 1.2000
+look 0,132.324 at 1.2167
+look 0,131.914 at 1.2333
+look 0,131.477 at 1.2500
+look 0,131.015 at 1.2667
+look 0,130.527 at 1.2833
+look 0,130.015 at 1.3000
+look 0,129.478 at 1.3167
+look 0,128.917 at 1.3333
+look 0,128.333 at 1.3500
+look 0,127.727 at 1.3667
+look 0,127.098 at 1.3833
+look 0,126.448 at 1.4000
+look 0,125.777 at 1.4167
+look 0,125.085 at 1.4333
+look 0,124.373 at 1.4500
+look 0,123.642 at 1.4667
+look 0,122.892 at 1.4833
+look 0,122.123 at 1.5000
+look 0,121.337 at 1.5167
+look 0,120.534 at 1.5333
+look 0,119.713 at 1.5500
+look 0,118.877 at 1.5667
+look 0,118.025 at 1.5833
+look 0,117.157 at 1.6000
+look 0,116.276 at 1.6167
+look 0,115.380 at 1.6333
+look 0,114.470 at 1.6500
+look 0,113.548 at 1.6667
+look 0,112.613 at 1.6833
+look 0,111.667 at 1.7000
+look 0,110.709 at 1.7167
+look 0,109.740 at 1.7333
+look 0,108.761 at 1.7500
+look 0,107.772 at 1.7667
+look 0,106.774 at 1.7833
+look 0,105.768 at 1.8000
+look 0,104.753 at 1.8167
+look 0,103.731 at 1.8333
+look 0,102.702 at 1.8500
+look 0,101.666 at 1.8667
+look 0,100.624 at 1.8833
+look 0,99.577 at 1.9000
+look 0,98.525 at 1.9167
+look 0,97.469 at 1.9333
+look 0,96.409 at 1.9500
+look 0,95.346 at 1.9667
+look 0,94.280 at 1.9833
+look 0,93.212 at 2.0000
+look 0,92.142 at 2.0167
+look 0,91.071 at 2.0333
+look 0,90.000 at 2.0500
+cmd +moveleft at 2.0500
+look 0,88.929 at 2.0667
+look 0,87.858 at 2.0833
+look 0,86.788 at 2.1000
+look 0,85.720 at 2.1167
+look 0,84.654 at 2.1333
+look 0,83.591 at 2.1500
+look 0,82.531 at 2.1667
+look 0,81.475 at 2.1833
+look 0,80.423 at 2.2000
+look 0,79.376 at 2.2167
+look 0,78.334 at 2.2333
+look 0,77.298 at 2.2500
+look 0,76.269 at 2.2667
+look 0,75.247 at 2.2833
+look 0,74.232 at 2.3000
+look 0,73.226 at 2.3167
+look 0,72.228 at 2.3333
+look 0,71.239 at 2.3500
+look 0,70.260 at 2.3667
+look 0,69.291 at 2.3833
+look 0,68.333 at 2.4000
+look 0,67.387 at 2.4167
+look 0,66.452 at 2.4333
+look 0,65.530 at 2.4500
+look 0,64.620 at 2.4667
+look 0,63.724 at 2.4833
+look 0,62.843 at 2.5000
+look 0,61.975 at 2.5167
+look 0,61.123 at 2.5333
+look 0,60.287 at 2.5500
+look 0,59.466 at 2.5667
+look 0,58.663 at 2.5833
+look 0,57.877 at 2.6000
+look 0,57.108 at 2.6167
+look 0,56.358 at 2.6333
+look 0,55.627 at 2.6500
+look 0,54.915 at 2.6667
+look 0,54.223 at 2.6833
+look 0,53.552 at 2.7000
+look 0,52.902 at 2.7167
+look 0,52.273 at 2.7333
+look 0,51.667 at 2.7500
+look 0,51.083 at 2.7667
+look 0,50.522 at 2.7833
+look 0,49.985 at 2.8000
+look 0,49.473 at 2.8167
+look 0,48.985 at 2.8333
+look 0,48.523 at 2.8500
+look 0,48.086 at 2.8667
+look 0,47.676 at 2.8833
+look 0,47.293 at 2.9000
+look 0,46.938 at 2.9167
+look 0,46.611 at 2.9333
+look 0,46.312 at 2.9500
+look 0,46.042 at 2.9667
+look 0,45.802 at 2.9833
+look 0,45.593 at 3.0000
+look 0,45.414 at 3.0167
+look 0,45.266 at 3.0333
+look 0,45.151 at 3.0500
+look 0,45.067 at 3.0667
+look 0,45.017 at 3.0833
+look 0,45.000 at 3.1000
+cmd -forward at 3.1
+cmd -moveleft at 3.1
+
+sound on
+events on

@@ -1,0 +1,17 @@
+{
+ "head_s": 1.0,
+ "shot_s": 4.3,
+ "tail_s": 1.0,
+ "frames": 378,
+ "fps": 60,
+ "sound": "S60.wav",
+ "lightning_shot_s": [
+  2.2,
+  2.7
+ ],
+ "window_film_s": [
+  0.883,
+  7.183
+ ],
+ "events": "S60.events.json"
+}

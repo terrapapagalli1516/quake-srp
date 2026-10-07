@@ -1,0 +1,19 @@
+{
+ "head_s": 1.0,
+ "shot_s": 6.4,
+ "tail_s": 1.0,
+ "frames": 504,
+ "fps": 60,
+ "sound": null,
+ "events": "LAB10a2.events.json",
+ "mix_shot_s": {
+  "bands": [
+   0.0,
+   5.6
+  ],
+  "to_picture": [
+   5.6,
+   6.4
+  ]
+ }
+}

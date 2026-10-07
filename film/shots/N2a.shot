@@ -1,7 +1,10 @@
-# N2a: the rig at id's perspective span, 16 pixels ("One last switch"). The divide rig:
-# e1m6's corridor from (504,500,242), a linear turn from yaw 104 down at 0.778 degrees a
-# second, no status bar, slop at 1920x1080. N2a, N2b, N2c and PER4 are the same turn; the
-# film cuts each where its line falls.
+# N2a: the rig at id's perspective span, 16 pixels. The divide rig: e1m6's corridor from
+# (504,500,242), a linear turn from yaw 104 down at 0.778 degrees a second, no status bar,
+# slop at 1920x1080. N2a, N2b, N2c and PER4 are the same turn; the film cuts each where
+# its line falls.
+#
+# Under V3-42, "One last switch, and it's subtle.", and V3-44a, "id's renderer divided
+# once every sixteen pixels, and drew straight lines in between."
 
 map e1m6
 

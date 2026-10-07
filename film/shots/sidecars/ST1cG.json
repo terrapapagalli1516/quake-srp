@@ -1,0 +1,9 @@
+{
+ "head_s": 1.0,
+ "shot_s": 4.5,
+ "tail_s": 1.0,
+ "frames": 390,
+ "fps": 60,
+ "sound": "ST1cG.wav",
+ "events": "ST1cG.events.json"
+}

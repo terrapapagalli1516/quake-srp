@@ -1,6 +1,8 @@
 # F13-id: e1m1's start, the player's own eye, god mode, slop with the crosshair and the
-# status bar; `impulse 9`, `impulse 4`, the trigger held from film second 0.5 ("So now
-# they leave the barrels"). id's nails.
+# status bar; `impulse 9`, `impulse 4`, the trigger held from film second 0.5. id's nails.
+#
+# Under V3-37: "QuakeC fires each nail six point seven units above the barrel. At
+# ten-eighty, you can tell. So now they leave the barrels." (its last sentence).
 #
 # Assembly (F13): the 470x520 crops at (725,450), from the cross down to the gun, of
 # F13-id and F13-barrels, enlarged 2x (nearest), side by side at (13,20) and (967,20) of a

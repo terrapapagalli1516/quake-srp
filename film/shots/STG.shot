@@ -1,0 +1,46 @@
+# STG: the torches' stage, e1m3's large flame under a timber gable, every option off,
+# until the torch wakes. The flame is light_flame_large_yellow at 518,-890,120, in the
+# Classic box (960x600 shown 4:3), Brightness 0.7. One eased push at fov 60 from inside
+# the room (x 692; its east wall is at 700) to a still view of the flame, at rest in both
+# handles; it ends on ST1cG's view. The flame's flicker (`r_torchflicker 1`) wakes at shot
+# second 6.55 (file 7.55). 8.75 s with a second of handle each end. The marks (the corners
+# of the flame model's box) say where the flame is on each frame.
+#
+# Under V3-19, "Now, the slop. We start from Classic, and switch it on one setting at a
+# time." (ST0). TQ1 has no voice: the bumper "TORCHES!" and the torch's own roar.
+#
+# Assembly: the film cuts it at shot second 6.25 into ST0 (shot 0 to 6.25) and TQ1 (6.25
+# to 8.75); the bumper and the options ladder over them are the edit's.
+
+map e1m3
+skill 2
+warmup 2
+
+duration 10.75
+fps 60
+size 1920x1080
+
+preset classic
+mode 960x600
+display 4:3
+hud off
+cvar gamma 0.7
+cvar r_torchflicker 0
+cvar r_torchflicker 1 at 7.55
+
+camera path
+key 1     692,-890,103  -6,180  fov 60  ease inout
+key 9.75  600,-890,110  -12,180  fov 60
+
+mark fo 518,-890,120
+mark f0 510.4,-897.6,107.6 radius 0
+mark f1 525.6,-897.6,107.6 radius 0
+mark f2 510.4,-882.4,107.6 radius 0
+mark f3 525.6,-882.4,107.6 radius 0
+mark f4 510.4,-897.6,163.6 radius 0
+mark f5 525.6,-897.6,163.6 radius 0
+mark f6 510.4,-882.4,163.6 radius 0
+mark f7 525.6,-882.4,163.6 radius 0
+
+sound on
+events on

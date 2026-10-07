@@ -1,0 +1,20 @@
+{
+ "head_s": 1.0,
+ "shot_s": 2.5,
+ "tail_s": 1.0,
+ "frames": 270,
+ "fps": 60,
+ "sound": "N7b.wav",
+ "events": "N7b.events.json",
+ "keys_lit_shot_s": {
+  "A": [
+   0.3,
+   0.8
+  ],
+  "D": [
+   1.2,
+   2.0
+  ]
+ },
+ "surface_break_shot_s": 1.644
+}

@@ -2,6 +2,10 @@
 # polygons as a wireframe on black, dissolving to the textured picture. Classic at
 # 320x200. The pan never stops: 4 degrees a second for the whole file. The x-ray (`xray
 # black`, `wire all`) holds to film second 2.5 and mixes out by 3.5.
+#
+# Under V3-04, "Underneath ran a monument of applied mathematics.", and V3-05, "A software
+# renderer: binary space partitions, a potentially visible set, a surface cache, fixed
+# point." (into its first words).
 
 map e1m1
 

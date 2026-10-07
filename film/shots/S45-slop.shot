@@ -1,6 +1,9 @@
 # S45-slop: S45-id with slop's motion: the grunt glides between its steps and blends its
 # poses.
 #
+# Under V3-28: "Monsters still think ten times a second. At two hundred and forty hertz,
+# id's grunt stands still for twenty-three frames, then jumps."
+#
 # Assembly (S45): the 940x1040 crops at (350,20) of S45-id and of S45-slop, side by side
 # at (13,20) and (967,20) of a black 1920x1080 frame, each film frame shown twice (1/8
 # speed at 60 fps), labelled "id's" and "slop".

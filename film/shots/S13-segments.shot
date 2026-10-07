@@ -1,7 +1,11 @@
 # S13-segments: S13-game in the `segments` x-ray: each span's affine runs in rust and
 # brown, a lava tick at each of id's perspective divides, every 16 pixels. The film's S13
-# was rendered with an earlier build of the tool, whose `segments` x-ray placed some of
-# the ticks elsewhere: rendered today, some ticks differ from the film's.
+# was rendered by the first version of the film tool, whose `segments` x-ray placed some
+# of the ticks elsewhere; the x-ray has changed since, so a render today differs from the
+# film's S13 once the sweep has begun (its file's frames 101 to 263), and the film keeps
+# that file as it was made. S13-game, the picture under it, still matches.
+#
+# Under V3-07: "And one division, rationed."
 #
 # Assembly (S13): S13-segments over S13-game, revealed from the left edge by a vertical
 # cut that crosses the frame between file seconds 1.9 and 2.5 (smoothstep) and stays.

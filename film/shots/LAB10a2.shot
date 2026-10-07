@@ -1,0 +1,35 @@
+# LAB10a2: e1m1's start in the `bands` x-ray, each renderer thread's rows a colour, mixing
+# out to the picture. A still camera at 480,-352,110, yaw 90, slop with the status bar and
+# the gun, in the x-ray: the renderer's 8 threads' bands of rows, a colour a thread, held
+# for shot seconds 0 to 5.6, then mixed out to the picture over 5.6 to 6.4 (file 6.6 to
+# 7.4). Brightness 0.8. 6.4 s with a second of handle each end; no sound.
+#
+# The colours follow the thread scheduler: which thread takes which band is decided as
+# each frame is drawn, so the colours reshuffle every frame and come out in another order
+# on every run. The pixels under them are the same on any number of threads. `threads 8`
+# is the film's: the x-ray shows the threads, so their number is part of the picture.
+#
+# Under V3-39: "Every core draws its own bands of the frame. One thread or eight, the same
+# pixels."
+
+map e1m1
+
+duration 8.4
+fps 60
+size 1920x1080
+threads 8
+
+preset slop
+hud on
+gun on
+cvar gamma 0.8
+
+camera fixed 480,-352,110 0,90
+
+xray bands
+mix 0 1
+mix 6.6 1
+mix 7.4 0
+
+events on
+sound off

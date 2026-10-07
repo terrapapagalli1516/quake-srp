@@ -1,0 +1,43 @@
+# S10b: e1m1's first corridor in the `lightmaps` x-ray, the light alone, dissolving to the
+# picture. The film's S10: a still camera at (480,-352,110), Classic at 320x200 shown 4:3;
+# the light alone dissolves to the picture over shot seconds 0.42 to 1.02 (file 1.42 to
+# 2.02, smoothstep in 0.05 s keys): light, then light times texture, which is what the
+# surface cache holds. `mix` on `xray lightmaps` draws each frame twice, the game's and
+# the light alone, and cross-fades them. Brightness 0.7, S01's: the same corridor. 1.43 s
+# with a second of handle each end; no sound.
+#
+# Under V3-05: "A software renderer: binary space partitions, a potentially visible set, a
+# surface cache, fixed point." The light shows on "surface"; the dissolve is done by
+# "cache".
+
+map e1m1
+
+duration 3.4333
+fps 60
+size 1920x1080
+
+preset classic
+mode 320x200
+hud off
+cvar gamma 0.7
+
+camera fixed 480,-352,110 0,90
+
+xray lightmaps
+mix 0 1
+mix 1.4200 1.0000
+mix 1.4700 0.9803
+mix 1.5200 0.9259
+mix 1.5700 0.8438
+mix 1.6200 0.7407
+mix 1.6700 0.6238
+mix 1.7200 0.5000
+mix 1.7700 0.3762
+mix 1.8200 0.2593
+mix 1.8700 0.1562
+mix 1.9200 0.0741
+mix 1.9700 0.0197
+mix 2.0200 0.0000
+
+events on
+sound off
