@@ -1,0 +1,5 @@
+{
+ "_about": "Merged into the ladder events' spans by name (ladder.py --overrides). LAB2: the panel, ending at y 758, because the events' pillar nudged up 80 px puts the 14th row at y 774-790, on D12b's '240 HZ FRAME' counter (y 776-796). LAB8c: one column at the right edge, x 1688-1912 on slop's outer wall, its rows 41 px apart so the column ends at y 627, above the right barrel (x 1515-1770, from y 640); the events' panel nudged +50 would run past the frame's edge (GLIDING LIGHTS to x 1927) and down onto the barrel. Up from the cut to 1.5 s after NAILS FROM BARRELS lights (cut +0.2), then a fade.",
+ "LAB2": {"place": "panel", "nudge": false},
+ "LAB8c": {"place": "column", "x": 1688, "head_y": 14, "y0": 60, "dy": 41, "lab": {"before": 0.2, "hold": 1.7}}
+}
