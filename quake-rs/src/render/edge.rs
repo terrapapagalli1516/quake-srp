@@ -2314,25 +2314,27 @@ impl WorldDraw<'_> {
 /// lets it through: e1m6, an armour at the screen's left edge before a door
 /// whose plane passes the eye there; e1m5, a fiend's edge pixel over a face
 /// whose plane the eye nearly touches (1/z from 0.05 to 4 along the row).
+#[inline]
 fn draw_zspan(zrow: &mut [i16], izi: i32, izistep: i32, odd_start: bool) {
-    let mut step = izi;
-    let mut sign = 0;
-    for z in zrow.iter_mut() {
-        *z = (step >> 16) as i16;
-        sign |= step;
-        step = step.wrapping_add(izistep);
-    }
-    if sign >= 0 {
-        return; // no pair's first `izi` was negative
-    }
-    // The second pixel of each pair (an odd address, after the span's first
-    // pixel) whose first was negative.
-    let mut prev = izi;
-    for (k, z) in zrow.iter_mut().enumerate().skip(1) {
-        if (k + usize::from(odd_start)) & 1 == 1 && prev < 0 {
-            *z = -1;
+    // `izi` steps linearly: with both ends in [0, 2^31), unwrapped, none is
+    // negative, and each pixel is its own `izi >> 16` (nearly every span).
+    let last = i64::from(izi) + i64::from(izistep) * (zrow.len() as i64 - 1).max(0);
+    if izi >= 0 && last >= 0 && last <= i64::from(i32::MAX) {
+        let mut izi = izi;
+        for z in zrow {
+            *z = (izi >> 16) as i16;
+            izi = izi.wrapping_add(izistep);
         }
-        prev = prev.wrapping_add(izistep);
+        return;
+    }
+    // A pair's second pixel (an odd address, after the span's first pixel)
+    // takes the first's sign when that was negative.
+    let (mut izi, mut prev) = (izi, 0);
+    for (k, z) in zrow.iter_mut().enumerate() {
+        let second = k > 0 && (k + usize::from(odd_start)) & 1 == 1;
+        *z = if second && prev < 0 { -1 } else { (izi >> 16) as i16 };
+        prev = izi;
+        izi = izi.wrapping_add(izistep);
     }
 }
 
