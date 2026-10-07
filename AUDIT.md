@@ -4111,6 +4111,12 @@ build. Unit tests: `z_spans_store_in_pairs_as_d_drawzspans`,
 over); the z-span fix alone moved none of them, and every sound tally, timedemo,
 census, edicts, oracle, screen2d, demolerp and sound value is unchanged.
 
+**Cost.** `timedemo demo1`, under the measure lock, five interleaved runs, medians:
+2766 → 2726 fps at 320x200 and 1332 → 1315 at 640x400 (−1.4%, −1.3%), a range test
+on each span's `izi` (one span of demo1's 1.49 million takes the pairs: a background
+pixel); variants that dodged the test per span measured −3% to −8% (the loop's
+vectorization is fragile). classic_check's `exact` takes about 8 s where it took 6.
+
 **Still open.** The listener and the asm's `D_DrawZSpans` (Open). The monster views
 are the shareware's; the registered game's and the packs' monsters were compared only
 where they spawn, in each map's first frame.
