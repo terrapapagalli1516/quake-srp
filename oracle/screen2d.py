@@ -43,7 +43,6 @@ import json
 import os
 import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
 
@@ -53,6 +52,7 @@ from PIL import Image
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from compare import DEFAULT_PAK, ensure_oracle, read_pak_file, read_pnm  # noqa: E402
+import scratch  # noqa: E402
 
 PROJECT = HERE.parent
 WASM = PROJECT / "quake-wasm"
@@ -354,7 +354,7 @@ def link_game(base: Path, pak: Path, game: str | None, data: Path | None) -> Non
 def run_c(oracle: Path, pak: Path, res, steps, out: Path, name: str, game: str | None = None,
           data: Path | None = None) -> dict:
     w, h = res
-    with tempfile.TemporaryDirectory(prefix="quake-screen2d-") as tmp:
+    with scratch.tempdir("quake-screen2d-") as tmp:
         base = Path(tmp)
         link_game(base, pak, game, data)
         mapname = FIRST_MAP[game] if game else "e1m1"
@@ -393,7 +393,7 @@ def run_port(harness: Path, script: list[str], out: Path, name: str, game: str |
     sp = out / f"{name}.port.txt"
     sp.write_text("\n".join(script) + "\n")
     env = dict(os.environ, QUAKE_SCREEN_SCRIPT=str(sp))
-    with tempfile.TemporaryDirectory(prefix="quake-screen2d-port-") as tmp:
+    with scratch.tempdir("quake-screen2d-port-") as tmp:
         if game:
             # the same layout as id's side; the harness boots `-basedir tmp -<game>`
             link_game(Path(tmp), pak, game, data)
@@ -463,7 +463,7 @@ def main() -> None:
     for n in names:
         if n not in scenarios:
             sys.exit(f"unknown scenario {n!r} (--list)")
-    out_root = (args.out or Path(tempfile.mkdtemp(prefix="quake-screen2d-"))).resolve()
+    out_root = (args.out or scratch.mkdtemp("quake-screen2d-")).resolve()
     oracle = ensure_oracle(args.oracle)
     harness = Path(args.harness).resolve() if args.harness else build_harness()
     pal = np.frombuffer(read_pak_file(args.pak, "gfx/palette.lmp")[:768], dtype=np.uint8).reshape(256, 3)

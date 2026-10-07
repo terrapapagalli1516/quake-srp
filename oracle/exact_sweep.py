@@ -61,7 +61,6 @@ import os
 import re
 import struct
 import sys
-import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -71,6 +70,7 @@ import numpy as np
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import compare  # noqa: E402
+import scratch  # noqa: E402
 
 # oracle -> (oracle/build.sh's ORACLE_FPMATH, compare.py's `fpcw`): x87store
 # is the x87 build with no float variable in an 80-bit register
@@ -370,7 +370,7 @@ def main() -> None:
         identical = sweep(ns, qt, pal, ns.keep.resolve())
     else:
         # The frames are only needed while the cases are counted.
-        with tempfile.TemporaryDirectory(prefix="quake-exact-", dir=os.environ.get("QUAKE_SCRATCH")) as tmp:
+        with scratch.tempdir("quake-exact-") as tmp:
             identical = sweep(ns, qt, pal, Path(tmp))
     sys.exit(0 if identical else 1)
 

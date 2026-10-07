@@ -45,10 +45,8 @@ from __future__ import annotations
 
 import argparse
 import collections
-import os
 import struct
 import sys
-import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -56,6 +54,7 @@ import numpy as np
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import compare  # noqa: E402
+import scratch  # noqa: E402
 
 
 def f32(bits: str) -> float:
@@ -171,7 +170,7 @@ def main() -> None:
     ap.add_argument("--out", type=Path)
     ns = ap.parse_args()
 
-    out = ns.out or Path(tempfile.mkdtemp(prefix="quake-trace-", dir=os.environ.get("QUAKE_SCRATCH")))
+    out = ns.out or scratch.mkdtemp("quake-trace-")
     out.mkdir(parents=True, exist_ok=True)
     out = out.resolve()
     mapname, ents = ns.maps, ns.mode == "ents"
