@@ -773,14 +773,17 @@ fn clamp_c(v: i32, lo: i32, hi: i32) -> i32 {
 /// bbextents]`: what the span loops step through, a segment ahead.
 ///
 /// The span loops ask for the end of the segment AFTER the one they are
-/// about to draw. id's routines divide for a segment's end on reaching the
-/// segment, and its pixels cannot start before the quotient is there; asked
-/// for a segment early, the divide runs while the segment before is drawn.
-/// The values are the same — the float adds and the divides are the C's, in
-/// its order; only the pixels are drawn later — and the wall spans a tenth
-/// to a fifth faster (PERF_PLAN.md, §15). Once the full segments are done,
-/// [`SegmentEnds::last`] gives the last segment's end from where the
-/// accumulators stopped, the last full segment's end.
+/// about to draw. id's portable C (`d_scan.c`) divides for a segment's end
+/// on reaching the segment, and its pixels cannot start before the quotient
+/// is there; asked for a segment early, the divide runs while the segment
+/// before is drawn. That is id's x86 trick in portable form: `d_draw16.s`
+/// and `d_draw.s` start the FDIV for the next segment's end halfway through
+/// the one they are drawing ("this is what we've gone to all this trouble
+/// to overlap"). The values are the same — the float adds and the divides
+/// are the C's, in its order; only the pixels are drawn later — and the
+/// wall spans a tenth to a fifth faster (PERF_PLAN.md, §15). Once the full
+/// segments are done, [`SegmentEnds::last`] gives the last segment's end
+/// from where the accumulators stopped, the last full segment's end.
 struct SegmentEnds<'g, const N: usize> {
     g: &'g SurfGrads,
     acc: FloatSpan,

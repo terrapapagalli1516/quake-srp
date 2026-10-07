@@ -1625,10 +1625,18 @@ without changing a pixel: two people's work, measured again together on top of ย
 **What changed** (every commit keeps every pixel: "Proof"):
 
 - **The span loops ask for each segment's end a segment ahead** (`1596242`,
-  `raster::segments_ahead`). id's span routines divide for a segment's end on
-  reaching the segment, and its pixels wait for the quotient; asked for a segment
-  early, the divide runs while the segment before is drawn. Spans 64 to 4 and the
-  liquids. The largest single gain, and largest at the 2026 default, span 8.
+  `raster::segments_ahead`, now `raster::SegmentEnds`). id's portable C (`d_scan.c`:
+  `D_DrawSpans8`, `Turbulent8`) divides for a segment's end on reaching the segment, and
+  its pixels wait for the quotient; asked for a segment early, the divide runs while the
+  segment before is drawn. Spans 64 to 4 and the liquids. The largest single gain,
+  and largest at the 2026 default, span 8. It is id's own x86 trick, found again in
+  portable code: the assembly (`d_draw16.s`'s `D_DrawSpans16`, what 1996 players
+  saw, and `d_draw.s`'s `D_DrawSpans8`) starts the FDIV for the next segment's end
+  halfway through the segment it is drawing, "start FDIV for end of next segment in
+  flight, so it can overlap", at the instruction id marked "this is what we've gone
+  to all this trouble to overlap". The port asks a whole segment early and leaves
+  the overlap to the processor. (The x86 build draws liquids with `Turbulent8`, C,
+  so there id's pixels did wait.)
 - **The z-buffer row vectorizes again** (`ad23c32`). ยง14's spans in row order bind
   each surface's `izistep` by reference, and the loop that writes `D_DrawZSpans`' 16-bit
   1/z for every world pixel read it again after every store (the compiler cannot

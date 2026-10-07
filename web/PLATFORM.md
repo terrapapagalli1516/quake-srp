@@ -1844,8 +1844,8 @@ what the game's State calls for:
 
 | state | on screen |
 |---|---|
-| the live game, `in_touch` on (2026) | a stick wherever the left thumb lands (the left 45%); look by dragging anywhere else; FIRE (hold; dragging it aims too), JUMP, WEAPON (`impulse 10`, the next weapon owned), MENU |
-| the live game, `in_touch` off (Classic) | MENU only: id's game has no touch controls, but a phone must never be left without a way back to the menu |
+| the live game, `in_touch` on (both presets) | a stick wherever the left thumb lands (the left 45%); look by dragging anywhere else; FIRE (hold; dragging it aims too), JUMP, WEAPON (`impulse 10`, the next weapon owned), MENU |
+| the live game, `in_touch` off (by hand) | MENU only: id's game has no touch controls, but a phone must never be left without a way back to the menu |
 | a demo (the attract loop) | MENU; a tap anywhere is Escape, as any key is during id's demo playback |
 | the menu | taps on the menu itself; a pad (▲▼◀▶, OK), keys like a keyboard's, held arrows repeating; BACK (Escape); YES / NO when it asks (STATE 256; the pad hides then, and while Customize controls waits for a key to bind); GAME beside BACK, with a mission pack on offer ("The game picker") |
 | the console (Options > Go to console) | KEYBOARD (a tap on the console too), TAB, ▲ (the previous line); BACK closes it; a drag scrolls (PgUp/PgDn) |

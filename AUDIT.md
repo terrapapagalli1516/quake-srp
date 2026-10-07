@@ -81,7 +81,7 @@ screen.
 
 | slop option | setting (its page and row) | slop | why |
 |---|---|---|---|
-| No 72 fps cap: a host frame on every display refresh, with the game stepped as id's 72 Hz frames step it (`Stepping::Uncapped`); or a cap of 60 to 240 on that timing | `host_maxfps` (QuakeSpasm's name; Picture and sound > Frame rate cap: 60, id's 72, 120, 144, 240, none); the retired `wasm_uncapped` sets its ends (1 none, 0 72) | none (on every machine; Classic id's 72, `Host_FilterTime`'s own gate exactly) | The game must play the same from 60 to 480 Hz. id's gate caps the game at 72 fps, so a 120 Hz display runs at 60. The stepping keeps jumps, flashes, trails and clocks on id's 72 Hz values (`FRAMERATE.md`). A cap other than 72 holds the frames drawn, not the game: a host frame runs on every refresh, and the picture is drawn on the first refresh at least 1/cap after the last one (`FrameCap::picture_due`; the others run undrawn, `cl_main::walk_frame_undrawn`): 60 on a 120 Hz display draws every second refresh, evenly; a cap above the display's rate draws every refresh; one that does not divide it draws below itself (60 on 144 Hz: 48 pictures a second) while the game runs at 144 (`quaketool framerate --cap 60 --check`). |
+| No 72 fps cap: a host frame on every display refresh, with the game stepped as id's 72 Hz frames step it (`Stepping::Uncapped`); or a cap of 60 to 240 on that timing | `host_maxfps` (QuakeSpasm's name; Picture and sound > Frame rate cap: 60, id's 72, 120, 144, 240, none); the retired `wasm_uncapped` sets its ends (1 none, 0 72) | none (on every machine; Classic id's 72, `Host_FilterTime`'s own gate but for one deviation: a frame may run up to 1 ms early, `HOST_FRAME_TOLERANCE`, so a 144 Hz display's two refreshes keep a steady 72 ("Host loop: Host_FilterTime's 72 fps cap")) | The game must play the same from 60 to 480 Hz. id's gate caps the game at 72 fps, so a 120 Hz display runs at 60. The stepping keeps jumps, flashes, trails and clocks on id's 72 Hz values (`FRAMERATE.md`). A cap other than 72 holds the frames drawn, not the game: a host frame runs on every refresh, and the picture is drawn on the first refresh at least 1/cap after the last one (`FrameCap::picture_due`; the others run undrawn, `cl_main::walk_frame_undrawn`): 60 on a 120 Hz display draws every second refresh, evenly; a cap above the display's rate draws every refresh; one that does not divide it draws below itself (60 on 144 Hz: 48 pictures a second) while the game runs at 144 (`quaketool framerate --cap 60 --check`). |
 | The picture fills the window at the window's aspect, at its device pixels divided by a whole pixel size, with square pixels; the renderer's `hires` (views past 1280x1024, particles and the underwater warp in proportion). Video Options lists Native 1x..4x below `RESOLUTION_PRESETS`, each with the size it gives, the live one white, and Enter switches back to it after a fixed mode, with a line that a mode above draws in a 4:3 box; the rows show in slop or whenever the picture is native (Classic with `vid_native 1`), else the screen is `VID_MenuDraw`'s alone. No frame bigger than the threads build's 512 MiB holds (`vid::MAX_FRAME_PIXELS`, 12 million pixels, measured): past it the next pixel size, the player's pick included | `vid_native`, `vid_pixelsize` 1..4 (Options > Video Options, the one place it is chosen) | on, 1x (2x on a touch screen) | id's modes stop at 1280x1024 and are shown in a 4:3 box. Whole pixels keep the chunky software look. A phone at 1x drew 13-19 ms frames against 60 Hz's 16.7, at 2x 8-9 ms. ("High resolutions and Hor+"; "Slop Options, two presets" for the memory) |
 | Hor+: `fov` spans a 4:3 screen, and a wider screen sees more at the sides | `fov_adapt` (Picture and sound > Widescreen FOV) | on | id spreads `fov` over any width, so a wide screen loses the top and bottom. |
 | The 2-D layer (status bar, menus, console) at the largest whole multiple of 320x200 that fits; on its screen, wider than 320 on most frames (384 at 16:9), the level-complete screen centred as the status bar is (`Sbar_DrawPic`'s `(vid.width - 320)>>1`, `Screen2d::centred_320_x`) | `wasm_scaled2d` (Picture and sound > Scaled 2-D layer) | on | id draws it 1:1, so at 1440p the status bar is a 24-pixel strip. `Sbar_IntermissionOverlay` draws at fixed coordinates laid out for 320 columns, so on a wider screen it sits left of the centred bar, menus and finale ("The 2-D layer on a wide screen", below). |
@@ -2969,13 +2969,14 @@ the home screen and plays it offline (`web/sw.js`); `web/PLATFORM.md`,
 "Touch" and "Offline and install", has the design. What that changed
 against id's WinQuake:
 
-- **`in_touch`** (`Cvars::touch`) is a departure, on in 2026, off in
-  Classic: the touch controls for play. The settings page's last row,
-  "Touch controls". `in_touchaccel` (look acceleration, console only,
-  default 0) reads nothing in the game, so it is no departure. Classic on a
-  touch screen keeps only a MENU button and the tappable menu, so a phone
-  is never stranded; Classic on a desktop is untouched (touch.js is not
-  even loaded).
+- **`in_touch`** (`Cvars::touch`) is a departure, the touch controls for
+  play: on in 2026, and since 2026-10-04 (`10b1cc2`) on in Classic too, a
+  shared control ("The controls are shared"), so Reset to Classic does not
+  leave a phone unplayable. Its row: Slop Options > Controls > Touch controls.
+  `in_touchaccel` (look acceleration, console only, default 0) reads
+  nothing in the game, so it is no departure. With `in_touch` off, a touch
+  screen keeps only a MENU button and the tappable menu, so a phone is
+  never stranded; a desktop is untouched (touch.js is not even loaded).
 - **The menu answers taps** (`Menu::tap` / `point` / `item_at`, quake-rs
   `menu.rs`, "Taps"): the port's input path, not id's. A tap becomes the
   key id's menu already takes (`M_Keydown` through `Key_Event`), so no
@@ -2987,10 +2988,10 @@ against id's WinQuake:
   test draws every list and checks the cursor is where a tap finds it.
 - **The State record** gains three flags: 128 `in_touch`, 256 the menu
   asks y/n (Quit, New Game's question), 512 the live game is paused.
-- **Hidden page, 2026 with touch:** the live game pauses (`pause`, id's
-  plaque and its "paused the game" line) under the menu, and unpauses when
-  the player is back in the game. Classic only stops getting ticks, as
-  every browser page does when hidden.
+- **Hidden page, with the touch controls on** (either preset): the live
+  game pauses (`pause`, id's plaque and its "paused the game" line) under
+  the menu, and unpauses when the player is back in the game. With them
+  off it only stops getting ticks, as every browser page does when hidden.
 - `player_field NAME` (automation): a read-only call the checks read the
   player's edict through.
 
