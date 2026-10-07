@@ -159,6 +159,9 @@ def main() -> None:
     ap.add_argument("--aspect", type=float)
     ap.add_argument("--spans", type=int, choices=(16, 8, 1), default=16)
     ap.add_argument("--c-cmd", action="append", default=[], help="as compare.py's (d_mipscale 0 ...)")
+    ap.add_argument("--c-post", action="append", default=[],
+                    help="as compare.py's: a console command for id's side once the map is loaded (six `wait`s, "
+                         "then `noclip`, `notarget`, `oracle_field origin X Y Z` move the player among monsters)")
     ap.add_argument("--sse", action="store_true", help="id's C built with SSE2 floats (the port's target)")
     ap.add_argument("--oracle", help="another build of id's C (default: the tree's x87 build, or --sse's)")
     ap.add_argument("--pixel", action="append", default=[], help="x,y to trace (default: every differing pixel)")
@@ -176,7 +179,7 @@ def main() -> None:
     args = argparse.Namespace(
         res=ns.res, view=ns.view, time=ns.time, settle=ns.settle, viewmodel=False, bench=0, viewsize=120,
         spans=ns.spans, exactpersp=ns.spans == 1, perspspan=8 if ns.spans == 8 else None,
-        c_cmd=ns.c_cmd + [f'oracle_stages "{out / case}.c.stages"'], c_post=[], demo=None, aspect=ns.aspect,
+        c_cmd=ns.c_cmd + [f'oracle_stages "{out / case}.c.stages"'], c_post=ns.c_post, demo=None, aspect=ns.aspect,
         oracle_dt=None, id_lightstyles=False, dlights="id", pak=ns.pak, pak1=None, game_dir=[], oracle=ns.oracle,
         sse=ns.sse, full=False, stages=True,
     )
