@@ -592,7 +592,7 @@ With the 3-D view one colour, what differs is the 2-D layer. `exact%` is over th
 whole screen; `2d exact%` over the pixels that are not the blank colour in either
 screen. Colours are compared as presented, after `V_UpdatePalette`, so the
 powerup tints count. Per shot: `<scenario>.<shot>.side.png` (C | port | white
-where they differ). Bulky: write `--out` to disk, not `/tmp`.
+where they differ). Without `--out` it goes to the scratch directory (below).
 
 **Results** (2026-09-25, branch `quake/fid2d`): the lowest `2d exact%` of each
 scenario's shots, before the branch -> after.
@@ -950,3 +950,11 @@ saved by the run: `demo1:323` (the player's shotgun flash) 75.65 -> 91.34 (id's
 radius 218, the port's 211) -> 100.00; `demo1:358` (a grenade explosion on the frame
 it is made) 14.42 -> 100.00; `demo1:376` (the same, fading, radius 275) 52.13 ->
 99.99; `demo1:601` (two explosions at once) 46.23 -> 100.00.
+
+## Scratch
+
+The scripts keep their temporary frames and builds in `$QUAKE_SCRATCH`, else `/var/tmp`, never in `/tmp`,
+which is often held in RAM: a sweep's frames could fill it. Temporary directories go when the run ends,
+also when it is stopped by SIGTERM (a `timeout`, a time limit); an output directory a script makes when
+`--out` is not given (`compare.py`, `screen2d.py`, `rotate_check.py`, `pixel_trace.py`) is kept, and its
+path is printed. The helper is `oracle/scratch.py`.

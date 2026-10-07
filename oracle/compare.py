@@ -43,7 +43,6 @@ import os
 import struct
 import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
 
@@ -53,6 +52,7 @@ from PIL import Image
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from oraclebin import ensure_oracle  # noqa: E402,F401  (the tools that import this module take it from here)
+import scratch  # noqa: E402
 
 PROJECT = HERE.parent
 DEFAULT_PAK = PROJECT / "quake-data" / "ID1" / "PAK0.PAK"
@@ -139,7 +139,7 @@ def ensure_quaketool(explicit: str | None) -> Path:
 def run_c(args, case: str, mapname: str, ents: bool, out: Path) -> dict:
     """Render one frame in id's renderer; returns the frame's .json metadata."""
     w, h = args.res
-    with tempfile.TemporaryDirectory(prefix="quake-oracle-") as tmp:
+    with scratch.tempdir("quake-oracle-") as tmp:
         base = Path(tmp)
         (base / "id1").mkdir()
         (base / "id1" / "pak0.pak").symlink_to(args.pak.resolve())
@@ -206,7 +206,7 @@ def frame_dlights(args, qt: Path, meta: dict) -> list[list[float]]:
         return []
     if not mode.startswith("demo"):
         sys.exit(f"--dlights: id, none or demoN, not {mode!r}")
-    with tempfile.TemporaryDirectory(prefix="quake-play-") as tmp:
+    with scratch.tempdir("quake-play-") as tmp:
         trace = Path(tmp) / "port.trace"
         subprocess.run([str(qt), "play", str(args.pak), mode, str(meta["frame"] + 30), "--hash-every", "0",
                         "--trace", str(trace)], check=True, capture_output=True, timeout=300)
@@ -432,7 +432,7 @@ def main() -> None:
 
     if args.view is not None and len(args.view) != 6:
         sys.exit("--view needs x,y,z,pitch,yaw,roll")
-    out = args.out or Path(tempfile.mkdtemp(prefix="quake-oracle-cmp-"))
+    out = args.out or scratch.mkdtemp("quake-oracle-cmp-")
     out.mkdir(parents=True, exist_ok=True)
     out = out.resolve()
     pal = np.frombuffer(read_pak_file(args.pak, "gfx/palette.lmp")[:768], dtype=np.uint8).reshape(256, 3)

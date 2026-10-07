@@ -37,11 +37,11 @@ import argparse
 import json
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 import numpy as np
 from PIL import Image
+import scratch
 
 HERE = Path(__file__).resolve().parent
 PROJECT = HERE.parent
@@ -125,7 +125,7 @@ def main() -> None:
 
     # The port's playback of the loop, once: which frames have lights, and their radii.
     port_frames = {}
-    with tempfile.TemporaryDirectory(prefix="demo-lights-") as tmp:
+    with scratch.tempdir("demo-lights-") as tmp:
         for d, n in (("demo1", 5350), ("demo2", 5035), ("demo3", 5928)):
             trace = Path(tmp) / f"{d}.trace"
             subprocess.run([str(args.quaketool), "play", str(PAK), d, str(n), "--hash-every", "0", "--trace", str(trace)],

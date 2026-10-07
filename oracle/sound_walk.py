@@ -47,13 +47,13 @@ import os
 import re
 import subprocess
 import sys
-import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from oraclebin import ORACLE_BIN as ORACLE, ensure_oracle  # noqa: E402
+import scratch  # noqa: E402
 
 PROJECT = HERE.parent
 DEFAULT_PAK = PROJECT / "quake-data" / "ID1" / "PAK0.PAK"
@@ -185,7 +185,7 @@ def ensure_quaketool(explicit: str | None) -> Path:
 
 def run_c(pak: Path, m: str, script: Path, log: Path, loadtime: str) -> None:
     # id's -basedir in the system's temp dir: MAX_OSPATH is 128 (demo_lerp.py).
-    with tempfile.TemporaryDirectory(prefix="sound-walk-") as tmp:
+    with scratch.tempdir("sound-walk-") as tmp:
         base = Path(tmp)
         (base / "id1").mkdir()
         (base / "id1" / "pak0.pak").symlink_to(pak.resolve())

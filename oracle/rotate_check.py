@@ -34,13 +34,13 @@ import argparse
 import json
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import compare as C  # noqa: E402  (the shared pak/pnm/stats/side_by_side helpers)
+import scratch  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 DEFAULT_ID1 = HERE.parent / "quake-data" / "ID1" / "PAK0.PAK"
@@ -96,13 +96,13 @@ def main() -> None:
             "  uv run oracle/rotate_check.py --id1-pak1 .../id1/pak1.pak --hipnotic .../hipnotic/pak0.pak"
         )
 
-    out = args.out or Path(tempfile.mkdtemp(prefix="quake-rotate-check-"))
+    out = args.out or scratch.mkdtemp("quake-rotate-check-")
     out.mkdir(parents=True, exist_ok=True)
     oracle = C.ensure_oracle(args.oracle)
     qt = C.ensure_quaketool(args.quaketool)
     pal = np.frombuffer(C.read_pak_file(args.id1, "gfx/palette.lmp")[:768], dtype=np.uint8).reshape(256, 3)
 
-    with tempfile.TemporaryDirectory(prefix="quake-rotate-base-") as tmp:
+    with scratch.tempdir("quake-rotate-base-") as tmp:
         base = Path(tmp)
         (base / "id1").mkdir()
         (base / "id1" / "pak0.pak").symlink_to(args.id1.resolve())
