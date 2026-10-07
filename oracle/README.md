@@ -47,7 +47,7 @@ Needs docker (for the build only), uv, cargo, and the shareware pak at
 | `--demo NAME` | id's side plays the demo (`playdemo NAME`) instead of loading a map, and the shot is frame `--settle` of its playback; `--maps` names the demo's map for the port (`--maps e1m3 --demo demo1 --settle 52`: a grenade explosion among gibs) |
 | `--oracle-dt DT` | id's host frame step in seconds (default 0.1, the oracle's own); `0.01388888899236917` is the port's 1/72 s, the step `quaketool play` and `demo_lerp.py` run at, so `--demo demo1 --settle K` is frame K of `quaketool play demo1 --trace` |
 | `--dlights none\|id\|demoN` | the lights the port's frame is lit with: id's own `cl_dlights` of the frame (default), none (what a demo's playback drew before `fleet/demolights`), or the lights the port's own playback of demo N makes at id's `cl.time` (`quaketool play demoN --trace`; needs `--oracle-dt` as above) |
-| `--id-lightstyles` | hand the port id's `d_lightstylevalue[]` of the frame (`quaketool view --style-values`) instead of the styles it derives from the clock: a demo frame's are the recording's, which the map's own animation does not know |
+| `--id-lightstyles` | hand the port id's `d_lightstylevalue[]` of the frame (`quaketool view --style-values`), R_AnimateLight's output, instead of id's light-style strings (`cl_lightstyle[].map`, `--style-maps`), which the port is handed by default and animates at id's clock |
 | `--game-dir NAME DIR` `--pak1 PAK` | a mission pack: `DIR`'s `pak0.pak`/`pak1.pak` layered over id1 as id's `-NAME` does (`-hipnotic`, `-rogue`), with id1's registered `pak1.pak` (id's own `-hipnotic` refuses the shareware id1); the port's `quaketool view` takes the same paks as a comma list |
 
 ### Reading the output
@@ -117,7 +117,11 @@ at `3ba835f`).
 signon (`V_CalcRefdef`'s eye, `cl.time` = 1.6 on these maps), handed verbatim to
 the port. In `ents` mode the port draws **id's entity list** (the `.ents` file),
 so the diff measures rendering, not the simulation; in both modes it draws id's
-particles (the `.parts` file). Note: that first-frame eye is
+particles (the `.parts` file) and id's dynamic lights, and its light styles animate
+id's light-style strings of the frame (the `.json`'s `lightstyle_maps`): like the
+entity list, they are the game's state — a trigger the player stood in may have put
+a light out — which the port's `view`, the map spawned and never run, cannot know.
+Note: that first-frame eye is
 12 units below the standing eye height — `V_CalcRefdef`'s stair smoothing starts
 from `static float oldz = 0` and clamps to 12 below the origin; `--settle 2` gives
 the steady eye. (The port's live path starts `oldz` at the origin, so its first
@@ -130,6 +134,7 @@ uv run oracle/exact_sweep.py                                   # e1m1/2/3/7, 19 
 uv run oracle/exact_sweep.py --maps start,e1m1,e1m2,e1m3,e1m4,e1m5,e1m6,e1m7,e1m8 --views standard,sweep,roll --mode ents
 uv run oracle/exact_sweep.py --spans 8      # id's portable D_DrawSpans8 against the port's --perspspan 8 (1: exact)
 uv run oracle/exact_sweep.py --res 640x480,1280x1024 --views standard,roll --oracles sse,x87,x87store,x87cw
+uv run oracle/exact_sweep.py --maps start,e1m1,e1m2,e1m3,e1m4,e1m5,e1m6,e1m7,e1m8 --views monsters,cases --mode ents --aspect 0.8333333
 uv run oracle/pixel_trace.py --maps e1m3 --view=-735.96875,-1591.96875,98.03125,30,210,0   # where a pixel parts
 ```
 
@@ -145,6 +150,13 @@ the same to the bit:
   world and entities, at id's 16-pixel spans, at id's portable 8 (`--spans 8`
   against the port's `--perspspan 8`) and at the exact perspective (`--spans 1`
   against `--exactpersp`): 1,242 frames;
+- the player among the monsters, awake (2026-10-06, `--views monsters,cases`): on
+  each of the nine maps 12 cameras around its groups of monsters, the player moved
+  there with noclip and god, the frame 12 after signon, id's monsters, missiles,
+  particles and lights drawn (100 of the 108 views show at least 100 pixels of
+  monsters; start's are its crucified zombies); four proof frames made for an
+  explainer film, and the 18 views that differed when 1,967 views were searched
+  for them (below); at the page's 320x200, at 16- and 8-pixel spans: 262 frames;
 - the same maps at 640x480, 640x400, 1024x768 and 1280x1024, at the page's
   0.8333 aspect (320x200 and 640x400), and at mip 0: 693 frames;
 - the registered game's maps and the mission packs' (59 maps, 23 views each, the
@@ -191,6 +203,31 @@ time handed over as a double, `--spans 8` and `1` drawing their liquids as the
 port does, the exact perspective's transcription in double, a mission pack's
 search path.
 
+**With the monsters awake** (2026-10-06, `fleet/pixel-ents`). Searching 1,967 views
+with the player among the monsters, on e1m1–e1m7, for proof frames, 18 differed. All
+are id's now, and all 18 are `exact_sweep.py`'s `cases`:
+- *The eye on a plane* (14 views on e1m3, 15,715 to 32,943 pixels; in world mode
+  too, `--view=-1123.8,-424.8,-368,19.4,225,0`, 31,741 pixels). `R_SetupFrame`'s
+  `r_dowarp` and `V_SetContentsColor` read the view leaf `Mod_PointInLeaf` finds,
+  where a point on a plane goes to the back child: the eye on the pool's surface
+  (z −368) is under water, and id warps. The port read `SV_PointContents`' rule (on
+  the plane, the front: air). Now `render::view_contents`, in `quaketool view` and
+  both clients; the live clients also add `V_CalcRefdef`'s 1/32 to the eye, which
+  keeps id's from ever sitting on such a plane.
+- *`D_DrawZSpans`' pairs* (21 pixels of an armour, a key and an ogre at column 1 of
+  an e1m6 view, before a door; 1 pixel of a fiend's edge on e1m5). The C stores
+  two z pixels as one `int`: `ltemp = izi >> 16; ...; ltemp |= izi & 0xFFFF0000`.
+  A negative first `izi` (where `zi * 2^31` passes an `int`: a plane within a unit
+  of the eye) fills the second pixel with -1, which a model in front passes; the
+  port stored that pixel's own wrapped `izi`, the nearest depth there is
+  (`edge::draw_zspan`). It was found as "brush model `*7` at the left edge"; *7 is
+  the door the models stand before.
+- *The harness* (2 views on e1m1, 56,011 and 54,085 pixels). The player, moved
+  into a `trigger_once`, had put light style 32 out in id's game; the port's
+  `view` spawns the map and never runs it. `compare.py` hands it id's light-style
+  strings now (the `.json`'s `lightstyle_maps`), which its own `R_AnimateLight`
+  animates; `--id-lightstyles` still hands id's values instead.
+
 **The x87 build, and which build is the target.** Against the default build
 (gcc 12 `-O2`, x87) 0.005% of pixels still differ: 638 of 13.2 M over the nine
 maps' 207 views, 5,210 of 86.8 M over the 59 registered and pack maps. All of it
@@ -225,13 +262,16 @@ difference between two libraries would show only on a knife edge).
 - `exact_sweep.py` — one process of id's C a view (fresh caches, as the port's
   `view`), the port beside it, the differing pixels counted per build
   (`--oracles x87,sse,x87store,x87cw` or `NAME=PATH`); the views (`standard`,
-  `sweep`, `roll`), modes, spans, resolutions, aspect, mip 0, `--pak1`/`--game-dir`;
+  `sweep`, `roll`; `monsters`, cameras around a map's groups of monsters with the
+  player moved there awake, and `cases`, fixed views in its `CASES`), modes, spans,
+  resolutions, aspect, mip 0, `--pak1`/`--game-dir`; a camera in solid is skipped;
   `--keep` writes every differing pixel to `diffs.json`. Its exit status is the
   SSE build's. Seconds for a few hundred views.
 - `pixel_trace.py` — one view, both renderers writing their frame's stages (id's
   `oracle_stages`, `c/stages_oracle.c`; the port's `quaketool view --stages`,
   `render/edge/stages.rs`): every float as its bits; per differing pixel the stages
-  that differ along its path, the nearest last; a count by stage.
+  that differ along its path, the nearest last; a count by stage. `--c-post` sets a
+  view up as `compare.py`'s does (the player moved among monsters).
 - The builds: `oracle/build.sh` (x87), `ORACLE_FPMATH=sse` and `=x87store`; the
   `-oracle_fpcw` flag (`compare.py --fpcw`).
 
@@ -483,18 +523,23 @@ has none of). Timings are noisy: compare within one sitting.
   reproduces `D_DrawSpans16` in C with the asm's integer steps (since
   `quake/w2b`; before, `D_DrawSpans8`'s — the two differ on 0-40 pixels of a
   320x200 frame), not the asm's x87 single-precision chop
-  rounding. Other asm-vs-C differences are unmeasured. The x87 build in id's
+  rounding. Other asm-vs-C differences are unmeasured but one: the asm's
+  `D_DrawZSpans` (`d_draw.s`) shifts a pair's first `izi` logically (`shrl`), so
+  the x86 binaries never stored the C's -1 in the second pixel; the port follows
+  the C ("With the monsters awake": 22 pixels of two views are where the asm's
+  frame is the port's before `fleet/pixel-ents`). The x87 build in id's
   rendering FPU state (`--fpcw`) differs from the port on 0.014% of pixels ("Bit
   for bit").
 - 32-bit build with modern gcc 12 (`-O2 -fwrapv -fno-strict-aliasing`), not MSVC
   1996. The SSE build is the port's exact target: the C with every operation in
   its type, which any conforming compiler gives; the x87 build differs from it by
   gcc's choice of the float variables it keeps in 80-bit registers ("Bit for bit").
-- The views of "Bit for bit" (some 3,300 frames over the shareware's, the
-  registered game's and the packs' maps, 320x200-1280x1024), the demo frames of
-  `demo_lights.py`, particles in one burst, explosions, the underwater warp in one
-  view. The intermission was not compared (the oracle can render it; nobody
-  looked yet). Dynamic lights: the muzzle-flash frames above and the demo frames.
+- The views of "Bit for bit" (some 3,600 frames over the shareware's, the
+  registered game's and the packs' maps, 320x200-1280x1024, monsters awake in 262
+  of them), the demo frames of `demo_lights.py`, particles in one burst,
+  explosions, the underwater warp in e1m1's pool and on e1m3's pool plane. The
+  intermission was not compared (the oracle can render it; nobody looked yet).
+  Dynamic lights: the muzzle-flash frames above and the demo frames.
 - The entity mode tests rendering of id's entity list; it says nothing about
   whether the port's simulation produces the same list.
 - `viewsize` below 120: the 3-D view rectangle is compared (`--viewsize N`);
@@ -798,7 +843,7 @@ part:
 | `census` | `quaketool census`: all nine maps through the real QuakeC (the report, by hash) | the recorded list |
 | `edicts` | id's server edicts (this oracle) diffed against the port's, nine maps at t = 1.7 / 4.7 / 10.7 s (`census/`): the diff report, by hash. What it still shows: each matched entity's number one below id's (the player is the port's last edict, CENSUS L25); monsters' random idle frames and wandering; a door pair on e1m6 caught at another point of its slide at 1.7 s; the fireballs and bubbles random numbers start. The statics' rows are gone since `fleet/makestatic` (1,185 rows to 606) | id's C: the diff report as recorded |
 | `oracle` | `compare.py --aspect 0.8333333 --spans 16 --sse`: the eight standard rows | id's C built with SSE floats: none below its recorded match, 100.0000% every row (against the x87 build e1m7 read 99.9969%, two pixels, before `fleet/pixelexact`) |
-| `exact` | `exact_sweep.py`: the nine maps' first frames, 18 yaws and pitches and 4 rolled views, entities drawn, at 320x200 and at the page's 640x400 and aspect (414 frames) | id's C built with SSE floats: not one pixel differs (the x87 build's count is in `exact.txt`, not judged) |
+| `exact` | `exact_sweep.py`: the nine maps' first frames, 18 yaws and pitches and 4 rolled views, entities drawn, at 320x200 and at the page's 640x400 and aspect (414 frames); and the player moved among each map's monsters, awake, 12 views a map, with four proof frames and every view once found differing (`--views monsters,cases`), at the page's 320x200 at id's 16- and 8-pixel spans (262 frames) | id's C built with SSE floats: not one pixel differs (the x87 build's count is in `exact.txt`, not judged) |
 | `screen2d` | `screen2d.py`, 320x200 and 640x400, the port in its Classic preset | id's C: no shot below its recorded `2d exact%` (the residues above) |
 | `demolerp` | `demo_lerp.py`: id's client against the port's over the attract loop, frame by frame — the camera, the entities and the dynamic lights (below) | id's C: every demo MATCH |
 | `sound` | `sound.py`: id's mixer against the engine's `Fixes::NONE`; `sound_walk.py`: a walk through id's game and the port's | id's C: every case sample-identical; every call the walk makes identical |

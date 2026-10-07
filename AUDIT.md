@@ -376,6 +376,14 @@ marked *(2026-06)* were not re-checked since. Struck items were closed on 2026-0
 - The live clients hand the renderer their float clocks (`w.clock`, the demo's `v.time`)
   where id's `cl.time` is a double, and make no random `ST_RAND` syncbase; the renderer
   takes both, and the oracle's views hand it id's ("Bit for bit", pixelexact).
+- `D_DrawZSpans` is id's C, whose pair store writes -1 after a negative `izi`; id's x86
+  asm (`d_draw.s`, `shrl`) does not, so the binaries players ran drew as the port did
+  before (22 pixels in two views of the monster search; "Every view tried, with
+  monsters", pixel-ents). The C is the target, as everywhere but the spans.
+- The live clients' eye is V_CalcRefdef's since pixel-ents (the 1/32 nudge), but no
+  check compares it with id's `r_refdef.vieworg` frame by frame (`demo_lerp.py`
+  compares the view entity's origin); id's stair smoothing starts from `static oldz =
+  0`, the port's from the origin (oracle README, "Matching inputs").
 
 **The 2026 profile** (not Classic; what the port's own departures still leave)
 - Uncapped, a few per-frame roundings in id's code still drift with the frame rate:
@@ -395,6 +403,12 @@ marked *(2026-06)* were not re-checked since. Struck items were closed on 2026-0
   entity 0 where `CL_ParseTEnt` uses -1 (nothing audible) (audio).
 - The mixer does not model `GetSoundtime`'s chop after 2^30 pairs (`paintedtime` is
   64-bit), `snd_show`, `soundlist`/`soundinfo` or `playvol` (audio).
+- The listener is the eye without the bob, the stair smoothing and the 1/32 nudge (the
+  live client's own choice, "so audio panning does not jitter"); id's `S_Update` gets
+  `r_origin`, the view's eye with all three (host.c), and `S_UpdateAmbientSounds` takes
+  its leaf there. Round 3 called the bob's exclusion faithful; host.c says otherwise.
+  The ambient leaf's rule is id's (`point_in_leaf`) (pixel-ents, found checking the
+  view leaf's callers).
 
 **Files and the command line**
 - ~~`-rogue`/`-hipnotic`/`-game`, and a `progs.dat` with builtins id's engine never had
@@ -485,8 +499,10 @@ group syncbase (Round 2, Round 5).
 **Tooling**
 - `quaketool view --vrect` draws an underwater view unwarped, so the warp below viewsize
   120 is not compared (polish2).
-- The oracle harness hands the port light styles 0.1 s off at settle ≥ 3 on e1m1
-  (oracle README); sprites and the intermission were never compared.
+- ~~The oracle harness hands the port light styles 0.1 s off at settle ≥ 3 on e1m1~~:
+  the port's `R_AnimateLight`, fixed on pixelexact. Since pixel-ents `compare.py` hands
+  the port id's light-style strings, the game's state. Sprites and the intermission were
+  never compared.
 
 **Not verified**
 - A real browser on a real display: every browser check ran headless (Chromium, and
@@ -4029,3 +4045,72 @@ demo's `v.time`): `Scene::time` takes a double now, the clients do not yet give 
 id's random `ST_RAND` syncbase is not made by the live clients (the renderer takes
 one). The game code's `AngleVectors` is the double one (`math::angle_vectors`), the
 x87 build's near enough; the server's and QuakeC's arithmetic was not part of this.
+
+## Every view tried, with monsters (2026-10-06, branch `fleet/pixel-ents`)
+
+The user asked for enemies in the comparisons. Searching 1,967 views with
+the player moved among the monsters of e1m1–e1m7 (`compare.py --modes ents --sse`,
+320x200 at the page's aspect, 16-pixel spans) for an explainer film's proof frames, 18
+differed from id's C. Three causes in the port, one in the harness; all 18 are id's
+frames now, and every one is a fixed case of `exact`:
+
+- ✅ *The view leaf* (14 views on e1m3, 15,715 to 32,943 px; in world mode too,
+  `--view=-1123.8,-424.8,-368,19.4,225,0`, 31,741 px). `R_SetupFrame`'s `r_dowarp` and
+  `V_SetContentsColor` read `r_viewleaf->contents`, the leaf `Mod_PointInLeaf` finds:
+  on a plane, the back child. The port asked `world::point_contents`
+  (`SV_HullPointContents`: on a plane, the front) in `quaketool view`
+  (bin/quaketool/render/view.rs:343), live play (cl_main.rs:1141) and demos
+  (cl_demo.rs:962). With the
+  eye on e1m3's pool surface (z −368) id's frame is under water and warped, the port's
+  was not. Now `render::view_contents` in all three, for the warp and the tint; the
+  ambient sound's leaf was id's already (`point_in_leaf`). That rule alone would have
+  turned the live clients the wrong way: id's eye never sits on such a plane, because
+  `V_CalcRefdef` moves `r_refdef.vieworg` 1/32 along each axis, and the clients left the
+  nudge out (cl_demo.rs said so). They add it now (`render::nudge_vieworg`), and the gun
+  is at id's place with it (its offset took the nudge back out of a camera that had
+  none). The oracle's own `.json` shows the nudge: `natural_vieworg` is the origin on
+  the wire's 1/8 grid, plus 22, plus 1/32.
+- ✅ *`D_DrawZSpans`' pairs* (e1m6, 21 px in column 1; e1m5, 1 px of a fiend's edge).
+  The C stores the 1/z two pixels at a time, as one `int` at an even address: `ltemp =
+  izi >> 16; izi += izistep; ltemp |= izi & 0xFFFF0000`. A negative first `izi` — where
+  `zi * 2^31` passes an `int`, a plane within a unit of the eye at that pixel, x86's
+  conversion giving `INT_MIN` and the steps wrapping — fills the second pixel's half
+  with its sign: -1, which any model in front passes. The port stored that pixel's own
+  `izi >> 16`, wrapped to the nearest depth there is, and the model failed. On e1m6 an
+  armour, a key and an ogre stand at the screen's left edge before a door (`*7`) whose
+  plane passes the eye there (the search called it "`*7` drawn black"; it was the
+  models over it); on e1m5 a face's 1/z runs from 0.05 to 4 along the row
+  (`edge::draw_zspan`; the parity is the z-buffer's own, `d_zwidth` and the view's
+  corner: `RenderOptions::zbuffer_place`). The background's -0.9 pairs read -1 too,
+  which no pixel can show. id's x86 asm (`d_draw.s`) shifts logically and has no -1
+  (Open, Renderer).
+- ✅ *The harness* (e1m1, 2 views, 56,011 and 54,085 px). The player moved there stood
+  in a `trigger_once` that put light style 32 ("t3") out in id's game; the port's
+  `view` spawns the map and never runs it, so its lights were on. The entity list was
+  already id's; now the light-style strings are too (the `.json`'s `lightstyle_maps`,
+  `quaketool view --style-maps`, `compare.py`'s default), and the port's own
+  `R_AnimateLight` animates them at id's clock. Not `--id-lightstyles` (id's values) by
+  default: that would have bypassed `R_AnimateLight` in every ents-mode check.
+
+**The tests.** `exact_sweep.py` has two new kinds of view. `monsters`: around each
+map's groups of monsters (the entity lump, normal skill) a camera every 45 degrees,
+22 units over the group's middle monster and 260 units out (or 200, 150, 340: the first
+in the open with a clear line to it), 12 a map taken a yaw at a time across the groups;
+the player is moved there with noclip and god, the monsters wake, turn and attack, and
+the shot is the twelfth frame after signon, id's monsters, missiles, particles and
+lights drawn by both. 100 of the 108 views show at least 100 px of monsters (start's
+are its crucified zombies). `cases`: the film's four proof frames and the 18 views
+above. classic_check's `exact` runs both on the nine maps at the page's 320x200 at
+16- and 8-pixel spans: 262 frames more, 676 in all, no pixel off against the SSE
+build. Unit tests: `z_spans_store_in_pairs_as_d_drawzspans`,
+`the_view_on_a_plane_is_behind_it_where_the_server_is_in_front`.
+
+**Goldens and recordings.** The goldens are unchanged (`790c53d3` / `3684efc6` /
+`e18bb516`): `quaketool scene` never had an eye on a plane or a model over a negative
+1/z. classic_check's 21 `play` frame hashes are re-recorded (the camera 1/32 unit
+over); the z-span fix alone moved none of them, and every sound tally, timedemo,
+census, edicts, oracle, screen2d, demolerp and sound value is unchanged.
+
+**Still open.** The listener and the asm's `D_DrawZSpans` (Open). The monster views
+are the shareware's; the registered game's and the packs' monsters were compared only
+where they spawn, in each map's first frame.

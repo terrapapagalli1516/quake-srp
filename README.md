@@ -21,9 +21,9 @@ which draws the preset's values: Screen size 110 (no inventory bar) and perspect
 
 id Software's *Quake* (1996), ported to Rust from the WinQuake C source, with only the
 standard library and no `unsafe` code. With every extra switched off it is id's game,
-checked against id's own C: every pixel of the 3-D view in every view tried, the sound
-mixer sample for sample, and in demo playback the camera, every entity and every dynamic
-light, frame by frame. What is known to differ still is a list
+checked against id's own C: every pixel of the 3-D view in every view tried, monsters awake
+among them, the sound mixer sample for sample, and in demo playback the camera, every entity
+and every dynamic light, frame by frame. What is known to differ still is a list
 ([AUDIT.md](AUDIT.md), "Open"). Every check is one command. By default it is the same software renderer given a 2026 machine. It plays
 in a browser; natively, `quaketool` runs the same engine without a window.
 
@@ -49,7 +49,8 @@ dependencies, no `unsafe`, and Classic is id's game, proven for anything touched
 - **Checked against id's code.** id's C, built headless (the "oracle", in `oracle/`), is the
   reference. With every extra switched off, the port and id's C agree on:
   - every pixel of the 3-D view, in every view tried: thousands of them, over the
-    shareware, registered and mission-pack maps, at sizes up to 1280x1024 (id's C with
+    shareware, registered and mission-pack maps, at sizes up to 1280x1024, and with the
+    player among each map's monsters, awake and attacking (id's C with
     every float operation in the type it declares: [Proof](#proof), "Which C");
   - the status bar, menus and console, apart from a few explained differences (the version
     string, the video-mode list, the port's own Options rows);
@@ -244,7 +245,7 @@ recorded from a tree known to be right. Six run id's C next to the port:
 | `census` | a headless playthrough of all nine maps | recorded |
 | `edicts` | the entities' fields against id's server on all nine maps (the known differences, such as the player's edict number and random numbers, are recorded) | id's C |
 | `oracle` | the 3-D view, pixel by pixel, in four maps' first frames, with and without the entities | id's C |
-| `exact` | the 3-D view in 414 views: each of the nine maps' first frames, turned, tilted and rolled, at two sizes; not one pixel may differ | id's C |
+| `exact` | the 3-D view in 676 frames: each of the nine maps' first frames, turned, tilted and rolled, at two sizes; and the player moved among each map's monsters, awake, with every view once found differing, at id's 16- and 8-pixel spans; not one pixel may differ | id's C |
 | `screen2d` | the status bar, menus and console | id's C |
 | `demolerp` | demo playback, frame by frame | id's C |
 | `sound` | the mixer, sample by sample | id's C |
