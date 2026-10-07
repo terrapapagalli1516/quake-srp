@@ -14,8 +14,8 @@ import json
 import os
 import subprocess
 import wave
-from dataclasses import dataclass, field
 from collections.abc import Callable
+from dataclasses import dataclass, field
 
 import numpy as np
 from PIL import Image, ImageDraw
@@ -121,7 +121,6 @@ def plain(name: str) -> Callable[[Ctx], None]:
             K.events_raw(c, st, base)
         if side:
             K.sidecar(c, base, n)
-    make.__qualname__ = f"plain[{name}: {PLAIN[name]}]"
     return make
 
 
