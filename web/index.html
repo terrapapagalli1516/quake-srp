@@ -1734,18 +1734,66 @@ function ringState() {
 const storage = {
   db: null,
   fallback: false,               // no IndexedDB: localStorage, text only
+  reopening: null,               // reopen()'s promise, while it runs
+  askedPersist: false,
   open() {
     return new Promise(resolve => {
       let req;
       try { req = indexedDB.open('quake-rs', 2); } catch (e) { this.fallback = true; resolve(); return; }
-      // 1: the game directory's files; 2: the player's CD tracks, kept apart
-      // (never handed to the worker: the page plays them a track at a time).
-      req.onupgradeneeded = () => {
-        const db = req.result;
-        for (const name of ['files', 'music']) if (!db.objectStoreNames.contains(name)) db.createObjectStore(name);
-      };
-      req.onsuccess = () => { this.db = req.result; resolve(); };
+      req.onupgradeneeded = () => this.upgrade(req.result);
+      req.onsuccess = () => { this.keep(req.result); resolve(); };
       req.onerror = () => { this.fallback = true; resolve(); };
+    });
+  },
+  // 1: the game directory's files; 2: the player's CD tracks, kept apart
+  // (never handed to the worker: the page plays them a track at a time).
+  upgrade(db) {
+    for (const name of ['files', 'music']) if (!db.objectStoreNames.contains(name)) db.createObjectStore(name);
+  },
+  // The connection can go away under the page. The browser closes it when
+  // the site's data is cleared (the `close` event; eviction and a lost
+  // backing store do the same), and every transaction after that throws
+  // InvalidStateError. Another tab opening a newer version of the database
+  // asks this one to let go (`versionchange`): it does, rather than leave
+  // that tab blocked. Either way the next transaction opens it again
+  // (files(), reopen()).
+  keep(db) {
+    this.db = db;
+    db.onversionchange = () => { db.close(); if (this.db === db) this.db = null; };
+    db.onclose = () => { if (this.db === db) this.db = null; };
+  },
+  // Open the database again, at whatever version it now has (a newer page
+  // may have raised it; one cleared away is made afresh). One at a time:
+  // writes that fail together share it.
+  reopen() {
+    return this.reopening ||= new Promise((resolve, reject) => {
+      const old = this.db;
+      this.db = null;
+      try { if (old) old.close(); } catch (e) {}
+      const req = indexedDB.open('quake-rs');
+      req.onupgradeneeded = () => this.upgrade(req.result);
+      req.onsuccess = () => { this.keep(req.result); resolve(); };
+      req.onerror = () => reject(req.error);
+    }).finally(() => { this.reopening = null; });
+  },
+  // One transaction on the files store: `op(store)` makes its requests, and
+  // the promise gets op's answer once the transaction has completed. A
+  // transaction that fails is tried once more on a connection opened
+  // again (keep(), above), except when the store is full: that stays full.
+  async files(mode, op) {
+    try { return await this.transact(mode, op); } catch (e) {
+      if (e && e.name === 'QuotaExceededError') throw e;
+      console.warn('storage: opening the database again after', e);
+      await this.reopen();
+      return this.transact(mode, op);
+    }
+  },
+  transact(mode, op) {
+    return new Promise((resolve, reject) => {
+      if (!this.db) throw new DOMException('The database connection is closed.', 'InvalidStateError');
+      const tx = this.db.transaction('files', mode), answer = op(tx.objectStore('files'));
+      tx.oncomplete = () => resolve(answer);
+      tx.onerror = tx.onabort = () => reject(tx.error || new DOMException('The transaction was aborted.', 'AbortError'));
     });
   },
   // Every kept file, as [path, Uint8Array] pairs.
@@ -1758,33 +1806,32 @@ const storage = {
       }
       return out;
     }
-    return new Promise((resolve, reject) => {
-      const tx = this.db.transaction('files'), st = tx.objectStore('files');
-      const keys = st.getAllKeys(), vals = st.getAll();
-      tx.oncomplete = () => resolve(keys.result.map((k, i) => [k, new Uint8Array(vals.result[i])]));
-      tx.onerror = () => reject(tx.error);
-    });
+    const { keys, vals } = await this.files('readonly', st => ({ keys: st.getAllKeys(), vals: st.getAll() }));
+    return keys.result.map((k, i) => [k, new Uint8Array(vals.result[i])]);
   },
-  put(path, data) {
-    if (this.fallback) {
-      try { localStorage.setItem(FILE_PREFIX + path, new TextDecoder().decode(data)); }
-      catch (e) { return Promise.reject(e); }
-      return Promise.resolve();
-    }
-    return new Promise((resolve, reject) => {
-      const tx = this.db.transaction('files', 'readwrite');
-      tx.objectStore('files').put(data, path);
-      tx.oncomplete = () => resolve();
-      tx.onerror = tx.onabort = () => reject(tx.error);
-    });
+  // (async: whatever throws, even before the first await, rejects.)
+  async put(path, data) {
+    if (this.fallback) localStorage.setItem(FILE_PREFIX + path, new TextDecoder().decode(data));
+    else await this.files('readwrite', st => { st.put(data, path); });
   },
-  remove(path) {
-    if (this.fallback) { try { localStorage.removeItem(FILE_PREFIX + path); } catch (e) {} return Promise.resolve(); }
-    return new Promise(resolve => {
-      const tx = this.db.transaction('files', 'readwrite');
-      tx.objectStore('files').delete(path);
-      tx.oncomplete = tx.onerror = () => resolve();
-    });
+  // Never fails: a file left behind is only one the program no longer reads.
+  async remove(path) {
+    try {
+      if (this.fallback) localStorage.removeItem(FILE_PREFIX + path);
+      else await this.files('readwrite', st => { st.delete(path); });
+    } catch (e) { console.error('storage', e); }
+  },
+  // Ask, once a session at the first file kept, that the browser keep this
+  // site's storage under pressure rather than evict it. Chromium and Safari
+  // decide by themselves and say nothing (an installed app, a bookmark, how
+  // much the site is used); Firefox would put a prompt over the game, so it
+  // is not asked there. The answer changes nothing on the page.
+  persist() {
+    if (this.askedPersist) return;
+    this.askedPersist = true;
+    const s = navigator.storage;
+    if (this.fallback || !s || !s.persist || /Firefox\//.test(navigator.userAgent)) return;
+    s.persisted().then(yes => yes || s.persist()).catch(() => {});
   },
   // The CD's tracks: the music store's values are the player's files
   // (Blobs), keyed by "<game dir>:<track>" — id1, hipnotic and rogue each
@@ -1808,7 +1855,8 @@ const storage = {
       req.onerror = () => resolve(null);
     });
   },
-  musicPut(dir, track, blob) {
+  async musicPut(dir, track, blob) {
+    if (!this.db) await this.reopen();   // closed under the page (keep())
     return new Promise((resolve, reject) => {
       const tx = this.db.transaction('music', 'readwrite');
       tx.objectStore('music').put(blob, `${dir}:${track}`);
@@ -1848,16 +1896,46 @@ const storage = {
   },
   // A file the program wrote or removed (wasi.js's 'fs' message).
   apply(m) {
-    const done = m.op === 'write' ? this.put(m.path, m.data) : this.remove(m.path);
-    done.catch(e => {
+    if (m.op !== 'write') { this.remove(m.path); return; }
+    this.persist();
+    this.put(m.path, m.data).catch(async e => {
       // The C's "ERROR: couldn't open." came at the write; this failure
       // comes after it, so it goes to the console on its own.
       console.error('storage', e);
-      callLine('exec echo ERROR: couldn\'t keep ' + m.path + ' (storage full?)');
+      const lines = await keepFailure(m.path, e);
+      callLine('exec ' + lines.map(echoLine).join(';')).catch(() => {});
     });
   },
 };
 const FILE_PREFIX = 'quake-rs.file.';
+
+// What the console says when a file the program wrote could not be kept:
+// the browser's own name and words for the error, what to do about a full
+// store, and what it means. The program's write succeeded (its "done."
+// stands, and the file is there to load until the page goes); only the copy
+// the next start reads is missing.
+async function keepFailure(path, e) {
+  const name = (e && e.name) || 'Error', why = e && e.message ? `${name}: ${e.message}` : name;
+  const lines = [`ERROR: couldn't keep ${path} (${why})`];
+  if (name === 'QuotaExceededError' && storage.fallback) {
+    lines.push("This browser's private or limited mode keeps a few MB for this site, and they are full.");
+  } else if (name === 'QuotaExceededError') {
+    const est = await (navigator.storage && navigator.storage.estimate ? navigator.storage.estimate() : Promise.reject())
+      .catch(() => null);
+    const mb = (n) => `${(n / 1048576).toFixed(1)} MB`;
+    lines.push("The browser's storage for this site is full"
+      + (est && est.quota ? ` (it uses ${mb(est.usage)} of the ${mb(est.quota)} it allows)` : '') + '.');
+    lines.push('Free some disk space, or remove the paks you added (in the drawer).');
+  }
+  lines.push(`This session still has ${path}, but a reload loses it.`);
+  return lines;
+}
+// A console line as `echo` prints it verbatim: one quoted argument (bare,
+// COM_Parse would split "couldn't" and "(x)" into tokens), in the
+// console's ASCII.
+function echoLine(text) {
+  return 'echo "' + text.replace(/["‘’“”]/g, "'").replace(/[^ -~]/g, '?') + '"';
+}
 
 // The page kept its saves and three settings in localStorage before the
 // program had files (`quake-rs.sav.<name>`, `quake-rs.resolution`,
@@ -2119,7 +2197,7 @@ function planServerFiles(list, gameDir) {
 
 // Keep what the plan says and restart the game with it.
 async function addContent(items) {
-  if (storage.fallback || !storage.db) { contentShow('your files need IndexedDB, which this browser does not offer here', false); return; }
+  if (storage.fallback) { contentShow('your files need IndexedDB, which this browser does not offer here', false); return; }
   contentShow('reading your files…', true);
   const plan = await planContent(items);
   if (!plan.paks.length && !plan.music.length) { contentShow(plan.notes.join('; ') || 'nothing to add', false); return; }
@@ -2127,7 +2205,8 @@ async function addContent(items) {
     for (const { path, file } of plan.paks) await storage.put(path, new Uint8Array(await file.arrayBuffer()));
     for (const { dir, track, file } of plan.music) await storage.musicPut(dir, track, file);
   } catch (e) {
-    contentShow('could not keep your files: ' + (e && e.message || e) + ' (storage full?)', false);
+    const full = e && e.name === 'QuotaExceededError' ? "the browser's storage for this site is full: " : '';
+    contentShow(`could not keep your files: ${full}${e && e.name ? `${e.name}${e.message ? ': ' + e.message : ''}` : e}`, false);
     return;
   }
   // id1's own path reads as its bare name (as it always did: "pak1.pak",
