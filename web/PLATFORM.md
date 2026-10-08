@@ -468,8 +468,25 @@ path; there is no `fd_readdir`); anything else a newer `std` imports answers
   default, not a choice, so it is dropped like the other restated defaults
   (`LEGACY_DEFAULTS`): that player gets the preset's own Screen size, 110 in
   slop. Any other size is kept.
-- A storage failure after the fact (quota) is printed on the console with
-  `echo`, since the program's write already succeeded.
+- **When keeping fails.** The program's write has already succeeded (its
+  file stays in the worker's file system, and loads, until the page goes),
+  so a failure to keep the copy comes after id's "done." on its own, as
+  `echo` lines: `ERROR: couldn't keep id1/s10.sav (<name>: <message>)`, the
+  browser's own words; for a full store (`QuotaExceededError`) how much the
+  site uses of what the browser allows it (`navigator.storage.estimate()`)
+  and what to do (free disk space, remove the paks you added), or, on the
+  localStorage fallback, that this is the browser's private or limited
+  mode; and that a reload loses the file. The connection itself can go
+  away under the page — the browser closes it when the site's data is
+  cleared or evicted, or its backing store is lost, after which every
+  transaction throws `InvalidStateError` — and the page lets it go for
+  another tab that opens a newer version of the database (`versionchange`)
+  rather than leave that tab blocked; so a failed transaction is tried once
+  more on a connection opened again (`storage.files`), a full store
+  excepted. At the first file kept in a session the page asks the browser
+  to keep the site's storage under pressure (`navigator.storage.persist()`,
+  which Chromium and Safari decide on silently; not in Firefox, which
+  would prompt). `web/verify_storage.py` checks all of it.
 
 ## Your files
 
