@@ -309,6 +309,8 @@ GPL-2.0-or-later; the text is in [LICENSE](LICENSE). The port is derived from th
 source that id Software released under the GPL (© 1996–1997 id Software, Inc.); the port's
 own code is © 2026 its authors, under the same licence.
 
+Quake is a trademark of id Software. quake-srp is not affiliated with or endorsed by id Software.
+
 No game data is in this repository. The shareware data that a demo serves (`id1/pak0.pak`)
 is id's, unmodified, under id's own terms: the shareware licence (`SLICNSE.TXT` in
 `quake106.zip`), whose section 6, "Permitted Distribution", grants "the limited right to
