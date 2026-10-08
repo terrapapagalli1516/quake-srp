@@ -30,12 +30,23 @@ if [ -e "$OUT" ] && [ -n "$(ls -A "$OUT")" ]; then
     echo "$OUT is not empty: give a new directory" >&2; exit 1
 fi
 
-(cd "$ROOT/quake-wasm" && cargo build --release --target wasm32-wasip1-threads)
+# The program keeps each source file's path for its panic messages: the
+# build machine's directories become `quake-srp/...`, and the standard
+# library's source (in the toolchain's own directory) becomes `rust/...`.
+# RUSTFLAGS replaces quake-wasm/.cargo/config.toml's flags, so its +simd128
+# is repeated here.
+(cd "$ROOT/quake-wasm" \
+    && STD_SRC="$(rustc --print sysroot)/lib/rustlib/src/rust" \
+    && RUSTFLAGS="-C target-feature=+simd128 --remap-path-prefix=$ROOT=quake-srp --remap-path-prefix=$STD_SRC=rust" \
+        cargo build --release --target wasm32-wasip1-threads)
 
 mkdir -p "$OUT/id1"
 OUT=$(cd "$OUT" && pwd)
 (cd "$ROOT/web" && uv run --no-project python -c 'import sys, isolated; isolated.copy_page(sys.argv[1])' "$OUT")
 cp "$ROOT/quake-wasm/target/wasm32-wasip1-threads/release/quake.wasm" "$OUT/quake.wasm"
+if grep -aq -e "$ROOT" -e "$HOME/" "$OUT/quake.wasm"; then
+    echo "quake.wasm still names a directory of this machine" >&2; exit 1
+fi
 cp "$PAK" "$OUT/id1/pak0.pak"
 LICENCE=$(dirname "$(dirname "$PAK")")/SLICNSE.TXT
 if [ -f "$LICENCE" ]; then
