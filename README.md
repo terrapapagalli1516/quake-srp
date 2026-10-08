@@ -2,7 +2,7 @@
 
 *srp: slop rust port* — a dare: read the [Proof](#proof).
 
-**Play it:** `DEMO-URL` (id's shareware episode, in the browser)
+**Play it:** https://quake-srp.pages.dev (id's shareware episode, in the browser)
 
 **Browsers:** tested in Chromium and Firefox (headless and headed) and on an Android phone; not
 yet in Safari. Firefox has no Keyboard Lock, so there one Esc in fullscreen also leaves it. The

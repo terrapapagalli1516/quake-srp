@@ -5,7 +5,7 @@ edition = "2021"
 rust-version = "1.74"
 description = "id Software's Quake (1996) in Rust, ported from WinQuake's GPL source: the engine and the quaketool CLI"
 license = "GPL-2.0-or-later"
-repository = "local"
+repository = "https://github.com/terrapapagalli1516/quake-srp"
 authors = ["Ported from id Software's Quake (GPLv2) by Claude"]
 
 # Zero external dependencies: everything is built on std so `cargo build`

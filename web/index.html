@@ -156,11 +156,11 @@
   #status { flex:1 1 12rem; min-width:0; color:#a08c5a; white-space:nowrap;
     overflow:hidden; text-overflow:ellipsis; }
   #barBtns { display:flex; gap:16px; }
-  button.link { font:inherit; font-size:12.5px; background:none; border:0; padding:0;
+  button.link, a.link { font:inherit; font-size:12.5px; background:none; border:0; padding:0;
     color:var(--dim); cursor:pointer; text-decoration:underline; text-decoration-color:transparent;
     text-underline-offset:3px; transition:color .15s, text-decoration-color .15s; }
-  button.link:hover { color:var(--bronze-hi); text-decoration-color:currentColor; }
-  button.link:focus-visible { outline:2px solid var(--bronze); outline-offset:3px; border-radius:2px; }
+  button.link:hover, a.link:hover { color:var(--bronze-hi); text-decoration-color:currentColor; }
+  button.link:focus-visible, a.link:focus-visible { outline:2px solid var(--bronze); outline-offset:3px; border-radius:2px; }
   button.link[aria-expanded="true"], #sndBtn.on { color:var(--bronze-hi); }
   /* The bar's "game" menu: the same choices, opening upward over the
      view's right corner (the bar is the page's last line in the window) —
@@ -302,7 +302,7 @@
       <input id="fileInput" type="file" multiple hidden>
     </section>
     <p class="aside">Shortcuts: <button id="walkBtn" class="link">walk e1m1</button> · <button id="demoBtn" class="link">play demo1 (e1m3)</button></p>
-    <p class="aside">id Software's 1996 Quake, ported to Rust from its GPL source and software-rendered in your browser — no GPU, no dependencies. Shareware episode included.</p>
+    <p class="aside">id Software's 1996 Quake, ported to Rust from its GPL source and software-rendered in your browser — no GPU, no dependencies. Shareware episode included. From Terra Papagalli · <a class="link" href="https://github.com/terrapapagalli1516/quake-srp" target="_blank" rel="noopener">source on GitHub</a>.</p>
   </div>
 <div id="dropHint" class="hidden">drop your Quake files — pak1.pak, a mission pack's pak0.pak, the music</div>
 <script>
