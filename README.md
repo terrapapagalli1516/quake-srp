@@ -317,3 +317,5 @@ is id's, unmodified, under id's own terms: the shareware licence (`SLICNSE.TXT` 
 distribute, free of charge only, the Software as a whole". The registered game and the
 mission packs are not redistributable; the port plays them only from a player's own
 copies.
+
+Contact (including legal notices): terrapapagalli1516@gmail.com
