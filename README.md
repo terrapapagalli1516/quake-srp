@@ -314,7 +314,8 @@ Quake is a trademark of id Software. quake-srp is not affiliated with or endorse
 No game data is in this repository. The shareware data that a demo serves (`id1/pak0.pak`)
 is id's, unmodified, under id's own terms: the shareware licence (`SLICNSE.TXT` in
 `quake106.zip`), whose section 6, "Permitted Distribution", grants "the limited right to
-distribute, free of charge only, the Software as a whole". The registered game and the
+distribute, free of charge only, the Software as a whole"; so the demo also serves id's
+archive itself, `quake106.zip`, unmodified, beside the page. The registered game and the
 mission packs are not redistributable; the port plays them only from a player's own
 copies.
 

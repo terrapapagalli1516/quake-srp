@@ -2,7 +2,8 @@
 # Fetch id's shareware Quake 1.06 and put its pak where the tests, the oracle
 # and the deploy recipes look for it: quake-data/ID1/PAK0.PAK, with the
 # shareware licence beside it (quake-data/SLICNSE.TXT, which a public demo
-# serves with the pak: LICENSE's notice, README "License").
+# serves with the pak: LICENSE's notice, README "License"), and id's archive
+# itself kept as it came (quake-data/quake106.zip, which the demo also serves).
 #
 #   ci/fetch_shareware.sh            # into quake-data/ at the repository's root
 #   ci/fetch_shareware.sh DIR        # into DIR/
@@ -17,7 +18,8 @@ URL=https://raw.githubusercontent.com/Jason2Brownlee/QuakeOfficialArchive/main/b
 ZIP_SHA256=ec6c9d34b1ae0252ac0066045b6611a7919c2a0d78a3a66d9387a8f597553239
 PAK_SHA256=35a9c55e5e5a284a159ad2a62e0e8def23d829561fe2f54eb402dbc0a9a946af
 
-if [ -f "$DEST/ID1/PAK0.PAK" ] && echo "$PAK_SHA256  $DEST/ID1/PAK0.PAK" | sha256sum -c --quiet >/dev/null 2>&1; then
+if [ -f "$DEST/ID1/PAK0.PAK" ] && echo "$PAK_SHA256  $DEST/ID1/PAK0.PAK" | sha256sum -c --quiet >/dev/null 2>&1 \
+    && [ -f "$DEST/quake106.zip" ] && echo "$ZIP_SHA256  $DEST/quake106.zip" | sha256sum -c --quiet >/dev/null 2>&1; then
     echo "$DEST/ID1/PAK0.PAK: already there"
     exit 0
 fi
@@ -32,4 +34,5 @@ echo "$PAK_SHA256  $WORK/ID1/PAK0.PAK" | sha256sum -c --quiet
 mkdir -p "$DEST/ID1"
 mv "$WORK/ID1/PAK0.PAK" "$DEST/ID1/PAK0.PAK"
 mv "$WORK/SLICNSE.TXT" "$DEST/SLICNSE.TXT"
+mv "$WORK/quake106.zip" "$DEST/quake106.zip"
 echo "$DEST/ID1/PAK0.PAK: id's shareware pak, sha256 ${PAK_SHA256:0:8}"
