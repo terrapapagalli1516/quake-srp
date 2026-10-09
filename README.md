@@ -1,4 +1,4 @@
-# quake-srp
+# Quake - SRP (Slop Rust Port)
 
 **Play it:** https://quake-srp.pages.dev (id's shareware episode, in the browser)
 
