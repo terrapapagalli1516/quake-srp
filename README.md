@@ -1,8 +1,8 @@
 # quake-srp
 
-*srp: slop rust port* — a dare: read the [Proof](#proof).
-
 **Play it:** https://quake-srp.pages.dev (id's shareware episode, in the browser)
+
+**Watch it:** https://youtu.be/8TvVMzyxACc (a six-minute film on how it works and what it changes)
 
 **Browsers:** tested on Linux in Chromium and Firefox, and played in Chrome on macOS and on an
 Android phone. Not yet tested: Safari, iPhone, iPad. Firefox has no Keyboard Lock, so there one
