@@ -4,11 +4,10 @@
 
 **Play it:** https://quake-srp.pages.dev (id's shareware episode, in the browser)
 
-**Browsers:** tested in Chromium and Firefox (headless and headed) and on an Android phone; not
-yet in Safari. Firefox has no Keyboard Lock, so there one Esc in fullscreen also leaves it. The
-threads build needs the browser to give it its memory and its worker threads: if it will not,
-the page says so and the game does not start (the single-threaded build is a deploy you choose,
-not a fallback).
+**Browsers:** tested on Linux in Chromium and Firefox, and played in Chrome on macOS and on an
+Android phone. Not yet tested: Safari, iPhone, iPad. Firefox has no Keyboard Lock, so there one
+Esc in fullscreen also leaves it. The game needs shared memory and worker threads; if the
+browser won't give them, the page says so.
 
 | Classic | slop (the default) |
 |:---:|:---:|
@@ -24,7 +23,7 @@ standard library and no `unsafe` code. With every extra switched off it is id's 
 checked against id's own C: every pixel of the 3-D view in every view tried, monsters awake
 among them, the sound mixer sample for sample, and in demo playback the camera, every entity
 and every dynamic light, frame by frame. What is known to differ still is a list
-([AUDIT.md](AUDIT.md), "Open"). Every check is one command. By default it is the same software renderer given a 2026 machine. It plays
+([AUDIT.md, "Open"](AUDIT.md#open)). Classic's checks run with one command ([Proof](#proof)). By default it is the same software renderer given a 2026 machine. It plays
 in a browser; natively, `quaketool` runs the same engine without a window.
 
 **How it was built.** Claude, Anthropic's model, wrote the code and the docs in Claude
@@ -58,7 +57,7 @@ dependencies, no `unsafe`, and Classic is id's game, proven for anything touched
   - demo playback, frame by frame: the camera, the entities and the dynamic lights (the
     game's state; a demo frame's pixels are compared on a sample of frames).
 
-  One command re-runs all of it; see [Proof](#proof).
+  One command re-runs the shareware part of it; see [Proof](#proof).
 - **The slop options, and their preset.** They show what software-rendered Quake looks like
   when the hardware is no longer the limit:
   - native resolution in whole pixels, at any window shape, with a wider field of view;
@@ -78,15 +77,16 @@ You need:
 - `curl`, `unzip` and `bsdtar` (Debian's `libarchive-tools`);
 - a static file server that can send headers. The examples use `miniserve`.
 
-**1. The data.** The repo has none. Fetch id's freely redistributable shareware pak:
+**1. The data.** The repo has none. Fetch id's freely redistributable shareware (Quake 1.06)
+from a public mirror of id's original archive:
 
 ```sh
-curl -sL -o quake106.zip https://raw.githubusercontent.com/Jason2Brownlee/QuakeOfficialArchive/main/bin/quake106.zip
-unzip quake106.zip resource.1 && bsdtar -xf resource.1 ID1/PAK0.PAK   # the zip holds an LZH archive
-mkdir -p quake-data && mv ID1 quake-data/ && rm quake106.zip resource.1
+ci/fetch_shareware.sh
 ```
 
-`ci/fetch_shareware.sh` does the same and checks both files' hashes.
+It needs curl, unzip and bsdtar (the zip holds an LZH archive), checks the hashes, and leaves
+`quake-data/ID1/PAK0.PAK`, id's licence `quake-data/SLICNSE.TXT` and the archive itself,
+`quake-data/quake106.zip`.
 
 **2. Build and assemble** a directory with the page, the program and the pak:
 
@@ -116,10 +116,10 @@ That needs those two headers and a secure context: `https://`, or `localhost`. T
 another device, put the server behind anything that serves https. If a host can't send the
 headers, the page's service worker adds them after one reload.
 
-**A public demo:** `web/publish.sh DIR` builds the threads program and assembles `DIR`
-with the page, the program and the shareware pak (with id's licence beside it), and a
-`_headers` file that Cloudflare Pages and Netlify read for the two headers and the
-caching. Upload `DIR` as it is.
+**A public demo:** `web/publish.sh DIR` builds the threads program and assembles `DIR` with the
+page, the program, the shareware pak with id's licence beside it (`id1/slicnse.txt`), id's
+original `quake106.zip`, and a `_headers` file that Cloudflare Pages and Netlify read for the
+two headers and the caching. Upload `DIR` as it is.
 
 You play with WASD and the mouse (click the game to capture the mouse), in either preset:
 
@@ -140,13 +140,10 @@ phone sideways" screen covers the page and the game waits behind it). The mouse 
 1996 controls (the arrows, no mouse look, no gamepad, Always Run off) type `idcontrols` in
 the console.
 
-**If the mouse feels slow on a Mac:** macOS 26 hands a browser one mouse move per screen
-refresh, and of a fast mouse's reports in between only one seems to count, so a 1000 Hz
-gaming mouse turns about an eighth as far on a 120 Hz screen and a sixteenth on a 60 Hz
-one (Chrome and Safari alike). Raise **Options > Mouse Speed** (`sensitivity 20` in the
-console goes past the slider's end), or set the mouse to poll at 125 Hz, which also keeps
-the fine aim. The numbers are in [web/PLATFORM.md](web/PLATFORM.md#input), "The mouse
-against the trackpad".
+**If the mouse turns too slowly on a Mac:** recent macOS merges a fast gaming mouse's
+movements and some are lost. Raise **Options > Mouse Speed** (`sensitivity 20` in the console
+goes past the slider), or set the mouse to a lower polling rate. Details:
+[web/PLATFORM.md](web/PLATFORM.md#input).
 
 ## The slop options and the Classic preset
 
@@ -269,7 +266,8 @@ and docker to build the oracles once. Put the source at `quake-c/` (so that
 difference.
 
 Beyond Classic:
-- `cargo test` passes in both crates, and clippy shows zero warnings. CI runs both, and
+- `cargo test` passes in both crates, and clippy shows zero warnings on the toolchain CI
+  pins (Rust 1.93.1). CI runs both, and
   both browser builds, on every push (`.github/workflows/check.yml`; `ci/local.sh` runs
   the same commands on a checkout).
 - `quake-rs/target/release/quaketool framerate quake-data/ID1/PAK0.PAK --check` runs
@@ -277,7 +275,8 @@ Beyond Classic:
   stated tolerance ([FRAMERATE.md](FRAMERATE.md)).
 - The headless-browser checks (`web/verify_*.py`) cover everything from walking and the
   menus to the gamepad, touch, quitting, sound through late frames, how a refresh waits
-  for its frame, and reading back the canvas. All pass in Chromium and in Firefox (`QUAKE_BROWSER=firefox`; Firefox's touch
+  for its frame, and reading back the canvas. All pass in headless Chromium; most also ran in
+  Firefox (`QUAKE_BROWSER=firefox`; Firefox's touch
   check runs on taps, and the Keyboard Lock checks are skipped there: `web/PLATFORM.md`,
   "Build, serve, deploy").
 

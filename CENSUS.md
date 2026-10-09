@@ -5,7 +5,7 @@ fixed, each by the commit named in its row. Of the 25 LOWs:
 - 18 are fixed: L1 L2 L4–L11 L14–L16 L18 L20–L22 L24. L10 was fixed on `quake/polish4a`
   and L16 on `q26/server`. L17 was fixed later, on `fleet/makestatic` (2026-10-02).
 - Two are fixed in part: L12 (all but the F-keys, `t` and `zoom_in`) and L25.
-- Four are open: L3 L13 L19 L23. `AUDIT.md`, "Open, as of 2026-09-26", lists them
+- Four are open: L3 L13 L19 L23. `AUDIT.md`, "Open", lists them
   with the rest.
 
 The departures in "Rule departures on by default" below are settled: since

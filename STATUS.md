@@ -82,11 +82,11 @@ the older history, kept as evidence, with superseded items marked.
   - ~~Esc under the Keyboard Lock API~~ (verified 2026-10-02 in a headed Chromium: a tap is
     the menu, a hold leaves fullscreen);
   - sound by ear (only its counters, samples and the C oracle).
-- **Deployed.** The threads build of `main` is served over https on a private network:
+- **Deployed.** The threads build of `main` runs on a test deployment over https:
   the shareware page, and a registered one that offers `pak1.pak` and the CD tracks
   through `files.json` (`web/PLATFORM.md`, "A server's own files"). No game data is in
   the repo. `README.md` describes serving generically.
-- **What is left.** `AUDIT.md`, "Open, as of 2026-09-26", is the one list. The closing
+- **What is left.** `AUDIT.md`, "Open", is the one list. The closing
   review's ranked next steps:
   1. old-era names (`wasm_*` cvars, `MenuScreen::Extras`, `EXTRAS_*`; renaming needs
      `config.cfg` aliases);
@@ -918,7 +918,7 @@ client TOSS physics arm — both fixed (details in the ship-push section).
 
 ## Known-deferred items (LOW severity, documented in AUDIT.md)
 
-*As of 2026-06-11. The current list is `AUDIT.md`, "Open, as of 2026-09-26"; the
+*As of 2026-06-11. The current list is `AUDIT.md`, "Open"; the
 marks added below say what happened to each since.*
 
 All previous HIGH/MED deferred items (lightning beams, R_MarkLights gating,

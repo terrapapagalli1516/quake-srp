@@ -248,7 +248,9 @@ the performance plan (`PERF_PLAN.md`), and the structure-only branches — the r
 server and quake-wasm splits and the move of the game client into `quake_rs::client` —
 which were byte-identical (STATUS.md).
 
-## Open, as of 2026-09-26
+## Open
+
+*Refreshed 2026-10-08; gathered 2026-09-26.*
 
 Everything known to differ from id's WinQuake in Classic, or not yet checked, gathered
 from the sections below, `CENSUS.md`, `oracle/README.md`, `FRAMERATE.md`, `PERF_PLAN.md`
@@ -470,10 +472,12 @@ marked *(2026-06)* were not re-checked since. Struck items were closed on 2026-0
 
 **Mission packs** ("The mission packs' paths", 2026-10-02; the re-release's progs were
 written for its own engine)
-- Its strings are localization keys: pickups, obituaries, centerprints and the finale
-  texts print as `$qc_got_item$qc_double_shotgun`, `$qc_finale_hip1` (P6).
-- Its end-of-pack flow calls `finaleFinished` (#79), which id's engine and the port
-  refuse with a QuakeC error, then `localcmd("menu_credits")` (P7).
+- ~~Its strings are localization keys: pickups, obituaries, centerprints and the finale
+  texts print as `$qc_got_item$qc_double_shotgun`, `$qc_finale_hip1` (P6)~~ — ✅ strings:
+  `localization.rs` reads the pack's own `loc_english.txt` ("P6", below).
+- ~~Its end-of-pack flow calls `finaleFinished` (#79), which id's engine and the port
+  refuse with a QuakeC error, then `localcmd("menu_credits")` (P7)~~ — ✅ packend: builtin
+  #79 and `menu_credits` reach the pack's end screen ("P7", below).
 - `PF_cvar` returns 0 for every cvar outside the server's own list: Hipnotic's footsteps
   (`cvar("crosshair") == 2`) never play (P9).
 
@@ -507,8 +511,10 @@ group syncbase (Round 2, Round 5).
 
 **Not verified**
 - A real browser on a real display: every browser check ran headless (Chromium, and
-  Firefox for most), on a desktop GPU at best. Not tried: Safari and iOS (WebKit
-  would not start here), a real phone, a real 120–480 Hz display, real pointer-lock
+  Firefox for most), on a desktop GPU at best. An Android phone was played and measured
+  ([web/PLATFORM.md](web/PLATFORM.md), "On an Android phone"), and the game was played in
+  Chrome on macOS. Not tried: Safari and iOS (WebKit would not start here), a real
+  240–480 Hz display, real pointer-lock
   behaviour (headless Chromium's lock jumps the pitch), a real gamepad (the checks emulate
   the Gamepad API), and Esc under the Keyboard Lock API in fullscreen.
 - Sound was checked by its counters, samples and the C oracle, never by ear.
@@ -840,7 +846,7 @@ Tracked but deferred (cosmetic/edge). A few already landed in wave 1: SV_SetIdea
 4. ✅ **Stereo pan law** (`web`) — linear 1±dot with full near-side gain.
 5. ✅ **`svc_particle`** → R_RunParticleEffect (not the rocket explosion).
 
-## Still open (as of 2026-06; superseded by "Open, as of 2026-09-26" at the top)
+## Still open (as of 2026-06; superseded by "Open" at the top)
 
 All HIGHs and the actionable MEDs are closed as of the 2026-06-10 ship push
 (see the session entry below). The remaining tail, all LOW / niche:
@@ -3497,7 +3503,7 @@ was done. Struck items are fixed on this branch.
   `$qc_got_item$qc_double_shotgun`, `$qc_enteredplayer`, and `$qc_finale_hip1` as the
   episode's closing text. Same in id's C. `mission_paks.py` put the maps' `$map_` keys
   back in English; the progs' cannot be, because of `{0}`.
-- **P7 The end of each pack** (open: brief B4). Hipnotic's `ExitIntermission` on hipend
+- **P7 The end of each pack** (fixed, `fleet/packend`; was: open, brief B4). Hipnotic's `ExitIntermission` on hipend
   and Rogue's `finale_5`/`finale_check` poll `finaleFinished()` (builtin #79) before
   `finale_transition` runs `localcmd("menu_credits\n")` and `"disconnect\n"`. id's
   engine and the port have no #79: `PR_RunError` ("bad builtin call number",
