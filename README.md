@@ -18,8 +18,8 @@ Both are stills from `quaketool shot`, so the slop crosshair isn't drawn. The sl
 `quaketool shot quake-data/ID1/PAK0.PAK maps/e1m1.bsp out.ppm --res 960x540 --zoom 2 --video modern --scaled2d 1 --sbaroverlay 1`,
 which draws the preset's values: Screen size 110 (no inventory bar) and perspective every 8 pixels.
 
-id Software's *Quake* (1996), ported to Rust from the WinQuake C source, with only the
-standard library and no `unsafe` code. With every extra switched off it is id's game,
+quake-srp, the *slop rust port*, is id Software's *Quake* (1996) ported to Rust from the
+WinQuake C source, with only the standard library and no `unsafe` code. With every extra switched off it is id's game,
 checked against id's own C: every pixel of the 3-D view in every view tried, monsters awake
 among them, the sound mixer sample for sample, and in demo playback the camera, every entity
 and every dynamic light, frame by frame. What is known to differ still is a list
