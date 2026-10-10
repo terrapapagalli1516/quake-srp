@@ -10,13 +10,15 @@
 #
 # Shareware only: the pak must be id's unmodified shareware pak0.pak (its
 # hash is checked), and no files.json is written, so the page offers nothing
-# beyond it. id's shareware licence goes beside the pak when it is found next
-# to it (`SLICNSE.TXT`, as ci/fetch_shareware.sh leaves it): the licence's
+# beyond it. id's shareware licence goes beside the pak (`SLICNSE.TXT`, found
+# next to the pak's folder, as ci/fetch_shareware.sh leaves it): the licence's
 # section 6 lets the shareware be passed on free of charge with the licence
 # accompanying it (README.md, "License"). id's original archive, quake106.zip,
 # goes out too, unmodified, beside the page: "the Software as a whole" that
-# section 6 speaks of (the one found beside the pak's folder, as
-# ci/fetch_shareware.sh keeps it; its hash is checked).
+# section 6 speaks of (the one beside the pak's folder, as
+# ci/fetch_shareware.sh keeps it; its hash is checked). Without either there
+# is no demo: the script stops before building (the page links the zip, and
+# the pak may not go out without the licence).
 #
 # OUTDIR must be new or empty; nothing is deleted. Needs cargo with the
 # wasm32-wasip1-threads target, and uv.
@@ -27,10 +29,11 @@ PAK=${2:-$ROOT/quake-data/ID1/PAK0.PAK}
 PAK_SHA256=35a9c55e5e5a284a159ad2a62e0e8def23d829561fe2f54eb402dbc0a9a946af   # as ci/fetch_shareware.sh
 ZIP_SHA256=ec6c9d34b1ae0252ac0066045b6611a7919c2a0d78a3a66d9387a8f597553239   # as ci/fetch_shareware.sh
 ZIP=$(dirname "$(dirname "$PAK")")/quake106.zip
-if [ -f "$ZIP" ]; then
-    echo "$ZIP_SHA256  $ZIP" | sha256sum -c --quiet >/dev/null 2>&1 \
-        || { echo "$ZIP is not id's quake106.zip; the public demo serves only that" >&2; exit 1; }
-fi
+LICENCE=$(dirname "$(dirname "$PAK")")/SLICNSE.TXT
+[ -f "$ZIP" ] || { echo "no quake106.zip at $ZIP (ci/fetch_shareware.sh fetches it)" >&2; exit 1; }
+echo "$ZIP_SHA256  $ZIP" | sha256sum -c --quiet >/dev/null 2>&1 \
+    || { echo "$ZIP is not id's quake106.zip; the public demo serves only that" >&2; exit 1; }
+[ -f "$LICENCE" ] || { echo "no id shareware licence at $LICENCE (ci/fetch_shareware.sh fetches it)" >&2; exit 1; }
 
 [ -f "$PAK" ] || { echo "no pak at $PAK (ci/fetch_shareware.sh fetches it)" >&2; exit 1; }
 echo "$PAK_SHA256  $PAK" | sha256sum -c --quiet >/dev/null 2>&1 \
@@ -57,17 +60,8 @@ if grep -aq -e "$ROOT" -e "$HOME/" "$OUT/quake.wasm"; then
     echo "quake.wasm still names a directory of this machine" >&2; exit 1
 fi
 cp "$PAK" "$OUT/id1/pak0.pak"
-LICENCE=$(dirname "$(dirname "$PAK")")/SLICNSE.TXT
-if [ -f "$LICENCE" ]; then
-    cp "$LICENCE" "$OUT/id1/slicnse.txt"
-else
-    echo "note: no SLICNSE.TXT beside the pak's folder; the demo goes out without id's shareware licence" >&2
-fi
-if [ -f "$ZIP" ]; then
-    cp "$ZIP" "$OUT/quake106.zip"
-else
-    echo "note: no quake106.zip beside the pak's folder; the demo goes out without id's original archive" >&2
-fi
+cp "$LICENCE" "$OUT/id1/slicnse.txt"
+cp "$ZIP" "$OUT/quake106.zip"
 
 # Every response: cross-origin isolation (SharedArrayBuffer, the threads).
 # The pak and id's archive never change: cached for a year. The program and the

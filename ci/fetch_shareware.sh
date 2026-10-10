@@ -19,7 +19,8 @@ ZIP_SHA256=ec6c9d34b1ae0252ac0066045b6611a7919c2a0d78a3a66d9387a8f597553239
 PAK_SHA256=35a9c55e5e5a284a159ad2a62e0e8def23d829561fe2f54eb402dbc0a9a946af
 
 if [ -f "$DEST/ID1/PAK0.PAK" ] && echo "$PAK_SHA256  $DEST/ID1/PAK0.PAK" | sha256sum -c --quiet >/dev/null 2>&1 \
-    && [ -f "$DEST/quake106.zip" ] && echo "$ZIP_SHA256  $DEST/quake106.zip" | sha256sum -c --quiet >/dev/null 2>&1; then
+    && [ -f "$DEST/quake106.zip" ] && echo "$ZIP_SHA256  $DEST/quake106.zip" | sha256sum -c --quiet >/dev/null 2>&1 \
+    && [ -f "$DEST/SLICNSE.TXT" ]; then
     echo "$DEST/ID1/PAK0.PAK: already there"
     exit 0
 fi

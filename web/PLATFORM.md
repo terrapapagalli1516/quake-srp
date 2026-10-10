@@ -2383,24 +2383,29 @@ proxy or tunnel that terminates TLS in front of the server works.
 **A public demo** (shareware only): `web/publish.sh OUTDIR [PAK0.PAK]`
 builds the threads program and assembles a new deploy dir: the page,
 `quake.wasm`, `id1/pak0.pak` (refused unless its sha256 is id's unmodified
-shareware pak's), id's shareware licence beside it as `id1/slicnse.txt`
-when `SLICNSE.TXT` sits next to the pak's folder (`ci/fetch_shareware.sh`
-leaves it there), no `files.json`, and a `_headers` file:
+shareware pak's), id's shareware licence beside it as `id1/slicnse.txt`,
+id's original `quake106.zip` beside the page (refused unless its sha256 is
+the archive's as id released it), no `files.json`, and a `_headers` file
+(below). The licence and the zip come from next to the pak's folder, where
+`ci/fetch_shareware.sh` leaves them; without either the script stops
+before building: the page links the zip, and the pak goes out only with
+its licence.
 
 ```
 /*               Cross-Origin-Opener-Policy: same-origin
                  Cross-Origin-Embedder-Policy: require-corp
 /id1/pak0.pak    Cache-Control: public, max-age=31536000, immutable
+/quake106.zip    Cache-Control: public, max-age=31536000, immutable
 /quake.wasm      Cache-Control: no-cache
 ```
 
 Cloudflare Pages and Netlify read `_headers`: a request gets every
 matching rule's headers, and a `Cache-Control` there replaces Pages'
 default (`public, max-age=0, must-revalidate`, which the page's other files
-keep). Any other host works through the service worker. The pak is id's and
-never changes, so a year; the program and the page change under the same
-names with each deploy, so they revalidate on every load, a 304 when
-nothing changed. Pages takes files up to 25 MiB; the pak is 17.8 MiB.
+keep). Any other host works through the service worker. The pak and the
+zip are id's and never change, so a year; the program and the page change
+under the same names with each deploy, so they revalidate on every load, a
+304 when nothing changed. Pages takes files up to 25 MiB; the pak is 17.8 MiB.
 `web/isolated.py` is the checks' server. `uv run --with playwright
 web/bench.py DEPLOYDIR` and `QUAKE_VERIFY_PORT=… uv run --with playwright
 web/verify_walk.py DEPLOYDIR` take a deploy dir, and `bench.py --build`
