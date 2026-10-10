@@ -890,6 +890,8 @@ pub enum SoundCall {
     /// listener's own entity (`cl.viewentity`), whose sounds `SND_Spatialize`
     /// plays at full volume; within one call a later event on the same
     /// non-zero (entity, channel) overrides an earlier one (`SND_PickChannel`).
+    /// With no events it only names the view entity: every walk frame's, and
+    /// a demo's `svc_setview` at its load.
     Start { events: Vec<SoundEvent>, view_entity: i32 },
     /// `S_StopSound(entity, channel)` for each pair (`svc_stopsound`).
     Stop(Vec<(i32, i32)>),

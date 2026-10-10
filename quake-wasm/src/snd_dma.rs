@@ -727,6 +727,34 @@ mod tests {
         assert!(n > 0.0 && channels.lines().count() as f64 == n, "{channels}");
     }
 
+    /// demo1 records its first sound 1.18 s in. Before it, the level's
+    /// placed loops are heard where they are: the demo's load names the view
+    /// entity (its signon's `svc_setview`) before the loops, so none is taken
+    /// for the player's own sound — full volume and centred, every torch in
+    /// the level summed into one, the noise a first click used to hear.
+    #[test]
+    fn the_attract_demos_loops_are_placed_before_its_first_recorded_sound() {
+        clear_pending();
+        crate::vid::set_resolution(320, 200);
+        assert_eq!(boot_attract(), 1);
+        let mut audio = Audio::new();
+        run_frames(&mut audio, 72 / 2, 1.0 / 72.0);
+        let s = stats(&audio);
+        assert_eq!(s["starts"], "0", "still before demo1's first recorded sound: {s:?}");
+        assert!(s["statics"].parse::<u32>().unwrap() > 0, "e1m3's loops registered: {s:?}");
+        let (_, channels) = audio.call("snd_channels").unwrap();
+        let as_the_players: Vec<&str> = channels
+            .lines()
+            .filter(|line| {
+                let f: Vec<i32> = line.split_whitespace().filter_map(|v| v.parse().ok()).collect();
+                // index left right master pos end entity channel (the sample's name skipped)
+                let [index, left, right, master, _, _, entity, _] = f[..] else { return false };
+                index >= quake_rs::bsp::NUM_AMBIENTS as i32 && entity == 0 && left == right && left >= master
+            })
+            .collect();
+        assert!(as_the_players.is_empty(), "placed loops at full volume, centred:\n{}", as_the_players.join("\n"));
+    }
+
     #[test]
     fn menu_clicks_and_play_go_through_the_mixer_centred_at_full_volume() {
         assert_eq!(boot(), 1);

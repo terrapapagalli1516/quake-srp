@@ -62,8 +62,8 @@ pub fn default_extension(path: &str, extension: &str) -> String {
 }
 
 /// `playdemo` of [`DEMOS`]`[demonum % 3]` from `pak` (`CL_PlayDemo_f`): the
-/// demo's sounds start through `sound` ([`SoundCall::StopAll`], then the
-/// signon's static loops).
+/// demo's sounds start through `sound` ([`SoundCall::StopAll`], the signon's
+/// view entity, then its static loops).
 pub fn build_demo_n(pak: Pak, demonum: usize, sound: &mut Vec<SoundCall>) -> Option<DemoPlay> {
     let demonum = demonum % DEMOS.len();
     let mut d = build_demo(pak, DEMOS[demonum], sound)?;
@@ -77,8 +77,8 @@ pub fn build_demo_n(pak: Pak, demonum: usize, sound: &mut Vec<SoundCall>) -> Opt
 /// and models, one frame per recorded message, played back as id's client
 /// does — drawn between the two newest messages ([`demo_frame`]). `None` when
 /// the file is missing or unplayable (the C prints "ERROR: couldn't open.").
-/// The demo's sounds start through `sound` ([`SoundCall::StopAll`], then the
-/// signon's static loops).
+/// The demo's sounds start through `sound` ([`SoundCall::StopAll`], the
+/// signon's view entity, then its static loops).
 pub fn build_demo(pak: Pak, name: &str, sound: &mut Vec<SoundCall>) -> Option<DemoPlay> {
     build_demo_with(pak, name, sound, |bytes| parse_demo(bytes).ok())
 }
@@ -129,8 +129,15 @@ fn build_demo_with(
     // Demo committed (nothing below fails): tear down the previous level/mode's
     // looping audio and register the demo signon's `svc_spawnstaticsound` loops
     // (CL_ParseStaticSound ran these on the live client during demo playback
-    // too — the e1m3 demo has its own torches).
+    // too — the e1m3 demo has its own torches). Between the two, the signon's
+    // svc_setview: id's client reads the whole signon before its first
+    // S_Update, so the mixer knows the view entity before it hears a loop
+    // (an empty Start names it, as a walk frame's does). Without it the
+    // mixer's would be 0, every loop's entity: each would play as the
+    // player's own sound, full volume and centred, until the demo's first
+    // recorded sound (1.18 s into demo1).
     sound.push(SoundCall::StopAll);
+    sound.push(SoundCall::Start { events: Vec::new(), view_entity: demo.viewentity as i32 });
     sound.push(SoundCall::Static(demo.static_sounds.clone()));
     // The signon's svc_cdtrack: the CD plays the level's track, or the one
     // the demo forces.
