@@ -9,7 +9,7 @@ rerun the measurement. (Branch `q26/framerate`, 2026-09-26.)
 
 ## In short
 
-- **Measured:** `quaketool framerate` plays 23 scripted scenarios on the
+- **Measured:** `quaketool framerate` plays 24 scripted scenarios on the
   shareware maps through the browser's own client frame, at 72 Hz with id's
   code (the reference) and at 60, 144, 240, 480 Hz and a jittery 144 Hz
   display, each with id's per-frame code and with the fixed uncapped step. The
@@ -370,6 +370,18 @@ the last column is `--check`'s tolerance. 72 Hz is the reference (id's code at
 | shots in 8 s, mean | 4.80 | 4.80 → 4.80 (0) | 4.80 → 4.80 (0) | 4.80 → 4.80 (0) | 4.80 → 4.80 (0) | 4.60 → 4.60 (−0.200) | — |
 | damage in 8 s, mean (hp) | 76.80 | 76.80 → 76.80 (0) | 76.80 → 76.80 (0) | 76.80 → 76.80 (0) | 76.80 → 76.80 (0) | 73.60 → 73.60 (−3.20) | — |
 | animation frames in 8 s, mean | 79.0 | 79.0 → 79.0 (0) | 79.0 → 79.0 (0) | 79.0 → 79.0 (0) | 79.0 → 79.0 (0) | 80.0 → 80.0 (+1.0) | ±1.0 |
+
+**lightning** — the thunderbolt held on e1m1's grunt for 2 s: its blood (particle 225, dir '0 0 100')
+(added 2026-10-20 on `fix/lg-blood`: the user saw the blood float to the sky at a high
+frame rate. Not the rate: before the fix it rose at 1500 u/s to 619 units at 72 Hz too,
+the builtin skipping `SV_StartParticle`'s byte; AUDIT, "`particle()` on the wire")
+
+| quantity | 72 (id) | 60 | 144 | 240 | 480 | jitter | tolerance |
+|---|---|---|---|---|---|---|---|
+| bolts fired in 2 s | 21.0 | 21.0 → 21.0 (0) | 21.0 → 21.0 (0) | 21.0 → 21.0 (0) | 21.0 → 21.0 (0) | 21.0 → 21.0 (0) | ±1.0 |
+| blood: fastest rise (u/s) | 118.5 | 118.4 → 118.4 (−0.111) | 118.8 → 118.8 (+0.278) | 118.9 → 118.9 (+0.389) | 119.0 → 119.0 (+0.472) | 118.9 → 118.9 (+0.349) | ±2.0 |
+| blood: top above the shooter's origin (u) | 62.79 | 64.24 → 64.24 (+1.45) | 62.74 → 62.74 (−0.056) | 62.76 → 62.76 (−0.030) | 62.66 → 62.66 (−0.137) | 63.10 → 63.11 (+0.318) | ±8.0 |
+| blood particles alive, mean | 235.1 | 244.6 → 244.6 (+9.47) | 231.5 → 231.5 (−3.55) | 236.5 → 236.5 (+1.46) | 232.8 → 232.8 (−2.31) | 231.8 → 231.8 (−3.28) | ±20.0 |
 
 **quad** — impulse 255: how long the Quad Damage lasts
 

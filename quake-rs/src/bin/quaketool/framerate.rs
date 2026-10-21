@@ -95,6 +95,7 @@ const IT_SHOTGUN: i32 = 1;
 const IT_NAILGUN: i32 = 4;
 const IT_GRENADE_LAUNCHER: i32 = 16;
 const IT_ROCKET_LAUNCHER: i32 = 32;
+const IT_LIGHTNING: i32 = 64;
 const IT_QUAD: i32 = 4_194_304;
 const MOVETYPE_STEP: f32 = 4.0;
 const MOVETYPE_NOCLIP: f32 = 8.0;
@@ -614,6 +615,11 @@ const SCENARIOS: &[Scenario] = &[
         name: "grunt",
         what: "an e1m1 grunt woken 192 units away: its first shot, shots and damage in 8 s",
         run: grunt,
+    },
+    Scenario {
+        name: "lightning",
+        what: "the thunderbolt held on e1m1's grunt for 2 s: its blood (particle 225, dir '0 0 100')",
+        run: lightning,
     },
     Scenario { name: "quad", what: "impulse 255: how long the Quad Damage lasts", run: quad },
     Scenario { name: "flash", what: "a hit's damage flash and view kick, and a pickup's bonus flash", run: flash },
@@ -1278,6 +1284,50 @@ fn grunt(c: &Ctx) -> Vec<Measure> {
         m("shots in 8 s, mean", "", shots / n, f64::NAN),
         m("damage in 8 s, mean", "hp", damage / n, f64::NAN),
         m("animation frames in 8 s, mean", "", frames / n, 1.0),
+    ]
+}
+
+fn lightning(c: &Ctx) -> Vec<Measure> {
+    // e1m1's first-room grunt, kept standing as a target, and the
+    // thunderbolt held on it: each hit is LightningDamage's
+    // `particle(trace_endpos, '0 0 100', 225, damage*4)`, 120 red particles.
+    // The first bolt wakes it; it is put back where it stood after every
+    // frame, so its pain steps and its running never take it out of the beam.
+    let mut s = c.sim("e1m1");
+    let p = s.player();
+    let g = s
+        .find("monster_army")
+        .into_iter()
+        .find(|&g| s.w.server.vm.ent_get_vector(g, "origin")[..2] == [0.0, 576.0])
+        .expect("e1m1's first-room grunt");
+    s.vm().ent_set_float(g, "health", 100_000.0);
+    let go = s.vm().ent_get_vector(g, "origin");
+    s.place([go[0] + 192.0, go[1], go[2]], 180.0);
+    s.arm(IT_LIGHTNING);
+    s.run(0.6, |_| {});
+    let hit_z = s.origin()[2];
+    let cells = s.vm().ent_get_float(p, "ammo_cells");
+    let is_bolt_blood = |q: &quake_rs::particles::Particle| q.color & 0xF8 == 224 && q.kind == ParticleKind::SlowGrav;
+    let (mut rise, mut up_speed, mut alive, mut frames) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+    s.w.in_attack = true;
+    s.run(2.0, |s| {
+        set_origin(s.vm(), g, go);
+        let mut n = 0;
+        for q in s.w.particles.particles().iter().filter(|q| is_bolt_blood(q)) {
+            rise = rise.max(f64::from(q.origin[2] - hit_z));
+            up_speed = up_speed.max(f64::from(q.velocity[2]));
+            n += 1;
+        }
+        alive += f64::from(n);
+        frames += 1.0;
+    });
+    s.w.in_attack = false;
+    let bolts = cells - s.vm().ent_get_float(p, "ammo_cells");
+    vec![
+        m("bolts fired in 2 s", "", f64::from(bolts), 1.0),
+        m("blood: fastest rise", "u/s", up_speed, 2.0),
+        m("blood: top above the shooter's origin", "u", rise, 8.0),
+        m("blood particles alive, mean", "", alive / frames, 20.0),
     ]
 }
 
