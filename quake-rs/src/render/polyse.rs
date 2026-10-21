@@ -6,6 +6,7 @@
 
 use super::alias::{ALIAS_ONSEAM, AliasSetup, FinalVert};
 use super::band::Band;
+use crate::math::c_ftoi;
 
 /// The sentinel `D_RasterizeAliasPolySmooth` stores in a span's `count`.
 const SPAN_END: i32 = -999_999;
@@ -58,16 +59,6 @@ fn floor_div_mod(numer: f64, denom: f64) -> (i32, i32) {
         }
         (q, r)
     }
-}
-
-/// `(int)` of a float the way the x86 id built for does it (`fistp` /
-/// `cvttss2si`): truncation toward zero, and the "integer indefinite"
-/// 0x80000000 for a NaN or a value out of range, where Rust's `as` saturates
-/// (a huge positive step would come out 0x7FFFFFFF, id's 0x80000000). Sliver
-/// triangles out of `R_AliasClipTriangle` reach this: a denominator of 1 or 2
-/// under a long edge makes a 1/z step of 1e11.
-pub(super) fn c_ftoi(x: f64) -> i32 {
-    if x > -2_147_483_649.0 && x < 2_147_483_648.0 { x as i32 } else { i32::MIN }
 }
 
 /// The box `verts` lie in on the screen: their least and greatest columns,

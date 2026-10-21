@@ -53,7 +53,7 @@ use super::xray::{XrayModel, XrayOptions, XrayPaint, XraySpan, XraySurface, Xray
 use super::{Frame, Projection, ViewGeom};
 use crate::bsp::MipTex;
 use crate::bsp::{Bsp, CONTENTS_SOLID, DFace, TexInfo};
-use crate::math::{Vec3, dot, normalize, sub};
+use crate::math::{Vec3, c_ftoi, dot, normalize, sub};
 
 mod stages;
 pub(super) use stages::Stages;
@@ -416,13 +416,6 @@ impl EdgeState {
         xray_brush_edges: Vec::new(),
         xray_grads: Vec::new(),
     };
-}
-
-/// `(int)` of a float as the x86 does it: truncation, and 0x80000000 for a
-/// NaN or a value out of range (Rust's `as` saturates).
-#[inline]
-fn c_ftoi(x: f64) -> i32 {
-    if x > -2_147_483_649.0 && x < 2_147_483_648.0 { x as i32 } else { i32::MIN }
 }
 
 /// [`c_ftoi`] widened for the edges' 44.20 `u` ([`Edge`]): truncation, the
@@ -2815,15 +2808,6 @@ mod tests {
             eprintln!("id's maps skipped: no shareware pak at {}", path.display());
         }
         assert!(compared > 5_000, "{compared} spans compared");
-    }
-
-    #[test]
-    fn c_ftoi_is_the_x86_conversion() {
-        assert_eq!(c_ftoi(1.9), 1);
-        assert_eq!(c_ftoi(-1.9), -1);
-        assert_eq!(c_ftoi(3.0e9), i32::MIN);
-        assert_eq!(c_ftoi(-3.0e9), i32::MIN);
-        assert_eq!(c_ftoi(f64::NAN), i32::MIN);
     }
 
     #[test]

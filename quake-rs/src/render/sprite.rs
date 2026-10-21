@@ -34,9 +34,8 @@
 
 use super::band::Band;
 use super::edge::{frustum_planes, view_edges};
-use super::polyse::c_ftoi;
 use super::{Frame, Projection};
-use crate::math::{ROLL, Vec3, add, angle_vectors, dot, inverse, normalize, scale, sub};
+use crate::math::{ROLL, Vec3, add, angle_vectors, c_ftoi, dot, inverse, normalize, scale, sub};
 use crate::spr::{
     Frame as SprFrame, SPR_FACING_UPRIGHT, SPR_ORIENTED, SPR_VP_PARALLEL, SPR_VP_PARALLEL_ORIENTED,
     SPR_VP_PARALLEL_UPRIGHT, Sprite, SpriteFrame,

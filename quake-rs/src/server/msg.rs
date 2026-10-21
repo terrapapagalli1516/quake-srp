@@ -22,6 +22,7 @@
 
 use super::Server;
 use crate::Result;
+use crate::math::c_ftoi;
 use crate::vm::Vm;
 
 // ---------------------------------------------------------------------------
@@ -239,10 +240,11 @@ fn entity_sound_origin(vm: &Vm, e: i32) -> [f32; 3] {
 /// `(int)(f*8)` as a short (the fraction truncated toward zero, the bits past
 /// 16 dropped) and `MSG_ReadCoord` read back `short * (1.0/8)`. id's client
 /// knew every position the server sent it to the 1/8 unit, so where a
-/// position reaches the sound layer it goes through this first.
+/// position reaches the sound layer it goes through this first. (`(int)` is
+/// x86's, [`c_ftoi`]: a NaN or a coordinate past 2^28 sends 0.)
 #[must_use]
 pub fn wire_coord(f: f32) -> f32 {
-    f32::from((f * 8.0) as i32 as i16) * (1.0 / 8.0)
+    f32::from(c_ftoi(f64::from(f * 8.0)) as i16) * (1.0 / 8.0)
 }
 
 /// An angle as it crossed the wire: `MSG_WriteAngle` sent `((int)f*256/360)
@@ -271,10 +273,11 @@ pub fn wire_angle(f: f32) -> f32 {
 /// One queued `particle()` burst — the engine `SV_StartParticle` payload,
 /// captured for a front-end instead of being serialised into a client datagram.
 ///
-/// The fields mirror `PF_particle`'s arguments verbatim: `org` is the emission
-/// origin, `dir` the direction/speed the C scaled into the velocity, `color` the
-/// base palette index of the 8-entry colour ramp, and `count` the number of
-/// particles to spawn. A front-end replays this through
+/// The fields are `PF_particle`'s arguments as id's client read them back
+/// ([`ParticleBurst::of_call`]): `org` is the emission origin, `dir` the
+/// direction/speed the C scaled into the velocity, `color` the base palette
+/// index of the 8-entry colour ramp, and `count` the number of particles to
+/// spawn. A front-end replays this through
 /// [`crate::particles::ParticleSystem::spawn_burst`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParticleBurst {
@@ -286,6 +289,35 @@ pub struct ParticleBurst {
     pub color: u8,
     /// How many particles to spawn (clamped against the pool cap on spawn).
     pub count: i32,
+}
+
+impl ParticleBurst {
+    /// The `svc_particle` `PF_particle(org, dir, color, count)` writes, as
+    /// `R_ParseParticleEffect` read it back. `SV_StartParticle` sent `org` as
+    /// three `MSG_WriteCoord`s ([`wire_coord`]), each axis of `dir` as
+    /// `(int)(dir*16)` clamped into a signed byte (read back over 16), and
+    /// `count` and `color` as the low 8 bits of the `int`s `PF_particle`
+    /// passed; a count byte of 255 reads back as 1024, the explosion
+    /// sentinel (`R_RunParticleEffect`'s `pt_explode` burst).
+    ///
+    /// The byte is what tames `LightningDamage`'s `'0 0 100'`: it arrives as
+    /// 127/16, so the bolt's blood rises at 119 u/s, not 1500. A count of
+    /// 256 sends 0 (no particles) and -1 sends 255 (an explosion), as id's
+    /// did. Every `(int)` is x86's ([`c_ftoi`]): a NaN or a value past 2^31
+    /// gives 0x80000000, a direction of -8 and a count and colour of 0.
+    /// (`oracle/particle_wire.py` holds these to id's C.)
+    #[must_use]
+    pub fn of_call(org: [f32; 3], dir: [f32; 3], color: f32, count: f32) -> ParticleBurst {
+        let int = |f: f32| c_ftoi(f64::from(f));
+        let byte = |f: f32| int(f) as u8; // MSG_WriteByte of an int: its low 8 bits
+        let sent = byte(count);
+        ParticleBurst {
+            org: org.map(wire_coord),
+            dir: dir.map(|d| f32::from(int(d * 16.0).clamp(-128, 127) as i8) * (1.0 / 16.0)),
+            color: byte(color),
+            count: if sent == 255 { 1024 } else { i32::from(sent) },
+        }
+    }
 }
 
 /// A text message QuakeC asked to show the player: a `centerprint` (drawn
@@ -352,33 +384,18 @@ pub(super) fn bi_stuffcmd(vm: &mut Vm) -> Result<()> {
 }
 
 /// `PF_particle` (#48): `void(vector org, vector dir, float color, float count)
-/// particle`. The C forwarded these straight to `SV_StartParticle`; here we
-/// queue a [`ParticleBurst`] for the front-end's [`crate::particles::ParticleSystem`]
-/// to realise. The base `color` and `count` are kept as the engine domain (a
-/// palette index and a particle count); the colour is cast into a `u8` palette
-/// index (the C `SV_StartParticle` itself wrote `color` as one packet byte).
+/// particle`. The C forwarded these straight to `SV_StartParticle`, which
+/// wrote them into the client datagram; here we queue the [`ParticleBurst`]
+/// id's client read back ([`ParticleBurst::of_call`]) for the front-end's
+/// [`crate::particles::ParticleSystem`] to realise.
 ///
 /// FAITHFULNESS: the C `SV_StartParticle` early-returned when the network
 /// datagram was nearly full; we have no datagram, so every fired burst is
-/// queued. A negative/huge `count` is preserved as-is and clamped only when the
-/// `ParticleSystem` spawns it, so the engine never allocates on program data.
+/// queued. The count is at most a byte's 255 (or the explosion's 1024) and is
+/// clamped again when the `ParticleSystem` spawns it, so the engine never
+/// allocates on program data.
 pub(super) fn bi_particle(vm: &mut Vm) -> Result<()> {
-    let org = vm.arg_vector(0);
-    let dir = vm.arg_vector(1);
-    // color is a float palette index; clamp into 0..=255 before the byte cast so
-    // an out-of-range value can never wrap unexpectedly.
-    let color = vm.arg_float(2).clamp(0.0, 255.0) as u8;
-    // SV_StartParticle writes `count` through MSG_WriteByte, which TRUNCATES mod 256
-    // (`buf[0] = c`), and the client's CL_ParseParticleEffect maps the byte value
-    // EXACTLY 255 back to 1024 — the explosion sentinel (R_RunParticleEffect's fiery
-    // pt_explode burst). So the trigger is `(count & 0xFF) == 255`, not `count >=
-    // 255`: a stray count like 256 truncates to 0 (no explosion), and -1 wraps to
-    // 255 -> 1024, exactly as the C and the demo parser (demo.rs) do. The
-    // misc_explobox death does `particle(origin, '0 0 0', 75, 255)` -> 1024 -> burst.
-    let sent = (vm.arg_float(3) as i32 & 0xFF) as u8;
-    let count = if sent == 255 { 1024 } else { sent as i32 };
-
-    let burst = ParticleBurst { org, dir, color, count };
+    let burst = ParticleBurst::of_call(vm.arg_vector(0), vm.arg_vector(1), vm.arg_float(2), vm.arg_float(3));
     send(vm, |o| o.particles.push(burst));
     Ok(())
 }
@@ -1277,9 +1294,10 @@ mod tests {
     #[test]
     fn bi_particle_queues_burst_and_drain_clears() {
         // bi_particle (PF_particle, #48) must push a ParticleBurst carrying its
-        // (org, dir, color, count) arguments verbatim, and drain_particles must
-        // return then clear it. Drive the builtin directly by placing its args in
-        // the PARM globals, mirroring bi_sound_queues_event_and_drain_clears.
+        // (org, dir, color, count) arguments (these cross the wire unchanged),
+        // and drain_particles must return then clear it. Drive the builtin
+        // directly by placing its args in the PARM globals, mirroring
+        // bi_sound_queues_event_and_drain_clears.
         let (img, _sound_fn) = attack_progs();
         let progs = Progs::parse(&img).expect("parse");
         let mut server = Server::new(floor_bsp(), progs).expect("server");
@@ -1306,25 +1324,49 @@ mod tests {
     }
 
     #[test]
-    fn bi_particle_clamps_out_of_range_color_to_byte() {
-        // A float color outside 0..=255 must clamp into the palette-index byte
-        // range rather than wrapping unexpectedly when cast.
+    fn bi_particle_sends_color_as_its_low_byte() {
+        // SV_StartParticle's MSG_WriteByte keeps the low 8 bits of the int
+        // PF_particle passed: an out-of-range colour wraps, as in id's game.
         let (img, _sound_fn) = attack_progs();
         let progs = Progs::parse(&img).expect("parse");
         let mut server = Server::new(floor_bsp(), progs).expect("server");
 
         server.vm.set_gv(OFS_PARM0, [0.0; 3]);
         server.vm.set_gv(OFS_PARM0 + 3, [0.0; 3]);
-        server.vm.set_gf(OFS_PARM0 + 6, 99999.0); // absurd color -> clamps to 255
+        server.vm.set_gf(OFS_PARM0 + 6, 99999.0); // 0x1869f -> 0x9f
         server.vm.set_gf(OFS_PARM0 + 9, 1.0);
         bi_particle(&mut server.vm).expect("bi_particle");
         let b = server.drain_particles();
-        assert_eq!(b[0].color, 255, "out-of-range color clamps to 255");
+        assert_eq!(b[0].color, 0x9f, "99999 sends its low byte");
 
-        server.vm.set_gf(OFS_PARM0 + 6, -10.0); // negative -> clamps to 0
+        server.vm.set_gf(OFS_PARM0 + 6, -10.0); // -10 -> 0xf6
         bi_particle(&mut server.vm).expect("bi_particle");
         let b = server.drain_particles();
-        assert_eq!(b[0].color, 0, "negative color clamps to 0");
+        assert_eq!(b[0].color, 0xf6, "-10 sends its low byte");
+    }
+
+    #[test]
+    fn particle_burst_is_what_crossed_the_wire() {
+        // LightningDamage's particle(trace_endpos, '0 0 100', 225, damage*4):
+        // 100*16 clamps to the byte's 127, so id's client got 127/16.
+        let b = ParticleBurst::of_call([0.0; 3], [0.0, 0.0, 100.0], 225.0, 120.0);
+        assert_eq!(b.dir, [0.0, 0.0, 7.9375]);
+        assert_eq!((b.color, b.count), (225, 120));
+        // The low end is -128: -8. (int) truncates toward zero, so -0.07
+        // (-1.12) sends -1 and 0.06 (0.96) sends 0.
+        let b = ParticleBurst::of_call([0.0; 3], [-100.0, -0.07, 0.06], 73.0, 1.0);
+        assert_eq!(b.dir, [-8.0, -0.0625, 0.0]);
+        // The origin goes through MSG_WriteCoord: 1/8 unit, toward zero.
+        let b = ParticleBurst::of_call([1.3, -0.06, -2.2], [0.0; 3], 0.0, 1.0);
+        assert_eq!(b.org, [1.25, 0.0, -2.125]);
+        // The count byte: 255 and -1 are the explosion, 256 is nothing.
+        let count = |c: f32| ParticleBurst::of_call([0.0; 3], [0.0; 3], 75.0, c).count;
+        assert_eq!([count(255.0), count(-1.0), count(256.0), count(300.0)], [1024, 1024, 0, 44]);
+        // x86's (int) of a NaN or a value past 2^31 is 0x80000000: a direction
+        // of -8 either way, a coordinate, count and colour of 0 (Rust's `as`
+        // would saturate: 3e9 would send 255, an explosion).
+        let b = ParticleBurst::of_call([f32::NAN, 1e9, -1e9], [f32::NAN, 1e9, -1e9], 3e9, 3e9);
+        assert_eq!((b.org, b.dir, b.color, b.count), ([0.0; 3], [-8.0; 3], 0, 0));
     }
 
     // ------------------------------------------------ temp-entity decoder

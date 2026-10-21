@@ -529,11 +529,33 @@ pub fn invert_24_to_16(val: u32) -> u32 {
     result as u32
 }
 
+/// `(int)` of a float the way the x86 id built for does it (`fistp` /
+/// `cvttss2si`): truncation toward zero, and the "integer indefinite"
+/// 0x80000000 for a NaN or a value out of range, where Rust's `as` saturates
+/// (a huge positive value would come out 0x7FFFFFFF, id's 0x80000000). The
+/// renderer's steps reach it (a sliver triangle out of `R_AliasClipTriangle`
+/// makes a 1/z step of 1e11), and so does what QuakeC sends over the wire
+/// (`server::ParticleBurst::of_call`, `server::wire_coord`).
+#[inline]
+#[must_use]
+pub fn c_ftoi(x: f64) -> i32 {
+    if x > -2_147_483_649.0 && x < 2_147_483_648.0 { x as i32 } else { i32::MIN }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const EPS: f32 = 1e-5;
+
+    #[test]
+    fn c_ftoi_is_the_x86_conversion() {
+        assert_eq!(c_ftoi(1.9), 1);
+        assert_eq!(c_ftoi(-1.9), -1);
+        assert_eq!(c_ftoi(3.0e9), i32::MIN);
+        assert_eq!(c_ftoi(-3.0e9), i32::MIN);
+        assert_eq!(c_ftoi(f64::NAN), i32::MIN);
+    }
 
     fn approx(a: f32, b: f32) -> bool {
         (a - b).abs() <= EPS
