@@ -205,6 +205,12 @@ const COMMANDS: &[Command] = &[
         about: "replay + render a recorded demo",
         run: |a| sim::cmd_demo(&a[0], &a[1], &a[2], parsed_or(a, 3, 0)),
     },
+    Command {
+        name: "partwire",
+        usage: "<script> <log>",
+        about: "particle() calls as id's client received them, logged (oracle/particle_wire.py)",
+        run: |a| sim::cmd_partwire(&a[0], &a[1]),
+    },
     // census.rs
     Command {
         name: "census",
@@ -447,6 +453,7 @@ mod tests {
             ("changelevel", 2),
             ("walk", 3),
             ("demo", 3),
+            ("partwire", 2),
             ("census", 1),
             ("census-edicts", 3),
             ("play", 2),

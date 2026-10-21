@@ -10,7 +10,7 @@
     uv run oracle/classic_check.py --only play,goldens
     uv run oracle/classic_check.py --record        # rewrite oracle/classic_expected.txt
 
-Ten checks, of two kinds:
+Eleven checks, of two kinds:
 
 - **Identity** (four: the port against itself, recorded in `oracle/classic_expected.txt`
   on a tree known to be Classic, `a50d8d7` for the first recording):
@@ -22,7 +22,7 @@ Ten checks, of two kinds:
     for demo1);
   - `census`: the `quaketool census` playthrough of all nine maps through
     the real QuakeC (its whole report, by hash).
-- **Against id's C** (six: the C oracle built from id's source runs in the
+- **Against id's C** (seven: the C oracle built from id's source runs in the
   same check):
   - `edicts`: id's own server edicts diffed against the port's for all nine
     maps at t = 1.7, 4.7 and 10.7 s (`census/`). The diff is not empty (the
@@ -49,7 +49,10 @@ Ten checks, of two kinds:
   - `sound`: `sound.py`, id's mixer against the engine's `Fixes::NONE`
     mixer: every case sample-identical; and `sound_walk.py`, a walk through
     id's game and the port's (start, a teleporter, the e1m1 slipgate): every
-    sound call the walk makes identical.
+    sound call the walk makes identical;
+  - `particles`: `particle_wire.py`, QuakeC's `particle()` calls (id1's own and
+    the wire's edges) as id's client received them, in both builds,
+    against the bursts the port's builtin queues: every one identical.
 
 "id's C" is id's WinQuake source built headless with gcc, in two builds
 (oracle/README.md, "Bit for bit"). `oracle` and `exact` run the SSE2 one,
@@ -59,9 +62,10 @@ float variables in 80-bit registers, by its own register allocation, not by
 anything the C says. `edicts`, `screen2d`, `demolerp` and `sound` run the x87
 build: where the two part there, the port follows the x87's registers
 (`world.rs`'s plane distances, the centerprint's row, the mixer's float steps).
+`particles` runs both.
 
 Needs cargo, uv, the shareware pak at `quake-data/ID1/PAK0.PAK`, and for
-`edicts`/`oracle`/`exact`/`screen2d`/`demolerp`/`sound` the C oracles
+`edicts`/`oracle`/`exact`/`screen2d`/`demolerp`/`sound`/`particles` the C oracles
 (`oracle/build.sh`, its SSE build `ORACLE_FPMATH=sse oracle/build.sh`,
 `oracle/build_sound.sh`: docker; each tool builds its oracle when it is
 missing or older than its sources, `oraclebin.py`). The report (and every tool's own
@@ -90,7 +94,7 @@ TIMEDEMO_RES = "320x200,640x400"
 # The server times of the edict dumps, and the 0.1 s frames id's oracle
 # waits for each after the last (the player connects at sv.time 1.2).
 EDICT_TIMES = [(1.7, 5), (4.7, 30), (10.7, 60)]
-CHECKS = ["goldens", "play", "timedemo", "census", "edicts", "oracle", "exact", "screen2d", "demolerp", "sound"]
+CHECKS = ["goldens", "play", "timedemo", "census", "edicts", "oracle", "exact", "screen2d", "demolerp", "sound", "particles"]
 
 
 def run(cmd, cwd=PROJECT, timeout=1800) -> str:
@@ -257,6 +261,15 @@ def check_sound(qt: Path, out: Path) -> dict:
     (out / "sound_walk.txt").write_text(res.stdout + res.stderr)
     if res.returncode != 0 or "every case identical" not in res.stdout:
         raise RuntimeError("sound_walk.py: the walks' sound calls left id's (see sound_walk.txt)")
+    return {}
+
+
+def check_particles(qt: Path, out: Path) -> dict:
+    wire = ["uv", "run", str(HERE / "particle_wire.py"), "--quaketool", str(qt), "--out", str(out / "particle-wire")]
+    res = subprocess.run(wire, cwd=PROJECT, capture_output=True, text=True, timeout=1800)
+    (out / "particle_wire.txt").write_text(res.stdout + res.stderr)
+    if res.returncode != 0 or "IDENTICAL" not in res.stdout:
+        raise RuntimeError("particle_wire.py: particle() left id's wire (see particle_wire.txt)")
     return {}
 
 

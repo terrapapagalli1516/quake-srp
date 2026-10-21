@@ -15,6 +15,7 @@ oracle/characterise.sh        # re-derive every number and crop in this README (
 uv run oracle/screen2d.py     # the 2-D layer (status bar, menus, console, ...): see its section
 uv run oracle/sound.py        # id's mixer against the port's, sample for sample: see "Sound"
 uv run oracle/sound_walk.py   # a walk through id's game and the port's, every sound call compared
+uv run oracle/particle_wire.py  # QuakeC's particle() calls as id's client received them: see its section
 uv run oracle/rotate_check.py --id1-pak1 … --hipnotic …   # a rotating brush model (Scourge's start door) through its swing
 uv run oracle/classic_check.py  # all of Classic's proof in one run: see "Classic"
 ```
@@ -817,6 +818,42 @@ What it shows:
   the walk changed (the first two in the signon, never heard), so it is the
   world's.
 
+## Particles on the wire (`particle_wire.py`)
+
+QuakeC's `particle(org, dir, color, count)` never reached id's client as it was
+called. `PF_particle` hands it to `SV_StartParticle`, which writes an
+`svc_particle`: the origin as three `MSG_WriteCoord`s (1/8 unit, toward zero,
+16 bits), each axis of the direction as `(int)(dir*16)` clamped into a signed
+byte, the count and colour as the low byte of an `int`. `R_ParseParticleEffect`
+reads them back (the direction over 16, a count of 255 as 1024) and spawns the
+particles at `vel = dir*15`. The port has no datagram: its builtin queues what
+id's client would have read (`ParticleBurst::of_call`). This compares the two.
+
+```sh
+uv run oracle/particle_wire.py     # 27 calls, id's x87 and SSE builds: exit 1 on any difference
+```
+
+**How.** id's side is this oracle on the start map, `oracle_particles script log`
+(`c/particle_oracle.c`): from the first server frame the client is spawned in,
+one call of the script a frame through id's own `PF_particle`, its arguments in
+the PARM globals as QuakeC's call sets them, made after `SV_Physics` (wrapped) so
+that the frame's `SV_SendClientMessages` sends it; every `svc_particle` the
+client parses is logged by a wrapped `R_ParseParticleEffect`. The port's side is
+`quaketool partwire script log`, the same calls through `of_call`. The calls are
+id1's six call sites (`census/qcsym.py pak0.pak calls particle`) with values their
+QuakeC makes, and the wire's edges: the byte's ends and past them, `(int)`
+toward zero, coordinates past 16 bits, the count's 255, -1 and 256, colours out
+of range, and NaN and values past 2^31, where x86's `(int)` gives 0x80000000 and
+Rust's `as` would saturate (`math::c_ftoi`). Every line must be identical.
+
+**Result (2026-10-20): every call identical** in both builds. Before
+`fix/lg-blood` the port queued the arguments as called, and 18 of the 27
+differed, four of them id1's own calls. The one anyone could see:
+`LightningDamage`'s `'0 0 100'` arrived as 127/16 in id's game (the thunderbolt's
+blood rises at 119 u/s) and as 100 in the port's (1500 u/s, some 600 units up in
+the particles' 0.4 s; the user saw it float to the sky). SpawnBlood's shotgun and
+nail blood moved by the rounding, and passes the clamp only on grazing hits.
+
 ## Classic (`classic_check.py`)
 
 ```sh
@@ -828,12 +865,12 @@ uv run oracle/classic_check.py --record --note "..."  # re-record, saying why
 The port's Classic preset (`quake_rs::settings`: every slop option off; the
 controls are shared with slop's, and the harnesses pin id's own by name:
 `Settings::id`, `idcontrols`) must stay WinQuake. One command runs every check of
-that, ten of them, and writes a report (`oracle/build/classic-check/classic_check.txt`,
+that, eleven of them, and writes a report (`oracle/build/classic-check/classic_check.txt`,
 next to each tool's own output). Four compare the port with values recorded from a
-tree known to be right; six run id's C in the same run. `oracle` and `exact` run
-the SSE build, the port's target ("Bit for bit"); the other four run the x87
-build, which the port's game code, 2-D layer and mixer follow where the two
-part:
+tree known to be right; seven run id's C in the same run. `oracle` and `exact` run
+the SSE build, the port's target ("Bit for bit"); `particles` runs both; the other
+four run the x87 build, which the port's game code, 2-D layer and mixer follow
+where the two part:
 
 | check | what | against |
 |---|---|---|
@@ -847,33 +884,35 @@ part:
 | `screen2d` | `screen2d.py`, 320x200 and 640x400, the port in its Classic preset | id's C: no shot below its recorded `2d exact%` (the residues above) |
 | `demolerp` | `demo_lerp.py`: id's client against the port's over the attract loop, frame by frame — the camera, the entities and the dynamic lights (below) | id's C: every demo MATCH |
 | `sound` | `sound.py`: id's mixer against the engine's `Fixes::NONE`; `sound_walk.py`: a walk through id's game and the port's | id's C: every case sample-identical; every call the walk makes identical |
+| `particles` | `particle_wire.py`: 27 `particle()` calls, id1's own and the wire's edges, as the client received them | id's C, both builds: every call identical |
 
 The recorded list is `oracle/classic_expected.txt`, with a note for each
 recording (first on `a50d8d7`, the settings branch's base). A change that
 moves an identity value on purpose is re-recorded with `--record --note`,
 and says so where the fidelity change is recorded (AUDIT.md).
 
-**Last run** (branch `fleet/pixelexact`, 2026-10-05; about two minutes with
+**Last run** (branch `fix/lg-blood`, 2026-10-20; about two minutes with
 everything built; timings are noisy):
 
 ```
 PASS  goldens      0.1 s  3 values match
-PASS  play        19.5 s  42 values match
-PASS  timedemo     4.0 s  3 values match
-PASS  census       1.3 s  1 values match
-PASS  edicts       2.3 s  9 values match
+PASS  play        11.1 s  42 values match
+PASS  timedemo     3.7 s  3 values match
+PASS  census       1.2 s  1 values match
+PASS  edicts       2.4 s  9 values match
 PASS  oracle       0.7 s  8 values match
-PASS  exact        6.2 s  0 values match
-PASS  screen2d    14.5 s  146 values match
-PASS  demolerp    32.4 s  0 values match
-PASS  sound        5.7 s  0 values match
+PASS  exact        9.9 s  0 values match
+PASS  screen2d    12.8 s  146 values match
+PASS  demolerp    26.2 s  0 values match
+PASS  sound        4.6 s  0 values match
+PASS  particles    0.2 s  0 values match
 ALL PASS
 ```
 
 "Values match" counts the values compared with `classic_expected.txt`. The
-`exact`, `demolerp` and `sound` rows record nothing: they compare the port with id's C
-live, in the same run (every demo MATCH, every case sample-identical), so their
-count is 0 and their PASS is the live comparison's. The `oracle` and `screen2d`
+`exact`, `demolerp`, `sound` and `particles` rows record nothing: they compare the
+port with id's C live, in the same run (every demo MATCH, every case sample-identical,
+every call identical), so their count is 0 and their PASS is the live comparison's. The `oracle` and `screen2d`
 rows do both: the live comparison with id's C, checked against the recorded match
 of each row.
 

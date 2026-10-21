@@ -57,6 +57,9 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 //                                      compares demo playback); quit after `frames` records
 //   oracle_walk path / oracle_sndlog path   a scripted walk, and a log of every call into
 //                                      the sound layer (walk_oracle.c, oracle/sound_walk.py)
+//   oracle_particles script log        QuakeC's particle() calls through PF_particle, and a
+//                                      log of the svc_particles the client parses
+//                                      (particle_oracle.c, oracle/particle_wire.py)
 //
 // The 2-D layer (oracle/screen2d.py drives these; see oracle/README.md):
 //   oracle_blank idx                   (a cvar, default -1 = off) fill the 3-D view rectangle
@@ -523,6 +526,7 @@ static void Oracle_Trace_f (void)
 }
 
 void Oracle_Walk_Init (void);
+void Oracle_Particles_Init (void);
 void Oracle_StagesInit (void);
 void Oracle_StagesBegin (void);
 void Oracle_StagesEnd (void);
@@ -531,6 +535,7 @@ void Oracle_StagesGrads (espan_t *pspan, char *kind);
 void Oracle_Init (void)
 {
 	Oracle_Walk_Init ();
+	Oracle_Particles_Init ();
 	Oracle_StagesInit ();
 	Cmd_AddCommand ("oracle_trace", Oracle_Trace_f);
 	Cmd_AddCommand ("oracle_field", Oracle_Field_f);

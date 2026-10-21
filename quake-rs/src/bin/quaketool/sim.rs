@@ -8,7 +8,9 @@
 //! - `playtest` ([`playtest`]): a player spawned, walked, sent into a fight,
 //!   and its view rendered;
 //! - `changelevel` ([`changelevel`]): a level's exit taken, and the
-//!   inventory carried into the next map.
+//!   inventory carried into the next map;
+//! - `partwire` (here): `particle()` calls as id's client received them, for
+//!   `oracle/particle_wire.py`.
 
 use std::fmt::Write as _;
 
@@ -17,7 +19,7 @@ use quake_rs::mdl::Mdl;
 use quake_rs::pak::Pak;
 use quake_rs::progs::Progs;
 use quake_rs::render::{self, Camera};
-use quake_rs::server::{Server, UserCmd};
+use quake_rs::server::{ParticleBurst, Server, UserCmd};
 
 use crate::entities::player_start;
 use crate::render::color_for_name;
@@ -388,4 +390,32 @@ pub fn cmd_demo(pak_path: &str, demo_name: &str, out_prefix: &str, stride_arg: u
     );
     let _ = writeln!(o, "  wrote {out_prefix}_0000.ppm .. {out_prefix}_{:04}.ppm", written.saturating_sub(1));
     Ok(Out::Text(o))
+}
+
+/// `partwire <script> <log>` — `particle()` calls as id's client received
+/// them: each through [`ParticleBurst::of_call`], the burst the port's
+/// builtin queues (`oracle/particle_wire.py` makes the same calls in id's C,
+/// `oracle/c/particle_oracle.c`, and compares). A script line is one call's
+/// arguments, `ox oy oz dx dy dz color count` (`#` starts a comment); a log
+/// line is its burst, `particle ox oy oz dx dy dz color count`, the count
+/// after the 255 -> 1024 sentinel.
+pub fn cmd_partwire(script_path: &str, log_path: &str) -> CmdResult {
+    let text = String::from_utf8_lossy(&read(script_path)?).into_owned();
+    let mut log = String::new();
+    for (n, line) in text.lines().enumerate() {
+        let words: Vec<&str> = line.split('#').next().unwrap_or("").split_whitespace().collect();
+        if words.is_empty() {
+            continue;
+        }
+        let bad = || format!("{script_path}:{}: want `ox oy oz dx dy dz color count`: {line}", n + 1);
+        let v: Vec<f32> = words.iter().map(|w| w.parse().ok()).collect::<Option<_>>().ok_or_else(bad)?;
+        if v.len() != 8 {
+            return Err(bad().into());
+        }
+        let b = ParticleBurst::of_call([v[0], v[1], v[2]], [v[3], v[4], v[5]], v[6], v[7]);
+        let ([ox, oy, oz], [dx, dy, dz]) = (b.org, b.dir);
+        let _ = writeln!(log, "particle {ox:.4} {oy:.4} {oz:.4} {dx:.4} {dy:.4} {dz:.4} {} {}", b.color, b.count);
+    }
+    std::fs::write(log_path, &log).map_err(|e| format!("cannot write {log_path}: {e}"))?;
+    Ok(Out::Text(format!("{} calls -> {log_path}\n", log.lines().count())))
 }

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Build the oracle: id's WinQuake software renderer, headless (null sound/cd/
-# input/net drivers; our vid_oracle.c, sys_oracle.c, oracle.c, walk_oracle.c
-# and stages_oracle.c), portable C paths only (id386 0: no assembly), as a static
-# 32-bit i386 binary that runs directly on the x86_64 host.
+# input/net drivers; our vid_oracle.c, sys_oracle.c, oracle.c, walk_oracle.c,
+# stages_oracle.c and particle_oracle.c), portable C paths only (id386 0: no
+# assembly), as a static 32-bit i386 binary that runs directly on the x86_64 host.
 #
 #   oracle/build.sh            -> oracle/build/quake-oracle      (x87 FPU, like 1996)
 #   ORACLE_FPMATH=sse oracle/build.sh -> oracle/build/quake-oracle-sse (SSE2 float math:
@@ -38,13 +38,14 @@ d_vars d_zpoint host host_cmd keys menu mathlib model net_loop net_main net_vcr
 net_none nonintel pr_cmds pr_edict pr_exec r_aclip r_alias r_bsp r_light r_draw
 r_efrag r_edge r_misc r_main r_sky r_sprite r_surf r_part r_vars screen sbar
 sv_main sv_phys sv_move sv_user zone view wad world cd_null in_null snd_null
-sys_oracle vid_oracle oracle walk_oracle stages_oracle"
+sys_oracle vid_oracle oracle walk_oracle stages_oracle particle_oracle"
 SRCS=$(for f in $FILES; do printf '%s.c ' "$f"; done)
 # walk_oracle.c drives CL_SendCmd and logs the sound layer's entry points
 # (snd_null's) and the server's SV_StartSound; sys_oracle.c times
-# SV_SpawnServer (-oracle_loadtime)
+# SV_SpawnServer (-oracle_loadtime); particle_oracle.c calls PF_particle after
+# SV_Physics and logs R_ParseParticleEffect
 WRAPS=$(for f in S_PrecacheSound S_StartSound S_StopSound S_StopAllSounds S_StaticSound S_LocalSound \
-        SV_StartSound CL_SendCmd SV_SpawnServer; do printf -- '-Wl,--wrap=%s ' "$f"; done)
+        SV_StartSound CL_SendCmd SV_SpawnServer SV_Physics R_ParseParticleEffect; do printf -- '-Wl,--wrap=%s ' "$f"; done)
 
 CFLAGS="-O2 -g0 -std=gnu89 -fcommon -fno-strict-aliasing -fwrapv -w"
 BIN=quake-oracle
