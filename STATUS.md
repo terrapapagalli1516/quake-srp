@@ -1,6 +1,6 @@
 # Quake-RS — status and hand-off
 
-Last updated 2026-10-07, after the merge of Classic's every pixel, the monsters and the film tool. The first section is
+Last updated 2026-10-20, after the thunderbolt's blood (`fix/lg-blood`); before that 2026-10-07, the merge of Classic's every pixel, the monsters and the film tool. The first section is
 where things stand. Then the rounds, newest first, branch by branch; how to work here; and
 the older history, kept as evidence, with superseded items marked.
 
@@ -47,15 +47,17 @@ the older history, kept as evidence, with superseded items marked.
   - QuakeC errors end the game as id's `Host_Error` does.
 - **Measured** (2026-10-07, at the merge of `fleet/pixel-ents`, `fleet/film-hero` and `fleet/filmdocs`):
   - **Classic** (since `fleet/pixelexact`, 2026-10-05): `uv run oracle/classic_check.py`
-    prints ALL PASS, ten checks. They cover the goldens `790c53d3` / `3684efc6` /
-    `e18bb516`, 42 play hashes and tallies, the timedemo counts, the census and id's
-    edicts on nine maps, the eight 3-D oracle rows at 100.0000% and the `exact` sweep's
-    676 frames with not one pixel off, 262 of them with the player among each map's
-    monsters, awake (both against id's C built with SSE2 floats, the port's target:
-    AUDIT, "Bit for bit" and "Every view tried, with monsters"), 146 2-D shots at their recorded match, demo playback against
-    id's client over 17,500 frames, and the mixer against id's C in 28 of 28 cases.
-  - **Tests:** `cargo test --release` gives 975 in quake-rs (plus a few ignored ones that
-    need the mission packs' data, `QUAKE_*_DIR`/`QUAKE_HIP1M1_PAK`) and 224 in quake-wasm (1
+    prints ALL PASS, eleven checks (the eleventh, `particles`, since 2026-10-20). They
+    cover the goldens `790c53d3` / `3684efc6` / `e18bb516`, 42 play hashes and
+    tallies, the timedemo counts, the census and id's edicts on nine maps, the eight
+    3-D oracle rows at 100.0000% and the `exact` sweep's 676 frames with not one pixel
+    off, 262 of them with the player among each map's monsters, awake (both against
+    id's C built with SSE2 floats, the port's target: AUDIT, "Bit for bit" and "Every
+    view tried, with monsters"), 146 2-D shots at their recorded match, demo playback
+    against id's client over 17,500 frames, the mixer against id's C in 28 of 28
+    cases, and 27 `particle()` calls on the wire against id's, every one identical.
+  - **Tests:** `cargo test --release` gives 976 in quake-rs (plus a few ignored ones that
+    need the mission packs' data, `QUAKE_*_DIR`/`QUAKE_HIP1M1_PAK`) and 225 in quake-wasm (1
     ignored: the 2-D oracle's harness).
   - **Clippy:** 0 warnings in both crates.
   - **Browser checks:** the `web/verify_*.py` checks pass in headless Chromium
@@ -63,7 +65,7 @@ the older history, kept as evidence, with superseded items marked.
     `verify_audio_resilience` needs a `--features bench` build; the rest run on a
     deploy dir of either build. Earlier branches also ran most checks in headless
     Firefox.
-  - **Frame rate:** `quaketool framerate --check` passes: 22 scenarios, uncapped at
+  - **Frame rate:** `quaketool framerate --check` passes: 24 scenarios, uncapped at
     60–480 Hz against 72.
   - **Speed:** `timedemo demo1` in Classic natively is 1.35–1.44x id's portable C. In
     2026 video on 8 threads it runs 689 / 455 / 210 fps at 1080p / 1440p / 4K. In the
@@ -101,6 +103,22 @@ the older history, kept as evidence, with superseded items marked.
 
   The structural work is `CODE_PLAN.md`'s menu:
   W0a/W0b, R1, R6, R8, R9, R11, and the engine-owned `Host` session (§7).
+
+---
+
+## 2026-10-20: the thunderbolt's blood (`fix/lg-blood`)
+
+The user saw the thunderbolt's blood float up to the sky at a high frame rate. Not the
+rate: the same at 72 Hz and in Classic. The `particle()` builtin queued QuakeC's
+arguments as called, where id's `SV_StartParticle` sent the direction as a signed byte
+of `dir*16`: `LightningDamage`'s `'0 0 100'` reached id's client as 127/16, blood at
+119 u/s; the port's rose at 1500. Now `ParticleBurst::of_call` is what id's client
+read back (the origin to 1/8 unit, the direction through the byte, the colour as its low
+byte, every `(int)` x86's: `math::c_ftoi`). New: `oracle/particle_wire.py`
+(classic_check's eleventh check, `particles`) holds 27 calls to id's own `PF_particle`
+in both builds, every one identical (18 differed before); `quaketool framerate`'s
+`lightning` scenario; two unit tests. AUDIT, "`particle()` on the wire"; FRAMERATE,
+"lightning".
 
 ---
 
@@ -414,7 +432,7 @@ From the repository's root:
 (cd quake-rs && cargo test --release && cargo clippy --release --all-targets)
 (cd quake-wasm && cargo test --release && cargo clippy --release --all-targets)
 
-# Classic's proof, ten checks (goldens, play hashes, timedemo, census; and id's C: edicts, 3-D, the exact sweep with the monsters awake, 2-D, demos, sound)
+# Classic's proof, eleven checks (goldens, play hashes, timedemo, census; and id's C: edicts, 3-D, the exact sweep with the monsters awake, 2-D, demos, sound, particle() on the wire)
 uv run oracle/classic_check.py
 
 # the uncapped game against 72 Hz

@@ -287,8 +287,9 @@ marked *(2026-06)* were not re-checked since. Struck items were closed on 2026-0
   approaches diagonally) (telesound, 2026-10-02).
 - Movement angles reach the server unrounded (`sv_user.rs`); id's client sends them as a byte
   in 1.40625° steps, so 180 arrives as −180 (telesound).
-- Explosion and impact particles start at the server's exact positions; id's client gets them
-  rounded to 1/8 unit (sounds are rounded since telesound's `wire_coord`) (telesound).
+- Explosion and impact particles (the temp entities) start at the server's exact positions;
+  id's client gets them rounded to 1/8 unit (sounds are rounded since telesound's `wire_coord`,
+  `particle()` bursts since `fix/lg-blood`) (telesound).
 - ~~Missing `default.cfg` binds: F1–F4, F6, F9, F10, F12~~ — ✅ fkeys: `keys.rs`'s
   `default_cfg` binds all eight to id's console lines (F5/F7/F8/F11 stay
   unbound, as id's own file leaves them). `t` `messagemode` and the
@@ -481,12 +482,12 @@ written for its own engine)
 - `PF_cvar` returns 0 for every cvar outside the server's own list: Hipnotic's footsteps
   (`cvar("crosshair") == 2`) never play (P9).
 
-**Older LOW tail** *(2026-05/06, not re-checked)*: `PF_particle`'s byte count and
-direction quantising; `clip_box`'s inopen/plane-distance coordinates; `SV_NewChaseDir`'s
-integer abs; `OP_ADDRESS`'s world guard; `AngleVectors` in f64 (the game code's; the
-renderer's is the C's floats since `fleet/pixelexact`); `ST_RAND` syncbase (the renderer
-takes one since `fleet/pixelexact`; the live clients pass 0);
-tracer parity; sky-name case; `push_entity`'s trigger order against `SV_Impact`; sprite
+**Older LOW tail** *(2026-05/06, not re-checked)*: ~~`PF_particle`'s byte count and
+direction quantising~~ (✅ `fix/lg-blood`: "`particle()` on the wire", below);
+`clip_box`'s inopen/plane-distance coordinates; `SV_NewChaseDir`'s integer abs;
+`OP_ADDRESS`'s world guard; `AngleVectors` in f64 (the game code's; the renderer's is
+the C's floats since `fleet/pixelexact`); `ST_RAND` syncbase (the renderer takes one
+since `fleet/pixelexact`; the live clients pass 0); tracer parity; sky-name case; `push_entity`'s trigger order against `SV_Impact`; sprite
 group syncbase (Round 2, Round 5).
 
 **Code** (the closing review's ranked list; `CODE_PLAN.md` has the plan)
@@ -4128,3 +4129,53 @@ vectorization is fragile). classic_check's `exact` takes about 8 s where it took
 **Still open.** The listener and the asm's `D_DrawZSpans` (Open). The monster views
 are the shareware's; the registered game's and the packs' monsters were compared only
 where they spawn, in each map's first frame.
+
+## `particle()` on the wire: the thunderbolt's blood (2026-10-20, branch `fix/lg-blood`)
+
+**Found by the user:** the thunderbolt's blood floated up to the sky. Not the high frame
+rate it was seen at: the same at 72 Hz, in Classic too. id's `PF_particle` hands
+its arguments to `SV_StartParticle`, which writes an `svc_particle`: the origin as three
+`MSG_WriteCoord`s, each axis of the direction as `(int)(dir*16)` clamped into a signed
+byte, the count and colour as bytes; `R_ParseParticleEffect` reads the direction back
+over 16 and `R_RunParticleEffect` sets `vel = dir*15`. The port's builtin queued the
+arguments as given. `LightningDamage`'s `particle(trace_endpos, '0 0 100', 225,
+damage*4)` (120 particles a hit, ten hits a second) reached id's client as 127/16: its
+blood rises at 119 u/s. The port's rose at 1500 u/s and climbed some 600 units in its
+0.4 s. The other id1 callers (`census/qcsym.py pak0.pak calls particle`) hardly
+noticed: SpawnBlood's direction is `4*(the shot's direction + 2*the surface's normal)`,
+about 4 on a head-on hit, under the clamp, and only grazing hits pass it; the barrel's
+is `'0 0 0'`. The "Older LOW tail" had carried "`PF_particle`'s byte count and
+direction quantising" since 2026-06; the count was fixed then, the direction not.
+
+**Fixed:** `ParticleBurst::of_call` (`server/msg.rs`) is the burst id's client read
+back, and the builtin queues it: the origin through `wire_coord`, the direction through
+the byte, and the colour as its low byte too (it clamped to 0..=255; id's wraps, 300 to
+44, which no id1 call does). Every `(int)` there is x86's, `math::c_ftoi` (moved from
+the renderer, which had two copies): a NaN or a value past 2^31 gives 0x80000000, where
+Rust's `as` saturates (a count of 3e9 would have sent 255, an explosion; id's sends 0).
+`wire_coord`, which the sounds and statics share, takes it too. Demo playback already
+decoded the byte (`demo.rs`).
+
+**The tests.**
+- `oracle/particle_wire.py` (and classic_check's new `particles`, its eleventh check):
+  id's own `PF_particle` called with 27 argument sets on the start map, one a server
+  frame (`oracle/c/particle_oracle.c`), and every `svc_particle` id's client parsed,
+  against `quaketool partwire`, the same calls through `of_call`: id1's six call sites
+  with values their QuakeC makes, and the edges (the byte's ends and past them, `(int)`
+  toward zero, the 16-bit coordinate wrapping, the count's 255/-1/256, the colour's
+  wrap, NaN and values past 2^31). Every line identical, in the x87 and the SSE build;
+  with the old builtin, 18 of the 27 differ, four of them id1's own calls.
+- `quaketool framerate`'s new `lightning` scenario: the bolt held on e1m1's grunt (put
+  back where it stood after every frame) for 2 s at 60, 72, 144, 240 and 480 Hz and a
+  jittery 144: the blood's fastest rise 119 u/s at every rate (1500 before), its top 63
+  units above the shooter's origin (619 before).
+- Unit tests: `particle_burst_is_what_crossed_the_wire`,
+  `bi_particle_sends_color_as_its_low_byte` (was `..._clamps_out_of_range_color_...`),
+  and `c_ftoi_is_the_x86_conversion`, moved with it to `math.rs`.
+
+**Goldens and recordings.** Unchanged: the goldens, classic_check's 42 `play` values,
+timedemo and census (no recorded run fires the thunderbolt, and a burst's origin moved
+under 1/8 unit, which no recorded frame shows).
+
+**Still open.** The temp entities' coordinates are still kept as written (Open,
+"Explosion and impact particles").

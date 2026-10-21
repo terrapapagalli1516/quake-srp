@@ -231,8 +231,8 @@ input, touch and offline play in detail.
 uv run oracle/classic_check.py      # prints ALL PASS
 ```
 
-This runs the Classic preset through ten checks. Four compare the port with values
-recorded from a tree known to be right. Six run id's C next to the port:
+This runs the Classic preset through eleven checks. Four compare the port with values
+recorded from a tree known to be right. Seven run id's C next to the port:
 
 | check | compares | against |
 |---|---|---|
@@ -246,6 +246,7 @@ recorded from a tree known to be right. Six run id's C next to the port:
 | `screen2d` | the status bar, menus and console | id's C |
 | `demolerp` | demo playback, frame by frame | id's C |
 | `sound` | the mixer, sample by sample | id's C |
+| `particles` | QuakeC's `particle()` calls as the client received them, over the network message's bytes | id's C |
 
 **Which C.** The oracle is id's WinQuake source built headless with gcc, in two builds. The
 pixel checks (`oracle`, `exact`) run the build with SSE2 floats, where every float operation is
